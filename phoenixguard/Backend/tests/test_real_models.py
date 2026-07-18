@@ -13,16 +13,17 @@ Tests:
 
 Run:
     cd phoenixguard
-    ./.venv/Scripts/python.exe -m pytest Backend/tests/test_real_models.py -v --tb=short
+    ./.venv-dev/Scripts/python.exe -m pytest Backend/tests/test_real_models.py -v --tb=short
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, ClassVar, Protocol, cast
 import numpy as np
 from PIL import Image
 
@@ -54,10 +55,6 @@ class _DetectorLike(Protocol):
     hf_last_inference_error: str
 
     def detect(self, image_rgb: Image.Image) -> list[dict[str, Any]]: ...
-
-
-class _SentenceTransformerLike(Protocol):
-    def encode(self, sentences: str, **kwargs: Any) -> Any: ...
 
 
 # ===========================================================================
@@ -226,65 +223,117 @@ class TestSentenceTransformerEmbedder(unittest.TestCase):
     Confirms real vectors are produced (dim=384, normalized).
     """
 
-    def _load_st(self):
+    _worker_payload: ClassVar[dict[str, Any] | None] = None
+    _worker_failure: ClassVar[str | None] = None
+    _RESULT_PREFIX: ClassVar[str] = "PHOENIXGUARD_REAL_MODEL_RESULT="
+
+    @classmethod
+    def _run_isolated_contract(cls) -> dict[str, Any]:
+        """Load and exercise the real model once outside the pytest process."""
+        if cls._worker_payload is not None:
+            return cls._worker_payload
+        if cls._worker_failure is not None:
+            raise AssertionError(cls._worker_failure)
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "CUDA_VISIBLE_DEVICES": "-1",
+                "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+                "HF_HUB_DISABLE_TELEMETRY": "1",
+                "HF_HUB_OFFLINE": "1",
+                "MKL_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "TOKENIZERS_PARALLELISM": "false",
+                "TRANSFORMERS_OFFLINE": "1",
+            }
+        )
+        timeout_raw = str(os.getenv("PHOENIXGUARD_REAL_MODEL_WORKER_TIMEOUT_SEC", "180") or "180")
         try:
-            from utils import can_import_sentence_transformers_safely
-            if not can_import_sentence_transformers_safely():
-                self.skipTest("sentence-transformers runtime unavailable in this environment")
-            from sentence_transformers import SentenceTransformer
-            return cast(_SentenceTransformerLike, SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2"))
-        except Exception as e:
-            self.skipTest(f"sentence-transformers not available or no network: {e}")
+            timeout_sec = max(30, min(600, int(float(timeout_raw))))
+        except (TypeError, ValueError):
+            timeout_sec = 180
+
+        worker = _REPO / "Backend" / "tests" / "support" / "real_model_worker.py"
+        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(worker), "sentence-transformer-contract"],
+                cwd=str(_REPO),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=timeout_sec,
+                creationflags=creationflags,
+            )
+        except subprocess.TimeoutExpired as exc:
+            cls._worker_failure = (
+                f"real SentenceTransformer worker exceeded {timeout_sec}s; "
+                "the worker was terminated without destabilizing pytest/VS Code. "
+                f"stdout={str(exc.stdout or '')[-1200:]!r} "
+                f"stderr={str(exc.stderr or '')[-1200:]!r}"
+            )
+            raise AssertionError(cls._worker_failure) from exc
+
+        payload: dict[str, Any] | None = None
+        for line in reversed(completed.stdout.splitlines()):
+            if not line.startswith(cls._RESULT_PREFIX):
+                continue
+            decoded = json.loads(line[len(cls._RESULT_PREFIX):])
+            if isinstance(decoded, dict):
+                payload = cast(dict[str, Any], decoded)
+            break
+
+        if completed.returncode != 0 or payload is None or payload.get("ok") is not True:
+            unsigned_status = int(completed.returncode) & 0xFFFFFFFF
+            cls._worker_failure = (
+                "real SentenceTransformer worker failed safely outside the pytest process: "
+                f"returncode={completed.returncode} windows_status=0x{unsigned_status:08X}; "
+                f"payload={payload!r}; stdout={completed.stdout[-1600:]!r}; "
+                f"stderr={completed.stderr[-1600:]!r}"
+            )
+            raise AssertionError(cls._worker_failure)
+
+        cls._worker_payload = payload
+        return payload
 
     def test_embedder_loads_and_produces_384_dim_vector(self):
-        model = self._load_st()
-        vec = np.asarray(model.encode("BUY entry after 4 red candles with wick rejection", convert_to_numpy=True))
-        self.assertEqual(len(vec), 384)
-        # Should be a float array
-        self.assertTrue(np.all(np.isfinite(vec)), "Embedding contains NaN/Inf")
-        print(f"  ✓  Embedding produced: dim={len(vec)}, norm={np.linalg.norm(vec):.4f}")
+        result = self._run_isolated_contract()
+        self.assertEqual(result["embedding_dim"], 384)
+        self.assertIs(result["all_finite"], True, "Embedding contains NaN/Inf")
+        self.assertEqual(result["torch_threads"], 1)
+        self.assertEqual(result["torch_interop_threads"], 1)
+        print(
+            f"  PASS Isolated real embedding: dim={result['embedding_dim']}, "
+            f"norm={float(result['first_norm']):.4f}, worker_pid={result['pid']}"
+        )
 
     def test_embedder_different_texts_produce_different_vectors(self):
-        model = self._load_st()
-        v1 = np.asarray(model.encode("strong bullish breakout above resistance", convert_to_numpy=True))
-        v2 = np.asarray(model.encode("bearish reversal after weak close near low", convert_to_numpy=True))
-        cosine = float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10))
+        result = self._run_isolated_contract()
+        cosine = float(result["contrast_cosine"])
         # Should be semantically different (cosine < 0.95)
         self.assertLess(cosine, 0.95, "Different texts should produce distinguishable embeddings")
-        print(f"  ✓  Cosine similarity between contrasting texts: {cosine:.4f}")
+        print(f"  PASS Cosine similarity between contrasting texts: {cosine:.4f}")
 
     def test_embedder_same_text_produces_same_vector(self):
-        model = self._load_st()
-        text = "SELL signal at resistance with upper wick rejection"
-        v1 = np.asarray(model.encode(text, convert_to_numpy=True))
-        v2 = np.asarray(model.encode(text, convert_to_numpy=True))
-        np.testing.assert_allclose(v1, v2, atol=1e-5)
-        print("  ✓  Same text → identical embedding (deterministic)")
+        result = self._run_isolated_contract()
+        self.assertLessEqual(float(result["same_max_abs_diff"]), 1e-5)
+        print("  PASS Same text produces an identical embedding (deterministic)")
 
     def test_personalization_engine_uses_real_embedder(self):
-        """PersonalizationEngine.update_style_from_memory_bank uses real ST model."""
-        try:
-            from personalization import PersonalizationEngine
-            from security import SecurityManager, EncryptedPreferenceStore
-        except ImportError as e:
-            self.skipTest(f"personalization not importable: {e}")
-
-        with tempfile.TemporaryDirectory() as td:
-            sec = SecurityManager(Path(td) / "d", Path(td) / "l", kdf_iterations=1000)
-            derive_fernet = getattr(sec, "derive_fernet")
-            fernet = derive_fernet("real-embedder-test")
-            store = EncryptedPreferenceStore(Path(td) / "prefs.enc.sqlite", fernet)
-            engine = PersonalizationEngine(
-                "sentence-transformers/all-MiniLM-L6-v2", store, _NullLogger()
-            )
-            dpo_pairs = [
-                {"chosen": "BUY after wick rejection", "rejected": "HOLD", "reason": "clear reversal"},
-                {"chosen": "SELL after exhaustion", "rejected": "HOLD", "reason": "5 consecutive green"},
-            ]
-            engine.update_style_from_memory_bank(dpo_pairs)
-            prefix = engine.style_prefix_prompt()
-            self.assertIsInstance(prefix, str)
-            print(f"  ✓  PersonalizationEngine produced style prefix: '{prefix[:80]}...'")
+        """PersonalizationEngine consumes the isolated real ST model output."""
+        result = self._run_isolated_contract()
+        self.assertIs(result["personalization_used_real_model"], True)
+        self.assertGreater(float(result["style_norm"]), 0.0)
+        prefix = str(result["style_prefix"])
+        self.assertTrue(prefix)
+        self.assertIn("sentence_transformers", str(result["model_class"]))
+        print(f"  PASS PersonalizationEngine used real model: '{prefix[:80]}...'")
 
 
 # ===========================================================================

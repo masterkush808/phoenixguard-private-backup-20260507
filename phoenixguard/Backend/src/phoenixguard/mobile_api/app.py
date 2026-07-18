@@ -44,6 +44,7 @@ from phoenixguard.runtime.realtime_performance_v3 import (
 from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
 from phoenixguard.runtime.tracker_bootstrap import tracker_session_runtime_state
 from phoenixguard.tracing import configure_tracing, instrument_fastapi_app
+from phoenixguard.tracking.tracking_episode_v3 import TrackingEpisodeReadinessError
 from phoenixguard.voice.control import (
     apply_voice_preferences,
     execute_voice_command,
@@ -87,6 +88,8 @@ from .observer import SignalObserverService
 from .operator_workspace_v1 import (
     OPERATOR_WORKSPACE_SCHEMA_VERSION,
     build_operator_workspace_v1,
+    project_public_tracking_episode_v1,
+    public_tracking_readiness_message_v1,
 )
 from .pipeline import DEFAULT_COUNCIL_SCOPE, DEFAULT_OVERLAY_MODE
 from .realtime_sync_v3 import (
@@ -146,7 +149,7 @@ _OPERATOR_VIEW_TO_OVERLAY_MODE = {
     "structure": "INSPECTOR",
     "zones": "INSPECTOR",
     "plan": "INSPECTOR",
-    "smc": "INSPECTOR",
+    "market_context": "INSPECTOR",
     "two-candle": "INSPECTOR",
     "scene-forecaster": "INSPECTOR",
     "lstm": "INSPECTOR",
@@ -167,14 +170,14 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
             "triggers",
             "targets",
             "invalidation",
-            "smc",
+            "market_context",
             "council",
         }
     ),
     "structure": frozenset({"current_candles", "major_swings", "local_swings", "trendlines"}),
     "zones": frozenset({"supply_demand"}),
     "plan": frozenset({"council", "triggers", "targets", "invalidation"}),
-    "smc": frozenset({"smc"}),
+    "market_context": frozenset({"market_context"}),
     "two-candle": frozenset({"two_candle"}),
     "scene-forecaster": frozenset({"scene_forecaster"}),
     "lstm": frozenset({"lstm"}),
@@ -746,6 +749,8 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
     {
         "id",
         "type",
+        "kind",
+        "kind_label",
         "side",
         "group",
         "family",
@@ -771,6 +776,7 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "forecast_candles",
         "forecast_scenarios",
         "forecast_anchor",
+        "geometry_kind",
         "forecast_coordinate_space",
         "forecast_coordinate_units",
         "trajectory_mode",
@@ -778,6 +784,7 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "interval",
         "horizon_unit",
         "clock_time_assumption",
+        "baseline_locked",
         "uncertainty_level",
         "forecast_quality_status",
         "trade_authorization_status",
@@ -794,6 +801,11 @@ _PRIVATE_PROJECTION_SNAPSHOT_KEYS = frozenset(
         "forecast_snapshot_v3",
         "operator_overlay_snapshot_v1",
         "operator_overlay_snapshot",
+        # Frozen episode evidence is an internal projection source.  Public
+        # callers use the dedicated neutral episode DTO instead.
+        "tracking_episode",
+        "tracking_episode_history",
+        "tracking_episode_readiness",
     }
 )
 
@@ -1222,19 +1234,25 @@ def _safe_operator_forecast_anchor(value: object) -> dict[str, object]:
         or not 0.0 <= y_norm <= 1.0
     ):
         return {}
-    source = str(raw.get("source") or "MODEL_CAUSAL_CANDLE").strip().upper()
-    if source not in {
-        "TRACKER_LATEST_CLOSE",
-        "TRACKER_LATEST_CLOSED_CANDLE",
-        "MODEL_CAUSAL_CANDLE",
-    }:
-        source = "MODEL_CAUSAL_CANDLE"
-    return {
+    output: dict[str, object] = {
         "x_norm": round(x_norm, 6),
         "y_norm": round(y_norm, 6),
-        "verified_latest_close": raw.get("verified_latest_close") is True,
-        "source": source,
     }
+    if "verified_latest_close" in raw:
+        output["verified_latest_close"] = raw.get("verified_latest_close") is True
+    raw_source = str(raw.get("source") or "").strip().upper()
+    if raw_source:
+        output["source"] = (
+            raw_source
+            if raw_source
+            in {
+                "TRACKER_LATEST_CLOSE",
+                "TRACKER_LATEST_CLOSED_CANDLE",
+                "MODEL_CAUSAL_CANDLE",
+            }
+            else "MODEL_CAUSAL_CANDLE"
+        )
+    return output
 
 
 def _safe_operator_forecast_bundle_complete(row: Mapping[str, object]) -> bool:
@@ -1245,7 +1263,6 @@ def _safe_operator_forecast_bundle_complete(row: Mapping[str, object]) -> bool:
     if (
         not isinstance(line_points, Sequence)
         or isinstance(line_points, (str, bytes, bytearray))
-        or len(cast(Sequence[object], line_points)) != 13
         or not isinstance(candles, Sequence)
         or isinstance(candles, (str, bytes, bytearray))
         or not isinstance(scenarios, Sequence)
@@ -1269,6 +1286,55 @@ def _safe_operator_forecast_bundle_complete(row: Mapping[str, object]) -> bool:
         for scenario in cast(Sequence[object], scenarios)
         if isinstance(scenario, Mapping)
     ]
+    block_only_lstm = bool(
+        str(row.get("family") or "").lower() == "lstm"
+        and str(row.get("geometry_kind") or "").lower() == "future_blocks"
+    )
+    if block_only_lstm:
+        if len(cast(Sequence[object], line_points)) != 0:
+            return False
+        anchor_mapping = cast(Mapping[str, object], anchor)
+        first_candle = candle_rows[0]
+        anchor_x = _epoch_float(anchor_mapping.get("x_norm"), float("nan"))
+        anchor_y = _epoch_float(anchor_mapping.get("y_norm"), float("nan"))
+        first_x = _epoch_float(first_candle.get("x_norm"), float("nan"))
+        first_open_y = _epoch_float(
+            first_candle.get("open_y_norm"),
+            float("nan"),
+        )
+        return bool(
+            anchor_x == anchor_x
+            and anchor_y == anchor_y
+            and first_x == first_x
+            and first_open_y == first_open_y
+            and 0.0 <= anchor_x < first_x <= 1.0
+            and abs(anchor_y - first_open_y) <= 1e-6
+        )
+    if len(cast(Sequence[object], line_points)) != 13:
+        return False
+    raw_first_point = cast(Sequence[object], line_points)[0]
+    first_point = (
+        cast(Sequence[object], raw_first_point)
+        if isinstance(raw_first_point, Sequence)
+        and not isinstance(raw_first_point, (str, bytes, bytearray))
+        else ()
+    )
+    anchor_mapping = cast(Mapping[str, object], anchor)
+    anchor_matches = bool(
+        len(first_point) >= 2
+        and abs(
+            _epoch_float(first_point[0], float("nan"))
+            - _epoch_float(anchor_mapping.get("x_norm"), float("nan"))
+        )
+        <= 1e-6
+        and abs(
+            _epoch_float(first_point[1], float("nan"))
+            - _epoch_float(anchor_mapping.get("y_norm"), float("nan"))
+        )
+        <= 1e-6
+    )
+    if not anchor_matches:
+        return False
     selected = [scenario for scenario in scenario_rows if scenario.get("selected") is True]
     if len(scenario_rows) != 3 or len(selected) != 1:
         return False
@@ -1600,6 +1666,33 @@ def _operator_projection_source_revision(
         != study_signature
     ):
         return None
+    episode_revision: dict[str, object] = {}
+    episode_state_path = display_path.with_name("tracking_episode_state.json")
+    episode_identity_before = atomic_file_identity(episode_state_path)
+    if episode_identity_before is not None:
+        try:
+            raw_episode_state = json.loads(
+                episode_state_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raw_episode_state = None
+        episode_identity_after = atomic_file_identity(episode_state_path)
+        if (
+            episode_identity_after == episode_identity_before
+            and isinstance(raw_episode_state, Mapping)
+        ):
+            episode_state = cast(Mapping[str, object], raw_episode_state)
+            episode_revision = {
+                "episode_id": str(episode_state.get("episode_id") or ""),
+                "state": str(episode_state.get("state") or "IDLE"),
+                "revision": int(
+                    _epoch_float(episode_state.get("revision"), 0.0)
+                ),
+                "event_cursor": int(
+                    _epoch_float(episode_state.get("event_cursor"), 0.0)
+                ),
+                "state_file": episode_identity_after,
+            }
     revision_payload = {
         "session_id": requested_session_id,
         "frame_id": frame_id,
@@ -1608,6 +1701,7 @@ def _operator_projection_source_revision(
         "display_signature": display_signature,
         "study_signature": study_signature,
         "display_file": display_identity_after,
+        "tracking_episode": episode_revision,
     }
     return (
         json.dumps(revision_payload, sort_keys=True, separators=(",", ":")),
@@ -3394,6 +3488,60 @@ class WindowTrackerDemoTradeRequest(BaseModel):
     force: bool = False
 
 
+class WindowTrackerEpisodeStopRequest(BaseModel):
+    reason: str = Field(default="manual_stop", min_length=1, max_length=160)
+
+
+def _public_tracking_episode_response(
+    episode: Mapping[str, object],
+    readiness: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    projection_input: dict[str, object] = {"tracking_episode": dict(episode)}
+    if readiness is not None:
+        projection_input["tracking_episode_readiness"] = dict(readiness)
+    return project_public_tracking_episode_v1(projection_input)
+
+
+def _public_tracking_episode_readiness_response(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    raw_reasons = value.get("reasons")
+    reasons: list[str] = []
+    if isinstance(raw_reasons, Sequence) and not isinstance(
+        raw_reasons,
+        (str, bytes, bytearray),
+    ):
+        for raw_reason in cast(Sequence[object], raw_reasons):
+            reason = public_tracking_readiness_message_v1(raw_reason)
+            if reason and reason not in reasons:
+                reasons.append(reason)
+    ready = value.get("ready") is True
+    message = (
+        "The chart is ready. Start Tracking when you want to anchor the 12-event study."
+        if ready
+        else reasons[0]
+        if reasons
+        else "The chart is still preparing the tracking baseline."
+    )
+    current = value.get("current")
+    current_episode: Mapping[str, object] = (
+        cast(Mapping[str, object], current)
+        if isinstance(current, Mapping)
+        else cast(Mapping[str, object], {})
+    )
+    return {
+        "schema_version": "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1",
+        "ready": ready,
+        "message": message,
+        "reasons": reasons,
+        "event_horizon": 12,
+        "current": _public_tracking_episode_response(
+            current_episode,
+            value,
+        ),
+    }
+
+
 class VoicePreferenceUpdateRequest(BaseModel):
     voice_enabled: bool
     listening_enabled: bool
@@ -3555,6 +3703,235 @@ def _bounded_operator_projection_context(
             ]
         return bounded_value(value, depth=depth, sequence_limit=16)
 
+    def bounded_scalar_fields(
+        value: object,
+        keys: Sequence[str],
+    ) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        source = cast(Mapping[str, object], value)
+        output: dict[str, object] = {}
+        for key in keys:
+            nested = source.get(key)
+            if nested is None or isinstance(nested, (str, int, float, bool)):
+                if nested not in (None, ""):
+                    output[key] = nested
+        return output
+
+    def bounded_episode_rows(
+        value: object,
+        keys: Sequence[str],
+        *,
+        limit: int = 12,
+    ) -> list[dict[str, object]]:
+        if not isinstance(value, Sequence) or isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            return []
+        return [
+            row
+            for item in list(cast(Sequence[object], value))[:limit]
+            if (row := bounded_scalar_fields(item, keys))
+        ]
+
+    def bounded_tracking_episode(value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        episode = cast(Mapping[str, object], value)
+        output = bounded_scalar_fields(
+            episode,
+            (
+                "schema_version",
+                "session_id",
+                "episode_id",
+                "state",
+                "revision",
+                "event_horizon",
+                "event_cursor",
+                "started_at",
+                "updated_at",
+                "stopped_at",
+                "completed_at",
+                "terminal_reason",
+                "pair",
+                "timeframe",
+            ),
+        )
+
+        committed = episode.get("committed_plan")
+        if isinstance(committed, Mapping):
+            committed_mapping = cast(Mapping[str, object], committed)
+            committed_plan: dict[str, object] = {}
+            for key, fields in (
+                (
+                    "decision",
+                    ("execution_action", "action", "side"),
+                ),
+                (
+                    "model_council",
+                    ("final_side",),
+                ),
+                (
+                    "signal_thesis",
+                    ("committed_side", "side"),
+                ),
+            ):
+                selected = bounded_scalar_fields(committed_mapping.get(key), fields)
+                if selected:
+                    committed_plan[key] = selected
+            if committed_plan:
+                output["committed_plan"] = committed_plan
+
+        forecasts = episode.get("baseline_forecasts")
+        if isinstance(forecasts, Mapping):
+            forecast_mapping = cast(Mapping[str, object], forecasts)
+            scene = forecast_mapping.get("scene")
+            lstm = forecast_mapping.get("lstm")
+            scene_mapping: Mapping[str, object] = (
+                cast(Mapping[str, object], scene)
+                if isinstance(scene, Mapping)
+                else cast(Mapping[str, object], {})
+            )
+            lstm_mapping: Mapping[str, object] = (
+                cast(Mapping[str, object], lstm)
+                if isinstance(lstm, Mapping)
+                else cast(Mapping[str, object], {})
+            )
+            forecast_candles = bounded_episode_rows(
+                scene_mapping.get("forecast_candles"),
+                (
+                    "step",
+                    "x_norm",
+                    "open_y_norm",
+                    "high_y_norm",
+                    "low_y_norm",
+                    "close_y_norm",
+                    "movement_side",
+                    "side",
+                    "body_bias",
+                    "direction",
+                    "direction_conflict",
+                ),
+            )
+            forecast_path = bounded_episode_rows(
+                lstm_mapping.get("forecast_path"),
+                (
+                    "step",
+                    "x_norm",
+                    "expected_open_norm",
+                    "expected_high_norm",
+                    "expected_low_norm",
+                    "expected_close_norm",
+                    "movement_direction",
+                    "direction",
+                    "candle_body_direction",
+                    "body_bias",
+                ),
+            )
+            baseline: dict[str, object] = {}
+            if forecast_candles:
+                baseline["scene"] = {"forecast_candles": forecast_candles}
+            if forecast_path:
+                baseline["lstm"] = {"forecast_path": forecast_path}
+            if baseline:
+                output["baseline_forecasts"] = baseline
+
+        events: list[dict[str, object]] = []
+        raw_events = episode.get("events")
+        if isinstance(raw_events, Sequence) and not isinstance(
+            raw_events,
+            (str, bytes, bytearray),
+        ):
+            for raw_event in list(cast(Sequence[object], raw_events))[:12]:
+                event = bounded_scalar_fields(
+                    raw_event,
+                    (
+                        "event_id",
+                        "episode_id",
+                        "step",
+                        "event_index",
+                        "observed_at",
+                        "direction_agreement",
+                        "frame_id",
+                    ),
+                )
+                if not isinstance(raw_event, Mapping):
+                    continue
+                raw_event_mapping = cast(Mapping[str, object], raw_event)
+                predicted = bounded_scalar_fields(
+                    raw_event_mapping.get("predicted_block"),
+                    ("side",),
+                )
+                actual = bounded_scalar_fields(
+                    raw_event_mapping.get("actual_block"),
+                    ("side",),
+                )
+                after = bounded_scalar_fields(
+                    raw_event_mapping.get("after_reference"),
+                    ("frame_id",),
+                )
+                if predicted:
+                    event["predicted_block"] = predicted
+                if actual:
+                    event["actual_block"] = actual
+                if after:
+                    event["after_reference"] = after
+                if event:
+                    events.append(event)
+        if events:
+            output["events"] = events
+        return output
+
+    def bounded_tracking_episode_history(value: object) -> list[dict[str, object]]:
+        if not isinstance(value, Sequence) or isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            return []
+        output: list[dict[str, object]] = []
+        for item in list(cast(Sequence[object], value))[:24]:
+            archive = bounded_scalar_fields(
+                item,
+                (
+                    "schema_version",
+                    "episode_id",
+                    "state",
+                    "revision",
+                    "pair",
+                    "timeframe",
+                    "started_at",
+                    "ended_at",
+                    "terminal_reason",
+                    "event_cursor",
+                    "event_horizon",
+                    "direction_agreement_count",
+                    "direction_observation_count",
+                    "mean_displacement_error",
+                    "anchor_frame_id",
+                ),
+            )
+            if not isinstance(item, Mapping):
+                continue
+            item_mapping = cast(Mapping[str, object], item)
+            events = bounded_episode_rows(
+                item_mapping.get("events"),
+                (
+                    "event_id",
+                    "step",
+                    "observed_at",
+                    "predicted_side",
+                    "actual_side",
+                    "direction_agreement",
+                    "frame_id",
+                ),
+            )
+            if events:
+                archive["events"] = events
+            if archive:
+                output.append(archive)
+        return output
+
     context: dict[str, object] = {}
     for key in (
         "session_id",
@@ -3591,6 +3968,37 @@ def _bounded_operator_projection_context(
     ):
         if key in live_state:
             context[key] = bounded_value(live_state[key], sequence_limit=16)
+
+    # Preserve exactly the nested fields needed to project one immutable
+    # 12-event baseline.  The generic depth limiter intentionally remains
+    # shallow for every other runtime object, and public routes remove this
+    # internal source after the operator DTO is built.
+    bounded_episode = bounded_tracking_episode(live_state.get("tracking_episode"))
+    if bounded_episode:
+        context["tracking_episode"] = bounded_episode
+    bounded_episode_history = bounded_tracking_episode_history(
+        live_state.get("tracking_episode_history")
+    )
+    if bounded_episode_history:
+        context["tracking_episode_history"] = bounded_episode_history
+    raw_episode_readiness = live_state.get("tracking_episode_readiness")
+    if isinstance(raw_episode_readiness, Mapping):
+        readiness_mapping = cast(Mapping[str, object], raw_episode_readiness)
+        readiness: dict[str, object] = {
+            **bounded_scalar_fields(readiness_mapping, ("ready",)),
+            "reasons": [
+                str(reason)[:180]
+                for reason in cast(Sequence[object], readiness_mapping.get("reasons", []))[:8]
+                if isinstance(reason, str) and reason.strip()
+            ]
+            if isinstance(readiness_mapping.get("reasons"), Sequence)
+            and not isinstance(
+                readiness_mapping.get("reasons"),
+                (str, bytes, bytearray),
+            )
+            else [],
+        }
+        context["tracking_episode_readiness"] = readiness
 
     raw_forecast = live_state.get("forecast_snapshot_v3")
     if isinstance(raw_forecast, Mapping):
@@ -3661,7 +4069,7 @@ def _bounded_operator_projection_context(
         ):
             history_rows.extend(list(cast(Sequence[object], raw_history)))
     bounded_history: list[dict[str, object]] = []
-    for raw_row in history_rows[-24:]:
+    for raw_row in history_rows[:24]:
         if not isinstance(raw_row, Mapping):
             continue
         raw_row_mapping = cast(Mapping[str, object], raw_row)
@@ -3692,8 +4100,8 @@ def _bounded_operator_projection_context(
         if row:
             bounded_history.append(row)
     if bounded_history:
-        context["recent_studies"] = bounded_history[-12:]
-        context["history"] = bounded_history[-24:]
+        context["recent_studies"] = bounded_history[:12]
+        context["history"] = bounded_history[:24]
     return context
 
 
@@ -3756,6 +4164,9 @@ def _merge_operator_projection_input(
             "tracking_enabled",
             "last_capture_epoch",
             "broker_source_lock_id",
+            "tracking_episode",
+            "tracking_episode_history",
+            "tracking_episode_readiness",
         ):
             if key in service_snapshot:
                 service_context[key] = service_snapshot[key]
@@ -3833,6 +4244,20 @@ def create_app(
     ] = {}
     operator_projection_refreshing: set[str] = set()
     operator_projection_refresh_context = threading.local()
+
+    def invalidate_operator_projection_cache(session_id: str) -> None:
+        """Remove a projection after an explicit episode state transition.
+
+        An already-running refresh is allowed to finish, but its cache write is
+        separately guarded by the complete source-revision token below.  That
+        prevents a pre-control projection from repopulating this entry.
+        """
+
+        requested_session_id = str(session_id or "").strip()
+        if not requested_session_id:
+            return
+        with operator_projection_cache_lock:
+            operator_projection_cache.pop(requested_session_id, None)
 
     def get_mobile_service() -> MobileApiService:
         mobile_service = getattr(app.state, "mobile_service", None)
@@ -5077,6 +5502,12 @@ def create_app(
     def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
         public_payload = _strip_private_projection_snapshots(payload)
         public_payload.pop("live_visual_state", None)
+        # The durable episode contains the frozen internal forecast evidence.
+        # It is consumed by the operator projector, which emits a narrow public
+        # DTO, and must never be serialized by the general compact endpoint.
+        public_payload.pop("tracking_episode", None)
+        public_payload.pop("tracking_episode_history", None)
+        public_payload.pop("tracking_episode_readiness", None)
         existing_command_center = public_payload.get("decision_command_center")
         if isinstance(existing_command_center, Mapping):
             public_payload["decision_command_center"] = _refresh_decision_command_center_freshness_v3(
@@ -6353,8 +6784,8 @@ def create_app(
                     "upward" if forecast_direction == "BUY" else "downward"
                 )
                 forecast["summary"] = (
-                    f"The last valid model outlook pointed {movement_word}. "
-                    "It is diagnostic only while waiting for a new broker frame."
+                    f"The last valid outlook pointed {movement_word}. "
+                    "It remains observation only while waiting for a new chart update."
                 )
             operator_state["forecast"] = forecast
         forecast_state = str(
@@ -6382,17 +6813,15 @@ def create_app(
         cache_revision: tuple[str, int, float] | None = None
         if (
             source_revision is not None
+            and final_source_revision is not None
+            and final_source_revision[0] == source_revision[0]
             and response_frame_number == source_revision[1]
         ):
-            # The display may advance while a projection is being built.  The
-            # completed response is still safe under its original revision
-            # because its surface URLs and every overlay remain on that frame.
+            # Cache only when every source-revision field, including frozen
+            # episode id/state/revision/cursor, stayed unchanged for the whole
+            # projection.  Same-frame Start/Stop must not let an in-flight old
+            # build repopulate the cache after explicit invalidation.
             cache_revision = source_revision
-        elif (
-            final_source_revision is not None
-            and response_frame_number == final_source_revision[1]
-        ):
-            cache_revision = final_source_revision
         if cache_revision is not None:
             with operator_projection_cache_lock:
                 operator_projection_cache[requested_session_id] = (
@@ -7754,7 +8183,13 @@ def create_app(
 
     @app.get("/v1/mobile/window-tracker/sessions")
     def list_tracker_sessions(limit: int = 20) -> dict[str, object]:
-        return {"sessions": get_window_tracker_service().list_sessions(limit=limit)}
+        rows = get_window_tracker_service().list_sessions(limit=limit)
+        return {
+            "sessions": [
+                _sanitize_public_tracker_session(row)
+                for row in rows
+            ]
+        }
 
     @app.post("/v1/mobile/window-tracker/sessions", status_code=status.HTTP_201_CREATED)
     def create_tracker_session(request: WindowTrackerSessionCreateRequest) -> dict[str, object]:
@@ -8543,7 +8978,10 @@ def create_app(
                 fingerprint = _fingerprint(cast(Mapping[str, Any], payload))
                 if fingerprint != last_fingerprint:
                     last_fingerprint = fingerprint
-                    body = json.dumps(payload, default=str)
+                    body = json.dumps(
+                        _sanitize_public_tracker_session(payload),
+                        default=str,
+                    )
                     yield f"event: SESSION_UPDATE\ndata: {body}\n\n"
                     last_keepalive = now
                 elif now - last_keepalive >= 2.0:
@@ -8556,6 +8994,111 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/current")
+    def get_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> dict[str, object]:
+        try:
+            tracker = get_window_tracker_service()
+            episode = cast(
+                Mapping[str, object],
+                tracker.get_tracking_episode(session_id),
+            )
+            readiness = cast(
+                Mapping[str, object],
+                tracker.get_tracking_episode_readiness(session_id),
+            )
+            return _public_tracking_episode_response(episode, readiness)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+
+    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/readiness")
+    def get_tracker_tracking_episode_readiness(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> dict[str, object]:
+        try:
+            readiness = cast(
+                Mapping[str, object],
+                get_window_tracker_service().get_tracking_episode_readiness(
+                    session_id
+                ),
+            )
+            return _public_tracking_episode_readiness_response(readiness)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+
+    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/start")
+    def start_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> dict[str, object]:
+        try:
+            tracker = get_window_tracker_service()
+            episode = cast(
+                Mapping[str, object],
+                tracker.start_tracking_episode(session_id),
+            )
+            invalidate_operator_projection_cache(session_id)
+            readiness = cast(
+                Mapping[str, object],
+                tracker.get_tracking_episode_readiness(session_id),
+            )
+            return _public_tracking_episode_response(episode, readiness)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+        except TrackingEpisodeReadinessError as exc:
+            public_reasons = [
+                message
+                for reason in exc.reasons
+                if (message := public_tracking_readiness_message_v1(reason))
+            ]
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "TRACKING_EPISODE_NOT_READY",
+                    "message": (
+                        public_reasons[0]
+                        if public_reasons
+                        else "The chart is still preparing the tracking baseline."
+                    ),
+                    "reasons": list(dict.fromkeys(public_reasons)),
+                },
+            ) from exc
+
+    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/stop")
+    def stop_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        request: WindowTrackerEpisodeStopRequest | None = None,
+    ) -> dict[str, object]:
+        try:
+            tracker = get_window_tracker_service()
+            episode = cast(
+                Mapping[str, object],
+                tracker.stop_tracking_episode(
+                    session_id,
+                    reason=(request.reason if request is not None else "manual_stop"),
+                ),
+            )
+            invalidate_operator_projection_cache(session_id)
+            readiness = cast(
+                Mapping[str, object],
+                tracker.get_tracking_episode_readiness(session_id),
+            )
+            return _public_tracking_episode_response(episode, readiness)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
 
     @app.post("/v1/mobile/window-tracker/sessions/{session_id}/start")
     def start_tracker_session(session_id: str) -> dict[str, object]:

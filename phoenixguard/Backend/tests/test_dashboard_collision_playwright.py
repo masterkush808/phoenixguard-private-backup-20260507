@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -138,6 +137,11 @@ def _operator_payload(
             "state": "LIVE",
             "updated_at": observed_at,
             "history_count": 2,
+            "episode": {
+                "state": "ACTIVE",
+                "event_horizon": 12,
+                "event_cursor": 0,
+            },
         },
         "freshness": {
             "state": "FRESH",
@@ -231,6 +235,8 @@ def _operator_payload(
                 "group": "structure",
                 "family": "chart_bounds",
                 "layer": "chart_bounds",
+                "kind": "chart_area",
+                "kind_label": "Chart area",
                 "label": "Chart bounds",
                 "bounds": [0.01, 0.01, 0.99, 0.99],
                 "points": [],
@@ -248,7 +254,9 @@ def _operator_payload(
                 "group": "zones",
                 "family": "supply_demand",
                 "layer": "supply_demand",
-                "label": "Demand area",
+                "kind": "lower_reaction_area",
+                "kind_label": "Lower reaction area",
+                "label": "Lower reaction area",
                 "bounds": [0.08, 0.18, 0.46, 0.72],
                 "points": [],
                 "line_points": [],
@@ -265,6 +273,8 @@ def _operator_payload(
                 "group": "structure",
                 "family": "trendlines",
                 "layer": "trendlines",
+                "kind": "rising_support_line",
+                "kind_label": "Rising support line",
                 "label": "Support trend",
                 "bounds": [0.14, 0.24, 0.86, 0.36],
                 "points": [[0.14, 0.36], [0.48, 0.30], [0.86, 0.24]],
@@ -282,6 +292,8 @@ def _operator_payload(
                 "group": "history",
                 "family": "history",
                 "layer": "historical_replay",
+                "kind": "past_movement",
+                "kind_label": "Past movement",
                 "label": "Earlier down move",
                 "bounds": [0.48, 0.24, 0.88, 0.68],
                 "points": [],
@@ -297,9 +309,11 @@ def _operator_payload(
                 "type": "zone",
                 "side": "BUY",
                 "group": "plan",
-                "family": "smc",
-                "layer": "smart_money",
-                "label": "SMC order block",
+                "family": "market_context",
+                "layer": "market_context",
+                "kind": "reaction_zone",
+                "kind_label": "Reaction zone",
+                "label": "Reaction zone",
                 "label_hidden": True,
                 "bounds": [0.52, 0.18, 0.68, 0.32],
                 "points": [],
@@ -317,7 +331,9 @@ def _operator_payload(
                 "group": "plan",
                 "family": "council",
                 "layer": "active_council_decision",
-                "label": "Council read",
+                "kind": "combined_analysis",
+                "kind_label": "Combined analysis",
+                "label": "Combined analysis",
                 "bounds": [0.70, 0.18, 0.78, 0.30],
                 "points": [],
                 "line_points": [],
@@ -334,7 +350,9 @@ def _operator_payload(
                 "group": "outlook",
                 "family": "two_candle",
                 "layer": "active_council_decision",
-                "label": "Two-candle study",
+                "kind": "near_term_read",
+                "kind_label": "Near-term candle read",
+                "label": "Near-term candle read",
                 "bounds": [0.60, 0.44, 0.72, 0.62],
                 "points": [],
                 "line_points": [],
@@ -351,7 +369,9 @@ def _operator_payload(
                 "group": "outlook",
                 "family": "lstm",
                 "layer": "prediction_path",
-                "label": "LSTM 12-event path · no edge",
+                "kind": "sequence_outlook",
+                "kind_label": "12-step sequence outlook",
+                "label": "12-step sequence outlook · uncertain",
                 "bounds": [0.70, 0.38, 0.95, 0.53],
                 "points": [],
                 "line_points": forecast_line,
@@ -510,6 +530,10 @@ def _dashboard_page(
           status_url: "/v1/mobile/window-tracker/sessions/operator-test/forecast-actions/forecast-action-1",
         }}}};
         window.__FORECAST_ACTION_STATUS_QUEUE = [];
+        window.__TRACKING_EPISODE_RESPONSES = {{
+          start: {{status: 202, body: {{state: "STARTING"}}}},
+          stop: {{status: 202, body: {{state: "STOPPING"}}}},
+        }};
         {event_source_bootstrap}
         Object.defineProperty(window, "Worker", {{value: undefined, configurable: true}});
         const nativeSetTimeout = window.setTimeout.bind(window);
@@ -534,6 +558,18 @@ def _dashboard_page(
             const action = window.__FORECAST_ACTION_STATUS_QUEUE.length
               ? window.__FORECAST_ACTION_STATUS_QUEUE.shift()
               : window.__FORECAST_ACTION_STATUS;
+            return Promise.resolve(new Response(JSON.stringify(action.body), {{
+              status: Number(action.status || 200),
+              headers: {{"Content-Type": "application/json"}},
+            }}));
+          }}
+          const episodeAction = href.endsWith("/tracking-episodes/start")
+            ? "start"
+            : href.endsWith("/tracking-episodes/stop")
+              ? "stop"
+              : "";
+          if (episodeAction) {{
+            const action = window.__TRACKING_EPISODE_RESPONSES[episodeAction];
             return Promise.resolve(new Response(JSON.stringify(action.body), {{
               status: Number(action.status || 200),
               headers: {{"Content-Type": "application/json"}},
@@ -651,6 +687,9 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             "layers-clear",
             "run-forecast",
             "show-future-path",
+            "tracking-start",
+            "tracking-stop",
+            "tracking-plan-toggle",
             "zoom-out",
             "zoom-fit",
             "zoom-actual",
@@ -665,7 +704,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             )
         ) == static_button_ids
         assert page.locator("button[data-overlay-view]").count() == 8
-        assert page.locator("button[data-overlay-family]").count() == 17
+        assert page.locator("button[data-overlay-family]").count() == 16
         assert page.locator("button[data-label-mode]").count() == 3
         assert page.locator("input[type=range]").count() == 2
 
@@ -700,7 +739,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         for view in (
             "all",
             "live",
-            "smc",
+            "market_context",
             "structure",
             "zones",
             "plan",
@@ -722,7 +761,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         page.locator("#layers-all").click()
         assert (
             page.locator("button[data-overlay-family][aria-pressed=true]").count()
-            == 17
+            == 16
         )
         families = page.locator("button[data-overlay-family]").evaluate_all(
             "nodes => nodes.map(node => node.dataset.overlayFamily)"
@@ -765,7 +804,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         page.locator("#history-scrubber").fill("0")
         page.locator('button[data-overlay-view="live"]').click()
         page.locator("#experience-mode-toggle").click()
-        page.get_by_role("button", name="Council read").click()
+        page.get_by_role("button", name="Combined analysis", exact=True).click()
         assert page.locator("#mobile-inspector").is_visible()
         page.locator("#mobile-inspector-close").click()
         assert page.locator("#mobile-inspector").is_hidden()
@@ -856,6 +895,387 @@ def test_808fx_branding_stays_premium_readable_and_inside_the_header(
         assert branding["titleFullyRendered"], (viewport, branding)
         assert branding["titleLeft"] >= branding["headerLeft"]
         assert branding["titleRight"] <= branding["headerRight"]
+
+
+def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    initial["history"] = []
+    initial["tracking"]["episode"] = {
+        "state": "IDLE",
+        "ready": False,
+        "event_horizon": 12,
+        "event_cursor": 0,
+    }
+    ready = copy.deepcopy(initial)
+    ready["revision"] = 42.5
+    ready["tracking"]["episode"]["ready"] = True
+    active = copy.deepcopy(initial)
+    active["revision"] = 43
+    active["tracking"]["episode"] = {
+        "state": "ACTIVE",
+        "event_horizon": 12,
+        "event_cursor": 4,
+        "baseline": {
+            "title": "Starting climb",
+            "summary": "The episode began while price was climbing.",
+        },
+        "current": {
+            "title": "Current pause",
+            "summary": "The move is pausing while the original plan remains anchored.",
+        },
+        "plan": {
+            "title": "Hold the original plan",
+            "summary": "Wait for the saved lower entry area; do not chase.",
+            "evidence_families": ["trendlines", "market_context", "triggers"],
+        },
+        "events": [
+            {
+                "event_id": "episode-event-1",
+                "observed_at": 4_102_444_510.0,
+                "direction": "BUY",
+                "state": "historical",
+                "title": "Move strengthened",
+                "summary": "Price extended from the starting chart.",
+            },
+            {
+                "event_id": "episode-event-2",
+                "observed_at": 4_102_444_520.0,
+                "direction": "HOLD",
+                "state": "current",
+                "title": "Current pause",
+                "summary": "The move is pausing while the original plan remains anchored.",
+            },
+        ],
+    }
+    completed = copy.deepcopy(active)
+    completed["revision"] = 44
+    completed["tracking"]["episode"]["state"] = "COMPLETED"
+
+    with _dashboard_page(chromium_browser, initial) as page:
+        assert page.locator("#tracking-start").is_visible()
+        assert page.locator("#tracking-start").is_disabled()
+        assert page.locator("#tracking-episode-state").inner_text() == "PREPARING"
+        assert page.locator("#run-forecast").is_disabled()
+        assert (
+            page.locator("#forecast-action-status").inner_text()
+            == "Start Tracking to publish a 12-step outlook"
+        )
+
+        page.evaluate("payload => window.renderOperatorState(payload)", ready)
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-start')?.disabled === false"
+        )
+
+        page.evaluate(
+            "payload => window.__TRACKING_EPISODE_RESPONSES.start.body = payload",
+            active,
+        )
+        page.locator("#tracking-start").click()
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-ribbon')?.dataset.state === 'active'"
+        )
+        assert page.locator("#tracking-episode-progress").inner_text() == "4 of 12"
+        assert page.locator("#story-step-one-label").inner_text() == "BEFORE"
+        assert page.locator("#story-step-two-label").inner_text() == "NOW"
+        assert page.locator("#story-step-three-label").inner_text() == "TRACKING PLAN"
+        assert page.locator("#current-move-title").inner_text() == "Starting climb"
+        assert page.locator("#forecast-title").inner_text() == "Current pause"
+        assert page.locator("#permission-title").inner_text() == "Hold the original plan"
+        assert page.locator("#history-count").inner_text() == "2 observations"
+        assert not page.locator("#run-forecast").is_disabled()
+        assert page.locator("#tracking-stop").is_visible()
+
+        page.evaluate(
+            "payload => window.__TRACKING_EPISODE_RESPONSES.stop.body = payload",
+            completed,
+        )
+        page.locator("#tracking-stop").click()
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-ribbon')?.dataset.state === 'complete'"
+        )
+        assert page.locator("#tracking-start").is_visible()
+        assert page.locator("#run-forecast").is_disabled()
+        assert "frozen and remains available" in page.locator(
+            "#forecast-action-status"
+        ).inner_text()
+        assert page.locator("#history-count").inner_text() == "2 observations"
+        requests = page.evaluate("window.__FETCH_REQUESTS.slice()")
+        assert any(
+            row["method"] == "POST"
+            and row["href"].endswith("/tracking-episodes/start")
+            for row in requests
+        )
+        assert any(
+            row["method"] == "POST"
+            and row["href"].endswith("/tracking-episodes/stop")
+            for row in requests
+        )
+
+
+def test_tracking_plan_individual_controls_and_sequence_blocks_render_without_diagnostics(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    public_sequence = cast(
+        dict[str, Any],
+        next(
+            overlay
+            for overlay in payload["overlays"]
+            if overlay["family"] == "lstm"
+        ),
+    )
+    public_sequence["line_points"] = []
+    public_sequence["points"] = []
+    public_sequence["forecast_scenarios"] = []
+    public_sequence["forecast_band_points"] = []
+    public_sequence["geometry_kind"] = "future_blocks"
+    payload["overlays"].append(
+        {
+            "id": "internal-transform-debug",
+            "type": "debug",
+            "side": "HOLD",
+            "group": "structure",
+            "family": "major_swings",
+            "layer": "diagnostics",
+            "kind": "transform_debug",
+            "kind_label": "Internal transform debug",
+            "label": "Internal transform debug",
+            "bounds": [0.2, 0.2, 0.4, 0.4],
+            "points": [],
+            "line_points": [],
+            "confidence": 1.0,
+            "lifecycle": "current",
+            "frame_id": 42,
+            "coordinate_space": "chart",
+            "coordinate_units": "normalized",
+        }
+    )
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator("#mode-raw").click()
+        page.locator("#tracking-plan-toggle").click()
+        assert (
+            page.locator("#tracking-plan-toggle").get_attribute("aria-expanded")
+            == "true"
+        )
+        assert page.locator("#tracking-plan-panel").is_visible()
+        assert page.locator("#mode-overlay").get_attribute("aria-pressed") == "true"
+        assert page.locator("#tracking-plan-count").inner_text() == "8"
+        for family in ("trendlines", "market_context", "lstm", "history"):
+            assert (
+                page.locator(
+                    f'[data-overlay-family="{family}"]'
+                ).get_attribute("aria-pressed")
+                == "true"
+            )
+        assert page.locator('polyline[data-overlay-id="support-current"]').count() == 1
+
+        page.locator("#detailed-overlay-controls").evaluate("node => node.open = true")
+        support_toggle = page.locator(
+            '[data-overlay-kind="rising_support_line"]'
+        )
+        assert support_toggle.count() == 1
+        support_toggle.click()
+        assert page.locator('polyline[data-overlay-id="support-current"]').count() == 0
+        assert support_toggle.get_attribute("aria-pressed") == "false"
+        support_toggle.click()
+        assert page.locator('polyline[data-overlay-id="support-current"]').count() == 1
+        assert page.locator('[data-overlay-kind="transform_debug"]').count() == 0
+        assert page.locator('[data-overlay-id="internal-transform-debug"]').count() == 0
+
+        page.locator('[data-overlay-view="forecast"]').click()
+        composite = page.locator(
+            'g.surface-forecast-composite.block-only[data-overlay-id="lstm-current"]'
+        )
+        assert composite.count() == 1
+        assert composite.get_attribute("data-display-mode") == "event-blocks"
+        assert composite.locator(".surface-forecast-event-block").count() == 12
+        assert composite.locator(".surface-forecast-candle-body").count() == 12
+        assert composite.locator(".surface-forecast-scenario").count() == 0
+        assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
+        assert page.locator("polyline.family-lstm").count() == 0
+        public_copy = page.locator("body").inner_text().lower()
+        for proprietary_term in ("smc", "liquidity", "order block", "fair value gap", "lstm"):
+            assert proprietary_term not in public_copy
+
+
+def test_episode_locked_future_blocks_remain_at_the_original_anchor_as_price_advances(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["tracking"]["episode"].update(
+        {
+            "episode_id": "episode-public-1",
+            "state": "ACTIVE",
+            "event_cursor": 7,
+        }
+    )
+    payload["overlays"].append(
+        {
+            "id": "current-candle-far-ahead",
+            "type": "movement",
+            "side": "BUY",
+            "group": "movement",
+            "family": "current_candles",
+            "layer": "current_candles",
+            "kind": "current_price",
+            "kind_label": "Current price",
+            "label": "Current price",
+            "bounds": [0.14, 0.62, 0.16, 0.74],
+            "points": [[0.15, 0.70]],
+            "line_points": [],
+            "confidence": 0.9,
+            "lifecycle": "current",
+            "frame_id": 42,
+            "coordinate_space": "chart",
+            "coordinate_units": "normalized",
+        }
+    )
+    sequence = next(
+        overlay for overlay in payload["overlays"] if overlay["family"] == "lstm"
+    )
+    sequence["baseline_locked"] = True
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator('[data-overlay-view="forecast"]').click()
+        composite = page.locator(
+            'g.surface-forecast-composite.block-only[data-overlay-id="lstm-current"]'
+        )
+        assert composite.count() == 1
+        assert composite.get_attribute("data-tracking-episode") == "ANCHORED"
+        assert composite.locator(".surface-forecast-event-block").count() == 12
+        assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
+
+
+def test_episode_owned_sequence_renders_all_blocks_without_a_live_sequence_contributor(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    live_sequence = cast(
+        dict[str, Any],
+        next(
+            overlay
+            for overlay in payload["overlays"]
+            if overlay["family"] == "lstm"
+        ),
+    )
+    payload["overlays"] = [
+        overlay for overlay in payload["overlays"] if overlay["family"] != "lstm"
+    ]
+    episode_blocks = copy.deepcopy(live_sequence["forecast_candles"])
+    payload["tracking"]["episode"] = {
+        "episode_id": "episode-owned-sequence-1",
+        "state": "ACTIVE",
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "future_blocks": copy.deepcopy(episode_blocks),
+    }
+    episode_sequence: dict[str, Any] = {
+        **copy.deepcopy(live_sequence),
+        "id": "episode-owned-sequence",
+        "kind": "future_blocks",
+        "kind_label": "12-step future blocks",
+        "layer": "future_blocks",
+        "label": "Saved future blocks",
+        "label_hidden": True,
+        "line_points": [],
+        "points": [],
+        "forecast_scenarios": [],
+        "forecast_band_points": [],
+        "forecast_candles": episode_blocks,
+        "geometry_kind": "future_blocks",
+        "baseline_locked": True,
+    }
+    payload["overlays"].append(episode_sequence)
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator('[data-overlay-view="forecast"]').click()
+        composite = page.locator(
+            'g.surface-forecast-composite.block-only[data-overlay-id="episode-owned-sequence"]'
+        )
+
+        assert composite.count() == 1
+        assert composite.get_attribute("data-display-mode") == "event-blocks"
+        assert composite.get_attribute("data-scenario-count") == "0"
+        assert composite.get_attribute("data-tracking-episode") == "ANCHORED"
+        assert composite.locator(".surface-forecast-event-block").count() == 12
+        assert composite.locator(".surface-forecast-candle-body").count() == 12
+        assert composite.locator(".surface-forecast-candle-wick").count() == 12
+        assert page.locator('[data-overlay-family-id="lstm"]').count() == 1
+        assert page.locator('polyline[data-overlay-id="episode-owned-sequence"]').count() == 0
+        assert page.locator("polyline.family-lstm").count() == 0
+
+
+def test_retained_episode_blocks_survive_a_poll_that_omits_the_live_sequence(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    live_sequence = cast(
+        dict[str, Any],
+        next(
+            overlay
+            for overlay in payload["overlays"]
+            if overlay["family"] == "lstm"
+        ),
+    )
+    episode_blocks = copy.deepcopy(live_sequence["forecast_candles"])
+    payload["overlays"] = [
+        overlay for overlay in payload["overlays"] if overlay["family"] != "lstm"
+    ]
+    payload["tracking"]["episode"] = {
+        "episode_id": "episode-retained-blocks-1",
+        "state": "STOPPED",
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "future_blocks": episode_blocks,
+        "baseline": {"direction": "BUY"},
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator('[data-overlay-view="forecast"]').click()
+        composite = page.locator(
+            'g.surface-forecast-composite.block-only'
+            '[data-overlay-id="episode-outlook-episode-retained-blocks-1"]'
+        )
+
+        assert composite.count() == 1
+        assert composite.get_attribute("data-display-mode") == "event-blocks"
+        assert composite.get_attribute("data-tracking-episode") == "ANCHORED"
+        assert composite.locator(".surface-forecast-event-block").count() == 12
+        assert composite.locator(".surface-forecast-candle-body").count() == 12
+        assert composite.locator(".surface-forecast-candle-wick").count() == 12
+        assert page.locator("polyline.family-lstm").count() == 0
+
+
+def test_retained_episode_fallback_rejects_an_incomplete_block_sequence(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    live_sequence = cast(
+        dict[str, Any],
+        next(
+            overlay
+            for overlay in payload["overlays"]
+            if overlay["family"] == "lstm"
+        ),
+    )
+    payload["overlays"] = [
+        overlay for overlay in payload["overlays"] if overlay["family"] != "lstm"
+    ]
+    payload["tracking"]["episode"] = {
+        "episode_id": "episode-incomplete-blocks-1",
+        "state": "STOPPED",
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "future_blocks": copy.deepcopy(live_sequence["forecast_candles"][:11]),
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator('[data-overlay-view="forecast"]').click()
+        assert page.locator("g.surface-forecast-composite.block-only").count() == 0
+        assert page.locator(".surface-forecast-event-block").count() == 0
 
 
 def test_simple_is_default_and_explore_does_not_restore_workspace_navigation(
@@ -1035,92 +1455,25 @@ def _assert_clean_multimodal_forecast(
     *,
     status: str,
 ) -> None:
+    del source_line
     composite = page.locator(
         '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
     )
     assert composite.count() == 1
-    assert composite.get_attribute("data-display-mode") == "multi-scenario-paths"
+    assert composite.get_attribute("data-display-mode") == "event-blocks"
     assert composite.get_attribute("data-scenario-count") == "3"
     assert composite.get_attribute("data-forecast-status") == status
     assert composite.get_attribute("data-event-count") == "12"
     assert composite.get_attribute("data-probability-calibration") == "UNCALIBRATED"
-
-    alternatives = composite.locator(":scope > .surface-forecast-scenario")
-    assert alternatives.count() == 2
-    assert alternatives.count() <= 2
-    alternative_opacities = cast(list[float], alternatives.evaluate_all(
-        "nodes => nodes.map(node => Number(node.style.opacity))"
-    ))
-    assert len(alternative_opacities) == 2
-    assert all(
-        math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-6)
-        for actual, expected in zip(
-            alternative_opacities,
-            (0.6152, 0.576),
-            strict=True,
-        )
-    )
-
-    steps = composite.locator(":scope > .surface-forecast-step-node")
-    assert steps.count() == 12
-    assert steps.evaluate_all(
-        "nodes => nodes.map(node => node.dataset.eventLabel)"
-    ) == [f"E{event_index}" for event_index in range(1, 13)]
-    step_labels = composite.locator(":scope > .surface-forecast-step-label")
-    assert step_labels.count() == 4
-    assert step_labels.evaluate_all(
-        "nodes => nodes.map(node => node.textContent)"
-    ) == ["E1", "E4", "E8", "E12"]
-    assert composite.locator(
-        ":scope > .surface-forecast-step-label.milestone"
-    ).count() == 4
-
-    milestones = composite.locator(
-        ":scope > .surface-forecast-step-node.surface-forecast-milestone-node"
-    )
-    assert milestones.count() == 4
-    assert milestones.locator("title").evaluate_all(
-        "nodes => nodes.map(node => node.textContent)"
-    ) == [
-        "E1 expected close · true chart scale",
-        "E4 expected close · true chart scale",
-        "E8 expected close · true chart scale",
-        "E12 expected close · true chart scale",
-    ]
-    assert composite.locator(".surface-forecast-milestone-node.endpoint").count() == 1
-    assert composite.locator(".surface-forecast-endpoint-label").text_content() == (
-        "UP COMMITTED · E1–E12 · NO EDGE"
-    )
-
+    assert composite.locator(":scope > .surface-forecast-scenario").count() == 0
+    assert composite.locator(":scope > .surface-forecast-step-node").count() == 0
+    assert composite.locator(":scope > .surface-forecast-step-label").count() == 0
+    assert composite.locator(".surface-forecast-endpoint-label").count() == 0
     assert composite.locator(":scope > .surface-forecast-candle").count() == 12
+    assert composite.locator(".surface-forecast-event-block").count() == 12
     assert composite.locator(".surface-forecast-candle-body").count() == 12
     assert composite.locator(".surface-forecast-candle-wick").count() == 12
-
-    for selector in (
-        ".surface-forecast-event",
-        ".surface-forecast-event-body",
-        ".surface-forecast-close-node",
-        ".surface-forecast-origin-rail",
-        ".surface-forecast-origin",
-    ):
-        assert composite.locator(selector).count() == 0
-
-    path = page.locator('polyline[data-overlay-id="lstm-current"]')
-    assert path.count() == 1
-    rendered_points = [
-        tuple(float(value) for value in pair.split(","))
-        for pair in (path.get_attribute("points") or "").split()
-    ]
-    expected_points = [
-        ((0.10 + x_norm * 0.80) * 1200, (0.12 + y_norm * 0.80) * 700)
-        for x_norm, y_norm in source_line
-    ]
-    assert len(rendered_points) == len(expected_points) == 13
-    for rendered, expected in zip(rendered_points, expected_points, strict=True):
-        assert all(
-            math.isclose(actual, wanted, rel_tol=1e-6, abs_tol=1e-6)
-            for actual, wanted in zip(rendered, expected, strict=True)
-        )
+    assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
 
 
 def test_no_edge_composite_forecast_renders_clean_multimodal_paths(
@@ -1143,26 +1496,22 @@ def test_no_edge_composite_forecast_renders_clean_multimodal_paths(
         hotspot = page.locator('.surface-hotspot[data-overlay-id="lstm-current"]')
         path = page.locator('polyline[data-overlay-id="lstm-current"]')
         assert hotspot.count() == 1
+        assert path.count() == 0
         assert hotspot.evaluate(
             "node => node.classList.contains('label-policy-hidden')"
         )
         assert hotspot.locator("span").evaluate(
             "node => getComputedStyle(node).opacity"
         ) == "0"
-        for class_names in (
-            (hotspot.get_attribute("class") or "").split(),
-            (path.get_attribute("class") or "").split(),
-        ):
+        for class_names in ((hotspot.get_attribute("class") or "").split(),):
             assert "forecast-no-edge" in class_names
             assert "buy" not in class_names
             assert "sell" not in class_names
 
         hotspot.click()
         inspector_copy = page.locator("#inspector-explanation").inner_text()
-        assert "The complete 12-step up / buy-side forecast is shown" in inspector_copy
-        assert "Forecast status remains NO EDGE." in inspector_copy
-        assert "This forecast is not entry permission." in inspector_copy
-        assert "no reliable" not in inspector_copy.lower()
+        assert "Twelve future event blocks are anchored" in inspector_copy
+        assert "not a guaranteed path or entry permission" in inspector_copy
 
 
 def test_low_confidence_composite_stays_visible_and_never_looks_authorized(
@@ -1194,8 +1543,8 @@ def test_low_confidence_composite_stays_visible_and_never_looks_authorized(
             "forecast-low-confidence"
             in (composite.get_attribute("class") or "").split()
         )
-        assert path.get_attribute("data-forecast-status") == "LOW_CONFIDENCE"
-        assert "forecast-authorized" not in (path.get_attribute("class") or "").split()
+        assert path.count() == 0
+        assert "forecast-authorized" not in (composite.get_attribute("class") or "").split()
 
 
 def test_authorized_composite_is_the_only_state_that_renders_predicted_ranges(
@@ -1224,15 +1573,11 @@ def test_authorized_composite_is_the_only_state_that_renders_predicted_ranges(
             if row.get("family") == "lstm"
         )
         _assert_clean_multimodal_forecast(page, source_line, status="AUTHORIZED")
-        assert composite.locator(".surface-forecast-band").count() == 1
+        assert composite.locator(".surface-forecast-band").count() == 0
         page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').click()
         inspector_copy = page.locator("#inspector-explanation").inner_text()
-        assert "Forecast status is AUTHORIZED." in inspector_copy
-        assert (
-            "Forecast authorization still does not equal entry permission"
-            in inspector_copy
-        )
-        assert "NO EDGE" not in inspector_copy
+        assert "Twelve future event blocks are anchored" in inspector_copy
+        assert "not a guaranteed path or entry permission" in inspector_copy
 
 
 def test_missing_trade_status_never_reads_as_authorized(
@@ -1256,8 +1601,8 @@ def test_missing_trade_status_never_reads_as_authorized(
         )
         assert "forecast-no-edge" in (composite.get_attribute("class") or "")
         assert composite.locator(".surface-forecast-band").count() == 0
-        assert "Forecast status remains NO EDGE." in inspector_copy
-        assert "Forecast status is AUTHORIZED." not in inspector_copy
+        assert "not a guaranteed path or entry permission" in inspector_copy
+        assert "AUTHORIZED" not in inspector_copy
 
 
 def test_authorized_but_uncalibrated_forecast_hides_the_range_band(
@@ -1329,7 +1674,7 @@ def test_neutral_primary_suppresses_compact_path_and_keeps_directional_alternati
         )
 
         assert composite.count() == 1
-        assert composite.get_attribute("data-display-mode") == "range-scenario-paths"
+        assert composite.get_attribute("data-display-mode") == "event-blocks"
         assert composite.get_attribute("data-primary-side") == "HOLD"
         assert composite.get_attribute("data-scenario-count") == "3"
         assert composite.get_attribute("data-event-count") == "12"
@@ -1337,71 +1682,10 @@ def test_neutral_primary_suppresses_compact_path_and_keeps_directional_alternati
             composite.get_attribute("data-probability-calibration")
             == "UNCALIBRATED"
         )
-        assert composite.get_attribute("aria-label") == (
-            "Range leads; complete 12-step buy and sell paths shown; "
-            "no edge and not entry permission"
-        )
-
-        alternatives = composite.locator(
-            ":scope > .surface-forecast-scenario.range-branch"
-        )
-        assert alternatives.count() == 2
-        assert alternatives.evaluate_all(
-            "nodes => nodes.map(node => node.dataset.eventCount)"
-        ) == ["12", "12"]
-        assert alternatives.evaluate_all(
-            "nodes => nodes.map(node => "
-            "node.classList.contains('buy') ? 'BUY' : "
-            "node.classList.contains('sell') ? 'SELL' : 'HOLD')"
-        ) == ["BUY", "SELL"]
-        assert alternatives.evaluate_all(
-            "nodes => nodes.map(node => node.getAttribute('points').trim().split(/\\s+/).length)"
-        ) == [13, 13]
-        assert alternatives.locator("title").evaluate_all(
-            "nodes => nodes.map(node => node.textContent)"
-        ) == [
-            "Bullish route · 12 events · relative route weight uncalibrated · "
-            "spread from the selected path shows route uncertainty",
-            "Bearish route · 12 events · relative route weight uncalibrated · "
-            "spread from the selected path shows route uncertainty",
-        ]
-        assert composite.locator(".surface-forecast-direction-label").text_content() == (
-            "RANGE LEADS · 12-STEP BUY/SELL PATHS · NO EDGE"
-        )
-
+        assert "Twelve future event blocks" in (composite.get_attribute("aria-label") or "")
+        assert composite.locator(":scope > .surface-forecast-scenario").count() == 0
         assert composite.locator(".surface-forecast-band").count() == 0
-        branch_nodes = composite.locator(":scope > .surface-forecast-branch-node")
-        assert branch_nodes.count() == 24
-        assert branch_nodes.evaluate_all(
-            "nodes => nodes.map(node => node.dataset.eventLabel)"
-        ) == [
-            *[f"E{event_index}" for event_index in range(1, 13)],
-            *[f"E{event_index}" for event_index in range(1, 13)],
-        ]
-        assert composite.locator(
-            ":scope > .surface-forecast-branch-node.surface-forecast-milestone-node"
-        ).count() == 8
-        assert composite.locator(
-            ":scope > .surface-forecast-branch-node.endpoint"
-        ).count() == 2
-        branch_labels = composite.locator(":scope > .surface-forecast-step-label")
-        assert branch_labels.count() == 8
-        assert branch_labels.evaluate_all(
-            "nodes => nodes.map(node => node.textContent)"
-        ) == [
-            "E1",
-            "E4",
-            "E8",
-            "E12",
-            "E1",
-            "E4",
-            "E8",
-            "E12",
-        ]
-        assert composite.locator(
-            ":scope > .surface-forecast-step-label.milestone"
-        ).count() == 8
-        assert composite.locator(".surface-forecast-empty-label").count() == 0
+        assert composite.locator(".surface-forecast-event-block").count() == 12
         assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
         assert (
             page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').count()
@@ -1558,55 +1842,17 @@ def test_reacquiring_hold_renders_verified_closed_candle_candidate_path(
             == "SELECTED_WITH_BULL_BEAR_RANGE"
         )
         assert composite.locator(":scope > .surface-forecast-candle").count() == 12
+        assert composite.locator(".surface-forecast-event-block").count() == 12
         assert composite.locator(".surface-forecast-candle-body").count() == 12
         assert composite.locator(".surface-forecast-candle-wick").count() == 12
-        assert composite.locator(".surface-forecast-step-label").evaluate_all(
-            "nodes => nodes.map(node => node.textContent)"
-        ) == ["E1", "E4", "E8", "E12"]
+        assert composite.locator(".surface-forecast-step-label").count() == 0
 
         path = page.locator('polyline[data-overlay-id="lstm-current"]')
-        assert path.count() == 1
-        assert "forecast-under-review" in (path.get_attribute("class") or "").split()
-        assert "forecast-selected-path" in (path.get_attribute("class") or "").split()
-        assert path.get_attribute("data-path-presentation") == (
-            "SELECTED_12_STEP_PATH"
-        )
-        assert "buy" not in (path.get_attribute("class") or "").split()
-        assert "sell" not in (path.get_attribute("class") or "").split()
+        assert path.count() == 0
         alternatives = composite.locator(":scope > .surface-forecast-scenario")
-        assert alternatives.count() == 2
-        assert alternatives.evaluate_all(
-            "nodes => nodes.map(node => node.dataset.scenarioRole)"
-        ) == ["BULL", "BEAR"]
-        assert alternatives.evaluate_all(
-            "nodes => nodes.map(node => node.dataset.uncertaintyMeaning)"
-        ) == ["ROUTE_SPREAD", "ROUTE_SPREAD"]
-        assert alternatives.evaluate_all(
-            "nodes => nodes.map(node => node.classList.contains('bullish-range') "
-            "? 'BULL' : node.classList.contains('bearish-range') ? 'BEAR' : '')"
-        ) == ["BULL", "BEAR"]
-        assert composite.locator(":scope > .surface-forecast-range-label").evaluate_all(
-            "nodes => nodes.map(node => node.textContent)"
-        ) == ["BULLISH ROUTE", "BEARISH ROUTE"]
-
-        paint_order = composite.locator(":scope > *").evaluate_all(
-            "nodes => nodes.map(node => node.getAttribute('class') || '')"
-        )
-        first_candle = next(
-            index
-            for index, class_name in enumerate(paint_order)
-            if "surface-forecast-candle" in class_name
-        )
-        scenario_indices = [
-            index
-            for index, class_name in enumerate(paint_order)
-            if "surface-forecast-scenario" in class_name
-        ]
-        assert scenario_indices and max(scenario_indices) < first_candle
-        assert composite.locator(".surface-forecast-endpoint-label").text_content() == (
-            f"{'UP' if candidate_side == 'BUY' else 'DOWN'} STUDY · "
-            "CALIBRATION PENDING · NO EDGE"
-        )
+        assert alternatives.count() == 0
+        assert composite.locator(":scope > .surface-forecast-range-label").count() == 0
+        assert composite.locator(".surface-forecast-endpoint-label").count() == 0
 
 
 def test_forecast_legend_and_foreground_hierarchy_explain_uncertainty_locally(
@@ -1620,7 +1866,7 @@ def test_forecast_legend_and_foreground_hierarchy_explain_uncertainty_locally(
         assert legend.is_visible()
         assert legend.get_attribute("aria-label") == "Forecast path legend"
         assert legend.locator('[role="listitem"]').all_inner_texts() == [
-            "Selected 12-step path",
+            "Selected visual route",
             "Bullish route",
             "Bearish route",
         ]
@@ -1632,7 +1878,8 @@ def test_forecast_legend_and_foreground_hierarchy_explain_uncertainty_locally(
             "nodes => nodes.map(node => ({"
             "family: node.dataset.overlayFamilyId || '', "
             "role: node.dataset.forecastRole || '', "
-            "presentation: node.dataset.pathPresentation || ''"
+            "presentation: node.dataset.pathPresentation || '', "
+            "display: node.dataset.displayMode || ''"
             "}))"
         )
         scene_indices = [
@@ -1641,12 +1888,13 @@ def test_forecast_legend_and_foreground_hierarchy_explain_uncertainty_locally(
         other_indices = [
             index for index, row in enumerate(svg_order) if row["family"] != "lstm"
         ]
-        assert len(scene_indices) == 2
+        assert len(scene_indices) == 1
         assert other_indices and min(scene_indices) > max(other_indices)
         assert svg_order[-1] == {
             "family": "lstm",
-            "role": "composite",
-            "presentation": "SELECTED_12_STEP_PATH",
+            "role": "",
+            "presentation": "",
+            "display": "event-blocks",
         }
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
@@ -1667,7 +1915,9 @@ def test_composite_without_scenarios_suppresses_the_flat_line_and_hotspot(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
 
-        assert composite.count() == 0
+        assert composite.count() == 1
+        assert composite.get_attribute("data-display-mode") == "event-blocks"
+        assert composite.locator(".surface-forecast-event-block").count() == 12
         assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
         assert (
             page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').count()
@@ -1681,8 +1931,7 @@ def test_forecast_studies_copy_promises_complete_events_without_calibrated_odds(
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
         helper_copy = page.locator("#forecast-action-status").text_content()
         assert helper_copy == (
-            "Every path shows 12 candle events · solid = committed scene forecast · "
-            "dashed = outcome under review · NO EDGE is never entry permission."
+            "Tracking is active. Publish the 12-step outlook when the current frame is ready."
         )
 
 
@@ -1725,7 +1974,10 @@ def test_run_forecast_posts_action_keeps_forecast_view_and_refreshes_atomically(
         assert not page.locator("#surface-canvas").evaluate(
             "node => node.classList.contains('updating')"
         )
-        assert page.locator(".family-lstm").count() >= 1
+        # Forecast refresh must preserve the block-only LSTM contract.  This
+        # fixture deliberately exposes only an uncertainty-band row, so no
+        # LSTM trajectory is a valid visual result.
+        assert page.locator("polyline.family-lstm").count() == 0
         requests = page.evaluate("window.__FETCH_REQUESTS.slice()")
         post_requests = [row for row in requests if row["method"] == "POST"]
         assert post_requests == [
@@ -2030,7 +2282,7 @@ def test_live_read_preserves_geometry_while_backend_label_policy_declutters_text
             == "0"
         )
 
-        page.locator('[data-overlay-view="smc"]').click()
+        page.locator('[data-overlay-view="market_context"]').click()
         assert smc_mark.count() == 1
         assert smc_mark.evaluate(
             "node => node.classList.contains('label-policy-hidden')"
@@ -2073,7 +2325,7 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
         assert page.locator('[data-layer-count="lstm"]').inner_text() == "1"
 
         request_count = page.evaluate("window.__FETCH_URLS.length")
-        page.locator('[data-overlay-family="smc"]').click()
+        page.locator('[data-overlay-family="market_context"]').click()
         assert (
             page.locator('.surface-hotspot[data-overlay-id="smc-order-block"]').count()
             == 0
@@ -2112,7 +2364,7 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
         )
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
-        page.locator('[data-overlay-family="smc"]').click()
+        page.locator('[data-overlay-family="market_context"]').click()
         page.locator('[data-overlay-family="scene_forecaster"]').click()
         page.locator('[data-overlay-family="lstm"]').click()
         assert (
@@ -2170,7 +2422,7 @@ def test_custom_overlay_mix_survives_reload_without_network_refetch_per_toggle(
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
         page.locator("#layers-all").click()
         request_count = page.evaluate("window.__FETCH_URLS.length")
-        page.locator('[data-overlay-family="smc"]').click()
+        page.locator('[data-overlay-family="market_context"]').click()
         page.locator('[data-overlay-family="lstm"]').click()
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
         expected_families = page.evaluate(
@@ -2191,7 +2443,7 @@ def test_custom_overlay_mix_survives_reload_without_network_refetch_per_toggle(
             == expected_families
         )
         assert (
-            page.locator('[data-overlay-family="smc"]').get_attribute("aria-pressed")
+            page.locator('[data-overlay-family="market_context"]').get_attribute("aria-pressed")
             == "false"
         )
         assert (
@@ -2311,7 +2563,7 @@ def test_mobile_overlay_library_has_tappable_controls_without_page_overflow(
         for selector in (
             "#layers-all",
             "#layers-clear",
-            '[data-overlay-family="smc"]',
+            '[data-overlay-family="market_context"]',
             '[data-overlay-family="lstm"]',
             "#run-forecast",
             "#show-future-path",
@@ -2444,14 +2696,14 @@ def test_overlay_selection_opens_plain_language_inspector(
         )
         # The calm Live read intentionally excludes the broader zone library.
         # Exercise a current mark that remains visible without changing views.
-        page.get_by_role("button", name="Council read").click()
+        page.get_by_role("button", name="Combined analysis", exact=True).click()
 
         content = page.locator("#inspector-content")
         assert content.is_visible()
-        assert page.locator("#inspector-title").inner_text() == "Council read"
-        assert page.locator("#inspector-group").inner_text().lower() == "council"
+        assert page.locator("#inspector-title").inner_text() == "Combined analysis"
+        assert page.locator("#inspector-group").inner_text() == "COMBINED ANALYSIS"
         assert (
-            "current combined plan read"
+            "current combined analysis"
             in page.locator("#inspector-explanation").inner_text().lower()
         )
         inspector_text = content.inner_text().lower()
@@ -2471,13 +2723,13 @@ def test_simple_view_overlay_selection_opens_plain_language_drawer(
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
         assert "simple-view" in (page.locator("body").get_attribute("class") or "")
-        page.get_by_role("button", name="Council read").click()
+        page.get_by_role("button", name="Combined analysis", exact=True).click()
 
         drawer = page.locator("#mobile-inspector")
         assert drawer.is_visible()
-        assert page.locator("#mobile-inspector-title").inner_text() == "Council read"
+        assert page.locator("#mobile-inspector-title").inner_text() == "Combined analysis"
         assert (
-            "current combined plan read"
+            "current combined analysis"
             in page.locator("#mobile-inspector-copy").inner_text().lower()
         )
 
@@ -2583,7 +2835,9 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
                 () => {
                   const image = document.querySelector('#surface-raw').getBoundingClientRect();
                   const box = document.querySelector('[data-overlay-id="demand-current"]').getBoundingClientRect();
-                  const line = document.querySelector('polyline[data-overlay-id="lstm-current"]');
+                  const blocks = Array.from(document.querySelectorAll(
+                    'g[data-overlay-id="lstm-current"] .surface-forecast-event-block'
+                  ));
                   return {
                     box: [
                       (box.left - image.left) / image.width,
@@ -2591,7 +2845,10 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
                       box.width / image.width,
                       box.height / image.height,
                     ],
-                    linePoints: line ? line.getAttribute('points') : '',
+                    blockGeometry: blocks.map(node => [
+                      node.getAttribute('x'), node.getAttribute('y'),
+                      node.getAttribute('width'), node.getAttribute('height')
+                    ]),
                     viewBox: document.querySelector('#surface-line-svg').getAttribute('viewBox'),
                   };
                 }
@@ -2599,7 +2856,7 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
             )
 
         baseline = geometry()
-        assert baseline["linePoints"]
+        assert len(baseline["blockGeometry"]) == 12
         page.locator("#zoom-in").click()
         page.locator("#zoom-in").click()
         page.wait_for_timeout(250)
@@ -2628,7 +2885,7 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
         changed = geometry()
         for actual, expected in zip(changed["box"], baseline["box"], strict=True):
             assert abs(float(actual) - float(expected)) <= 0.002
-        assert changed["linePoints"] == baseline["linePoints"]
+        assert changed["blockGeometry"] == baseline["blockGeometry"]
         assert changed["viewBox"] == baseline["viewBox"]
 
         page.locator("#zoom-actual").click()
@@ -2638,7 +2895,7 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
         for observed in (actual_size, fit_again):
             for actual, expected in zip(observed["box"], baseline["box"], strict=True):
                 assert abs(float(actual) - float(expected)) <= 0.002
-            assert observed["linePoints"] == baseline["linePoints"]
+                assert observed["blockGeometry"] == baseline["blockGeometry"]
             assert observed["viewBox"] == baseline["viewBox"]
 
 
@@ -2789,8 +3046,8 @@ def test_new_live_revision_reuses_studied_history_and_updates_only_live_edge_geo
               const forecast = document.querySelector(
                 'g.surface-forecast-composite[data-overlay-id="lstm-current"]'
               );
-              const path = document.querySelector(
-                'polyline[data-overlay-id="lstm-current"]'
+              const firstBlock = document.querySelector(
+                'g[data-overlay-id="lstm-current"] .surface-forecast-event-block'
               );
               window.__STUDIED_HISTORY_NODE = history;
               window.__CURRENT_CANDLE_NODE = current;
@@ -2803,7 +3060,7 @@ def test_new_live_revision_reuses_studied_history_and_updates_only_live_edge_geo
                 historyStyle: history.getAttribute('style'),
                 currentStyle: current.getAttribute('style'),
                 forecastSignature: forecast.dataset.renderSignature,
-                forecastPoints: path.getAttribute('points'),
+                forecastPoints: firstBlock.getAttribute('y'),
                 cacheHits:
                   window.PhoenixGuardDashboard.getState().overlayRenderStats
                     .projectionCacheHits,
@@ -2824,8 +3081,8 @@ def test_new_live_revision_reuses_studied_history_and_updates_only_live_edge_geo
               const forecast = document.querySelector(
                 'g.surface-forecast-composite[data-overlay-id="lstm-current"]'
               );
-              const path = document.querySelector(
-                'polyline[data-overlay-id="lstm-current"]'
+              const firstBlock = document.querySelector(
+                'g[data-overlay-id="lstm-current"] .surface-forecast-event-block'
               );
               return {
                 historySame: window.__STUDIED_HISTORY_NODE === history,
@@ -2839,7 +3096,7 @@ def test_new_live_revision_reuses_studied_history_and_updates_only_live_edge_geo
                 historyStyle: history.getAttribute('style'),
                 currentStyle: current.getAttribute('style'),
                 forecastSignature: forecast.dataset.renderSignature,
-                forecastPoints: path.getAttribute('points'),
+                forecastPoints: firstBlock.getAttribute('y'),
                 cacheHits:
                   window.PhoenixGuardDashboard.getState().overlayRenderStats
                     .projectionCacheHits,
@@ -2913,7 +3170,9 @@ def test_off_surface_and_anchor_mismatched_geometry_is_suppressed_not_clamped(
         next(row for row in payload["overlays"] if row["id"] == "lstm-current")
     )
     invalid_forecast["id"] = "detached-forecast"
-    invalid_forecast["forecast_scenarios"][0]["line_points"][0] = [0.25, 0.20]
+    invalid_forecast["line_points"] = []
+    invalid_forecast["forecast_scenarios"] = []
+    invalid_forecast["forecast_anchor"]["y_norm"] = 0.20
     payload["overlays"].extend([invalid_history, invalid_forecast])
 
     with _dashboard_page(chromium_browser, payload) as page:
@@ -3198,7 +3457,7 @@ def test_overlay_keyboard_focus_survives_an_unrelated_family_toggle(
         page.locator("#layers-all").click()
         target = page.locator('.surface-hotspot[data-overlay-id="two-candle-current"]')
         target.focus()
-        page.locator('[data-overlay-family="smc"]').click()
+        page.locator('[data-overlay-family="market_context"]').click()
         page.wait_for_function(
             "() => document.activeElement?.dataset?.overlayId === 'two-candle-current'"
         )
@@ -3349,6 +3608,38 @@ def test_latest_history_row_keeps_its_real_ended_lifecycle(
         latest = page.locator(".history-item").first
         assert latest.get_attribute("aria-current") == "true"
         assert latest.locator(".history-state").inner_text().lower() == "ended"
+
+
+def test_session_history_does_not_drop_episode_rows_after_twenty_four(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["history"] = [
+        {
+            "id": f"episode-retained-event-{index:02d}",
+            "episode_id": f"episode-retained-{index // 12:02d}",
+            "event_index": index % 12 + 1,
+            "observed_at": 4_102_440_000.0 + index,
+            "direction": "BUY" if index % 2 == 0 else "SELL",
+            "state": "HISTORICAL",
+            "summary": f"Retained episode event {index + 1}.",
+            "frame_id": 100 + index,
+        }
+        for index in range(40)
+    ]
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.wait_for_function(
+            "() => document.querySelectorAll('.history-item').length === 40",
+            timeout=10_000,
+        )
+        assert page.locator("#history-count").inner_text() == "40 observations"
+        assert page.locator(
+            '[data-history-id="episode-retained-event-00"]'
+        ).count() == 1
+        assert page.locator(
+            '[data-history-id="episode-retained-event-39"]'
+        ).count() == 1
 
 
 def test_empty_session_history_records_completed_sideways_frames(

@@ -49,7 +49,7 @@ def test_dashboard_consumes_only_the_public_operator_workspace_contract() -> Non
 
     assert "PG_OPERATOR_WORKSPACE_V1" in text
     assert 'return "/v1/mobile/operator/state/v1/" + encodeURIComponent(SESSION_ID)' in text
-    assert 'const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "smc", "structure", "zones", "plan", "forecast", "history"]);' in text
+    assert 'const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"]);' in text
     assert '"?view=" + encodeURIComponent(publicView)' in text
     assert 'const publicView = "all";' in text
     assert "ACTIVE_CONTEXT" not in text
@@ -96,7 +96,7 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     text = _dashboard_text()
 
     assert 'id="overlay-explorer" aria-label="Overlay views"' in text
-    for view in ("all", "live", "smc", "structure", "zones", "plan", "forecast", "history"):
+    for view in ("all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"):
         assert f'data-overlay-view="{view}"' in text
     for family in (
         "chart_bounds",
@@ -105,12 +105,13 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
         "local_swings",
         "supply_demand",
         "trendlines",
-        "smc",
+        "market_context",
         "council",
         "triggers",
         "targets",
         "invalidation",
         "two_candle",
+        "scene_forecaster",
         "lstm",
         "prediction",
         "history",
@@ -124,8 +125,8 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert 'method: "POST"' in text
     assert 'mode === "future" ? "show-future" : "predict"' in text
     assert 'setOverlayView("forecast", {fetch: false});' in text
-    assert "Every path shows 12 candle events" in text
-    assert "NO EDGE is never entry permission." in text
+    assert "Every outlook studies 12 candle events" in text
+    assert "A model outlook is evidence, never entry permission." in text
     assert 'phoenixguard.overlay.layers.v1' in text
     assert 'id="visual-evidence-status" data-source="chart" data-freshness="updating" aria-live="polite"' in text
     assert 'id="overlay-inspector" aria-live="polite"' in text
@@ -142,7 +143,7 @@ def test_dashboard_explains_forecast_ranges_and_uses_a_30_second_fallback_poll()
     text = _dashboard_text()
 
     assert 'id="forecast-path-legend" role="list" aria-label="Forecast path legend"' in text
-    assert "Selected 12-step path" in text
+    assert "Selected visual route" in text
     assert "Bullish route" in text
     assert "Bearish route" in text
     assert "Green and red are alternative studied routes, not odds." in text
@@ -170,3 +171,96 @@ def test_dashboard_keeps_current_movement_forecast_and_permission_separate() -> 
     assert 'currentSide === "BUY"' in text
     assert 'pressureState === "ended"' in text
     assert "Past observations stay in history. They never overwrite the current move or regain entry permission." in text
+
+
+def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -> None:
+    text = _dashboard_text()
+
+    assert 'id="tracking-start" type="button" disabled>Start Tracking</button>' in text
+    assert 'id="tracking-stop" type="button" hidden disabled>Stop &amp; save</button>' in text
+    assert '+ "/tracking-episodes/"' in text
+    assert 'const endpoint = action === "stop" ? "stop" : "start";' in text
+    assert "row.event_horizon" in text
+    assert "row.event_cursor" in text
+    assert "safeObject(episode.baseline)" in text
+    assert "safeObject(episode.current)" in text
+    assert "safeObject(episode.plan)" in text
+    assert "safeList(trackingEpisode(payload).events)" in text
+    assert "Start Tracking to publish a 12-step outlook" in text
+    assert "capture-worker" not in text
+    for private_fallback in (
+        "baseline_forecasts",
+        "candidate_revision",
+        "committed_plan",
+        "committed_forecast",
+        "baseline_snapshot",
+        "current_snapshot",
+    ):
+        assert private_fallback not in text
+
+
+def test_dashboard_tracking_plan_and_individual_overlay_controls_are_real_filters() -> None:
+    text = _dashboard_text()
+
+    assert 'id="tracking-plan-toggle"' in text
+    assert ">Playbook overlays <" in text
+    assert 'id="tracking-plan-panel"' in text
+    assert 'data-overlay-family="playbook"' not in text
+    assert 'id="detailed-overlay-controls"' in text
+    assert 'id="detailed-overlay-list" aria-label="Individual overlay types"' in text
+    assert "function overlayKind(overlay)" in text
+    assert "function toggleOverlayKind(kind)" in text
+    assert "&& overlayKindIsEnabled(overlay)" in text
+    assert "function overlayIsDiagnostic(overlay)" in text
+    assert "!overlayIsDiagnostic(overlay)" in text
+    assert "function episodeAllowsOverlay(overlay, payload)" in text
+    assert 'data-overlay-family="market_context"' in text
+    assert ">Reaction map <" in text
+
+
+def test_dashboard_sequence_outlook_renders_blocks_without_a_selected_path() -> None:
+    text = _dashboard_text()
+
+    assert 'const blockOnly = overlayFamily(overlay) === "lstm";' in text
+    assert "const rawForecastCandles = safeList(overlay.forecast_candles);" in text
+    assert "const blockAnchorMatches = Boolean(" in text
+    assert "const explicitAnchorMatches = blockOnly" in text
+    assert '"surface-forecast-composite forecast-" + visualStatus + (blockOnly ? " block-only" : "")' in text
+    assert 'eventBlock.setAttribute("class", "surface-forecast-event-block");' in text
+    assert 'group.dataset.displayMode = blockOnly' in text
+    assert 'if (overlayFamily(overlay) === "lstm" && forecastRole === "center")' in text
+    assert 'const line = overlayFamily(overlay) === "lstm" && forecastRole === "composite"' in text
+    assert "Twelve future event blocks are anchored to the latest completed candle." in text
+
+
+def test_dashboard_retains_episode_future_blocks_across_stale_poll_refreshes() -> None:
+    text = _dashboard_text()
+
+    assert "function episodeOutlookOverlays(operatorState)" in text
+    assert "const futureBlocks = safeList(episode.future_blocks)" in text
+    assert 'geometry_kind: "future_blocks"' in text
+    assert "const operatorOverlays = episodeOutlookOverlays(operatorState);" in text
+
+
+def test_dashboard_prefers_server_episode_history_over_local_fallback() -> None:
+    text = _dashboard_text()
+
+    assert "const episodeEvents = safeList(trackingEpisode(payload).events);" in text
+    assert "const durableRows = serverRows.concat(episodeEvents);" in text
+    assert "const sourceRows = durableRows.length ? durableRows : state.localHistory;" in text
+    assert "row.event_id || row.id || row.episode_id" in text
+
+
+def test_dashboard_source_contains_no_private_strategy_vocabulary() -> None:
+    lowered = _dashboard_text().lower()
+
+    for private_term in (
+        "smc",
+        "liquidity",
+        "order block",
+        "order_block",
+        "fair value gap",
+        "fair_value_gap",
+        "fvg",
+    ):
+        assert private_term not in lowered

@@ -127,11 +127,8 @@ def test_tracker_dashboard_separates_current_outlook_and_entry_permission() -> N
     assert "function derivedHighFrequencyForecast" not in dashboard
     assert 'data-overlay-family="lstm"' in dashboard
     assert 'data-overlay-family="scene_forecaster"' in dashboard
-    assert (
-        "This Scene forecaster mark shows the full-suite model's candle-anchored "
-        "12-event path"
-    ) in dashboard
-    assert "This LSTM mark shows the production-gated candle-sequence model's event path" in dashboard
+    assert "This visual outlook shows the full-chart study's candle-anchored 12-event route" in dashboard
+    assert "This sequence outlook shows 12 future event blocks" in dashboard
     assert "/v1/mobile/live/state/v3/" not in dashboard
 
 
@@ -141,7 +138,8 @@ def test_tracker_dashboard_uses_sanitized_operator_overlays() -> None:
     )
 
     assert 'const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";' in dashboard
-    assert "state.overlays = safeList(operatorState.overlays);" in dashboard
+    assert "const operatorOverlays = episodeOutlookOverlays(operatorState);" in dashboard
+    assert "state.overlays = operatorOverlays;" in dashboard
     assert "function lifecycleIsVisible(overlay)" in dashboard
     assert "function overlayMatchesSurface(overlay)" in dashboard
     assert "function overlayFamily(overlay)" in dashboard
@@ -214,7 +212,9 @@ def test_tracker_dashboard_does_not_expose_overlay_tuning_editor() -> None:
     assert 'id="overlay-opacity" type="range"' in dashboard
     assert 'id="layers-all"' in dashboard
     assert 'id="layers-clear"' in dashboard
-    assert 'data-overlay-family="smc"' in dashboard
+    assert 'data-overlay-family="market_context"' in dashboard
+    assert '>Reaction map <' in dashboard
+    assert 'data-overlay-family="playbook"' not in dashboard
     assert 'data-overlay-family="two_candle"' in dashboard
     assert 'data-overlay-family="lstm"' in dashboard
     assert 'data-label-mode="on"' in dashboard

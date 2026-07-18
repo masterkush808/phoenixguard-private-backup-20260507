@@ -16,6 +16,37 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $ProjectRoot
+
+function Set-PhoenixGuardDefaultProcessEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $currentValue = [Environment]::GetEnvironmentVariable($Name, 'Process')
+    if ([string]::IsNullOrWhiteSpace([string]$currentValue)) {
+        [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
+    }
+}
+
+# Bound native math/tokenizer pools before the first Python process imports
+# PyTorch, NumPy, or Transformers. Explicit operator overrides remain intact.
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'OMP_NUM_THREADS' -Value '2'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'MKL_NUM_THREADS' -Value '2'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'OPENBLAS_NUM_THREADS' -Value '2'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'NUMEXPR_NUM_THREADS' -Value '2'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'TOKENIZERS_PARALLELISM' -Value 'false'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CHRONOS_CPU_THREADS' -Value '2'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_BACKGROUND_WARMUP_ON_LAUNCH' -Value '1'
+
+# The canonical launcher is FINAL_LIVE. Choose the live Python profile before
+# resolving the interpreter, while still respecting an explicit caller profile
+# or PHOENIXGUARD_PYTHON_ENV_NAME override handled by the resolver.
+$env:PHOENIXGUARD_PROFILE = 'FINAL_LIVE'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_PYTHON_PROFILE' -Value 'live'
+
 $backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
 $backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
 $backendCompat = Join-Path -Path $ProjectRoot -ChildPath 'Backend\compat'
@@ -267,7 +298,6 @@ $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = '1'
 $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_DASHBOARD_ROUTE = 'live'
-$env:PHOENIXGUARD_PROFILE = 'FINAL_LIVE'
 $env:PHOENIXGUARD_EXECUTION_COOLDOWN_SEC = '600'
 $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = '0'
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = '1'
@@ -313,7 +343,7 @@ if (-not $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC) {
     $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC = '300'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS) {
-    $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '1'
+    $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '0'
 }
 
 Write-Host ""

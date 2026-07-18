@@ -2352,7 +2352,28 @@ class _RegistryBuilder:
                 side=candle.get("direction"),
             )
 
-        for index, trendline in enumerate(_derive_trendline_overlays(candles)):
+        published_trendlines = [
+            row
+            for row in _sequence_of_mappings(tracking.get("trendlines_v3"))
+            if normalize_overlay_type(
+                row.get("type"),
+                layer=row.get("layer"),
+                role=row.get("role"),
+                side=row.get("direction"),
+            )
+            in TRENDLINE_OVERLAY_TYPES
+            and len(_point_rows(row.get("line_points") or row.get("points"))) >= 2
+            and len(
+                _point_rows(
+                    row.get("touch_points")
+                    or row.get("trendline_touch_points")
+                    or row.get("anchor_wick_points")
+                )
+            )
+            >= 2
+        ]
+        trendline_rows = published_trendlines or _derive_trendline_overlays(candles)
+        for index, trendline in enumerate(trendline_rows):
             object_type = normalize_overlay_type(
                 trendline.get("type"),
                 layer=trendline.get("layer"),

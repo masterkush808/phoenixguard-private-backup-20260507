@@ -294,6 +294,131 @@
       padding: clamp(18px, 2.8vw, 40px);
     }
 
+    .tracking-ribbon {
+      display: flex;
+      min-height: 52px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 8px 0 10px;
+      border-bottom: 1px solid rgba(242, 200, 102, 0.18);
+    }
+
+    .tracking-ribbon-copy {
+      display: flex;
+      min-width: 0;
+      flex: 1 1 auto;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .tracking-ribbon-state {
+      display: inline-flex;
+      min-width: 92px;
+      align-items: center;
+      gap: 7px;
+      color: var(--gold-pale);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .tracking-ribbon-state::before {
+      width: 6px;
+      height: 6px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--quiet);
+      content: "";
+    }
+
+    .tracking-ribbon[data-state="active"] .tracking-ribbon-state::before {
+      background: var(--up);
+      box-shadow: 0 0 10px rgba(74, 222, 128, 0.52);
+      animation: status-pulse 1.5s ease-in-out infinite;
+    }
+
+    .tracking-ribbon[data-state="complete"] .tracking-ribbon-state::before {
+      background: var(--accent);
+      box-shadow: 0 0 10px rgba(242, 200, 102, 0.38);
+    }
+
+    .tracking-ribbon-detail {
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tracking-ribbon-progress {
+      display: grid;
+      width: min(240px, 22vw);
+      flex: 0 1 240px;
+      gap: 4px;
+    }
+
+    .tracking-ribbon-progress-track {
+      height: 3px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .tracking-ribbon-progress-fill {
+      display: block;
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--gold-deep), var(--gold-pale));
+      box-shadow: 0 0 10px rgba(242, 200, 102, 0.24);
+      transition: width 260ms ease;
+    }
+
+    .tracking-ribbon-progress-label {
+      color: var(--quiet);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      text-align: right;
+    }
+
+    .tracking-ribbon-actions {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .tracking-action {
+      min-height: 34px;
+      padding: 0 12px;
+      border-color: rgba(242, 200, 102, 0.34);
+      border-radius: 9px;
+      color: var(--gold-pale);
+      background: rgba(242, 200, 102, 0.045);
+      font-size: 10px;
+      font-weight: 720;
+    }
+
+    .tracking-action.primary {
+      background: linear-gradient(180deg, rgba(242, 200, 102, 0.16), rgba(184, 121, 40, 0.07));
+      box-shadow: inset 0 1px 0 rgba(255, 247, 220, 0.08);
+    }
+
+    .tracking-action:hover:not(:disabled),
+    .tracking-action:focus-visible:not(:disabled) {
+      border-color: var(--accent);
+      background: rgba(242, 200, 102, 0.12);
+    }
+
+    .tracking-action:disabled {
+      cursor: wait;
+      opacity: 0.46;
+    }
+
     .decision-shell {
       display: grid;
       grid-template-columns: minmax(260px, 0.75fr) minmax(0, 1.65fr);
@@ -1789,6 +1914,88 @@
       content: "•";
     }
 
+    .layer-availability-note {
+      margin: 8px 0 0;
+      color: var(--quiet);
+      font-size: 9px;
+      line-height: 1.45;
+    }
+
+    .detailed-overlay-controls {
+      border-top: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.012);
+    }
+
+    .detailed-overlay-controls summary {
+      display: flex;
+      min-height: 42px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 12px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 680;
+      list-style: none;
+    }
+
+    .detailed-overlay-controls summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .detailed-overlay-controls summary::after {
+      color: var(--accent);
+      content: "+";
+      font-family: var(--font-mono);
+      font-size: 14px;
+    }
+
+    .detailed-overlay-controls[open] summary::after {
+      content: "−";
+    }
+
+    .detailed-overlay-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 0 12px 12px;
+    }
+
+    .detailed-overlay-empty {
+      margin: 0;
+      color: var(--quiet);
+      font-size: 10px;
+    }
+
+    .kind-filter {
+      display: inline-flex;
+      min-height: 30px;
+      align-items: center;
+      gap: 6px;
+      padding: 0 9px;
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 640;
+    }
+
+    .kind-filter[aria-pressed="true"] {
+      border-color: rgba(242, 200, 102, 0.38);
+      color: var(--gold-pale);
+      background: rgba(242, 200, 102, 0.075);
+    }
+
+    .surface-forecast-event-block {
+      fill: rgba(195, 157, 255, 0.13);
+      stroke: rgba(219, 198, 255, 0.62);
+      stroke-width: 0.8;
+    }
+
+    .surface-forecast-composite.block-only .surface-forecast-candle-body {
+      stroke-width: 1.25;
+    }
+
     .overlay-library-appearance {
       display: none;
       align-items: center;
@@ -2158,6 +2365,31 @@
         padding-top: 17px;
       }
 
+      .tracking-ribbon {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .tracking-ribbon-copy {
+        flex-wrap: wrap;
+      }
+
+      .tracking-ribbon-detail {
+        flex: 1 1 220px;
+        white-space: normal;
+      }
+
+      .tracking-ribbon-progress {
+        width: 100%;
+        flex-basis: 100%;
+      }
+
+      .tracking-ribbon-actions,
+      .tracking-action {
+        width: 100%;
+      }
+
       .decision-action-row h2 {
         font-size: clamp(42px, 16vw, 64px);
       }
@@ -2339,6 +2571,21 @@
   </header>
 
   <main class="app-main" id="main-content">
+    <section class="tracking-ribbon" id="tracking-ribbon" data-state="ready" aria-label="Tracking episode">
+      <div class="tracking-ribbon-copy">
+        <strong class="tracking-ribbon-state" id="tracking-episode-state">Ready</strong>
+        <span class="tracking-ribbon-detail" id="tracking-episode-summary" aria-live="polite">Start tracking when the chart is loaded to keep one plan anchored across the full 12-step study.</span>
+        <div class="tracking-ribbon-progress" aria-label="Tracking episode progress">
+          <span class="tracking-ribbon-progress-track" aria-hidden="true"><span class="tracking-ribbon-progress-fill" id="tracking-episode-progress-fill"></span></span>
+          <span class="tracking-ribbon-progress-label" id="tracking-episode-progress">0 of 12</span>
+        </div>
+      </div>
+      <div class="tracking-ribbon-actions">
+        <button class="tracking-action primary" id="tracking-start" type="button" disabled>Start Tracking</button>
+        <button class="tracking-action" id="tracking-stop" type="button" hidden disabled>Stop &amp; save</button>
+      </div>
+    </section>
+
     <section class="decision-shell" id="beginner-decision-shell" data-tone="hold" aria-labelledby="beginner-decision-title">
       <div class="decision-primary">
         <div>
@@ -2373,17 +2620,17 @@
         </div>
         <div class="story-steps" aria-label="Current market story">
           <div class="story-step">
-            <span class="story-label">Now</span>
+            <span class="story-label" id="story-step-one-label">Now</span>
             <strong id="current-move-title">Reading movement</strong>
             <p id="beginner-now-read">The current chart movement is being observed.</p>
           </div>
           <div class="story-step">
-            <span class="story-label">Likely next</span>
+            <span class="story-label" id="story-step-two-label">Likely next</span>
             <strong id="forecast-title">No forecast yet</strong>
             <p id="beginner-next-read">A forecast will appear only when the current observation is valid.</p>
           </div>
           <div class="story-step">
-            <span class="story-label">Entry status</span>
+            <span class="story-label" id="story-step-three-label">Entry status</span>
             <strong id="permission-title">Entry closed</strong>
             <p id="beginner-entry-read">Wait until this page explicitly says BUY NOW or SELL NOW.</p>
           </div>
@@ -2415,7 +2662,7 @@
         <div>
           <span class="section-kicker">Visual workspace</span>
           <h2 id="workspace-title">Full broker view &amp; live overlays</h2>
-          <p>The complete broker frame stays visible by default. Switch to Chart focus when you want detail; every SMC, study, plan, and history layer remains independently toggleable.</p>
+          <p>The complete broker frame stays visible by default. Switch to Chart focus when you want detail; every current, structural, outlook, plan, and history mark remains independently toggleable.</p>
         </div>
         <div class="workspace-heading-actions">
           <div class="surface-modes" aria-label="Broker frame">
@@ -2432,7 +2679,7 @@
       <nav class="overlay-explorer" id="overlay-explorer" aria-label="Overlay views">
         <button class="overlay-view" type="button" data-overlay-view="all" aria-pressed="false">All overlays</button>
         <button class="overlay-view" type="button" data-overlay-view="live" aria-pressed="true">Live read</button>
-        <button class="overlay-view" type="button" data-overlay-view="smc" aria-pressed="false">SMC</button>
+        <button class="overlay-view" type="button" data-overlay-view="market_context" aria-pressed="false">Reaction map</button>
         <button class="overlay-view" type="button" data-overlay-view="structure" aria-pressed="false">Structure</button>
         <button class="overlay-view" type="button" data-overlay-view="zones" aria-pressed="false">Zones</button>
         <button class="overlay-view" type="button" data-overlay-view="plan" aria-pressed="false">Trade plan</button>
@@ -2458,42 +2705,43 @@
               <button class="layer-filter" type="button" data-overlay-family="current_candles" aria-pressed="true">Current price <span class="layer-count" data-layer-count="current_candles">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="major_swings" aria-pressed="true">Major swings <span class="layer-count" data-layer-count="major_swings">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="local_swings" aria-pressed="true">Local swings <span class="layer-count" data-layer-count="local_swings">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="supply_demand" aria-pressed="true">Supply / demand <span class="layer-count" data-layer-count="supply_demand">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="supply_demand" aria-pressed="true">Reaction areas <span class="layer-count" data-layer-count="supply_demand">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="trendlines" aria-pressed="true">Trendlines <span class="layer-count" data-layer-count="trendlines">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="chart_bounds" aria-pressed="true">Chart bounds <span class="layer-count" data-layer-count="chart_bounds">0</span></button>
             </div>
+            <p class="layer-availability-note" id="trendline-availability">Trendlines appear after enough confirmed chart anchors are available.</p>
           </div>
           <div class="overlay-family-group">
-            <span class="overlay-family-label">SMC &amp; trade map</span>
-            <div class="layer-filter-list" aria-label="SMC and trade map overlays">
-              <button class="layer-filter" type="button" data-overlay-family="smc" aria-pressed="true">SMC <span class="layer-count" data-layer-count="smc">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="council" aria-pressed="true">Council <span class="layer-count" data-layer-count="council">0</span></button>
+            <span class="overlay-family-label">Market context &amp; trade map</span>
+            <div class="layer-filter-list" aria-label="Market context and trade map overlays">
+              <button class="layer-filter" type="button" data-overlay-family="market_context" aria-pressed="true">Reaction map <span class="layer-count" data-layer-count="market_context">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="council" aria-pressed="true">Combined analysis <span class="layer-count" data-layer-count="council">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="triggers" aria-pressed="true">Entry triggers <span class="layer-count" data-layer-count="triggers">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="targets" aria-pressed="true">Targets <span class="layer-count" data-layer-count="targets">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="invalidation" aria-pressed="true">Invalidation <span class="layer-count" data-layer-count="invalidation">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="playbook" aria-pressed="true">Playbook <span class="layer-count" data-layer-count="playbook">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="invalidation" aria-pressed="true">Risk limits <span class="layer-count" data-layer-count="invalidation">0</span></button>
+              <button class="layer-filter" id="tracking-plan-toggle" type="button" data-tracking-plan-control aria-expanded="false">Playbook overlays <span class="layer-count" id="tracking-plan-count">0</span></button>
             </div>
-            <div class="playbook-panel" id="adaptive-playbook-panel" data-ready="false" aria-live="polite">
-              <strong>Adaptive playbook</strong>
-              <span>Waiting for the chart suite to publish SMC, structure, candlestick, and forecast evidence.</span>
+            <div class="playbook-panel" id="tracking-plan-panel" data-ready="false" aria-live="polite" hidden>
+              <strong>Tracking plan</strong>
+              <span>Start a tracking episode to keep one plan and its supporting chart evidence together.</span>
             </div>
           </div>
           <div class="overlay-family-group">
             <span class="overlay-family-label">Forecast studies</span>
             <div class="layer-filter-list" aria-label="Forecast study overlays">
-              <button class="layer-filter" type="button" data-overlay-family="two_candle" aria-pressed="false">Two-candle <span class="layer-count" data-layer-count="two_candle">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="scene_forecaster" aria-pressed="false">Scene forecaster <span class="layer-count" data-layer-count="scene_forecaster">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">LSTM <span class="layer-count" data-layer-count="lstm">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="prediction" aria-pressed="false">Prediction path <span class="layer-count" data-layer-count="prediction">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="two_candle" aria-pressed="false">Near-term candle read <span class="layer-count" data-layer-count="two_candle">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="scene_forecaster" aria-pressed="false">Visual outlook <span class="layer-count" data-layer-count="scene_forecaster">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">12-step sequence outlook <span class="layer-count" data-layer-count="lstm">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="prediction" aria-pressed="false">Possible route <span class="layer-count" data-layer-count="prediction">0</span></button>
             </div>
             <div class="forecast-actions" id="forecast-actions" aria-label="Forecast actions" aria-busy="false">
               <div class="forecast-action-buttons">
                 <button class="forecast-action primary" id="run-forecast" type="button">Run forecast</button>
                 <button class="forecast-action" id="show-future-path" type="button">Show future path</button>
               </div>
-              <p class="forecast-action-status" id="forecast-action-status" data-state="idle" role="status" aria-live="polite">Every path shows 12 candle events · solid = committed scene forecast · dashed = outcome under review · NO EDGE is never entry permission.</p>
+              <p class="forecast-action-status" id="forecast-action-status" data-state="idle" role="status" aria-live="polite">Every outlook studies 12 candle events. A model outlook is evidence, never entry permission.</p>
               <div class="forecast-path-legend" id="forecast-path-legend" role="list" aria-label="Forecast path legend">
-                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line" aria-hidden="true"></span>Selected 12-step path</span>
+                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line" aria-hidden="true"></span>Selected visual route</span>
                 <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line bullish" aria-hidden="true"></span>Bullish route</span>
                 <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line bearish" aria-hidden="true"></span>Bearish route</span>
                 <span class="forecast-path-legend-note">Green and red are alternative studied routes, not odds. Wider route separation means less agreement about the progression.</span>
@@ -2507,6 +2755,12 @@
             </div>
           </div>
         </div>
+        <details class="detailed-overlay-controls" id="detailed-overlay-controls">
+          <summary>Detailed overlay controls <span id="detailed-overlay-count">Waiting for current marks</span></summary>
+          <div class="detailed-overlay-list" id="detailed-overlay-list" aria-label="Individual overlay types">
+            <p class="detailed-overlay-empty">Individual controls appear when the current chart publishes safe operator marks.</p>
+          </div>
+        </details>
         <div class="overlay-library-appearance">
           <label class="appearance-controls" for="overlay-opacity">
             Overlay strength
@@ -2622,11 +2876,11 @@
         </div>
         <div class="help-step">
           <span class="help-step-index">03</span>
-          <div><strong>Entry status</strong><p>WAIT remains the default. BUY NOW means look for a lower price inside the verified demand or retest area; SELL NOW means look for a higher price inside the verified supply or retest area. Never chase a move.</p></div>
+          <div><strong>Entry status</strong><p>WAIT remains the default. BUY NOW means look for a lower price inside the verified reaction area; SELL NOW means look for a higher price inside the verified reaction area. Never chase a move.</p></div>
         </div>
         <div class="help-step">
           <span class="help-step-index">04</span>
-          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. SMC, Two-candle, Scene forecaster, LSTM, prediction, structure, zones, plans, and history remain independent. Select a mark for its plain-language meaning.</p></div>
+          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. Current movement, reaction areas, trendlines, plans, outlooks, and history remain independent. Open Detailed overlay controls when you need to switch an individual mark type.</p></div>
         </div>
       </div>
       <p class="help-note">A setup window can remain available for several minutes while Phoenix Guard refreshes current-frame permission. It closes early whenever live truth invalidates the setup. Visual analysis is decision support, not a promise of market outcome.</p>
@@ -2643,12 +2897,22 @@
     // the low-frequency HTTP fallback used while the dashboard is left open.
     const POLL_INTERVAL_MS = 30000;
     const FORECAST_ACTION_ACK_TIMEOUT_MS = 10000;
-    const FORECAST_ACTION_TIMEOUT_MS = 120000;
+    // A cold local model/bank load can take several minutes on CPU.  The API
+    // owns a 420-second safety deadline; keep the dashboard polling slightly
+    // longer so it receives that terminal state instead of pretending the
+    // model failed while live tracking is still healthy.
+    const FORECAST_ACTION_TIMEOUT_MS = 450000;
     const FORECAST_ACTION_STALE_RETRIES = 2;
+    // The server retains 24 tracking episodes, each with 12 events and one
+    // summary, plus the active episode and a small rolling context.  Keep the
+    // complete bounded session record visible instead of truncating it to the
+    // newest 24 flattened rows.
+    const SESSION_HISTORY_ROW_LIMIT = 360;
     const OVERLAY_LAYERS_STORAGE_KEY = "phoenixguard.overlay.layers.v1";
+    const DISABLED_OVERLAY_KINDS_STORAGE_KEY = "phoenixguard.overlay.disabled-kinds.v1";
     const OVERLAY_SCENE_SPLIT_MIGRATION_KEY = "phoenixguard.overlay.layers.scene-split-migration.v1";
     const OVERLAY_SCENE_SPLIT_MIGRATION_VERSION = "1";
-    const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "smc", "structure", "zones", "plan", "forecast", "history"]);
+    const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"]);
     const ALL_OVERLAY_FAMILIES = Object.freeze([
       "chart_bounds",
       "current_candles",
@@ -2659,8 +2923,7 @@
       "triggers",
       "targets",
       "invalidation",
-      "playbook",
-      "smc",
+      "market_context",
       "council",
       "two_candle",
       "scene_forecaster",
@@ -2670,14 +2933,82 @@
     ]);
     const OVERLAY_PRESETS = Object.freeze({
       all: ALL_OVERLAY_FAMILIES,
-      live: ["current_candles", "smc", "council", "triggers", "targets", "invalidation", "playbook"],
-      smc: ["smc", "supply_demand", "triggers", "targets", "invalidation", "playbook"],
+      live: ["current_candles", "market_context", "council", "triggers", "targets", "invalidation"],
+      market_context: ["market_context", "supply_demand", "triggers", "targets", "invalidation"],
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
       plan: ["council", "triggers", "targets", "invalidation"],
       forecast: ["two_candle", "scene_forecaster", "lstm", "prediction"],
       history: ["history", "major_swings", "local_swings"],
     });
+    const TRACKING_PLAN_FAMILIES = Object.freeze([
+      "chart_bounds",
+      "current_candles",
+      "major_swings",
+      "local_swings",
+      "supply_demand",
+      "trendlines",
+      "market_context",
+      "council",
+      "triggers",
+      "targets",
+      "invalidation",
+      "two_candle",
+      "scene_forecaster",
+      "lstm",
+      "prediction",
+      "history",
+    ]);
+    const PUBLIC_OVERLAY_KINDS = new Set([
+      "chart_area",
+      "current_price",
+      "strong_move",
+      "pullback",
+      "retest_area",
+      "continuation",
+      "precision_entry",
+      "target_area",
+      "risk_limit",
+      "higher_reaction",
+      "higher_reaction_area",
+      "lower_reaction",
+      "lower_reaction_area",
+      "opposing_area",
+      "rising_support",
+      "rising_support_line",
+      "falling_resistance",
+      "falling_resistance_line",
+      "local_structure_line",
+      "movement_angle",
+      "observed_path",
+      "possible_path",
+      "past_entry",
+      "past_exit",
+      "past_movement",
+      "combined_analysis",
+      "market_phase",
+      "active_setup",
+      "price_location",
+      "near_term_read",
+      "future_blocks",
+      "sequence_outlook",
+      "visual_outlook",
+      "reaction_zone",
+      "price_imbalance",
+      "crowded_price_area",
+      "level_sweep",
+      "structure_change",
+      "price_area",
+      "trend",
+      "entry_area",
+      "price_movement",
+    ]);
+    const EPISODE_OUTLOOK_FAMILIES = Object.freeze([
+      "two_candle",
+      "scene_forecaster",
+      "lstm",
+      "prediction",
+    ]);
     const GROUP_EXPLANATIONS = Object.freeze({
       movement: "This mark belongs to the newest observed price movement. It describes what is happening now, not what Phoenix Guard predicts next.",
       structure: "This mark tracks a swing or trend structure found in the visible chart history.",
@@ -2691,17 +3022,16 @@
       current_candles: "This mark is attached to the newest observed price candle.",
       major_swings: "This mark tracks the larger market leg visible in the chart history.",
       local_swings: "This mark tracks a nearer pullback or continuation inside the larger move.",
-      supply_demand: "This price region is a supply or demand area where price previously reacted or may react again.",
+      supply_demand: "This area marks a price region where movement previously reacted or may react again.",
       trendlines: "This line follows visible structure and stays attached to the same chart coordinates.",
       triggers: "This is a watched entry trigger. It does not grant permission by itself.",
       targets: "This is a watched target area for an active plan.",
       invalidation: "This area shows where the watched plan would no longer be valid.",
-      playbook: "This live playbook summarizes which book-backed strategies the current chart suite is using.",
-      smc: "This SMC mark highlights chart-anchored order flow evidence such as an order block, imbalance, liquidity area, or active SMC read.",
-      council: "This mark shows the current combined plan read. Entry permission is still shown separately above.",
-      two_candle: "This two-candle study describes the nearest short-term setup. It remains a study, not entry permission.",
-      scene_forecaster: "This Scene forecaster mark shows the full-suite model's candle-anchored 12-event path. It is a forecast, not entry permission.",
-      lstm: "This LSTM mark shows the production-gated candle-sequence model's event path. A NO EDGE result stays diagnostic and never grants entry permission.",
+      market_context: "This mark identifies a chart-anchored reaction or structure event without granting entry permission.",
+      council: "This mark shows the current combined analysis. Entry permission is still shown separately above.",
+      two_candle: "This near-term candle read describes the closest developing setup. It remains a study, not entry permission.",
+      scene_forecaster: "This visual outlook shows the full-chart study's candle-anchored 12-event route. It is a forecast, not entry permission.",
+      lstm: "This sequence outlook shows 12 future event blocks. An uncertain result never grants entry permission.",
       prediction: "This path is a possible next route, not a statement about what price is doing now.",
       history: "This mark belongs to an earlier observation and cannot be treated as current.",
     });
@@ -2723,6 +3053,9 @@
       beginnerNextCondition: byId("beginner-next-condition"),
       beginnerStoryTitle: byId("beginner-story-title"),
       beginnerStorySummary: byId("beginner-story-summary"),
+      storyStepOneLabel: byId("story-step-one-label"),
+      storyStepTwoLabel: byId("story-step-two-label"),
+      storyStepThreeLabel: byId("story-step-three-label"),
       currentMoveTitle: byId("current-move-title"),
       forecastTitle: byId("forecast-title"),
       permissionTitle: byId("permission-title"),
@@ -2733,6 +3066,13 @@
       beginnerEvidenceStory: byId("beginner-evidence-story"),
       beginnerEvidenceTiming: byId("beginner-evidence-timing"),
       beginnerEvidenceSafety: byId("beginner-evidence-safety"),
+      trackingRibbon: byId("tracking-ribbon"),
+      trackingEpisodeState: byId("tracking-episode-state"),
+      trackingEpisodeSummary: byId("tracking-episode-summary"),
+      trackingEpisodeProgress: byId("tracking-episode-progress"),
+      trackingEpisodeProgressFill: byId("tracking-episode-progress-fill"),
+      trackingStart: byId("tracking-start"),
+      trackingStop: byId("tracking-stop"),
       frameWindow: byId("frame-window"),
       frameChart: byId("frame-chart"),
       modeOverlay: byId("mode-overlay"),
@@ -2775,7 +3115,13 @@
       runForecast: byId("run-forecast"),
       showFuturePath: byId("show-future-path"),
       forecastActionStatus: byId("forecast-action-status"),
-      adaptivePlaybookPanel: byId("adaptive-playbook-panel"),
+      trackingPlanToggle: byId("tracking-plan-toggle"),
+      trackingPlanCount: byId("tracking-plan-count"),
+      trackingPlanPanel: byId("tracking-plan-panel"),
+      detailedOverlayControls: byId("detailed-overlay-controls"),
+      detailedOverlayCount: byId("detailed-overlay-count"),
+      detailedOverlayList: byId("detailed-overlay-list"),
+      trendlineAvailability: byId("trendline-availability"),
       overlayOpacity: byId("overlay-opacity"),
       historyCount: byId("history-count"),
       historyList: byId("history-list"),
@@ -2814,7 +3160,9 @@
         if (!Array.isArray(parsed)) {
           return fallback;
         }
-        const migrated = parsed.slice();
+        const migrated = parsed.filter(function (family) {
+          return typeof family === "string" && ALL_OVERLAY_FAMILIES.includes(family);
+        });
         const migrationPending = readStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, "")
           !== OVERLAY_SCENE_SPLIT_MIGRATION_VERSION;
         if (migrationPending && migrated.includes("lstm") && !migrated.includes("scene_forecaster")) {
@@ -2827,11 +3175,11 @@
         const enabled = migrated.filter(function (family) {
           return typeof family === "string" && ALL_OVERLAY_FAMILIES.includes(family);
         });
-        if (migrationPending) {
+        if (migrationPending || migrated.length !== parsed.length) {
           writeStoredValue(OVERLAY_LAYERS_STORAGE_KEY, JSON.stringify(enabled));
           writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
         }
-        return new Set(enabled);
+        return new Set(enabled.length ? enabled : fallback);
       } catch (_error) {
         return fallback;
       }
@@ -2839,7 +3187,18 @@
 
     function readStoredPreset() {
       const stored = readStoredValue("phoenixguard.overlay.preset.v1", "live");
-      return PUBLIC_OVERLAY_VIEWS.has(stored) ? stored : "custom";
+      return stored === "custom" || PUBLIC_OVERLAY_VIEWS.has(stored) ? stored : "live";
+    }
+
+    function readStoredDisabledKinds() {
+      try {
+        const parsed = JSON.parse(readStoredValue(DISABLED_OVERLAY_KINDS_STORAGE_KEY, "[]"));
+        return new Set(Array.isArray(parsed) ? parsed.filter(function (kind) {
+          return typeof kind === "string" && kind.length > 0;
+        }) : []);
+      } catch (_error) {
+        return new Set();
+      }
     }
 
     const state = {
@@ -2848,6 +3207,9 @@
       surfaceMode: "overlay",
       overlayView: readStoredPreset(),
       activeFamilies: readStoredFamilies(),
+      disabledKinds: readStoredDisabledKinds(),
+      trackingPlanOpen: false,
+      trackingEpisodeBusy: false,
       labelMode: readStoredValue("phoenixguard.labels", "on"),
       overlayOpacity: Number(readStoredValue("phoenixguard.overlay.opacity", "88")) || 88,
       payload: null,
@@ -2920,25 +3282,6 @@
       return Array.isArray(value) ? value : [];
     }
 
-    function firstObjectAtPaths(source, paths) {
-      const root = safeObject(source);
-      for (const path of paths) {
-        let cursor = root;
-        let valid = true;
-        for (const key of path) {
-          cursor = safeObject(cursor)[key];
-          if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) {
-            valid = false;
-            break;
-          }
-        }
-        if (valid) {
-          return safeObject(cursor);
-        }
-      }
-      return {};
-    }
-
     function currentForecastOverlay(overlays, preferredFamily) {
       const pool = safeList(overlays || state.overlays);
       return safeObject(pool.find(function (overlay) {
@@ -2954,14 +3297,7 @@
 
     function sceneForecastEvidence(payload, overlays) {
       const operatorState = safeObject(payload || state.payload);
-      const explicit = firstObjectAtPaths(operatorState, [
-        ["scene_forecast_contribution"],
-        ["forecast_snapshot_v3", "scene_forecast_contribution"],
-        ["latest_signal", "scene_forecast_contribution"],
-        ["tracking_summary", "scene_forecast_contribution"],
-        ["model_" + "council_result", "scene_forecast_contribution"],
-        ["high_frequency_forecast", "scene_forecast_contribution"],
-      ]);
+      const explicit = safeObject(operatorState.forecast);
       const overlay = currentForecastOverlay(overlays, "scene_forecaster");
       const source = Object.assign({}, explicit, overlay);
       const points = safeList(source.line_points || source.points);
@@ -3066,6 +3402,215 @@
         .toLowerCase()
         .replace(/[_-]+/g, " ")
         .replace(/\b\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function trackingEpisode(payload) {
+      return safeObject(safeObject(safeObject(payload).tracking).episode);
+    }
+
+    function episodeProgress(episode) {
+      const row = safeObject(episode);
+      const progress = safeObject(row.progress);
+      const totalCandidate = Number(progress.total || row.event_horizon || row.total_steps || row.episode_total || row.episodes_total || 12);
+      const total = Math.max(1, Number.isFinite(totalCandidate) ? Math.round(totalCandidate) : 12);
+      const completedCandidate = Number(
+        progress.completed
+        || progress.current
+        || row.event_cursor
+        || row.completed_steps
+        || row.current_step
+        || row.episode_index
+        || row.step
+        || 0
+      );
+      const completed = clamp(Number.isFinite(completedCandidate) ? completedCandidate : 0, 0, total);
+      return {completed: Math.round(completed), total: total};
+    }
+
+    function episodeIsActive(episode) {
+      const row = safeObject(episode);
+      const status = safeText(row.state || row.status, "").toLowerCase();
+      return ["arming", "active", "tracking", "running", "observing", "studying"].includes(status);
+    }
+
+    function renderTrackingEpisode(payload) {
+      const episode = trackingEpisode(payload);
+      const progress = episodeProgress(episode);
+      const status = safeText(episode.state || episode.status, "ready").toLowerCase();
+      const active = episodeIsActive(episode);
+      const retained = ["complete", "completed", "saved", "stopped", "invalidated"].includes(status);
+      const hasWorkspace = safeText(safeObject(payload).schema_version, "") === OPERATOR_SCHEMA_VERSION;
+      const ready = active || episode.ready === true || (hasWorkspace && episode.ready !== false && Object.keys(episode).length > 0);
+      const publicState = active
+        ? "Tracking"
+        : retained
+          ? "Saved"
+          : status === "error" || status === "failed"
+            ? "Needs attention"
+            : ready
+              ? "Ready"
+              : hasWorkspace
+                ? "Preparing"
+                : "Loading";
+      const summary = active
+        ? safeText(episode.summary || episode.status_summary, "One plan is anchored while the current move is studied across 12 steps.")
+        : retained
+          ? safeText(episode.summary || episode.status_summary, "The tracking episode is saved in session history.")
+          : ready
+            ? safeText(episode.summary || episode.status_summary, "Start tracking to keep one plan anchored across the full 12-step study.")
+            : "Loading the chart, latest completed candle, and 12-step outlook. Start Tracking unlocks when they are ready.";
+      els.trackingRibbon.dataset.state = active ? "active" : retained ? "complete" : ready ? "ready" : "loading";
+      setText(els.trackingEpisodeState, state.trackingEpisodeBusy ? "Updating" : publicState);
+      setText(els.trackingEpisodeSummary, summary);
+      setText(els.trackingEpisodeProgress, progress.completed + " of " + progress.total);
+      els.trackingEpisodeProgressFill.style.width = Math.round((progress.completed / progress.total) * 100) + "%";
+      els.trackingStart.hidden = active;
+      els.trackingStop.hidden = !active;
+      els.trackingStart.disabled = state.trackingEpisodeBusy || !ready;
+      els.trackingStop.disabled = state.trackingEpisodeBusy || !active;
+      renderForecastGate(payload);
+    }
+
+    function episodeRetainsOutlook(episode) {
+      const row = safeObject(episode);
+      const status = safeText(row.state || row.status, "").toLowerCase();
+      return ["complete", "completed", "saved", "stopped", "invalidated"].includes(status)
+        || safeList(row.events).length > 0
+        || safeList(row.future_blocks).length > 0
+        || episodeProgress(row).completed > 0;
+    }
+
+    function renderForecastGate(payload) {
+      const episode = trackingEpisode(payload);
+      const active = episodeIsActive(episode);
+      const retained = episodeRetainsOutlook(episode);
+      const canInspect = active || retained;
+      els.runForecast.disabled = state.forecastActionBusy || !active;
+      els.showFuturePath.disabled = state.forecastActionBusy || !active;
+      document.querySelectorAll("[data-overlay-family]").forEach(function (button) {
+        if (["two_candle", "scene_forecaster", "lstm", "prediction"].includes(button.dataset.overlayFamily)) {
+          button.disabled = !canInspect;
+          button.title = canInspect
+            ? button.title
+            : "Start Tracking to publish a 12-step outlook";
+        }
+      });
+      const forecastView = document.querySelector('[data-overlay-view="forecast"]');
+      if (forecastView) {
+        forecastView.disabled = !canInspect;
+        forecastView.title = canInspect ? "" : "Start Tracking to publish a 12-step outlook";
+      }
+      if (!active && !state.forecastActionBusy) {
+        els.forecastActionStatus.dataset.state = "gated";
+        setText(
+          els.forecastActionStatus,
+          retained
+            ? "This episode outlook is frozen and remains available. Start Tracking to publish a new 12-step outlook."
+            : "Start Tracking to publish a 12-step outlook"
+        );
+      } else if (active && els.forecastActionStatus.dataset.state === "gated") {
+        els.forecastActionStatus.dataset.state = "idle";
+        setText(els.forecastActionStatus, "Tracking is active. Publish the 12-step outlook when the current frame is ready.");
+      }
+    }
+
+    function episodeAllowsOverlay(overlay, payload) {
+      if (!EPISODE_OUTLOOK_FAMILIES.includes(overlayFamily(overlay))) {
+        return true;
+      }
+      const episode = trackingEpisode(payload || state.payload || {});
+      return episodeIsActive(episode) || episodeRetainsOutlook(episode);
+    }
+
+    async function runTrackingEpisodeAction(action) {
+      if (
+        state.trackingEpisodeBusy
+        || (action !== "stop" && els.trackingStart.disabled)
+        || (action === "stop" && !episodeIsActive(trackingEpisode(state.payload || {})))
+      ) {
+        return;
+      }
+      state.trackingEpisodeBusy = true;
+      renderTrackingEpisode(state.payload || {});
+      setText(
+        els.trackingEpisodeSummary,
+        action === "stop" ? "Saving this episode without deleting its history…" : "Anchoring the current chart and plan…"
+      );
+      let failed = false;
+      try {
+        const payload = await postTrackingEpisodeAction(action);
+        if (safeText(payload.schema_version, "") === OPERATOR_SCHEMA_VERSION) {
+          renderOperatorState(payload);
+        } else {
+          await refreshOperatorState({force: true});
+        }
+      } catch (error) {
+        failed = true;
+        setText(els.trackingEpisodeState, "Needs attention");
+        setText(els.trackingEpisodeSummary, safeText(error && error.message, "Tracking could not be updated. Try again."));
+      } finally {
+        state.trackingEpisodeBusy = false;
+        if (!failed) {
+          renderTrackingEpisode(state.payload || {});
+        } else {
+          els.trackingStart.disabled = false;
+          els.trackingStop.disabled = !episodeIsActive(trackingEpisode(state.payload || {}));
+        }
+      }
+    }
+
+    function episodeStoryPart(source, titleFallback, summaryFallback) {
+      const row = safeObject(source);
+      return {
+        title: safeText(row.title || row.label || row.action || row.direction, titleFallback),
+        summary: safeText(row.summary || row.story || row.message || row.description || row.instruction, summaryFallback),
+      };
+    }
+
+    function renderEpisodeStory(payload) {
+      const episode = trackingEpisode(payload);
+      const baselineSource = safeObject(episode.baseline);
+      const currentSource = safeObject(episode.current);
+      const planSource = safeObject(episode.plan);
+      const hasEpisodeStory = Object.keys(baselineSource).length > 0
+        || Object.keys(currentSource).length > 0
+        || Object.keys(planSource).length > 0
+        || Boolean(episode.change_summary || episode.story_summary);
+      if (!hasEpisodeStory) {
+        return false;
+      }
+      const progress = episodeProgress(episode);
+      const baseline = episodeStoryPart(
+        baselineSource,
+        safeText(episode.baseline_title, "Tracking started"),
+        safeText(episode.baseline_summary, "The first valid chart state is preserved as the comparison point.")
+      );
+      const current = episodeStoryPart(
+        currentSource,
+        safeText(episode.current_title, "Current movement"),
+        safeText(episode.current_summary || episode.change_summary, "Waiting for a confirmed change from the starting state.")
+      );
+      const plan = episodeStoryPart(
+        planSource,
+        safeText(episode.plan_title, "Plan held steady"),
+        safeText(episode.plan_summary, "The saved plan remains the reference until the episode completes or is stopped.")
+      );
+      setText(els.storyStepOneLabel, "Before");
+      setText(els.storyStepTwoLabel, "Now");
+      setText(els.storyStepThreeLabel, "Tracking plan");
+      setText(els.currentMoveTitle, baseline.title);
+      setText(els.beginnerNowRead, baseline.summary);
+      setText(els.forecastTitle, current.title);
+      setText(els.beginnerNextRead, current.summary);
+      setText(els.permissionTitle, plan.title);
+      setText(els.beginnerEntryRead, plan.summary);
+      setText(els.beginnerStoryTitle, "Tracking episode · " + progress.completed + " of " + progress.total);
+      setText(
+        els.beginnerStorySummary,
+        episode.change_summary || episode.story_summary,
+        "The starting state, current change, and anchored plan are compared without rewriting the original forecast."
+      );
+      return true;
     }
 
     function formatSide(side, options) {
@@ -3222,6 +3767,39 @@
     function forecastActionUrl(mode) {
       const endpoint = mode === "future" ? "show-future" : "predict";
       return "/v1/mobile/window-tracker/sessions/" + encodeURIComponent(SESSION_ID) + "/" + endpoint;
+    }
+
+    function trackingEpisodeActionUrl(action) {
+      const endpoint = action === "stop" ? "stop" : "start";
+      return "/v1/mobile/window-tracker/sessions/"
+        + encodeURIComponent(SESSION_ID)
+        + "/tracking-episodes/"
+        + endpoint;
+    }
+
+    async function postTrackingEpisodeAction(action) {
+      const response = await fetch(trackingEpisodeActionUrl(action), {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Accept": "application/json"},
+      });
+      let payload = {};
+      if (response.status !== 204) {
+        try {
+          payload = await response.json();
+        } catch (_error) {
+          payload = {};
+        }
+      }
+      if (!response.ok) {
+        const detail = safeObject(safeObject(payload).detail);
+        throw new Error(
+          response.status === 409
+            ? "The chart is still preparing. Start Tracking will unlock as soon as the current candle and outlook are ready."
+            : neutralPublicText(detail.message, "Tracking could not be updated. Try again.")
+        );
+      }
+      return safeObject(payload);
     }
 
     function waitForForecastPoll(delayMs) {
@@ -3383,9 +3961,10 @@
 
     function renderForecastActionState(status, message, mode) {
       const running = status === "running";
+      const publishingAllowed = episodeIsActive(trackingEpisode(state.payload || state.pendingPayload || {}));
       els.forecastActions.setAttribute("aria-busy", running ? "true" : "false");
-      els.runForecast.disabled = state.forecastActionBusy;
-      els.showFuturePath.disabled = state.forecastActionBusy;
+      els.runForecast.disabled = state.forecastActionBusy || !publishingAllowed;
+      els.showFuturePath.disabled = state.forecastActionBusy || !publishingAllowed;
       els.runForecast.textContent = running && mode === "predict" ? "Forecasting…" : "Run forecast";
       els.showFuturePath.textContent = running && mode === "future" ? "Building path…" : "Show future path";
       els.forecastActionStatus.dataset.state = status;
@@ -3393,7 +3972,8 @@
     }
 
     async function runForecastAction(mode) {
-      if (state.forecastActionBusy) {
+      if (state.forecastActionBusy || !episodeIsActive(trackingEpisode(state.payload || state.pendingPayload || {}))) {
+        renderForecastGate(state.payload || state.pendingPayload || {});
         return;
       }
       const normalizedMode = mode === "future" ? "future" : "predict";
@@ -3412,7 +3992,7 @@
         );
         if (state.payload) {
           renderDecision(state.payload);
-          renderAdaptivePlaybook(state.payload);
+          renderTrackingPlan(state.payload);
         }
         return;
       }
@@ -3456,7 +4036,7 @@
         await refreshOperatorState({force: true});
         if (state.payload) {
           renderDecision(state.payload);
-          renderAdaptivePlaybook(state.payload);
+          renderTrackingPlan(state.payload);
         }
       } catch (error) {
         outcome = {state: "error", message: forecastActionErrorMessage(error)};
@@ -3675,6 +4255,10 @@
       const observedAt = Number(freshness.observed_at || payload.observed_at || 0);
       const confidence = Number(forecast.confidence || permission.confidence || currentMove.confidence || 0);
 
+      setText(els.storyStepOneLabel, "Now");
+      setText(els.storyStepTwoLabel, "Likely next");
+      setText(els.storyStepThreeLabel, "Entry status");
+
       els.beginnerDecisionShell.dataset.tone = actionTone;
       setText(els.beginnerReadStatus, freshnessLabel);
       setText(els.beginnerMarketContext, marketLabel);
@@ -3789,7 +4373,7 @@
         const candleCount = Math.max(sceneForecast.candles.length, Math.max(0, sceneForecast.points.length - 1));
         const scenarioCount = sceneForecast.scenarios.length;
         els.beginnerDecisionShell.dataset.tone = sceneTone;
-        setText(els.beginnerReadStatus, "Scene forecast active");
+        setText(els.beginnerReadStatus, "Visual outlook active");
         setText(
           els.beginnerDecisionTitle,
           sceneSide === "BUY" ? "FORECAST BUY" : sceneSide === "SELL" ? "FORECAST SELL" : "FORECAST HOLD"
@@ -3800,16 +4384,16 @@
         );
         setText(
           els.beginnerInstruction,
-          "The forecaster output is displayed now. Use the candle-anchored path and playbook together; execution still requires a verified entry window."
+          "The visual outlook is displayed now. Use it with the tracking plan; execution still requires a verified entry window."
         );
         setText(
           els.beginnerReason,
           sceneForecast.summary,
           sceneSide === "BUY"
-            ? "The current scene forecast leans upward across the projected progression."
+            ? "The current visual outlook leans upward across the projected progression."
             : sceneSide === "SELL"
-              ? "The current scene forecast leans downward across the projected progression."
-              : "The current scene forecast is range/hold and needs stronger agreement."
+              ? "The current visual outlook leans downward across the projected progression."
+              : "The current visual outlook is range/hold and needs stronger agreement."
         );
         setText(
           els.beginnerNextCondition,
@@ -3818,10 +4402,11 @@
         setText(els.forecastTitle, sceneSide === "BUY" ? "12-step path leans up" : sceneSide === "SELL" ? "12-step path leans down" : "12-step range path");
         setText(
           els.beginnerNextRead,
-          "Scene forecaster is active from the latest studied chart suite: " + (candleCount || 12) + " projected candle events are available."
+          "The latest studied chart provides " + (candleCount || 12) + " projected candle events."
         );
-        setText(els.beginnerEvidenceStory, "Scene forecast · " + (sceneSide === "BUY" ? "buy progression" : sceneSide === "SELL" ? "sell progression" : "range progression"));
+        setText(els.beginnerEvidenceStory, "Visual outlook · " + (sceneSide === "BUY" ? "buy progression" : sceneSide === "SELL" ? "sell progression" : "range progression"));
       }
+      renderEpisodeStory(payload);
     }
 
     function updateVisualStatus(source, freshness, label) {
@@ -3838,7 +4423,7 @@
       const normalized = normalizeFreshness(freshness.state || freshness.status);
       const trackingState = safeText(tracking.state || tracking.status, "WAITING").toLowerCase();
       const active = tracking.active !== false && trackingState !== "paused";
-      const label = !active ? "Paused" : normalized === "live" ? "Live" : normalized === "updating" ? "Updating" : normalized === "stale" ? "Out of date" : "Offline";
+      const label = !active ? "Paused" : normalized === "live" ? "Live" : normalized === "updating" ? "Updating" : normalized === "stale" ? "Entry checks expired" : "Offline";
       setConnectionState(active ? normalized : "updating", label);
       const observed = Number(freshness.observed_at || payload.observed_at || 0);
       setText(
@@ -4167,14 +4752,60 @@
 
     function overlayFamilyTitle(family) {
       const labels = {
-        smc: "SMC",
-        scene_forecaster: "Scene forecaster",
-        lstm: "LSTM",
-        two_candle: "Two-candle study",
+        market_context: "Reaction map",
+        scene_forecaster: "Visual outlook",
+        lstm: "12-step sequence outlook",
+        two_candle: "Near-term candle read",
         current_candles: "Current price",
-        supply_demand: "Supply / demand",
+        supply_demand: "Reaction areas",
+        council: "Combined analysis",
       };
       return labels[family] || titleCase(family);
+    }
+
+    function overlayIsDiagnostic(overlay) {
+      const row = safeObject(overlay);
+      const family = safeText(row.family || row.toggle_key, "").toLowerCase();
+      const kind = safeText(row.kind, "").toLowerCase();
+      if (family && !ALL_OVERLAY_FAMILIES.includes(family)) {
+        return true;
+      }
+      return Boolean(kind && !PUBLIC_OVERLAY_KINDS.has(kind));
+    }
+
+    function overlayKind(overlay) {
+      if (overlayIsDiagnostic(overlay)) {
+        return "";
+      }
+      const token = safeText(safeObject(overlay).kind, "").trim().toLowerCase();
+      if (!token || !/^[a-z0-9][a-z0-9_-]*$/.test(token)) {
+        return "";
+      }
+      return token;
+    }
+
+    function neutralPublicText(value, fallback) {
+      const text = safeText(value, "").trim();
+      const publicCopyPattern = /^[A-Za-z0-9][A-Za-z0-9\s.,:;!?%+'’()·&\/–—-]*$/;
+      if (!text || text.length > 240 || !publicCopyPattern.test(text)) {
+        return safeText(fallback, "Chart mark");
+      }
+      return text;
+    }
+
+    function overlayKindLabel(overlay) {
+      const row = safeObject(overlay);
+      const kind = overlayKind(row);
+      return neutralPublicText(row.kind_label, kind ? titleCase(kind) : overlayFamilyTitle(overlayFamily(row)) + " mark");
+    }
+
+    function overlayKindIsEnabled(overlay) {
+      const kind = overlayKind(overlay);
+      return !kind || !state.disabledKinds.has(kind);
+    }
+
+    function persistDisabledOverlayKinds() {
+      writeStoredValue(DISABLED_OVERLAY_KINDS_STORAGE_KEY, JSON.stringify(Array.from(state.disabledKinds).sort()));
     }
 
     function applyStudyBackedCounts(counts, payload, overlays) {
@@ -4187,18 +4818,10 @@
         || safeList(safeObject(operatorState.surface).overlay_viewport && safeObject(safeObject(operatorState.surface).overlay_viewport).bounds).length === 4
       );
       const trendlineEvidence = overlayPool.filter(function (overlay) {
-        const label = safeText(overlay.label || overlay.kind || overlay.type || overlay.role, "").toUpperCase();
-        return overlayFamily(overlay) === "trendlines"
-          || label.includes("TRENDLINE")
-          || label === "TREND";
+        return !overlayIsDiagnostic(overlay) && overlayFamily(overlay) === "trendlines";
       }).length;
-      const smcEvidence = overlayPool.filter(function (overlay) {
-        const label = safeText(overlay.label || overlay.kind || overlay.type || overlay.role, "").toUpperCase();
-        return overlayFamily(overlay) === "smc"
-          || label.includes("ORDER BLOCK")
-          || label.includes("LIQUIDITY")
-          || label.includes("FAIR VALUE")
-          || label.includes("MARKET STRUCTURE SHIFT");
+      const marketContextEvidence = overlayPool.filter(function (overlay) {
+        return !overlayIsDiagnostic(overlay) && overlayFamily(overlay) === "market_context";
       }).length;
       if (hasChartSurface && !counts.chart_bounds) {
         counts.chart_bounds = 1;
@@ -4206,8 +4829,8 @@
       if (trendlineEvidence > 0) {
         counts.trendlines = Math.max(Number(counts.trendlines || 0), trendlineEvidence);
       }
-      if (smcEvidence > 0) {
-        counts.smc = Math.max(Number(counts.smc || 0), smcEvidence);
+      if (marketContextEvidence > 0) {
+        counts.market_context = Math.max(Number(counts.market_context || 0), marketContextEvidence);
       }
       if (forecastEvidence.present) {
         counts.scene_forecaster = Math.max(Number(counts.scene_forecaster || 0), 1);
@@ -4215,69 +4838,169 @@
       if (candlestickEvidence.count > 0) {
         counts.current_candles = Math.max(Number(counts.current_candles || 0), candlestickEvidence.count);
       }
-      counts.playbook = buildAdaptivePlaybook(operatorState, overlayPool, forecastEvidence, candlestickEvidence).items.length;
       return counts;
     }
 
-    function buildAdaptivePlaybook(payload, overlays, forecastEvidence, candlestickEvidence) {
+    function trackingPlanFamilies(payload, overlays) {
+      const operatorState = safeObject(payload || state.payload);
+      const episode = trackingEpisode(operatorState);
+      const plan = safeObject(episode.plan);
+      const includeEpisodeEvidence = episodeIsActive(episode) || episodeRetainsOutlook(episode);
+      const eligibleFamilies = TRACKING_PLAN_FAMILIES.filter(function (family) {
+        return includeEpisodeEvidence || !EPISODE_OUTLOOK_FAMILIES.includes(family);
+      });
+      const explicit = safeList(plan.evidence_families || episode.evidence_families).map(function (family) {
+        return safeText(family, "").toLowerCase();
+      }).filter(function (family) {
+        return eligibleFamilies.includes(family);
+      });
+      if (explicit.length) {
+        return Array.from(new Set(explicit));
+      }
+      const available = new Set(safeList(overlays || state.overlays).filter(function (overlay) {
+        return !overlayIsDiagnostic(overlay);
+      }).map(overlayFamily));
+      const matched = eligibleFamilies.filter(function (family) {
+        return available.has(family);
+      });
+      return matched.length ? matched : eligibleFamilies.slice();
+    }
+
+    function buildTrackingPlan(payload, overlays, forecastEvidence, candlestickEvidence) {
       const operatorState = safeObject(payload || state.payload);
       const overlayPool = safeList(overlays || state.overlays);
       const forecast = forecastEvidence || sceneForecastEvidence(operatorState, overlayPool);
       const candles = candlestickEvidence || detectCandlestickEvidence(operatorState);
-      const items = [];
-      const addItem = function (text) {
-        const copy = safeText(text, "");
-        if (copy && !items.includes(copy)) {
-          items.push(copy);
-        }
-      };
-      const overlayLabels = overlayPool.map(function (overlay) {
-        return safeText(overlay.label || overlay.kind || overlay.type || overlay.role || overlay.family, "").toUpperCase();
+      const episode = trackingEpisode(operatorState);
+      const families = trackingPlanFamilies(operatorState, overlayPool);
+      const familySet = new Set(families);
+      const marks = overlayPool.filter(function (overlay) {
+        return !overlayIsDiagnostic(overlay) && familySet.has(overlayFamily(overlay));
       });
-      if (overlayLabels.some(function (label) { return label.includes("LIQUIDITY") || label.includes("SWEEP"); })) {
-        addItem("SMC liquidity is active: watch for sweep, reclaim, and retest before entry permission.");
+      const items = [];
+      if (episodeIsActive(episode)) {
+        items.push("The starting chart and plan are anchored for this tracking episode.");
+      } else {
+        items.push("Start tracking to anchor the current chart and keep one plan across the full study.");
       }
-      if (overlayLabels.some(function (label) { return label.includes("ORDER BLOCK") || label.includes("SUPPLY") || label.includes("DEMAND"); })) {
-        addItem("Order-block / supply-demand zone is active: entries must stay inside the verified reaction area.");
-      }
-      if (overlayLabels.some(function (label) { return label.includes("TRENDLINE") || label === "TREND"; })) {
-        addItem("Trendline study is active: connect wick extremes and treat body closes through the line as stronger breach evidence.");
+      if (families.length) {
+        items.push("Supporting evidence: " + families.slice(0, 6).map(overlayFamilyTitle).join(", ") + ".");
       }
       if (candles.count > 0) {
-        addItem("Candlestick filter: " + candles.summary + ".");
+        items.push("Latest candle read: " + neutralPublicText(candles.summary, "Current candle behavior is available") + ".");
       }
       if (forecast.present) {
-        addItem("Scene forecaster: " + (forecast.side === "BUY" ? "12-step path leans up" : forecast.side === "SELL" ? "12-step path leans down" : "12-step path is range/hold") + "; forecast is guidance, not execution permission.");
+        items.push("The 12-step visual outlook currently leans " + (forecast.side === "BUY" ? "up" : forecast.side === "SELL" ? "down" : "sideways") + "; it cannot grant entry permission.");
       }
       const replayCount = safeList(operatorState.history || operatorState.session_history || operatorState.replay).length;
       if (replayCount > 0) {
-        addItem("History replay has " + replayCount + " studied observation" + (replayCount === 1 ? "" : "s") + " for comparing which strategy stayed aligned.");
+        items.push(replayCount + " saved observation" + (replayCount === 1 ? " is" : "s are") + " available for before-and-after comparison.");
       }
-      if (!items.length) {
-        addItem("Waiting for a complete chart suite: SMC, structure, candlesticks, and scene forecast must publish before the playbook can rank strategies.");
-      }
-      return {items: items};
+      return {families: families, items: items, marks: marks};
     }
 
-    function renderAdaptivePlaybook(payload) {
-      if (!els.adaptivePlaybookPanel) {
+    function renderTrackingPlan(payload) {
+      if (!els.trackingPlanPanel) {
         return;
       }
       const operatorState = safeObject(payload || state.payload);
-      const forecast = sceneForecastEvidence(operatorState, state.overlays);
-      const candles = detectCandlestickEvidence(operatorState);
-      const playbook = buildAdaptivePlaybook(operatorState, state.overlays, forecast, candles);
-      els.adaptivePlaybookPanel.dataset.ready = playbook.items.length > 0 && playbook.items[0].indexOf("Waiting for") !== 0 ? "true" : "false";
-      els.adaptivePlaybookPanel.innerHTML = "<strong>Adaptive playbook</strong><ul>"
-        + playbook.items.slice(0, 5).map(function (item) {
-          const escaped = item
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/\"/g, "&quot;");
-          return "<li>" + escaped + "</li>";
-        }).join("")
-        + "</ul>";
+      const plan = buildTrackingPlan(operatorState, state.overlays);
+      els.trackingPlanToggle.setAttribute("aria-expanded", state.trackingPlanOpen ? "true" : "false");
+      els.trackingPlanPanel.hidden = !state.trackingPlanOpen;
+      els.trackingPlanPanel.dataset.ready = episodeIsActive(trackingEpisode(operatorState)) ? "true" : "false";
+      setText(els.trackingPlanCount, plan.marks.length);
+      const heading = document.createElement("strong");
+      heading.textContent = "Tracking plan";
+      const list = document.createElement("ul");
+      plan.items.slice(0, 5).forEach(function (item) {
+        const entry = document.createElement("li");
+        entry.textContent = item;
+        list.appendChild(entry);
+      });
+      els.trackingPlanPanel.replaceChildren(heading, list);
+    }
+
+    function setTrackingPlanOpen(open) {
+      state.trackingPlanOpen = Boolean(open);
+      if (state.trackingPlanOpen) {
+        const planFamilies = trackingPlanFamilies(state.payload || state.pendingPayload, state.overlays);
+        const planFamilySet = new Set(planFamilies);
+        planFamilies.forEach(function (family) {
+          state.activeFamilies.add(family);
+        });
+        state.overlays.forEach(function (overlay) {
+          if (planFamilySet.has(overlayFamily(overlay))) {
+            state.disabledKinds.delete(overlayKind(overlay));
+          }
+        });
+        persistDisabledOverlayKinds();
+        state.overlayView = "custom";
+        document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
+          button.setAttribute("aria-pressed", "false");
+        });
+        persistOverlaySelection();
+        setSurfaceMode("overlay");
+      }
+      renderTrackingPlan(state.payload || state.pendingPayload);
+      syncOverlayButtons();
+      renderOverlays();
+    }
+
+    function renderDetailedOverlayControls(overlays) {
+      const kinds = new Map();
+      safeList(overlays || state.overlays).forEach(function (overlay) {
+        const kind = overlayKind(overlay);
+        if (!kind || overlayIsDiagnostic(overlay) || !episodeAllowsOverlay(overlay, state.payload || state.pendingPayload)) {
+          return;
+        }
+        const current = kinds.get(kind) || {label: overlayKindLabel(overlay), count: 0};
+        current.count += 1;
+        kinds.set(kind, current);
+      });
+      const entries = Array.from(kinds.entries()).sort(function (left, right) {
+        return left[1].label.localeCompare(right[1].label);
+      });
+      setText(els.detailedOverlayCount, entries.length ? entries.length + " available" : "No current marks");
+      if (!entries.length) {
+        const empty = document.createElement("p");
+        empty.className = "detailed-overlay-empty";
+        empty.textContent = "Individual controls appear when the current chart publishes safe operator marks.";
+        els.detailedOverlayList.replaceChildren(empty);
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      entries.forEach(function (entry) {
+        const kind = entry[0];
+        const meta = entry[1];
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "kind-filter";
+        button.dataset.overlayKind = kind;
+        button.setAttribute("aria-pressed", state.disabledKinds.has(kind) ? "false" : "true");
+        button.textContent = meta.label + " · " + meta.count;
+        fragment.appendChild(button);
+      });
+      els.detailedOverlayList.replaceChildren(fragment);
+    }
+
+    function renderTrendlineAvailability(count) {
+      const available = Math.max(0, Number(count) || 0);
+      if (available > 0) {
+        setText(els.trendlineAvailability, available + " chart-anchored trendline" + (available === 1 ? " is" : "s are") + " available.");
+        return;
+      }
+      const surface = currentSurface(state.payload || state.pendingPayload || {});
+      const hasChartSurface = Boolean(
+        surface.url
+        || state.imageUrl
+        || (state.naturalWidth > 0 && state.naturalHeight > 0)
+      );
+      setText(
+        els.trendlineAvailability,
+        hasChartSurface
+          ? "No reliable trendline yet. At least two confirmed swing anchors are required before a line is drawn."
+          : "Trendlines will be checked after a valid chart surface is available."
+      );
     }
 
     function syncOverlayButtons(availableOverlays, options) {
@@ -4287,6 +5010,9 @@
         return [family, 0];
       }));
       overlayPool.forEach(function (overlay) {
+        if (overlayIsDiagnostic(overlay)) {
+          return;
+        }
         const family = overlayFamily(overlay);
         counts[family] = Number(counts[family] || 0) + 1;
       });
@@ -4304,12 +5030,19 @@
       document.querySelectorAll("[data-layer-count]").forEach(function (badge) {
         badge.textContent = String(counts[badge.dataset.layerCount] || 0);
       });
+      renderTrendlineAvailability(counts.trendlines);
+      renderDetailedOverlayControls(overlayPool);
+      renderTrackingPlan(state.payload || state.pendingPayload);
       if (config.loading) {
         const enabledCount = ALL_OVERLAY_FAMILIES.filter(function (family) {
           return state.activeFamilies.has(family);
         }).length;
         const pendingCount = overlayPool.filter(function (overlay) {
-          return state.activeFamilies.has(overlayFamily(overlay)) && lifecycleIsVisible(overlay);
+          return !overlayIsDiagnostic(overlay)
+            && episodeAllowsOverlay(overlay, state.payload || state.pendingPayload)
+            && state.activeFamilies.has(overlayFamily(overlay))
+            && overlayKindIsEnabled(overlay)
+            && lifecycleIsVisible(overlay);
         }).length;
         setText(
           els.overlayLibraryStatus,
@@ -4335,7 +5068,10 @@
       const renderedCount = Number.isFinite(Number(visibleCount))
         ? Number(visibleCount)
         : state.overlays.filter(function (overlay) {
-          return state.activeFamilies.has(overlayFamily(overlay));
+          return !overlayIsDiagnostic(overlay)
+            && episodeAllowsOverlay(overlay, state.payload || state.pendingPayload)
+            && state.activeFamilies.has(overlayFamily(overlay))
+            && overlayKindIsEnabled(overlay);
         }).length;
       setText(
         els.overlayLibraryStatus,
@@ -4351,6 +5087,12 @@
         state.activeFamilies.delete(family);
       } else {
         state.activeFamilies.add(family);
+        state.overlays.forEach(function (overlay) {
+          if (overlayFamily(overlay) === family) {
+            state.disabledKinds.delete(overlayKind(overlay));
+          }
+        });
+        persistDisabledOverlayKinds();
       }
       state.overlayView = "custom";
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
@@ -4361,8 +5103,27 @@
       renderOverlays();
     }
 
+    function toggleOverlayKind(kind) {
+      const token = safeText(kind, "").toLowerCase();
+      if (!token) {
+        return;
+      }
+      if (state.disabledKinds.has(token)) {
+        state.disabledKinds.delete(token);
+      } else {
+        state.disabledKinds.add(token);
+      }
+      persistDisabledOverlayKinds();
+      renderDetailedOverlayControls(state.overlays);
+      renderOverlays();
+    }
+
     function setAllOverlayFamilies(enabled) {
       state.activeFamilies = new Set(enabled ? ALL_OVERLAY_FAMILIES : []);
+      if (enabled) {
+        state.disabledKinds.clear();
+        persistDisabledOverlayKinds();
+      }
       state.overlayView = enabled ? "all" : "custom";
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
         button.setAttribute("aria-pressed", enabled && button.dataset.overlayView === "all" ? "true" : "false");
@@ -4839,9 +5600,10 @@
       }
       const namespace = "http://www.w3.org/2000/svg";
       const status = effectiveForecastStatus(overlay);
+      const blockOnly = overlayFamily(overlay) === "lstm";
       const group = document.createElementNS(namespace, "g");
       const visualStatus = status.replace(/_/g, "-");
-      group.setAttribute("class", "surface-forecast-composite forecast-" + visualStatus);
+      group.setAttribute("class", "surface-forecast-composite forecast-" + visualStatus + (blockOnly ? " block-only" : ""));
       group.dataset.overlayId = safeText(overlay.id, "");
       group.dataset.overlayFamilyId = overlayFamily(overlay);
       group.dataset.forecastStatus = status.toUpperCase();
@@ -4919,16 +5681,47 @@
         rawAnchor.x_norm,
         rawAnchor.y_norm,
       );
-      const latestCandleAnchor = projectedLatestCandleCloseAnchor();
-      const explicitAnchorMatches = Boolean(
-        projectedAnchor
-        && pathPoints.length === 13
-        && pointsShareAnchor(projectedAnchor, pathPoints[0])
+      const rawForecastCandles = safeList(overlay.forecast_candles);
+      const firstRawForecastCandle = safeObject(rawForecastCandles[0]);
+      const rawAnchorX = Number(rawAnchor.x_norm);
+      const rawAnchorY = Number(rawAnchor.y_norm);
+      const firstBlockX = Number(firstRawForecastCandle.x_norm);
+      const firstBlockOpenY = Number(firstRawForecastCandle.open_y_norm);
+      const blockAnchorMatches = Boolean(
+        blockOnly
+        && rawForecastCandles.length === 12
+        && [rawAnchorX, rawAnchorY, firstBlockX, firstBlockOpenY].every(Number.isFinite)
+        && rawAnchorX >= 0
+        && rawAnchorX < firstBlockX
+        && firstBlockX <= 1
+        && rawAnchorY >= 0
+        && rawAnchorY <= 1
+        && Math.abs(rawAnchorY - firstBlockOpenY) <= 0.000001
+        && projectedAnchor
       );
+      const latestCandleAnchor = projectedLatestCandleCloseAnchor();
+      const explicitAnchorMatches = blockOnly
+        ? blockAnchorMatches
+        : Boolean(
+          projectedAnchor
+          && pathPoints.length === 13
+          && pointsShareAnchor(projectedAnchor, pathPoints[0])
+        );
       const latestCloseMatches = Boolean(
         latestCandleAnchor
-        && pathPoints.length === 13
-        && pointsShareAnchor(latestCandleAnchor, pathPoints[0])
+        && (
+          blockOnly
+            ? projectedAnchor && pointsShareAnchor(latestCandleAnchor, projectedAnchor)
+            : pathPoints.length === 13 && pointsShareAnchor(latestCandleAnchor, pathPoints[0])
+        )
+      );
+      const activeEpisode = trackingEpisode(state.payload || {});
+      const baselineEpisodeLocked = Boolean(
+        blockOnly
+        && overlay.baseline_locked === true
+        && safeText(activeEpisode.episode_id, "")
+        && episodeRetainsOutlook(activeEpisode)
+        && explicitAnchorMatches
       );
       const verifiedClosedCandleAnchor = Boolean(
         rawAnchor.verified_latest_close === true
@@ -4952,21 +5745,27 @@
       const candleLocked = Boolean(
         explicitAnchorMatches
         && (
-          // The scene forecast is frozen at the latest completed candle. A
-          // newer `Current price` overlay can be the still-forming candle and
-          // must not detach that verified origin while price moves inside it.
-          // It must still be horizontally adjacent on this exact frame. This
-          // independently rejects a producer that labels old chart geometry as
-          // the latest closed candle while keeping normal forming-candle Y
-          // movement free to diverge from the completed close.
-          verifiedClosedCandleAnchor
-            ? verifiedAnchorHorizontallyAdjacent
-            : latestCandleAnchor
-            ? latestCloseMatches
-            : rawAnchor.verified_latest_close === true
+          // A user-started episode owns a stable baseline. Keep its exact
+          // 12-block object sequence attached to that original chart anchor
+          // while newer candles advance; only a new episode may replace it.
+          baselineEpisodeLocked
+          || (
+            // The scene forecast is frozen at the latest completed candle. A
+            // newer `Current price` overlay can be the still-forming candle and
+            // must not detach that verified origin while price moves inside it.
+            // It must still be horizontally adjacent on this exact frame. This
+            // independently rejects a producer that labels old chart geometry as
+            // the latest closed candle while keeping normal forming-candle Y
+            // movement free to diverge from the completed close.
+            verifiedClosedCandleAnchor
+              ? verifiedAnchorHorizontallyAdjacent
+              : latestCandleAnchor
+              ? latestCloseMatches
+              : rawAnchor.verified_latest_close === true
+          )
         )
       );
-      const projectedForecastCandles = safeList(overlay.forecast_candles).map(function (rawCandle) {
+      const projectedForecastCandles = rawForecastCandles.map(function (rawCandle) {
         const candle = safeObject(rawCandle);
         const xNorm = Number(candle.x_norm);
         const openY = Number(candle.open_y_norm);
@@ -5033,17 +5832,25 @@
         && forecastAnchorFitsBounds(pathPoints[0], geometry.bounds)
       );
       const scenarioReady = directionalPrimary || rangePrimary;
-      if (!scenarioReady) {
+      const blockReady = blockOnly
+        && candleLocked
+        && projectedForecastCandles.length === 12
+        && projectedForecastCandles.every(function (candle, index) {
+          return candle.step === index + 1;
+        });
+      if (!scenarioReady && !blockReady) {
         // A partially projected or anchor-mismatched scenario must disappear
         // as a unit. Falling back to a clamped path would make it look as if
         // the forecast belongs to a candle that never supplied its origin.
         return null;
       }
-      group.dataset.displayMode = directionalPrimary
-        ? "multi-scenario-paths"
-        : "range-scenario-paths";
+      group.dataset.displayMode = blockOnly
+        ? "event-blocks"
+        : directionalPrimary
+          ? "multi-scenario-paths"
+          : "range-scenario-paths";
       const beliefState = safeText(overlay.belief_state, "STABLE").toUpperCase();
-      const committedSide = directionalSide(overlay.committed_side || selectedScenario.side);
+      const committedSide = directionalSide(overlay.committed_side || (selectedScenario && selectedScenario.side) || overlay.side);
       const candidateSide = directionalSide(overlay.candidate_side);
       const confirmationEvents = Math.max(0, Number(overlay.confirmation_events) || 0);
       const requiredEvents = Math.max(0, Number(overlay.required_events) || 0);
@@ -5054,6 +5861,9 @@
         return scenario.probabilityCalibrated;
       }) ? "CALIBRATED" : "UNCALIBRATED";
       group.dataset.anchorState = "CANDLE_LOCKED";
+      if (baselineEpisodeLocked) {
+        group.dataset.trackingEpisode = "ANCHORED";
+      }
       group.dataset.beliefState = beliefState;
       group.dataset.candidateSide = candidateSide;
       group.dataset.scenarioPresentation = "SELECTED_WITH_BULL_BEAR_RANGE";
@@ -5066,7 +5876,8 @@
           : null;
       }).filter(Boolean);
       if (
-        status === "authorized"
+        !blockOnly
+        && status === "authorized"
         && directionalPrimary
         && interval.calibrated === true
         && bandPoints.length >= 4
@@ -5084,8 +5895,12 @@
 
       const eventSpacing = pathPoints.length >= 3
         ? Math.abs(pathPoints[2][0] - pathPoints[1][0])
-        : 8;
-      const candleBodyWidth = clamp(eventSpacing * 0.38, 3, 8);
+        : projectedForecastCandles.length >= 2
+          ? Math.abs(projectedForecastCandles[1].close[0] - projectedForecastCandles[0].close[0])
+          : 8;
+      const candleBodyWidth = blockOnly
+        ? clamp(eventSpacing * 0.66, 6, 14)
+        : clamp(eventSpacing * 0.38, 3, 8);
       projectedForecastCandles.forEach(function (candle) {
         const candleGroup = document.createElementNS(namespace, "g");
         const sideClass = candle.movementSide.toLowerCase();
@@ -5095,6 +5910,19 @@
             + (candle.directionConflict ? " direction-conflict" : ""),
         );
         candleGroup.dataset.eventLabel = candle.label;
+
+        if (blockOnly) {
+          const eventBlock = document.createElementNS(namespace, "rect");
+          const eventTop = Math.min(candle.high[1], candle.low[1]);
+          eventBlock.setAttribute("x", String(candle.close[0] - candleBodyWidth * 0.7));
+          eventBlock.setAttribute("y", String(eventTop));
+          eventBlock.setAttribute("width", String(candleBodyWidth * 1.4));
+          eventBlock.setAttribute("height", String(Math.max(3, Math.abs(candle.low[1] - candle.high[1]))));
+          eventBlock.setAttribute("rx", "2");
+          eventBlock.setAttribute("class", "surface-forecast-event-block");
+          eventBlock.dataset.eventLabel = candle.label;
+          candleGroup.appendChild(eventBlock);
+        }
 
         const wick = document.createElementNS(namespace, "line");
         wick.setAttribute("x1", String(candle.high[0]));
@@ -5121,6 +5949,11 @@
         candleGroup.appendChild(title);
         group.appendChild(candleGroup);
       });
+
+      if (blockOnly) {
+        group.setAttribute("aria-label", "Twelve future event blocks anchored to the latest completed candle; outlook only, not entry permission");
+        return group;
+      }
 
       group.setAttribute(
         "aria-label",
@@ -5329,14 +6162,14 @@
 
     function overlayPriority(overlay) {
       const weights = {plan: 5, outlook: 4, zones: 3, movement: 2.5, structure: 2, history: 1};
-      const familyBoost = {smc: 1.4, triggers: 1.3, scene_forecaster: 1.2, lstm: 1.15, two_candle: 1.1};
+      const familyBoost = {market_context: 1.4, triggers: 1.3, scene_forecaster: 1.2, lstm: 1.15, two_candle: 1.1};
       return clamp(overlay.confidence, 0, 1) * 100
         + (weights[overlayGroup(overlay)] || 1) * 20
         + (familyBoost[overlayFamily(overlay)] || 0) * 10;
     }
 
     function overlayLabel(overlay) {
-      return safeText(overlay.label || overlay.display_label || overlay.type, titleCase(overlayGroup(overlay)));
+      return overlayKindLabel(overlay) || overlayFamilyTitle(overlayFamily(overlay));
     }
 
     function percent(value, total) {
@@ -5418,6 +6251,12 @@
     }
 
     function createOverlayLine(overlay, points) {
+      // The sequence study is an object forecast: twelve candle blocks only.
+      // Its private anchor scaffold may prove placement, but it must never be
+      // painted as a trajectory, even when scenario metadata is present.
+      if (overlayFamily(overlay) === "lstm") {
+        return null;
+      }
       if (points.length < 2) {
         return null;
       }
@@ -5508,8 +6347,14 @@
         requiredEvents: overlay.required_events,
         interval: forecastRole ? overlay.interval : null,
         band: forecastRole ? overlay.forecast_band_points : null,
+        forecastCandles: forecastRole ? overlay.forecast_candles : null,
         scenarios: forecastRole ? overlay.forecast_scenarios : null,
         forecastAnchor: forecastRole ? overlay.forecast_anchor : null,
+        baselineLocked: overlay.baseline_locked === true,
+        trackingEpisode: (() => {
+          const episode = trackingEpisode(state.payload || {});
+          return [episode.episode_id || "", episode.revision || 0, episode.state || ""];
+        })(),
       });
     }
 
@@ -5634,7 +6479,10 @@
       }
 
       const visible = state.overlays.filter(function (overlay) {
-        return state.activeFamilies.has(overlayFamily(overlay))
+        return !overlayIsDiagnostic(overlay)
+          && episodeAllowsOverlay(overlay, state.payload)
+          && state.activeFamilies.has(overlayFamily(overlay))
+          && overlayKindIsEnabled(overlay)
           && lifecycleIsVisible(overlay)
           && quickViewShowsOverlay(overlay)
           && overlayMatchesSurface(overlay);
@@ -5654,6 +6502,9 @@
         const bounds = geometry.bounds;
         const points = geometry.points;
         const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
+        if (overlayFamily(overlay) === "lstm" && forecastRole === "center") {
+          return;
+        }
         if (overlayFamily(overlay) === "chart_bounds") {
           const outline = createChartBoundsOutline(overlay, bounds);
           if (outline) {
@@ -5675,7 +6526,9 @@
             ? sceneForecastForegroundCandidates
             : svgCandidates).push(preparedForecast);
         }
-        const line = createOverlayLine(overlay, points);
+        const line = overlayFamily(overlay) === "lstm" && forecastRole === "composite"
+          ? null
+          : createOverlayLine(overlay, points);
         if (line) {
           const preparedLine = prepareRenderedNode(line, overlay, "line");
           (["scene_forecaster", "lstm"].includes(overlayFamily(overlay))
@@ -5766,7 +6619,7 @@
       const effectiveStatus = forecastStatus === "LOW_CONFIDENCE"
           ? "LOW CONFIDENCE"
           : forecastStatus === "DIAGNOSTIC"
-            ? "DIAGNOSTIC ONLY"
+            ? "OBSERVATION ONLY"
             : "NO EDGE";
       return " Forecast status remains " + effectiveStatus + ". This forecast is not entry permission.";
     }
@@ -5779,6 +6632,9 @@
         return "This is an earlier chart event kept for context. It cannot describe the current move or open an entry.";
       }
       if (safeText(overlay.forecast_role, "").toLowerCase() === "composite") {
+        if (family === "lstm") {
+          return "Twelve future event blocks are anchored to the latest completed candle. They show a studied sequence, not a guaranteed path or entry permission.";
+        }
         const path = directionalSide(overlay.forecast_direction);
         const body = directionalSide(overlay.body_bias);
         const pathWord = path === "BUY" ? "up / buy-side" : path === "SELL" ? "down / sell-side" : "uncertain";
@@ -5856,10 +6712,10 @@
     function normalizeHistoryItem(item, index) {
       const row = safeObject(item);
       return {
-        id: safeText(row.id, "history-" + index + "-" + safeText(row.observed_at || row.timestamp, index)),
+        id: safeText(row.event_id || row.id || row.episode_id, "history-" + index + "-" + safeText(row.observed_at || row.timestamp, index)),
         observed_at: Number(row.observed_at || row.timestamp || row.created_at_epoch || 0),
         side: directionalSide(row.side || row.direction || row.action),
-        summary: safeText(row.summary || row.label, "Market observation"),
+        summary: neutralPublicText(row.summary || row.label || row.message, "Market observation"),
         state: safeText(row.state || row.lifecycle, "historical").toLowerCase(),
       };
     }
@@ -5913,17 +6769,20 @@
     }
 
     function combinedHistory(payload) {
-      const items = safeList(payload.history).map(normalizeHistoryItem);
-      state.localHistory.forEach(function (item, index) {
-        items.push(normalizeHistoryItem(item, items.length + index));
-      });
+      const episodeEvents = safeList(trackingEpisode(payload).events);
+      const serverRows = safeList(payload.history).length
+        ? safeList(payload.history)
+        : safeList(payload.session_history);
+      const durableRows = serverRows.concat(episodeEvents);
+      const sourceRows = durableRows.length ? durableRows : state.localHistory;
+      const items = sourceRows.map(normalizeHistoryItem);
       const byIdentity = new Map();
       items.forEach(function (item) {
         byIdentity.set(item.id, item);
       });
       return Array.from(byIdentity.values())
         .sort(function (a, b) { return Number(a.observed_at || 0) - Number(b.observed_at || 0); })
-        .slice(-24);
+        .slice(-SESSION_HISTORY_ROW_LIMIT);
     }
 
     function renderHistory(payload) {
@@ -6004,9 +6863,138 @@
       }
     }
 
+    function episodeOutlookOverlays(operatorState) {
+      const payload = safeObject(operatorState);
+      const overlays = safeList(payload.overlays);
+      const hasCompleteSequence = overlays.some(function (overlay) {
+        return overlayFamily(overlay) === "lstm"
+          && safeText(overlay.forecast_role, "").toLowerCase() === "composite"
+          && safeList(overlay.forecast_candles).length === 12;
+      });
+      if (hasCompleteSequence) {
+        return overlays;
+      }
+
+      const episode = trackingEpisode(payload);
+      const episodeId = safeText(episode.episode_id, "");
+      const futureBlocks = safeList(episode.future_blocks).map(function (rawBlock, index) {
+        const block = safeObject(rawBlock);
+        const stepCandidate = Number(block.step);
+        const step = Number.isFinite(stepCandidate) ? Math.round(stepCandidate) : index + 1;
+        const xNorm = Number(block.x_norm);
+        const openY = Number(block.open_y_norm);
+        const highY = Number(block.high_y_norm);
+        const lowY = Number(block.low_y_norm);
+        const closeY = Number(block.close_y_norm);
+        const normalizedValues = [xNorm, openY, highY, lowY, closeY];
+        if (
+          step !== index + 1
+          || !normalizedValues.every(Number.isFinite)
+          || !normalizedValues.every(function (value) { return value >= 0 && value <= 1; })
+          || highY > Math.min(openY, closeY) + 0.000001
+          || lowY < Math.max(openY, closeY) - 0.000001
+        ) {
+          return null;
+        }
+        return {
+          step: step,
+          label: safeText(block.label, "E" + step),
+          x_norm: xNorm,
+          open_y_norm: openY,
+          high_y_norm: highY,
+          low_y_norm: lowY,
+          close_y_norm: closeY,
+          movement_side: directionalSide(block.movement_side || block.body_bias),
+          position_side: directionalSide(block.position_side),
+          body_bias: directionalSide(block.body_bias),
+          direction_conflict: block.direction_conflict === true,
+        };
+      }).filter(Boolean);
+      const xCoordinates = futureBlocks.map(function (block) { return block.x_norm; });
+      const strictlyForward = xCoordinates.every(function (xCoordinate, index) {
+        return index === 0 || xCoordinate > xCoordinates[index - 1];
+      });
+      if (
+        !episodeId
+        || !episodeRetainsOutlook(episode)
+        || futureBlocks.length !== 12
+        || !strictlyForward
+        || xCoordinates[0] <= 0
+      ) {
+        return overlays;
+      }
+
+      const firstBlock = futureBlocks[0];
+      const firstSpacing = futureBlocks.length > 1
+        ? futureBlocks[1].x_norm - firstBlock.x_norm
+        : 0.012;
+      const anchorX = Math.max(0, firstBlock.x_norm - Math.max(0.001, firstSpacing));
+      const yCoordinates = futureBlocks.flatMap(function (block) {
+        return [block.open_y_norm, block.high_y_norm, block.low_y_norm, block.close_y_norm];
+      });
+      const baseline = safeObject(episode.baseline);
+      const plan = safeObject(episode.plan);
+      const side = directionalSide(
+        baseline.direction
+        || baseline.side
+        || plan.direction
+        || plan.side
+        || episode.direction
+      );
+      const safeEpisodeId = episodeId.replace(/[^a-z0-9_-]/gi, "").slice(-48) || "saved";
+      const retainedSequence = {
+        id: "episode-outlook-" + safeEpisodeId,
+        type: "outlook",
+        side: side,
+        group: "outlook",
+        family: "lstm",
+        layer: "future_blocks",
+        kind: "future_blocks",
+        kind_label: "12-step future blocks",
+        label: "Saved future blocks",
+        label_hidden: true,
+        bounds: [
+          anchorX,
+          Math.min.apply(null, yCoordinates),
+          Math.max.apply(null, xCoordinates),
+          Math.max.apply(null, yCoordinates),
+        ],
+        points: [],
+        line_points: [],
+        confidence: 0,
+        lifecycle: "current",
+        frame_id: safeObject(payload.surface).frame_id,
+        coordinate_space: "chart",
+        coordinate_units: "normalized",
+        forecast_coordinate_space: "chart",
+        forecast_coordinate_units: "normalized",
+        forecast_role: "composite",
+        forecast_status: "NO_EDGE",
+        forecast_authorized: false,
+        trade_authorization_status: "NOT_AUTHORIZED",
+        forecast_direction: side,
+        geometry_kind: "future_blocks",
+        forecast_band_points: [],
+        forecast_scenarios: [],
+        forecast_candles: futureBlocks,
+        forecast_anchor: {
+          x_norm: anchorX,
+          y_norm: firstBlock.open_y_norm,
+          verified_latest_close: true,
+          source: "TRACKING_EPISODE_BASELINE",
+        },
+        baseline_locked: true,
+      };
+      return overlays.concat([retainedSequence]);
+    }
+
     function commitOperatorState(payload) {
       const operatorState = safeObject(payload);
-      const surface = safeObject(operatorState.surface);
+      const operatorOverlays = episodeOutlookOverlays(operatorState);
+      const committedOperatorState = Object.assign({}, operatorState, {
+        overlays: operatorOverlays,
+      });
+      const surface = safeObject(committedOperatorState.surface);
       const nextVisualBundleKey = JSON.stringify({
         frameId: surface.frame_id,
         semanticIdentity: surface.semantic_identity,
@@ -6020,10 +7008,10 @@
         surfaceViewport: state.surfaceViewport,
         naturalWidth: state.naturalWidth,
         naturalHeight: state.naturalHeight,
-        overlays: safeList(operatorState.overlays),
+        overlays: operatorOverlays,
       });
       const visualBundleChanged = nextVisualBundleKey !== state.lastVisualBundleKey;
-      const historySemanticIdentity = surfaceSemanticIdentity(operatorState);
+      const historySemanticIdentity = surfaceSemanticIdentity(committedOperatorState);
       if (
         state.historySemanticIdentity
         && historySemanticIdentity !== state.historySemanticIdentity
@@ -6035,18 +7023,19 @@
         state.historyItemNodes.clear();
       }
       state.historySemanticIdentity = historySemanticIdentity;
-      state.payload = operatorState;
-      state.overlays = safeList(operatorState.overlays);
+      state.payload = committedOperatorState;
+      state.overlays = operatorOverlays;
       syncOverlayButtons();
       if (visualBundleChanged) {
         state.lastVisualBundleKey = nextVisualBundleKey;
         pruneOverlayCaches();
       }
-      recordCurrentMove(operatorState);
-      renderTrackingStatus(operatorState);
-      renderDecision(operatorState);
-      renderAdaptivePlaybook(operatorState);
-      renderHistory(operatorState);
+      recordCurrentMove(committedOperatorState);
+      renderTrackingStatus(committedOperatorState);
+      renderTrackingEpisode(committedOperatorState);
+      renderDecision(committedOperatorState);
+      renderTrackingPlan(committedOperatorState);
+      renderHistory(committedOperatorState);
       if (visualBundleChanged) {
         renderOverlays();
       }
@@ -6074,6 +7063,9 @@
           surfaceMode: state.surfaceMode,
           overlayView: state.overlayView,
           activeFamilies: Array.from(state.activeFamilies),
+          disabledKinds: Array.from(state.disabledKinds),
+          trackingPlanOpen: state.trackingPlanOpen,
+          trackingEpisodeBusy: state.trackingEpisodeBusy,
           forecastActionBusy: state.forecastActionBusy,
           revision: state.lastRevision,
           streamConnected: state.streamConnected,
@@ -6097,6 +7089,21 @@
       const button = event.target.closest("[data-overlay-view]");
       if (button) {
         setOverlayView(button.dataset.overlayView);
+      }
+    });
+    els.trackingStart.addEventListener("click", function () {
+      runTrackingEpisodeAction("start");
+    });
+    els.trackingStop.addEventListener("click", function () {
+      runTrackingEpisodeAction("stop");
+    });
+    els.trackingPlanToggle.addEventListener("click", function () {
+      setTrackingPlanOpen(!state.trackingPlanOpen);
+    });
+    els.detailedOverlayList.addEventListener("click", function (event) {
+      const button = event.target.closest("[data-overlay-kind]");
+      if (button) {
+        toggleOverlayKind(button.dataset.overlayKind);
       }
     });
     document.querySelectorAll("[data-overlay-family]").forEach(function (button) {
@@ -6225,6 +7232,7 @@
     els.overlayOpacity.value = String(state.overlayOpacity);
     document.documentElement.style.setProperty("--overlay-opacity", String(state.overlayOpacity / 100));
     setOverlayView(state.overlayView, {fetch: false, persist: false});
+    renderTrackingEpisode({});
     refreshOperatorState({force: true});
     connectSessionStream();
     scheduleRefresh(POLL_INTERVAL_MS);

@@ -749,6 +749,42 @@ def test_registry_preserves_trendline_touch_point_anchor_geometry() -> None:
         assert trendline["anchor_evidence_status"] == "VALID"
 
 
+def test_registry_prefers_published_validated_trendlines_over_fresh_derivation() -> None:
+    payload = _sample_payload()
+    published_points = [[120.0, 210.0], [300.0, 250.0]]
+    payload["tracking_summary"]["trendlines_v3"] = [
+        {
+            "type": "RESISTANCE_TRENDLINE",
+            "role": "resistance_trendline",
+            "trendline_role": "resistance",
+            "label": "RESISTANCE TRENDLINE",
+            "direction": "SELL",
+            "bounds": [120.0, 210.0, 300.0, 250.0],
+            "points": published_points,
+            "line_points": published_points,
+            "touch_points": published_points,
+            "anchor_wick_points": published_points,
+            "anchor_candles": [1, 8],
+            "anchor_type": "TRENDLINE_TOUCH_POINTS",
+            "trendline_validation": "wick_anchor_no_obstruction_closed_body_validation",
+            "confidence": 0.91,
+            "lifecycle_state": "ACTIVE",
+        }
+    ]
+
+    registry = build_market_object_registry_v3(payload).as_dict()
+    trendlines = [
+        row
+        for row in registry["overlay_objects"]
+        if str(row.get("type", "")).endswith("_TRENDLINE")
+    ]
+
+    assert [row["type"] for row in trendlines] == ["RESISTANCE_TRENDLINE"]
+    assert trendlines[0]["line_points"] == published_points
+    assert trendlines[0]["trendline_touch_points"] == published_points
+    assert trendlines[0]["source_path"] == "tracking_summary.trendlines_v3[0]"
+
+
 def test_market_object_tracker_prefers_explicit_source_indices_for_history() -> None:
     registry = build_market_object_registry_v3(_sample_payload())
     payload = registry.as_dict()

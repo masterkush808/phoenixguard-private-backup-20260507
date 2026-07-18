@@ -393,7 +393,21 @@ def test_lstm_selector_uses_high_frequency_timeframe_on_faster_chart() -> None:
         if row["family"] == "lstm"
     ]
     assert len(public_lstm) == 1
-    assert public_lstm[0]["label"].startswith("LSTM")
+    assert public_lstm[0]["label"] == "12-step future blocks"
+    assert all(
+        token not in str(public_lstm[0]["label"]).lower()
+        for token in ("lstm", "model", "provider", "telemetry", "diagnostic")
+    )
+    assert set(public_lstm[0]).isdisjoint(
+        {
+            "source_agent",
+            "source_key",
+            "reason",
+            "forecast_engine",
+            "forecast_provider",
+            "forecast_provider_status",
+        }
+    )
 
 
 def test_compact_live_lstm_contract_strips_model_and_host_internals() -> None:
@@ -781,11 +795,18 @@ def test_operator_exposes_committed_scene_revision_without_flip_or_authority() -
     assert forecast["required_events"] == 2
     assert "BUY remains the committed forecast" in forecast["summary"]
     assert "SELL is under review" in forecast["summary"]
-    assert public_overlay["label"].startswith("Scene forecaster events")
+    assert public_overlay["label"] == "Visual outlook · change under review"
+    assert all(
+        token not in str(public_overlay["label"]).lower()
+        for token in ("scene", "forecaster", "model", "provider", "telemetry", "diagnostic")
+    )
     assert public_overlay["family"] == "scene_forecaster"
     assert public_overlay["forecast_status"] == "NO_EDGE"
     assert public_overlay["forecast_authorized"] is False
     assert set(public_overlay).isdisjoint(private_telemetry)
+    assert set(public_overlay).isdisjoint(
+        {"source_agent", "source_key", "reason", "role", "model_version"}
+    )
     assert public_overlay["forecast_anchor"]["source"] == "TRACKER_LATEST_CLOSED_CANDLE"
     scenarios = cast(list[dict[str, Any]], public_overlay["forecast_scenarios"])
     candidate = next(row for row in scenarios if row["candidate"])

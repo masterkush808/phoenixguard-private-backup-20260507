@@ -3652,13 +3652,22 @@ def _compact_playbook_ai_summary(value: Mapping[str, Any]) -> dict[str, Any]:
 def _compact_recent_studies(rows: Any, *, limit: int = 12) -> list[dict[str, Any]]:
     studies = _sequence_of_mappings(rows)
     compact_rows: list[dict[str, Any]] = []
-    for row in studies[-limit:]:
+    # Session history is canonical newest-first (capture commit inserts at 0).
+    # Taking the tail returned the oldest studies and made the public timeline
+    # appear stale even while captures advanced.
+    for row in studies[:limit]:
         compact_rows.append(
             {
                 key: row.get(key)
                 for key in (
                     "timestamp",
                     "created_at",
+                    "captured_at",
+                    "observed_at",
+                    "observed_epoch",
+                    "published_epoch",
+                    "frame_id",
+                    "source_capture_id",
                     "side",
                     "action",
                     "confidence",
@@ -3668,6 +3677,9 @@ def _compact_recent_studies(rows: Any, *, limit: int = 12) -> list[dict[str, Any
                     "execution_block_reason",
                     "state",
                     "packet_id",
+                    "entry_state",
+                    "market",
+                    "timeframe",
                 )
                 if row.get(key) not in (None, "", [], {})
             }
@@ -3914,6 +3926,8 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
         "rl_track_interval_sec",
         "status",
         "tracking_enabled",
+        "tracking_episode",
+        "tracking_episode_history",
         "created_at",
         "updated_at",
         "last_capture_at",
@@ -4012,6 +4026,8 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
         "rl_track_interval_sec",
         "status",
         "tracking_enabled",
+        "tracking_episode",
+        "tracking_episode_history",
         "created_at",
         "updated_at",
         "last_capture_at",

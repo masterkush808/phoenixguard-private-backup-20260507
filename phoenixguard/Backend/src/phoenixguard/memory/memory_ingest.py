@@ -27,6 +27,7 @@ Skills wired:
 from __future__ import annotations
 
 import hashlib
+from importlib import import_module
 import json
 import logging
 import os
@@ -41,7 +42,13 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
-from phoenixguard.core.utils import append_hash_chain, can_import_sentence_transformers_safely, setup_logger, utc_now_iso
+from phoenixguard.core.utils import (
+    append_hash_chain,
+    can_import_sentence_transformers_safely,
+    sentence_transformer_runtime_kwargs,
+    setup_logger,
+    utc_now_iso,
+)
 from phoenixguard.memory.memory_features import (
     build_late_interaction_tokens,
     build_metric_profile,
@@ -62,30 +69,51 @@ try:
 except ImportError:
     pass
 
-_FAISS_OK: bool = False
-try:
-    import faiss  # type: ignore[import-untyped]
-    _FAISS_OK = True  # type: ignore[misc]
-except ImportError:
-    pass
+_faiss_ok: bool = False
+_faiss_import_attempted: bool = False
+faiss: Any = None
 
 _ST_OK: bool = False
 SentenceTransformer = None  # type: ignore[assignment,misc]
 
-_SK_OK: bool = False
-try:
-    from sklearn.cluster import MiniBatchKMeans  # type: ignore[import-untyped]
-    _SK_OK = True  # type: ignore[misc]
-except ImportError:
-    MiniBatchKMeans = None  # type: ignore[assignment,misc]
+_sk_ok: bool = False
+_sk_import_attempted: bool = False
+mini_batch_kmeans: Any = None
 
-_TORCH_OK: bool = False
-try:
-    import torch as _torch_probe  # noqa: F401
-    _TORCH_OK = True  # type: ignore[misc]
-    del _torch_probe
-except Exception:
-    pass
+
+def _ensure_faiss() -> bool:
+    """Load the fallback index only when HNSW/numpy cannot serve the request."""
+
+    global _faiss_import_attempted, _faiss_ok, faiss
+    if _faiss_import_attempted:
+        return _faiss_ok
+    _faiss_import_attempted = True
+    try:
+        faiss = import_module("faiss")
+    except ImportError:
+        faiss = None
+        _faiss_ok = False
+    else:
+        _faiss_ok = True
+    return _faiss_ok
+
+
+def _ensure_sklearn() -> bool:
+    """Keep the offline clustering stack out of the live forecast cold path."""
+
+    global _sk_import_attempted, _sk_ok, mini_batch_kmeans
+    if _sk_import_attempted:
+        return _sk_ok
+    _sk_import_attempted = True
+    try:
+        cluster_module = import_module("sklearn.cluster")
+        mini_batch_kmeans = getattr(cluster_module, "MiniBatchKMeans")
+    except (AttributeError, ImportError):
+        mini_batch_kmeans = None
+        _sk_ok = False
+    else:
+        _sk_ok = True
+    return _sk_ok
 
 # ── constants ─────────────────────────────────────────────────────────────────
 EMBED_DIM = 384          # sentence-transformer all-MiniLM-L6-v2 output dim
@@ -513,9 +541,13 @@ class _EmbedderSingleton:
                     force_download = str(
                         os.getenv("PHOENIXGUARD_TEXT_EMBEDDER_FORCE_DOWNLOAD", "0") or "0"
                     ).strip().lower() in {"1", "true", "yes", "on"}
+                    constructor_kwargs = sentence_transformer_runtime_kwargs(
+                        allow_remote_bootstrap=allow_remote_bootstrap,
+                        force_download=force_download,
+                    )
                     cls._model = sentence_transformer_cls(  # type: ignore[operator]
                         model_name,
-                        local_files_only=bool(not allow_remote_bootstrap and not force_download),
+                        **constructor_kwargs,
                     )
                 except Exception:
                     cls._model = None
@@ -1256,7 +1288,7 @@ def _build_archetypes(
     Clustering — K-Means on combined embeddings.
     Prunes identical setups into single Archetype Nodes to save memory.
     """
-    if not _SK_OK:
+    if not _ensure_sklearn():
         if logger:
             logger.warning("scikit-learn unavailable; skipping archetype clustering.")
         return entries
@@ -1275,8 +1307,8 @@ def _build_archetypes(
             group[0].is_archetype_centroid = True
             return group
         try:
-            km = MiniBatchKMeans(n_clusters=n_clusters, random_state=808, n_init=5)  # type: ignore[operator]
-            km_any = cast(Any, km)
+            km = mini_batch_kmeans(n_clusters=n_clusters, random_state=808, n_init=5)
+            km_any = km
             labels: NDArray[np.int64] = np.asarray(km_any.fit_predict(X), dtype=np.int64)
             centroids: NDArray[np.float32] = np.asarray(km_any.cluster_centers_, dtype=np.float32)
             # Assign archetype IDs
@@ -1345,7 +1377,7 @@ class _HNSWIndex:
             self._index.add_items(vectors, list(range(n)))
             if logger:
                 logger.info("[HNSW] Built index with %d entries (M=%d, ef=%d)", n, HNSW_M, HNSW_EF_CONSTRUCTION)
-        elif _FAISS_OK:
+        elif _ensure_faiss():
             self._index = faiss.IndexFlatIP(self.dim)  # type: ignore[possibly-unbound]
             # Normalize for cosine similarity via inner product
             norms = np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -1381,7 +1413,7 @@ class _HNSWIndex:
             except Exception:
                 pass
 
-        if _FAISS_OK and hasattr(self._index, "search"):
+        if _ensure_faiss() and hasattr(self._index, "search"):
             try:
                 norm = np.linalg.norm(q)
                 q_norm = q / (norm + 1e-8)
@@ -1411,7 +1443,7 @@ class _HNSWIndex:
         path.mkdir(parents=True, exist_ok=True)
         if _HNSW_OK and hasattr(self._index, "save_index"):
             self._index.save_index(str(path / "hnsw.bin"))
-        elif _FAISS_OK and hasattr(self._index, "ntotal"):
+        elif _ensure_faiss() and hasattr(self._index, "ntotal"):
             faiss.write_index(self._index, str(path / "faiss.bin"))  # type: ignore[possibly-unbound]
         else:
             if isinstance(self._index, np.ndarray):
@@ -1433,7 +1465,7 @@ class _HNSWIndex:
                 return
             except Exception:
                 self._index = None
-        if _FAISS_OK and faiss_path.exists():
+        if faiss_path.exists() and _ensure_faiss():
             self._index = faiss.read_index(str(faiss_path))  # type: ignore[possibly-unbound]
         elif numpy_path.exists():
             self._index = np.load(str(numpy_path))
@@ -2148,9 +2180,9 @@ def main():
     logger.info("SELLS dir: %s (%s)", sells_dir, "EXISTS" if sells_dir.exists() else "MISSING")
     logger.info("Output   : %s", output_dir)
     logger.info("hnswlib  : %s", "OK" if _HNSW_OK else "MISSING (fallback mode)")
-    logger.info("faiss    : %s", "OK" if _FAISS_OK else "MISSING")
+    logger.info("faiss    : %s", "OK" if _faiss_ok else "DEFERRED")
     logger.info("ST       : %s", "OK" if _ST_OK else "MISSING (hash fallback)")
-    logger.info("sklearn  : %s", "OK" if _SK_OK else "MISSING (no clustering)")
+    logger.info("sklearn  : %s", "OK" if _sk_ok else "DEFERRED")
     logger.info("=" * 60)
 
     ingestor = MemoryIngestor(

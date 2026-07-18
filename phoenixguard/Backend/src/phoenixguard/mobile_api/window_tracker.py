@@ -30,6 +30,7 @@ from phoenixguard.core.decision_state import build_trade_intent, derive_state_ve
 
 from phoenixguard.core.config import RUNTIME
 from phoenixguard.core.utils import utc_now_iso
+from phoenixguard.paths import PROJECT_ROOT
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
@@ -64,7 +65,19 @@ from phoenixguard.runtime.realtime_performance_v3 import (
     CaptureWorkerV3Health,
     SessionAtomicWriterV3,
 )
-from phoenixguard.tracking.market_object_tracker_v3 import build_market_object_registry_v3
+from phoenixguard.tracking.market_object_tracker_v3 import (
+    build_market_object_registry_v3,
+    derive_trendline_overlays,
+)
+from phoenixguard.tracking.tracking_episode_v3 import (
+    advance_tracking_episode_v1,
+    default_tracking_episode_v1,
+    normalize_tracking_episode_v1,
+    start_tracking_episode_v1,
+    stop_tracking_episode_v1,
+    tracking_episode_readiness_v1,
+    update_tracking_episode_history_v1,
+)
 from phoenixguard.vision.broker_source_lock_v3 import build_broker_source_lock_v3
 from phoenixguard.vision.candle_palette_v3 import (
     build_candle_palette_masks,
@@ -110,7 +123,21 @@ _FORECAST_ACTION_POLL_AFTER_MS = 250
 _FORECAST_ACTION_MAX_PENDING = 4
 _FORECAST_ACTION_MAX_RETAINED = 128
 _FORECAST_ACTION_TERMINAL_STATUSES = frozenset({"ready", "degraded", "stale", "error"})
+
+
+def _forecast_action_timeout_sec() -> float:
+    try:
+        configured = float(os.getenv("PHOENIXGUARD_FORECAST_ACTION_TIMEOUT_SEC", "420"))
+    except (TypeError, ValueError):
+        configured = 420.0
+    if not math.isfinite(configured):
+        configured = 420.0
+    return min(1800.0, max(30.0, configured))
+
+
+_FORECAST_ACTION_TIMEOUT_SEC = _forecast_action_timeout_sec()
 _MEMORY_PROJECTION_WARMUP_LOCK = threading.Lock()
+_PHOENIXGUARD_MEMORY_BANK_LOAD_LOCK = threading.Lock()
 _memory_projection_warmup_started = False
 
 
@@ -2407,6 +2434,16 @@ def _forecast_snapshot_v3(
 
 def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact = dict(payload)
+    if "tracking_episode" in compact:
+        compact["tracking_episode"] = normalize_tracking_episode_v1(
+            compact.get("tracking_episode"),
+            session_id=str(compact.get("session_id", "") or ""),
+        )
+    if "tracking_episode_history" in compact:
+        compact["tracking_episode_history"] = update_tracking_episode_history_v1(
+            compact.get("tracking_episode_history"),
+            {},
+        )
     forecast_snapshot = _forecast_snapshot_v3(compact)
     if forecast_snapshot:
         compact["forecast_snapshot_v3"] = forecast_snapshot
@@ -2449,6 +2486,8 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "session_id",
         "status",
         "tracking_enabled",
+        "tracking_episode",
+        "tracking_episode_history",
         "capture_count",
         "frame_index",
         "chart_frame_id",
@@ -4718,7 +4757,12 @@ def _load_phoenixguard_memory_bank_cached(bank_dir: str, fingerprint: tuple[int,
 
 def _load_phoenixguard_memory_bank(bank_dir: Path) -> Any | None:
     resolved = bank_dir.resolve()
-    return _load_phoenixguard_memory_bank_cached(str(resolved), _memory_bank_cache_fingerprint(resolved))
+    fingerprint = _memory_bank_cache_fingerprint(resolved)
+    # ``lru_cache`` is coherent but may execute the same uncached call twice
+    # when warmup and an operator click arrive together.  Serializing only the
+    # cold load prevents two native model stacks from competing for memory.
+    with _PHOENIXGUARD_MEMORY_BANK_LOAD_LOCK:
+        return _load_phoenixguard_memory_bank_cached(str(resolved), fingerprint)
 
 
 def _resolve_memory_source_path(image_path: Any) -> Path:
@@ -5800,7 +5844,15 @@ def _regression_slope(values: Sequence[float]) -> float:
     return float(slope)
 
 
-def _study_entry(signal: Mapping[str, Any], tracking: Mapping[str, Any]) -> dict[str, Any]:
+def _study_entry(
+    signal: Mapping[str, Any],
+    tracking: Mapping[str, Any],
+    *,
+    captured_at: str = "",
+    published_at: str = "",
+    frame_id: int = 0,
+    source_capture_id: str = "",
+) -> dict[str, Any]:
     decision_kernel = _mapping_to_dict(signal.get("decision_kernel", {}))
     high_frequency = _mapping_to_dict(signal.get("high_frequency_forecast", tracking.get("high_frequency_forecast", {})))
     two_candle_study = _mapping_to_dict(signal.get("two_candle_study", tracking.get("two_candle_study", {})))
@@ -5812,8 +5864,35 @@ def _study_entry(signal: Mapping[str, Any], tracking: Mapping[str, Any]) -> dict
         tracking.get("support_resistance_context", signal.get("support_resistance_context", {}))
     )
     execution_timing = _mapping_to_dict(tracking.get("execution_timing", signal.get("execution_timing", {})))
+    observed_at = str(
+        captured_at
+        or signal.get("capture_started_at")
+        or signal.get("observed_at")
+        or _now_iso()
+    )
+    created_at = str(
+        published_at
+        or signal.get("published_at")
+        or signal.get("timestamp")
+        or observed_at
+    )
+    observed_epoch = _float_or(
+        signal.get("capture_started_epoch", signal.get("observed_epoch", 0.0)),
+        0.0,
+    )
+    published_epoch = _float_or(
+        signal.get("published_epoch", signal.get("created_epoch", 0.0)),
+        0.0,
+    )
     return {
-        "captured_at": _now_iso(),
+        "timestamp": created_at,
+        "created_at": created_at,
+        "captured_at": observed_at,
+        "observed_at": observed_at,
+        "observed_epoch": observed_epoch,
+        "published_epoch": published_epoch,
+        "frame_id": max(0, int(frame_id or 0)),
+        "source_capture_id": str(source_capture_id or ""),
         "action": str(signal.get("action", "HOLD") or "HOLD"),
         "execution_action": str(signal.get("execution_action", "HOLD") or "HOLD"),
         "entry_state": str(signal.get("entry_state", "WAIT") or "WAIT"),
@@ -11916,8 +11995,18 @@ class PhoenixGuardWindowTrackingAdapter:
                 previous_signal.get("focus_timeframe", previous_tracking.get("detected_timeframe", ""))
                 or ""
             ).upper()
+            cached_timeframe_confidence = _clip01(
+                previous_signal.get(
+                    "focus_timeframe_confidence",
+                    previous_tracking.get("timeframe_confidence", 0.0),
+                )
+            )
+            minimum_cached_timeframe_confidence = _clip01(
+                selector_execution_controls.get("min_timeframe_confidence", 0.42)
+            )
             cached_timeframe_reusable = bool(
                 cached_timeframe
+                and cached_timeframe_confidence >= minimum_cached_timeframe_confidence
                 and not market_selector_visual_changed
                 and not previous_market_selector_rebind_pending
                 and not force_market_selector_scan
@@ -11935,7 +12024,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 {
                     "value": cached_timeframe,
                     "source": "live_cached_selector",
-                    "confidence": _clip01(previous_signal.get("focus_timeframe_confidence", previous_tracking.get("timeframe_confidence", 0.0))),
+                    "confidence": cached_timeframe_confidence,
                 }
                 if cached_timeframe_reusable
                 else {}
@@ -18233,6 +18322,7 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["chart_region"] = dict(chart_region)
             tracking["display_region"] = dict(chart_region)
             tracking["tracked_candles"] = candles
+            tracking["trendlines_v3"] = derive_trendline_overlays(candles)
             tracking["detected_timeframe"] = timeframe
             tracking["timeframe_source"] = timeframe_source
             tracking["timeframe_confidence"] = timeframe_confidence
@@ -18698,6 +18788,7 @@ class PhoenixGuardWindowTrackingAdapter:
         projection["next_behavior_state"] = str(behavior_payload.get("next_most_likely_state", "sideways_pause") or "sideways_pause")
         projection["decision_kernel"] = decision_kernel
         tracked_public = candles[-36:]
+        trendlines_v3 = derive_trendline_overlays(tracked_public)
 
         reasons = [
             f"global {global_direction} slope {global_slope:+.3f}",
@@ -18769,6 +18860,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "recent_price_momentum": impulse_delta,
             "overlay_kind": setup,
             "tracked_candles": tracked_public,
+            "trendlines_v3": trendlines_v3,
             "historical_structure": historical_structure,
             "support_resistance_zones": support_resistance_zones,
             "support_resistance_context": support_resistance_context,
@@ -21633,8 +21725,6 @@ class PhoenixGuardWindowTrackingAdapter:
                 else hold_rgb
             ),
         }
-        action_rgb = role_colors["current"]
-
         label_font = _overlay_font(max(11, int(round(surface_image.width * 0.011))), bold=True)
         caption_font = _overlay_font(max(10, int(round(surface_image.width * 0.0095))), bold=False)
 
@@ -21645,28 +21735,9 @@ class PhoenixGuardWindowTrackingAdapter:
             width=2,
         )
 
-        tracked_candles = [dict(item) for item in cast(Sequence[Any], tracking_summary.get("tracked_candles", []))]
-        self._draw_regression_line(
-            draw,
-            tracked_candles,
-            _rgba(role_colors["global"], 232),
-            offset=(chart_offset_x, chart_offset_y),
-            bounds=chart_box,
-        )
-        self._draw_regression_line(
-            draw,
-            tracked_candles[-8:],
-            _rgba(role_colors["local"], 236),
-            offset=(chart_offset_x, chart_offset_y),
-            bounds=chart_box,
-        )
-        self._draw_regression_line(
-            draw,
-            tracked_candles[-4:],
-            _rgba(action_rgb, 244),
-            offset=(chart_offset_x, chart_offset_y),
-            bounds=chart_box,
-        )
+        # Trendlines are published as validated, toggleable ``trendlines_v3``
+        # objects.  Do not paint unrelated center-price regression lines into
+        # the base raster; the interactive canonical layer owns visibility.
         if bool(layer_visibility.get("historical_replay", False)):
             self._draw_historical_structure_layer(
                 draw,
@@ -22628,6 +22699,147 @@ class PhoenixGuardWindowTrackingAdapter:
 
         return masks
 
+    @staticmethod
+    def _compact_timeframe_shape_hint(text_mask: ArrayND) -> tuple[str, float]:
+        """Decode tiny M1/M3/M5 badges whose antialiasing defeats font templates.
+
+        Pocket Option renders the selected timeframe at roughly seven pixels
+        high in a 1080p capture.  At that size the ``M`` and digit often merge
+        into one connected component.  This topology check uses the three
+        horizontal digit bars and upper/lower side strokes instead of trying
+        to invent OCR confidence from an enlarged blur.
+        """
+
+        if text_mask.ndim != 2 or text_mask.size == 0:
+            return "", 0.0
+        binary = np.asarray(text_mask > 0, dtype=np.uint8)
+        occupied_rows = np.flatnonzero(np.any(binary > 0, axis=1))
+        occupied_columns = np.flatnonzero(np.any(binary > 0, axis=0))
+        if occupied_rows.size < 5 or occupied_columns.size < 6:
+            return "", 0.0
+        binary = binary[
+            int(occupied_rows[0]) : int(occupied_rows[-1]) + 1,
+            int(occupied_columns[0]) : int(occupied_columns[-1]) + 1,
+        ]
+        height, width = int(binary.shape[0]), int(binary.shape[1])
+        if height < 5 or width < 6:
+            return "", 0.0
+
+        column_ink = np.sum(binary > 0, axis=0)
+        separator_limit = max(1, int(round(height * 0.18)))
+        separator_columns = [
+            index
+            for index, ink in enumerate(column_ink.tolist())
+            if 2 <= index <= width - 3 and int(ink) <= separator_limit
+        ]
+        if not separator_columns:
+            return "", 0.0
+        # Prefer a separator near the middle while keeping enough pixels for
+        # both the prefix and the digit.  This rejects isolated icon strokes.
+        separator = min(
+            separator_columns,
+            key=lambda index: abs(float(index) / float(max(1, width - 1)) - 0.58),
+        )
+        prefix = binary[:, :separator]
+        digit = binary[:, separator + 1 :]
+
+        def trim_columns(value: NDArray[np.uint8]) -> NDArray[np.uint8]:
+            columns = np.flatnonzero(np.any(value > 0, axis=0))
+            if columns.size == 0:
+                return value[:, :0]
+            return value[:, int(columns[0]) : int(columns[-1]) + 1]
+
+        prefix = trim_columns(prefix)
+        digit = trim_columns(digit)
+        if prefix.shape[1] < 3 or digit.shape[1] < 2:
+            return "", 0.0
+
+        prefix_left = _array_mean_float(
+            np.any(prefix[:, : min(2, prefix.shape[1])] > 0, axis=1)
+        )
+        prefix_right = _array_mean_float(
+            np.any(prefix[:, -min(2, prefix.shape[1]) :] > 0, axis=1)
+        )
+        upper_rows = prefix[: max(2, height // 2), :]
+        upper_inner = (
+            _array_mean_float(upper_rows[:, 1:-1] > 0)
+            if upper_rows.shape[1] > 2
+            else 0.0
+        )
+        m_prefix_score = _clip01(
+            0.42 * prefix_left
+            + 0.42 * prefix_right
+            + 0.16 * _clip01(upper_inner * 2.2)
+        )
+        if m_prefix_score < 0.68:
+            return "", 0.0
+
+        digit_height, digit_width = int(digit.shape[0]), int(digit.shape[1])
+        if digit_height < 5 or digit_width < 2:
+            return "", 0.0
+        top_end = max(1, int(math.ceil(digit_height * 0.28)))
+        middle_start = max(1, int(math.floor(digit_height * 0.30)))
+        middle_end = min(digit_height, max(middle_start + 1, int(math.ceil(digit_height * 0.70))))
+        bottom_start = min(digit_height - 1, max(0, int(math.floor(digit_height * 0.72))))
+
+        def strongest_row(start: int, end: int) -> float:
+            rows = digit[start:end, :]
+            if rows.size == 0:
+                return 0.0
+            return max(_array_mean_float(row > 0) for row in rows)
+
+        top_bar = _clip01(strongest_row(0, top_end) * 1.6)
+        middle_bar = _clip01(strongest_row(middle_start, middle_end) * 1.35)
+        bottom_bar = _clip01(strongest_row(bottom_start, digit_height) * 1.35)
+        upper_body = digit[1:max(2, digit_height // 2), :]
+        lower_body = digit[max(1, digit_height // 2) : max(2, digit_height - 1), :]
+
+        def side_stroke(rows: NDArray[np.uint8], *, right: bool) -> float:
+            if rows.size == 0:
+                return 0.0
+            edge_width = min(2, int(rows.shape[1]))
+            edge = rows[:, -edge_width:] if right else rows[:, :edge_width]
+            return _array_mean_float(np.any(edge > 0, axis=1))
+
+        upper_left = side_stroke(upper_body, right=False)
+        upper_right = side_stroke(upper_body, right=True)
+        lower_left = side_stroke(lower_body, right=False)
+        lower_right = side_stroke(lower_body, right=True)
+        digit_scores = {
+            "1": _clip01(
+                0.58 * max(upper_right, lower_right)
+                + 0.24 * (1.0 - middle_bar)
+                + 0.18 * (1.0 - max(upper_left, lower_left))
+            ),
+            "3": _clip01(
+                0.20 * top_bar
+                + 0.20 * middle_bar
+                + 0.20 * bottom_bar
+                + 0.20 * upper_right
+                + 0.20 * lower_right
+            ),
+            "5": _clip01(
+                0.17 * top_bar
+                + 0.17 * middle_bar
+                + 0.17 * bottom_bar
+                + 0.18 * upper_left
+                + 0.18 * lower_right
+                + 0.065 * (1.0 - upper_right)
+                + 0.065 * (1.0 - lower_left)
+            ),
+        }
+        ranked_digits = sorted(digit_scores.items(), key=lambda item: item[1], reverse=True)
+        digit_label, digit_score = ranked_digits[0]
+        digit_margin = digit_score - ranked_digits[1][1]
+        if digit_score < 0.68 or digit_margin < 0.06:
+            return "", 0.0
+        confidence = _clip01(
+            0.58 * digit_score
+            + 0.28 * m_prefix_score
+            + 0.14 * _clip01(digit_margin * 3.0)
+        )
+        return f"M{digit_label}", confidence
+
     def _score_timeframe_label(self, text_mask: ArrayND) -> tuple[str, float]:
         if text_mask.ndim != 2 or text_mask.size == 0:
             return "", 0.0
@@ -22775,6 +22987,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 second_best = label_best
         margin = max(0.0, best_score - second_best)
         confidence = _clip01(0.76 * best_score + 0.34 * margin)
+        shape_label, shape_confidence = self._compact_timeframe_shape_hint(text_mask)
+        if shape_label and shape_confidence > confidence:
+            return shape_label, shape_confidence
         return best_label, confidence
 
 
@@ -22807,11 +23022,16 @@ class ContinuousWindowTrackerService:
         tracking_adapter: object | None = None,
         focus_selector_backend: FocusSelectionBackend | None = None,
         execution_backend: BrokerExecutionBackend | None = None,
+        tracking_episode_archive_root: Path | None = None,
     ) -> None:
         self.observer_service = observer_service
         self.root_dir = Path(root_dir or (RUNTIME.data_dir / "window_tracker"))
         self.sessions_dir = self.root_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.tracking_episode_archive_root = self._resolve_tracking_episode_archive_root(
+            tracking_episode_archive_root
+        )
+        self.tracking_episode_archive_root.mkdir(parents=True, exist_ok=True)
         self.capture_backend = cast(WindowCaptureBackend, capture_backend or WindowsWindowCaptureBackend())
         self.tracking_adapter = cast(WindowTrackingAdapter, tracking_adapter or PhoenixGuardWindowTrackingAdapter())
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
@@ -22853,9 +23073,48 @@ class ContinuousWindowTrackerService:
         self._start_emergency_hotkey_listener()
         self._start_memory_projection_warmup()
 
+    def _resolve_tracking_episode_archive_root(
+        self,
+        configured_root: Path | None,
+    ) -> Path:
+        """Keep episode memory outside launcher-cleaned runtime authority state."""
+
+        explicit = str(
+            configured_root
+            or os.getenv("PHOENIXGUARD_TRACKING_EPISODE_ARCHIVE_DIR", "")
+            or ""
+        ).strip()
+        if explicit:
+            return Path(explicit).expanduser()
+        runtime_roots = [PROJECT_ROOT / "runtime" / "live"]
+        configured_runtime = str(os.getenv("PHOENIXGUARD_RUNTIME_DIR", "") or "").strip()
+        if configured_runtime:
+            runtime_roots.append(Path(configured_runtime).expanduser())
+        root_resolved = self.root_dir.expanduser().resolve()
+        for runtime_root in runtime_roots:
+            try:
+                root_resolved.relative_to(runtime_root.expanduser().resolve())
+            except ValueError:
+                continue
+            return (
+                PROJECT_ROOT
+                / "data"
+                / "mobile_api"
+                / "window_tracker"
+                / "tracking_episode_archive_v1"
+            )
+        # Isolated/test service roots receive a sibling mirror, allowing a new
+        # ephemeral root to reuse the same explicit archive during restart tests.
+        return self.root_dir.parent / "tracking_episode_archive_v1"
+
     def _start_memory_projection_warmup(self) -> None:
         """Start one non-blocking process-local memory-bank warmup when supported."""
 
+        if not bool(RUNTIME.background_warmup_on_launch):
+            LOGGER.info(
+                "PhoenixGuard memory projection warmup deferred; the resident model will load on first use."
+            )
+            return
         warmup = getattr(self.tracking_adapter, "warmup_memory_projection", None)
         if not callable(warmup):
             return
@@ -22880,6 +23139,12 @@ class ContinuousWindowTrackerService:
             warmup()
         except Exception:
             LOGGER.exception("PhoenixGuard memory projection warmup failed; on-demand forecasting remains available.")
+
+    @property
+    def memory_projection_warmup_started(self) -> bool:
+        """Whether this service scheduled the configured background warmup."""
+
+        return self._memory_projection_warmup_thread is not None
 
     @property
     def lock(self) -> Any:
@@ -23010,6 +23275,264 @@ class ContinuousWindowTrackerService:
 
     def _event_log_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
+
+    def _tracking_episode_record_path(
+        self,
+        session_id: str,
+        episode_id: str,
+    ) -> Path:
+        return (
+            self._session_dir(session_id)
+            / "tracking_episodes"
+            / f"{_slugify(episode_id, 'episode')}.json"
+        )
+
+    def _tracking_episode_ledger_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "tracking_episode_events.jsonl"
+
+    def _tracking_episode_state_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "tracking_episode_state.json"
+
+    def _durable_tracking_episode_session_dir(self, session_id: str) -> Path:
+        return self.tracking_episode_archive_root / "sessions" / _slugify(
+            session_id,
+            "session",
+        )
+
+    def _durable_tracking_episode_record_path(
+        self,
+        session_id: str,
+        episode_id: str,
+    ) -> Path:
+        return (
+            self._durable_tracking_episode_session_dir(session_id)
+            / "episodes"
+            / f"{_slugify(episode_id, 'episode')}.json"
+        )
+
+    def _durable_tracking_episode_history_path(self, session_id: str) -> Path:
+        return self._durable_tracking_episode_session_dir(session_id) / "history.json"
+
+    def _durable_tracking_episode_ledger_path(self, session_id: str) -> Path:
+        return self._durable_tracking_episode_session_dir(session_id) / "events.jsonl"
+
+    def _load_durable_tracking_episode_history(
+        self,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        raw = _mapping_to_dict(
+            _read_json(self._durable_tracking_episode_history_path(session_id), {})
+        )
+        return update_tracking_episode_history_v1(raw.get("episodes"), {})
+
+    def _merge_tracking_episode_history(
+        self,
+        session_id: str,
+        history: Any,
+    ) -> list[dict[str, Any]]:
+        combined = [
+            *update_tracking_episode_history_v1(history, {}),
+            *self._load_durable_tracking_episode_history(session_id),
+        ]
+        unique: dict[str, dict[str, Any]] = {}
+        for row in combined:
+            episode_id = str(row.get("episode_id", "") or "").strip()
+            if not episode_id:
+                continue
+            previous = unique.get(episode_id)
+            if previous is None or int(row.get("revision", 0) or 0) >= int(
+                previous.get("revision", 0) or 0
+            ):
+                unique[episode_id] = dict(row)
+        rows = list(unique.values())
+        rows.sort(
+            key=lambda row: str(
+                row.get("ended_at", row.get("started_at", "")) or ""
+            ),
+            reverse=True,
+        )
+        return rows[:24]
+
+    def _persist_durable_tracking_episode_transition(
+        self,
+        session_id: str,
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+        *,
+        source: str,
+    ) -> None:
+        """Mirror episode evidence outside ephemeral live-runtime cleanup."""
+
+        before_episode = normalize_tracking_episode_v1(
+            before,
+            session_id=session_id,
+        )
+        after_episode = normalize_tracking_episode_v1(
+            after,
+            session_id=session_id,
+        )
+        episode_id = str(after_episode.get("episode_id", "") or "").strip()
+        if not episode_id:
+            return
+        before_revision = int(before_episode.get("revision", 0) or 0)
+        after_revision = int(after_episode.get("revision", 0) or 0)
+        if (
+            str(before_episode.get("episode_id", "") or "") == episode_id
+            and before_revision == after_revision
+        ):
+            return
+        record_path = self._durable_tracking_episode_record_path(
+            session_id,
+            episode_id,
+        )
+        _write_json_atomic(record_path, after_episode)
+        ledger_path = self._durable_tracking_episode_ledger_path(session_id)
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        transition = {
+            "schema_version": "PG_TRACKING_EPISODE_TRANSITION_V1",
+            "timestamp": str(after_episode.get("updated_at", "") or _now_iso()),
+            "session_id": str(session_id),
+            "episode_id": episode_id,
+            "source": str(source or "episode_transition"),
+            "from_state": str(before_episode.get("state", "IDLE") or "IDLE"),
+            "to_state": str(after_episode.get("state", "IDLE") or "IDLE"),
+            "revision": after_revision,
+            "event_cursor": int(after_episode.get("event_cursor", 0) or 0),
+            "terminal_reason": str(after_episode.get("terminal_reason", "") or ""),
+        }
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(transition, sort_keys=True) + "\n")
+        self._prune_session_event_log(ledger_path)
+
+        terminal_history = update_tracking_episode_history_v1([], after_episode)
+        if terminal_history:
+            history_path = self._durable_tracking_episode_history_path(session_id)
+            history = self._merge_tracking_episode_history(
+                session_id,
+                terminal_history,
+            )
+            _write_json_atomic(
+                history_path,
+                {
+                    "schema_version": "PG_TRACKING_EPISODE_ARCHIVE_V1",
+                    "session_id": str(session_id),
+                    "episodes": history,
+                    "updated_at": str(after_episode.get("updated_at", "") or _now_iso()),
+                },
+            )
+
+        episode_dir = record_path.parent
+        records = sorted(
+            episode_dir.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for old_record in records[24:]:
+            try:
+                old_record.unlink()
+            except OSError:
+                LOGGER.warning(
+                    "Unable to prune old durable tracking episode record %s.",
+                    old_record,
+                )
+
+    def _persist_tracking_episode_transition(
+        self,
+        session_id: str,
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+        *,
+        source: str,
+    ) -> None:
+        before_episode = normalize_tracking_episode_v1(
+            before,
+            session_id=session_id,
+        )
+        after_episode = normalize_tracking_episode_v1(
+            after,
+            session_id=session_id,
+        )
+        episode_id = str(after_episode.get("episode_id", "") or "").strip()
+        if not episode_id:
+            return
+        before_revision = int(before_episode.get("revision", 0) or 0)
+        after_revision = int(after_episode.get("revision", 0) or 0)
+        if (
+            str(before_episode.get("episode_id", "") or "") == episode_id
+            and before_revision == after_revision
+        ):
+            return
+        try:
+            state_snapshot = {
+                key: after_episode.get(key)
+                for key in (
+                    "schema_version",
+                    "session_id",
+                    "episode_id",
+                    "state",
+                    "revision",
+                    "event_cursor",
+                    "event_horizon",
+                    "started_at",
+                    "updated_at",
+                    "stopped_at",
+                    "completed_at",
+                    "terminal_reason",
+                    "pair",
+                    "timeframe",
+                    "permission",
+                )
+            }
+            _write_json_atomic(
+                self._tracking_episode_state_path(session_id),
+                state_snapshot,
+            )
+            record_path = self._tracking_episode_record_path(
+                session_id,
+                episode_id,
+            )
+            _write_json_atomic(record_path, after_episode)
+            ledger_path = self._tracking_episode_ledger_path(session_id)
+            ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            events = [
+                dict(cast(Mapping[str, Any], item))
+                for item in cast(Sequence[Any], after_episode.get("events", []))
+                if isinstance(item, Mapping)
+            ]
+            latest_event = events[-1] if events else {}
+            transition = {
+                "schema_version": "PG_TRACKING_EPISODE_TRANSITION_V1",
+                "timestamp": str(after_episode.get("updated_at", "") or _now_iso()),
+                "session_id": str(session_id),
+                "episode_id": episode_id,
+                "source": str(source or "episode_transition"),
+                "from_state": str(before_episode.get("state", "IDLE") or "IDLE"),
+                "to_state": str(after_episode.get("state", "IDLE") or "IDLE"),
+                "revision": after_revision,
+                "event_cursor": int(after_episode.get("event_cursor", 0) or 0),
+                "event_id": str(latest_event.get("event_id", "") or ""),
+                "terminal_reason": str(after_episode.get("terminal_reason", "") or ""),
+            }
+            with ledger_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(transition, sort_keys=True) + "\n")
+            self._prune_session_event_log(ledger_path)
+        except Exception:
+            LOGGER.exception(
+                "Unable to persist tracking episode transition for %s.",
+                session_id,
+            )
+        try:
+            self._persist_durable_tracking_episode_transition(
+                session_id,
+                before_episode,
+                after_episode,
+                source=source,
+            )
+        except Exception:
+            LOGGER.exception(
+                "Unable to persist durable tracking episode transition for %s.",
+                session_id,
+            )
 
     def _prune_session_event_log(self, path: Path) -> None:
         try:
@@ -25250,6 +25773,14 @@ class ContinuousWindowTrackerService:
             "observer_policy": dict(_mapping_to_dict(raw.get("observer_policy", {}))),
             "status": status,
             "tracking_enabled": tracking_enabled,
+            "tracking_episode": normalize_tracking_episode_v1(
+                raw.get("tracking_episode"),
+                session_id=session_id,
+            ),
+            "tracking_episode_history": self._merge_tracking_episode_history(
+                session_id,
+                raw.get("tracking_episode_history"),
+            ),
             "created_at": str(raw.get("created_at", "") or _now_iso()),
             "updated_at": str(raw.get("updated_at", "") or _now_iso()),
             "last_capture_started_at": str(raw.get("last_capture_started_at", "") or ""),
@@ -25436,6 +25967,14 @@ class ContinuousWindowTrackerService:
                 "observer_policy": dict(observer_policy or {}),
                 "status": "awaiting_focus",
                 "tracking_enabled": False,
+                "tracking_episode": default_tracking_episode_v1(
+                    session_id=normalized_session_id
+                ),
+                # Only terminal summaries cross a launcher/runtime restart.
+                # Live episode permission always starts IDLE in a new session.
+                "tracking_episode_history": self._load_durable_tracking_episode_history(
+                    normalized_session_id
+                ),
                 "created_at": _now_iso(),
                 "updated_at": _now_iso(),
                 "last_capture_at": "",
@@ -26028,6 +26567,124 @@ class ContinuousWindowTrackerService:
                     return candidate
 
         raise FileNotFoundError(kind)
+
+    def get_tracking_episode(self, session_id: str) -> dict[str, Any]:
+        payload = self._require_session(session_id)
+        return normalize_tracking_episode_v1(
+            payload.get("tracking_episode"),
+            session_id=str(payload.get("session_id", session_id) or session_id),
+        )
+
+    def get_tracking_episode_readiness(self, session_id: str) -> dict[str, Any]:
+        payload = self._require_session(session_id)
+        readiness = tracking_episode_readiness_v1(payload)
+        readiness["schema_version"] = "PG_TRACKING_EPISODE_READINESS_V1"
+        readiness["session_id"] = str(
+            payload.get("session_id", session_id) or session_id
+        )
+        readiness["current"] = normalize_tracking_episode_v1(
+            payload.get("tracking_episode"),
+            session_id=str(payload.get("session_id", session_id) or session_id),
+        )
+        return readiness
+
+    def start_tracking_episode(self, session_id: str) -> dict[str, Any]:
+        """Start a user episode without changing capture-worker lifecycle state."""
+
+        normalized_session_id = str(session_id or "").strip()
+        with self._session_commit_lock_for(normalized_session_id):
+            payload = self._require_session(normalized_session_id)
+            normalized_session_id = str(
+                payload.get("session_id", normalized_session_id)
+                or normalized_session_id
+            )
+            before = normalize_tracking_episode_v1(
+                payload.get("tracking_episode"),
+                session_id=normalized_session_id,
+            )
+            now_iso = _now_iso()
+            after = start_tracking_episode_v1(
+                before,
+                payload,
+                episode_id=f"episode-{uuid4().hex}",
+                now_iso=now_iso,
+            )
+            if after == before:
+                return after
+            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
+                payload.get("tracking_episode_history"),
+                before,
+            )
+            payload["tracking_episode"] = after
+            payload["updated_at"] = now_iso
+            payload["__control_write_v3"] = True
+            self._save_session(payload)
+            self._persist_tracking_episode_transition(
+                normalized_session_id,
+                before,
+                after,
+                source="start_tracking",
+            )
+            self._write_session_event_log(
+                normalized_session_id,
+                "tracking_episode_started",
+                episode_id=str(after.get("episode_id", "") or ""),
+                event_horizon=int(after.get("event_horizon", 12) or 12),
+                state=str(after.get("state", "ACTIVE") or "ACTIVE"),
+            )
+            return after
+
+    def stop_tracking_episode(
+        self,
+        session_id: str,
+        *,
+        reason: str = "manual_stop",
+    ) -> dict[str, Any]:
+        """Stop only the user episode; workers, models, cache, and history stay warm."""
+
+        normalized_session_id = str(session_id or "").strip()
+        with self._session_commit_lock_for(normalized_session_id):
+            payload = self._require_session(normalized_session_id)
+            normalized_session_id = str(
+                payload.get("session_id", normalized_session_id)
+                or normalized_session_id
+            )
+            before = normalize_tracking_episode_v1(
+                payload.get("tracking_episode"),
+                session_id=normalized_session_id,
+            )
+            now_iso = _now_iso()
+            after = stop_tracking_episode_v1(
+                before,
+                session_id=normalized_session_id,
+                now_iso=now_iso,
+                reason=reason,
+            )
+            if after == before:
+                return after
+            payload["tracking_episode"] = after
+            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
+                payload.get("tracking_episode_history"),
+                after,
+            )
+            payload["updated_at"] = now_iso
+            payload["__control_write_v3"] = True
+            self._save_session(payload)
+            self._persist_tracking_episode_transition(
+                normalized_session_id,
+                before,
+                after,
+                source="stop_tracking",
+            )
+            self._write_session_event_log(
+                normalized_session_id,
+                "tracking_episode_stopped",
+                episode_id=str(after.get("episode_id", "") or ""),
+                event_cursor=int(after.get("event_cursor", 0) or 0),
+                state=str(after.get("state", "STOPPED") or "STOPPED"),
+                reason=str(reason or "manual_stop"),
+            )
+            return after
 
     def start_session(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -27055,6 +27712,15 @@ class ContinuousWindowTrackerService:
             latest_request_id = self._latest_forecast_action.get((session_id, mode), "")
             if request_id and latest_request_id != request_id:
                 return self._stale_projection_payload(projection_payload, mode=mode), False
+            if request_id:
+                action = self._forecast_actions.get(request_id)
+                if action is None or (
+                    bool(action.get("terminal", False))
+                    and str(action.get("status", "") or "").lower() == "error"
+                ):
+                    # A timed-out or shutdown action must never publish a late
+                    # forecast into a newer live session revision.
+                    return self._stale_projection_payload(projection_payload, mode=mode), False
             source_current = self._projection_source_is_current(
                 payload,
                 frame_index=source_frame_index,
@@ -27321,7 +27987,32 @@ class ContinuousWindowTrackerService:
         # the compare-and-swap check and lets the dashboard retry the newest
         # frame when necessary.
         if not bool(action.get("terminal", False)):
-            return
+            created_epoch = self._forecast_action_created_epoch.get(request_id, 0.0)
+            if (
+                created_epoch > 0.0
+                and (_now_epoch() - created_epoch) >= _FORECAST_ACTION_TIMEOUT_SEC
+            ):
+                future = self._forecast_action_futures.get(request_id)
+                if future is not None:
+                    future.cancel()
+                action.update(
+                    {
+                        "status": "error",
+                        "terminal": True,
+                        "is_current": False,
+                        "snapshot_ready": False,
+                        "snapshot_status": "TIMED_OUT",
+                        "trade_authorized": False,
+                        "completed_at": _now_iso(),
+                        "summary": (
+                            "Forecast initialization exceeded the safe time limit. "
+                            "Live chart tracking is still running; retry after warmup."
+                        ),
+                    }
+                )
+                return
+            else:
+                return
         source_chart_path = str(action.get("source_chart_path", "") or "")
         try:
             source_artifact_available = bool(source_chart_path and Path(source_chart_path).is_file())
@@ -27429,6 +28120,14 @@ class ContinuousWindowTrackerService:
         with self._lock:
             action = self._forecast_actions.get(snapshot.request_id)
             if action is None:
+                return
+            if (
+                bool(action.get("terminal", False))
+                and str(action.get("status", "") or "").lower() == "error"
+            ):
+                # Polling may have expired this immutable request while a
+                # native model call was completing.  Keep the sanitized
+                # timeout result and reject this late completion.
                 return
             latest_request_id = self._latest_forecast_action.get(
                 (snapshot.session_id, snapshot.mode),
@@ -32132,11 +32831,32 @@ class ContinuousWindowTrackerService:
             for item in cast(Sequence[Any], payload.get("recent_studies", []))
             if isinstance(item, Mapping)
         ]
-        history.insert(0, _study_entry(latest_signal, tracking_summary))
+        history.insert(
+            0,
+            _study_entry(
+                latest_signal,
+                tracking_summary,
+                captured_at=capture_started_iso,
+                published_at=published_at,
+                frame_id=frame_index,
+                source_capture_id=(
+                    f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
+                    f"{int(capture_started_epoch * 1000.0)}"
+                ),
+            ),
+        )
         history = history[:24]
 
         with self._session_commit_lock_for(str(payload["session_id"])):
             persisted_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {}))
+            episode_before_commit = normalize_tracking_episode_v1(
+                persisted_payload.get("tracking_episode"),
+                session_id=str(payload["session_id"]),
+            )
+            # Start/Stop controls may commit while this capture is in flight.
+            # The persisted episode is authoritative under the same lock, so a
+            # stale capture can neither reopen a stopped episode nor erase it.
+            payload["tracking_episode"] = episode_before_commit
             persisted_last_capture_epoch = _float_or(persisted_payload.get("last_capture_epoch", 0.0), 0.0)
             if persisted_last_capture_epoch > float(published_epoch) + 0.001:
                 LOGGER.warning(
@@ -32286,7 +33006,23 @@ class ContinuousWindowTrackerService:
                 "log_path": str(self._event_log_path(str(payload["session_id"]))),
                 "updated_at": published_at,
             }
+            episode_after_commit = advance_tracking_episode_v1(
+                episode_before_commit,
+                payload,
+                now_iso=published_at,
+            )
+            payload["tracking_episode"] = episode_after_commit
+            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
+                persisted_payload.get("tracking_episode_history"),
+                episode_after_commit,
+            )
             self._save_session(payload)
+            self._persist_tracking_episode_transition(
+                str(payload["session_id"]),
+                episode_before_commit,
+                episode_after_commit,
+                source="atomic_capture_commit",
+            )
             mark_stage("persist_session")
             self._write_session_event_log(
                 str(payload["session_id"]),
@@ -32816,6 +33552,14 @@ class ContinuousWindowTrackerService:
     def _public_session_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         public = _synchronize_session_versions(payload)
         session_id = str(public.get("session_id", "") or "")
+        public["tracking_episode"] = normalize_tracking_episode_v1(
+            public.get("tracking_episode"),
+            session_id=session_id,
+        )
+        public["tracking_episode_history"] = update_tracking_episode_history_v1(
+            public.get("tracking_episode_history"),
+            {},
+        )
         public["manual_focus_region"] = _public_manual_focus_region(public.get("manual_focus_region", {}))
         public["event_log_path"] = str(self._event_log_path(session_id)) if session_id else ""
         public["focus_selector"] = _public_focus_selector_state(

@@ -195,6 +195,37 @@ def test_canonical_live_launcher_enables_validated_native_display_capture_fallba
     assert "display_native_capture_fallback_enabled = $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK" in text
 
 
+def test_canonical_live_launcher_bounds_native_threads_and_avoids_codex_session_pruning() -> None:
+    text = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+    resolver_index = text.index("Resolve-PhoenixGuardPythonRuntime")
+
+    assert "[Environment]::GetEnvironmentVariable($Name, 'Process')" in text
+    assert "[string]::IsNullOrWhiteSpace([string]$currentValue)" in text
+    assert "[Environment]::SetEnvironmentVariable($Name, $Value, 'Process')" in text
+    for name, value in (
+        ("OMP_NUM_THREADS", "2"),
+        ("MKL_NUM_THREADS", "2"),
+        ("OPENBLAS_NUM_THREADS", "2"),
+        ("NUMEXPR_NUM_THREADS", "2"),
+        ("TOKENIZERS_PARALLELISM", "false"),
+        ("PHOENIXGUARD_CHRONOS_CPU_THREADS", "2"),
+        ("PHOENIXGUARD_BACKGROUND_WARMUP_ON_LAUNCH", "1"),
+    ):
+        fragment = f"Set-PhoenixGuardDefaultProcessEnvironment -Name '{name}' -Value '{value}'"
+        assert fragment in text
+        assert text.index(fragment) < resolver_index
+
+    final_live_fragment = "$env:PHOENIXGUARD_PROFILE = 'FINAL_LIVE'"
+    python_profile_fragment = (
+        "Set-PhoenixGuardDefaultProcessEnvironment "
+        "-Name 'PHOENIXGUARD_PYTHON_PROFILE' -Value 'live'"
+    )
+    assert text.index(final_live_fragment) < resolver_index
+    assert text.index(python_profile_fragment) < resolver_index
+    assert "$env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '0'" in text
+    assert "$env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '1'" not in text
+
+
 def test_canonical_live_launchers_keep_display_and_forecast_frames_atomic() -> None:
     live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
     full_local = _read("Backend/launch/start_phoenixguard_full_local.ps1")

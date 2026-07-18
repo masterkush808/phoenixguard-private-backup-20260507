@@ -7,7 +7,11 @@ from typing import Any, Sequence, cast
 import pytest
 
 from phoenixguard.vision.v3_overlay_contract import (
+    DIAGNOSTIC_OVERLAY_TYPES,
+    MODE_ALLOWED_TYPES,
+    OVERLAY_TYPES,
     REQUIRED_FIELDS,
+    TYPE_LAYER_MAP,
     V3OverlayContractError,
     abbreviate_label,
     approved_overlay_display_labels,
@@ -15,6 +19,7 @@ from phoenixguard.vision.v3_overlay_contract import (
     layout_overlay_labels,
     normalize_bounds,
     normalize_overlay_display_label,
+    normalize_overlay_type,
     normalize_v3_overlay_object,
     normalize_view_mode,
     overlay_is_visible,
@@ -226,7 +231,260 @@ def test_legacy_registry_overlay_types_stay_renderable_in_active_context() -> No
         )
         assert overlay["type"] == normalized_type
         assert overlay["layer"] == layer
-        assert overlay_is_visible(overlay, "ACTIVE_CONTEXT") is (normalized_type != "RETEST_BOX")
+        assert overlay_is_visible(overlay, "ACTIVE_CONTEXT") is True
+
+
+def test_full_overlay_vocabulary_aliases_normalize_to_canonical_types() -> None:
+    expected = {
+        # Chart and candle structure.
+        "CHART_BOUNDS": "CHART_BOUNDS",
+        "CURRENT_CANDLE": "CURRENT_CANDLE",
+        "CANDLE_BOX": "CURRENT_CANDLE",
+        "CANDLE_GROUP": "CURRENT_CANDLE",
+        "TRACKED_CANDLES": "CURRENT_CANDLE",
+        "CURRENT_BOX": "CURRENT_CANDLE",
+        "CANDLE": "CURRENT_CANDLE",
+        "RECENT_CANDLE": "CURRENT_CANDLE",
+        "NOW": "CURRENT_CANDLE",
+        "IMPULSE_BOX": "IMPULSE_BOX",
+        "IMPULSE": "IMPULSE_BOX",
+        "MAJOR_SWING": "IMPULSE_BOX",
+        "GLOBAL_SWING": "IMPULSE_BOX",
+        "PULLBACK_BOX": "PULLBACK_BOX",
+        "PULLBACK": "PULLBACK_BOX",
+        "LOCAL_SWING": "PULLBACK_BOX",
+        "MINOR_SWING": "PULLBACK_BOX",
+        "RETEST_BOX": "RETEST_BOX",
+        "CONTINUATION_BOX": "CONTINUATION_BOX",
+        "CONTINUATION": "CONTINUATION_BOX",
+        "STRUCTURE_BOX": "CONTINUATION_BOX",
+        "HISTORICAL_STRUCTURE": "PROGRESSION_PATH",
+
+        # Entry, target, and invalidation aliases.
+        "TRIGGER": "RETEST_BOX",
+        "TRIGGER_ZONE": "RETEST_BOX",
+        "CONSERVATIVE_TRIGGER": "RETEST_BOX",
+        "RETEST": "RETEST_BOX",
+        "RETEST_AREA": "RETEST_BOX",
+        "SNIPER": "SNIPER_ENTRY_BOX",
+        "SNIPER_ENTRY": "SNIPER_ENTRY_BOX",
+        "SNIPER_ENTRY_BOX": "SNIPER_ENTRY_BOX",
+        "SNIPER_BUY": "SNIPER_ENTRY_BOX",
+        "SNIPER_SELL": "SNIPER_ENTRY_BOX",
+        "ENTRY_AREA_ZONE": "SNIPER_ENTRY_BOX",
+        "ENTRY_LEVEL": "SNIPER_ENTRY_BOX",
+        "TARGET_ZONE_BOX": "TARGET_ZONE_BOX",
+        "TARGET": "TARGET_ZONE_BOX",
+        "TARGET_ZONE": "TARGET_ZONE_BOX",
+        "TARGET_LEVEL": "TARGET_ZONE_BOX",
+        "INVALIDATION_BOX": "INVALIDATION_BOX",
+        "INVALIDATION": "INVALIDATION_BOX",
+        "INVALIDATION_ZONE": "INVALIDATION_BOX",
+        "RISK_LIMIT": "INVALIDATION_BOX",
+
+        # Landscape and reaction areas.
+        "SUPPLY_ZONE": "SUPPLY_ZONE",
+        "SUPPLY": "SUPPLY_ZONE",
+        "SUPPLY_AREA": "SUPPLY_ZONE",
+        "RESISTANCE": "SUPPLY_ZONE",
+        "RESISTANCE_ZONE": "SUPPLY_ZONE",
+        "LIVE_RESISTANCE": "SUPPLY_ZONE",
+        "NEAREST_RESISTANCE": "SUPPLY_ZONE",
+        "DEMAND_ZONE": "DEMAND_ZONE",
+        "DEMAND": "DEMAND_ZONE",
+        "DEMAND_AREA": "DEMAND_ZONE",
+        "SUPPORT": "DEMAND_ZONE",
+        "SUPPORT_ZONE": "DEMAND_ZONE",
+        "LIVE_SUPPORT": "DEMAND_ZONE",
+        "NEAREST_SUPPORT": "DEMAND_ZONE",
+        "OPPOSING_FORCE": "OPPOSING_FORCE",
+        "OPPOSING_FORCE_ZONE": "OPPOSING_FORCE",
+        "SUPPORT_RESISTANCE_ZONE": "OPPOSING_FORCE",
+
+        # Directional structure.
+        "SUPPORT_TRENDLINE": "SUPPORT_TRENDLINE",
+        "SUPPORT_LINE": "SUPPORT_TRENDLINE",
+        "SUPPORT_TREND": "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE": "RESISTANCE_TRENDLINE",
+        "RESISTANCE_LINE": "RESISTANCE_TRENDLINE",
+        "RESISTANCE_TREND": "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE": "INNER_TRENDLINE",
+        "INNER_LINE": "INNER_TRENDLINE",
+        "INNER_TREND": "INNER_TRENDLINE",
+        "TRENDLINE": "INNER_TRENDLINE",
+        "ANGLE_VECTOR": "ANGLE_VECTOR",
+
+        # Projection, replay, and memory aliases.
+        "PROGRESSION_PATH": "PROGRESSION_PATH",
+        "PATH": "PROGRESSION_PATH",
+        "HISTORICAL_PROGRESSION": "PROGRESSION_PATH",
+        "HISTORICAL_REPLAY": "PROGRESSION_PATH",
+        "MEMORY_MATCH": "PROGRESSION_PATH",
+        "PREDICTION_PATH": "PREDICTION_PATH",
+        "PROJECTED_CANDLES": "PREDICTION_PATH",
+        "FORWARD_PROJECTION": "PREDICTION_PATH",
+        "REPLAY_ENTRY": "REPLAY_ENTRY",
+        "WOULD_HAVE_ENTERED": "REPLAY_ENTRY",
+        "REPLAY_EXIT": "REPLAY_EXIT",
+        "WOULD_HAVE_EXITED": "REPLAY_EXIT",
+
+        # Market-context concepts remain canonical internally.
+        "ORDER_BLOCK": "ORDER_BLOCK",
+        "ORDER_BLOCK_RETEST": "ORDER_BLOCK",
+        "FAIR_VALUE_GAP": "FAIR_VALUE_GAP",
+        "FVG": "FAIR_VALUE_GAP",
+        "LIQUIDITY_POOL": "LIQUIDITY_POOL",
+        "SMC_LIQUIDITY_POOL": "LIQUIDITY_POOL",
+        "LIQUIDITY_SWEEP": "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT": "MARKET_STRUCTURE_SHIFT",
+        "MSS": "MARKET_STRUCTURE_SHIFT",
+        "BREAK_OF_STRUCTURE": "MARKET_STRUCTURE_SHIFT",
+        "BOS": "MARKET_STRUCTURE_SHIFT",
+
+        # Explanatory studies and decision markers.
+        "MODEL_COUNCIL_MARKER": "MODEL_COUNCIL_MARKER",
+        "SMC_COUNCIL": "MODEL_COUNCIL_MARKER",
+        "REGIME_MARKER": "REGIME_MARKER",
+        "MARKET_PLAY_MARKER": "MARKET_PLAY_MARKER",
+        "PLAYBOOK_MARKER": "MARKET_PLAY_MARKER",
+        "THESIS_MARKER": "MARKET_PLAY_MARKER",
+        "OPPORTUNITY_MATURITY_MARKER": "MARKET_PLAY_MARKER",
+        "SUPPORT_RECLAIM": "MARKET_PLAY_MARKER",
+        "RESISTANCE_REJECTION": "MARKET_PLAY_MARKER",
+        "RECLAIM_AFTER_SWEEP": "MARKET_PLAY_MARKER",
+        "PRICE_LOCATION_MARKER": "PRICE_LOCATION_MARKER",
+        "TWO_CANDLE_STUDY": "TWO_CANDLE_STUDY",
+        "LSTM_STUDY": "LSTM_STUDY",
+
+        # Broker and diagnostic plane.
+        "BROKER_CONTROL": "BROKER_CONTROL",
+        "DEBUG_RAW_DETECTION": "DEBUG_RAW_DETECTION",
+        "REJECTED_OVERLAY": "REJECTED_OVERLAY",
+        "STALE_OVERLAY": "STALE_OVERLAY",
+        "TRANSFORM_DEBUG": "TRANSFORM_DEBUG",
+        "SCENE_GRAPH_DEBUG": "SCENE_GRAPH_DEBUG",
+        "LABEL_COLLISION_DEBUG": "LABEL_COLLISION_DEBUG",
+        "CHART_TRANSFORM_DEBUG": "TRANSFORM_DEBUG",
+        "SOURCE_LOCK_DEBUG": "DEBUG_RAW_DETECTION",
+        "ANCHOR_DEBUG": "DEBUG_RAW_DETECTION",
+        "CANDLE_ANCHOR_DEBUG": "DEBUG_RAW_DETECTION",
+        "BOX_REFINEMENT_DEBUG": "DEBUG_RAW_DETECTION",
+    }
+
+    assert {alias: normalize_overlay_type(alias) for alias in expected} == expected
+    assert set(expected.values()).issubset(set(OVERLAY_TYPES))
+    assert all(TYPE_LAYER_MAP[overlay_type] for overlay_type in set(expected.values()))
+
+    live_safe_types = set(expected.values()) - DIAGNOSTIC_OVERLAY_TYPES - {
+        "BROKER_CONTROL",
+        "PREDICTION_PATH",
+    }
+    live_modes = {
+        mode: allowed
+        for mode, allowed in MODE_ALLOWED_TYPES.items()
+        if mode not in {"BROKER", "CALIBRATION", "DIAGNOSTICS", "DEBUG", "INSPECTOR"}
+    }
+    assert all(
+        any(overlay_type in allowed for allowed in live_modes.values())
+        for overlay_type in live_safe_types
+    )
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "DEBUG_RAW_DETECTION",
+        "REJECTED_OVERLAY",
+        "STALE_OVERLAY",
+        "TRANSFORM_DEBUG",
+        "SCENE_GRAPH_DEBUG",
+        "LABEL_COLLISION_DEBUG",
+        "CHART_TRANSFORM_DEBUG",
+        "SOURCE_LOCK_DEBUG",
+        "ANCHOR_DEBUG",
+        "CANDLE_ANCHOR_DEBUG",
+        "BOX_REFINEMENT_DEBUG",
+    ],
+)
+def test_diagnostic_vocabulary_aliases_remain_diagnostics_only(alias: str) -> None:
+    overlay = normalize_v3_overlay_object(
+        _base_overlay(
+            overlay_id=f"diagnostic-{alias.lower()}",
+            type=alias,
+            layer="diagnostics",
+            label=alias,
+            visible_modes=["CLEAN_LIVE", "DIAGNOSTICS", "INSPECTOR"],
+        ),
+        strict=False,
+    )
+
+    assert overlay["type"] in DIAGNOSTIC_OVERLAY_TYPES
+    assert overlay["layer"] == "diagnostics"
+    assert overlay_is_visible(overlay, "CLEAN_LIVE") is False
+    assert overlay_is_visible(overlay, "DIAGNOSTICS") is True
+
+
+def test_retest_invalidation_and_angle_are_visible_in_their_live_modes() -> None:
+    retest = _base_overlay(
+        overlay_id="retest-live",
+        type="RETEST_BOX",
+        layer="trigger_zones",
+        visible_modes=["CLEAN_LIVE", "TRIGGER", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "PREDICTION"],
+    )
+    invalidation = _base_overlay(
+        overlay_id="invalidation-live",
+        type="INVALIDATION_BOX",
+        layer="invalidation",
+        visible_modes=[
+            "CLEAN_LIVE",
+            "INVALIDATION",
+            "ACTIVE_CONTEXT",
+            "FULL_HISTORY_READ",
+            "REPLAY",
+            "PREDICTION",
+        ],
+    )
+    angle = _base_overlay(
+        overlay_id="angle-live",
+        type="ANGLE_VECTOR",
+        layer="prediction_path",
+        anchor_type="LINE",
+        bounds=[120, 180, 420, 320],
+        touch_points=[[120, 320], [420, 180]],
+        visible_modes=["PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "PREDICTION"],
+    )
+
+    assert all(overlay_is_visible(retest, mode) for mode in retest["visible_modes"])
+    assert all(overlay_is_visible(invalidation, mode) for mode in invalidation["visible_modes"])
+    assert all(overlay_is_visible(angle, mode) for mode in angle["visible_modes"])
+
+
+def test_projection_aliases_remain_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_ENABLE_PREDICTION_OVERLAY", raising=False)
+
+    for alias in ("PROJECTED_CANDLES", "FORWARD_PROJECTION"):
+        projection = _base_overlay(
+            overlay_id=f"projection-{alias.lower()}",
+            type=alias,
+            layer="prediction_path",
+            anchor_type="POLYGON",
+            visible_modes=["PATH", "PREDICTION", "DIAGNOSTICS", "INSPECTOR"],
+        )
+        assert normalize_overlay_type(alias) == "PREDICTION_PATH"
+        assert overlay_is_visible(projection, "PATH") is False
+        assert overlay_is_visible(projection, "PREDICTION") is False
+        assert "prediction_overlay_disabled" in overlay_rejection_reasons(projection, "PREDICTION")
+
+    monkeypatch.setenv("PHOENIXGUARD_ENABLE_PREDICTION_OVERLAY", "1")
+    diagnostic_projection = _base_overlay(
+        overlay_id="projection-diagnostics-only",
+        type="PREDICTION_PATH",
+        layer="prediction_path",
+        anchor_type="POLYGON",
+        visible_modes=["PREDICTION", "DIAGNOSTICS", "INSPECTOR"],
+    )
+    assert overlay_is_visible(diagnostic_projection, "DIAGNOSTICS") is True
+    assert overlay_is_visible(diagnostic_projection, "PREDICTION") is False
 
 
 def test_visible_labels_are_locked_to_approved_dictionary() -> None:
@@ -371,7 +629,7 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert {raw: normalize_view_mode(raw) for raw in cases} == cases
     assert view_mode_profile("chart-bounds")["layer_visibility"]["chart_bounds"] is True
     assert view_mode_profile("candles")["layer_visibility"]["recent_candles"] is True
-    assert view_mode_profile("invalidation")["layer_visibility"]["invalidation"] is False
+    assert view_mode_profile("invalidation")["layer_visibility"]["invalidation"] is True
     trend_profile = view_mode_profile("trendlines")
     assert trend_profile["mode"] == "TRENDLINES"
     assert trend_profile["layer_visibility"]["trendlines"] is True
@@ -383,17 +641,20 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert "SNIPER_ENTRY_BOX" in replay_profile["allowed_types"]
     assert "TARGET_ZONE_BOX" in replay_profile["allowed_types"]
     assert "CURRENT_CANDLE" not in replay_profile["allowed_types"]
-    assert "RETEST_BOX" not in replay_profile["allowed_types"]
-    assert "ANGLE_VECTOR" not in replay_profile["allowed_types"]
+    assert "RETEST_BOX" in replay_profile["allowed_types"]
+    assert "INVALIDATION_BOX" in replay_profile["allowed_types"]
+    assert "ANGLE_VECTOR" in replay_profile["allowed_types"]
     full_history_profile = view_mode_profile("full-history-read")
     assert "CURRENT_CANDLE" not in full_history_profile["allowed_types"]
-    assert "RETEST_BOX" not in full_history_profile["allowed_types"]
-    assert "ANGLE_VECTOR" not in full_history_profile["allowed_types"]
+    assert "RETEST_BOX" in full_history_profile["allowed_types"]
+    assert "INVALIDATION_BOX" in full_history_profile["allowed_types"]
+    assert "ANGLE_VECTOR" in full_history_profile["allowed_types"]
     assert full_history_profile["layer_visibility"]["recent_candles"] is False
     assert replay_profile["layer_visibility"]["trigger_zones"] is True
     assert replay_profile["layer_visibility"]["target_zones"] is True
     assert replay_profile["layer_visibility"]["recent_candles"] is False
-    assert replay_profile["layer_visibility"]["invalidation"] is False
+    assert replay_profile["layer_visibility"]["invalidation"] is True
+    assert replay_profile["layer_visibility"]["prediction_path"] is True
 
 
 def test_smart_money_mode_is_canonical_and_separate_from_model_council() -> None:
@@ -602,8 +863,8 @@ def test_semantic_target_invalidation_and_path_layers_override_legacy_layers() -
     assert invalidation["layer"] == "invalidation"
     assert target["layer"] == "target_zones"
     assert path["layer"] == "prediction_path"
-    assert overlay_is_visible(invalidation, "CLEAN_LIVE") is False
-    assert overlay_is_visible(invalidation, "DIAGNOSTICS") is False
+    assert overlay_is_visible(invalidation, "CLEAN_LIVE") is True
+    assert overlay_is_visible(invalidation, "DIAGNOSTICS") is True
     assert overlay_is_visible(invalidation, "CALIBRATION") is False
     assert overlay_is_visible(invalidation, "INSPECTOR") is True
 
@@ -800,8 +1061,8 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     assert trigger["layer_visibility"]["trigger_zones"] is True
     assert "CURRENT_CANDLE" not in trigger["allowed_types"]
     assert "CHART_BOUNDS" not in trigger["allowed_types"]
-    assert "RETEST_BOX" not in trigger["allowed_types"]
-    assert set(trigger["allowed_types"]) == {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}
+    assert "RETEST_BOX" in trigger["allowed_types"]
+    assert set(trigger["allowed_types"]) == {"RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}
     assert inspector["layer_visibility"]["diagnostics"] is True
     assert inspector["allow_selection"] is True
 
@@ -831,7 +1092,7 @@ def test_story_scoped_modes_do_not_render_now_or_chart_bounds_spam() -> None:
     assert overlay_is_visible(replay_now, "SUPPLY_DEMAND") is False
     assert overlay_is_visible(chart_bounds, "TRIGGER") is False
     assert overlay_is_visible(chart_bounds, "SUPPLY_DEMAND") is False
-    assert overlay_is_visible(trigger, "TRIGGER") is False
+    assert overlay_is_visible(trigger, "TRIGGER") is True
     assert overlay_is_visible(sniper, "TRIGGER") is True
     assert overlay_is_visible(target, "TRIGGER") is True
     assert overlay_is_visible(supply, "SUPPLY_DEMAND") is True

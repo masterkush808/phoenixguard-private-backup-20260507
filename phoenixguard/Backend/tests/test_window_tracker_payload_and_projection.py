@@ -93,7 +93,7 @@ def _wait_for_terminal_action(
     raise AssertionError(f"forecast action {request_id} did not complete")
 
 
-def testpublic_session_payload_normalizes_chart_overlay_paths(tmp_path: Path) -> None:
+def test_public_session_payload_normalizes_chart_overlay_paths(tmp_path: Path) -> None:
     svc = ContinuousWindowTrackerService(root_dir=tmp_path / "wt")
     payload: dict[str, Any] = {"session_id": "s1", "last_display_chart_path": "display.png", "last_full_overlay_path": "overlay.png", "last_frame_path": "frame.png", "manual_focus_region": {"enabled": True}}
     public = svc.public_session_payload(payload)
@@ -577,4 +577,74 @@ def test_forecast_action_failure_is_terminal_and_sanitized(tmp_path: Path) -> No
         assert completed["is_current"] is False
         assert "private backend failure detail" not in str(completed)
     finally:
+        svc.shutdown()
+
+
+def test_forecast_action_timeout_is_terminal_and_rejects_late_commit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    adapter = BlockingProjectionAdapter()
+    monkeypatch.setattr(window_tracker_module, "_FORECAST_ACTION_TIMEOUT_SEC", 0.05)
+    svc = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "wt",
+        tracking_adapter=adapter,
+    )
+    session_id = "forecast-timeout"
+    chart_path = tmp_path / "chart.png"
+    Image.new("RGB", (12, 10), color=(12, 18, 24)).save(chart_path)
+    svc.save_session(
+        {
+            "session_id": session_id,
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0, 0, 1, 1],
+            },
+            "frame_index": 1,
+            "state_version": 1,
+            "last_chart_path": str(chart_path),
+        }
+    )
+    try:
+        submitted = svc.enqueue_memory_projection(session_id, mode="predict")
+        assert adapter.started.wait(timeout=1.0)
+        time.sleep(0.06)
+
+        timed_out = svc.get_memory_projection_action(
+            session_id,
+            str(submitted["request_id"]),
+        )
+
+        assert timed_out["status"] == "error"
+        assert timed_out["terminal"] is True
+        assert timed_out["snapshot_status"] == "TIMED_OUT"
+        assert timed_out["trade_authorized"] is False
+        assert "safe time limit" in str(timed_out["summary"])
+
+        adapter.release.set()
+        futures = cast(
+            dict[str, Any],
+            getattr(svc, "_forecast_action_futures"),
+        )
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            future = futures[str(submitted["request_id"])]
+            if future.done():
+                break
+            time.sleep(0.01)
+        final = svc.get_memory_projection_action(
+            session_id,
+            str(submitted["request_id"]),
+        )
+        assert final["status"] == "error"
+        assert final["snapshot_status"] == "TIMED_OUT"
+        stored = svc.require_session(session_id).get("memory_projection_predict", {})
+        stored_status = (
+            cast(Mapping[str, object], stored).get("status")
+            if isinstance(stored, Mapping)
+            else None
+        )
+        assert stored_status != "ready"
+    finally:
+        adapter.release.set()
         svc.shutdown()

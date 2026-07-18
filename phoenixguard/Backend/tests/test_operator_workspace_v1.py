@@ -115,6 +115,8 @@ class _OverlayViewportView(TypedDict):
 class _OverlayView(TypedDict):
     id: str
     type: str
+    kind: str
+    kind_label: str
     side: str
     group: str
     family: str
@@ -132,6 +134,7 @@ class _OverlayView(TypedDict):
     forecast_role: NotRequired[str]
     forecast_status: NotRequired[str]
     forecast_authorized: NotRequired[bool]
+    geometry_kind: NotRequired[str]
     horizon_unit: NotRequired[str]
     clock_time_assumption: NotRequired[str]
     uncertainty_level: NotRequired[float]
@@ -140,6 +143,9 @@ class _OverlayView(TypedDict):
     overlay_geometry_revision: NotRequired[str]
     anchor_id: NotRequired[str]
     forecast_scenarios: NotRequired[object]
+    forecast_candles: NotRequired[list[dict[str, object]]]
+    forecast_anchor: NotRequired[object]
+    baseline_locked: NotRequired[bool]
     trajectory_mode: NotRequired[str]
     trajectory_mode_probability_calibrated: NotRequired[bool]
     interval: NotRequired[object]
@@ -151,6 +157,11 @@ class _HistoryView(TypedDict):
     state: str
     summary: str
     frame_id: _FrameId
+    id: NotRequired[str]
+    episode_id: NotRequired[str]
+    event_index: NotRequired[int]
+    predicted_direction: NotRequired[str]
+    agreement: NotRequired[bool | None]
 
 
 class _OperatorWorkspaceView(TypedDict):
@@ -253,6 +264,18 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
         "state_version": 14,
         "display_frame_id": 14,
         "tracking_enabled": True,
+        "tracking_episode": {
+            "schema_version": "PG_TRACKING_EPISODE_V1",
+            "episode_id": "episode-test-active",
+            "state": "ACTIVE",
+            "revision": 1,
+            "event_horizon": 12,
+            "event_cursor": 0,
+            "pair": "EUR/USD",
+            "timeframe": "M5",
+            "committed_plan": {"decision": {"action": side}},
+            "events": [],
+        },
         "tracking_summary": {
             "detected_market": "EUR/USD",
             "detected_timeframe": "M5",
@@ -1114,6 +1137,248 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
     assert deferred_tasks == []
 
 
+def test_tracking_controls_invalidate_operator_projection_on_the_same_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session_id = "episode-control-cache"
+    now_epoch = time.time()
+    episode: dict[str, object] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "episode_id": "",
+        "state": "IDLE",
+        "revision": 0,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "events": [],
+    }
+
+    def live_state() -> dict[str, object]:
+        payload = _fresh_payload(now=now_epoch)
+        payload["session_id"] = session_id
+        payload["tracking_episode"] = json.loads(json.dumps(episode))
+        payload["overlays"] = {"objects": []}
+        payload["live_visual_state"] = {"overlays": {"objects": []}}
+        return payload
+
+    class _Tracker:
+        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return live_state()
+
+        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return {}
+
+        def start_tracking_episode(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            episode.update(
+                {
+                    "episode_id": "episode-control-1",
+                    "state": "ACTIVE",
+                    "revision": 1,
+                    "committed_plan": {"decision": {"action": "BUY"}},
+                }
+            )
+            return json.loads(json.dumps(episode))
+
+        def stop_tracking_episode(
+            self,
+            requested_session_id: str,
+            *,
+            reason: str,
+        ) -> dict[str, object]:
+            assert requested_session_id == session_id
+            assert reason == "operator_stop"
+            episode.update(
+                {
+                    "state": "STOPPED",
+                    "revision": 2,
+                    "terminal_reason": "MANUAL_STOP",
+                }
+            )
+            return json.loads(json.dumps(episode))
+
+        def get_tracking_episode_readiness(
+            self,
+            requested_session_id: str,
+        ) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return {"ready": True, "reasons": []}
+
+    def build_state(
+        tracker: object,
+        requested_session_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert isinstance(tracker, _Tracker)
+        assert requested_session_id == session_id
+        return live_state()
+
+    def source_revision(
+        requested_session_id: str,
+    ) -> tuple[str, int, float] | None:
+        if requested_session_id != session_id:
+            return None
+        return (
+            f"episode:{episode['episode_id']}:{episode['state']}:{episode['revision']}",
+            14,
+            now_epoch + 60.0,
+        )
+
+    projection_calls = 0
+    original_builder = mobile_app.build_operator_workspace_v1
+
+    def counted_builder(source: Mapping[str, object]) -> dict[str, object]:
+        nonlocal projection_calls
+        projection_calls += 1
+        return original_builder(source)
+
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_DIRECT_READ", "0")
+    monkeypatch.setattr(mobile_app, "_LIVE_STATE_V3_CACHE_TTL_SEC", 0.0)
+    monkeypatch.setattr(
+        mobile_app,
+        "_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "build_live_state_v3_from_tracker_service",
+        build_state,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "_operator_projection_source_revision",
+        source_revision,
+    )
+    monkeypatch.setattr(mobile_app, "build_operator_workspace_v1", counted_builder)
+
+    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
+        idle = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
+        started = client.post(
+            f"/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/start"
+        )
+        active = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
+        stopped = client.post(
+            f"/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/stop",
+            json={"reason": "operator_stop"},
+        )
+        retained = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
+
+    assert idle.json()["tracking"]["episode"]["state"] == "IDLE"
+    assert started.status_code == 200
+    assert active.json()["tracking"]["episode"]["state"] == "ACTIVE"
+    assert active.json()["freshness"]["state"] != "STALE"
+    assert stopped.status_code == 200
+    assert retained.json()["tracking"]["episode"]["state"] == "STOPPED"
+    assert retained.json()["freshness"]["state"] != "STALE"
+    assert projection_calls == 3
+
+
+def test_inflight_old_episode_projection_cannot_repopulate_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session_id = "episode-cache-race"
+    now_epoch = time.time()
+    episode: dict[str, object] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "episode_id": "episode-race-1",
+        "state": "ACTIVE",
+        "revision": 1,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "committed_plan": {"decision": {"action": "BUY"}},
+        "events": [],
+    }
+
+    def live_state() -> dict[str, object]:
+        payload = _fresh_payload(now=now_epoch)
+        payload["session_id"] = session_id
+        payload["tracking_episode"] = json.loads(json.dumps(episode))
+        payload["overlays"] = {"objects": []}
+        payload["live_visual_state"] = {"overlays": {"objects": []}}
+        return payload
+
+    class _Tracker:
+        def get_session_snapshot(self, _session_id: str) -> dict[str, object]:
+            return live_state()
+
+        def latest_model_council_state(self, _session_id: str) -> dict[str, object]:
+            return {}
+
+    def build_state(
+        _tracker: object,
+        _session_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        return live_state()
+
+    def source_revision(
+        requested_session_id: str,
+    ) -> tuple[str, int, float] | None:
+        if requested_session_id != session_id:
+            return None
+        return (
+            f"episode:{episode['state']}:{episode['revision']}",
+            14,
+            now_epoch + 60.0,
+        )
+
+    projection_calls = 0
+    transition_during_first_build = True
+    original_builder = mobile_app.build_operator_workspace_v1
+
+    def racing_builder(source: Mapping[str, object]) -> dict[str, object]:
+        nonlocal projection_calls, transition_during_first_build
+        projection_calls += 1
+        projected = original_builder(source)
+        if transition_during_first_build:
+            transition_during_first_build = False
+            episode.update(
+                {
+                    "state": "STOPPED",
+                    "revision": 2,
+                    "terminal_reason": "MANUAL_STOP",
+                }
+            )
+        return projected
+
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_DIRECT_READ", "0")
+    monkeypatch.setattr(mobile_app, "_LIVE_STATE_V3_CACHE_TTL_SEC", 0.0)
+    monkeypatch.setattr(
+        mobile_app,
+        "_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "build_live_state_v3_from_tracker_service",
+        build_state,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "_operator_projection_source_revision",
+        source_revision,
+    )
+    monkeypatch.setattr(mobile_app, "build_operator_workspace_v1", racing_builder)
+
+    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
+        old_response = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
+        current_response = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
+
+    assert old_response.json()["tracking"]["episode"]["state"] == "ACTIVE"
+    assert current_response.json()["tracking"]["episode"]["state"] == "STOPPED"
+    assert current_response.json()["freshness"]["state"] != "STALE"
+    assert projection_calls == 2
+
+
 def test_bounded_operator_context_keeps_safe_two_candle_forecast_without_raw_features() -> None:
     bounded_context = cast(
         Callable[[Mapping[str, object]], dict[str, object]],
@@ -1164,6 +1429,408 @@ def test_bounded_operator_context_keeps_safe_two_candle_forecast_without_raw_fea
     assert workspace["forecast"]["confidence"] == 0.64
 
 
+def test_public_episode_and_legacy_session_routes_never_expose_frozen_internals() -> None:
+    visual_blocks = cast(list[dict[str, object]], _complete_forecast_bundle()["forecast_candles"])
+    raw_episode: dict[str, object] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "episode_id": "episode-public-route-1",
+        "state": "ACTIVE",
+        "revision": 3,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "pair": "EUR/USD",
+        "timeframe": "M5",
+        "committed_plan": {
+            "decision": {"action": "BUY", "summary": "PRIVATE_PLAN_TRACE"},
+            "model_council": {"provider": "PRIVATE_COUNCIL_PROVIDER"},
+        },
+        "baseline_forecasts": {
+            "scene": {
+                "forecast_candles": visual_blocks,
+                "provider": "PRIVATE_SCENE_PROVIDER",
+                "source_path": r"C:\private\scene.json",
+            },
+            "lstm": {
+                "forecast_path": [{"step": step, "raw_model_score": 0.9} for step in range(1, 13)],
+                "model_version": "PRIVATE_MODEL_VERSION",
+            },
+        },
+        "candidate_revision": {"model_vote": "PRIVATE_CANDIDATE_MODEL"},
+        "events": [],
+    }
+
+    class _Tracker:
+        def get_session_snapshot(self, _session_id: str) -> dict[str, object]:
+            return {
+                "session_id": "episode-route-test",
+                "tracking_episode": json.loads(json.dumps(raw_episode)),
+                "tracking_episode_history": [
+                    {"provider": "PRIVATE_ARCHIVE_PROVIDER"}
+                ],
+            }
+
+        def get_tracking_episode(self, _session_id: str) -> dict[str, object]:
+            return json.loads(json.dumps(raw_episode))
+
+        def get_tracking_episode_readiness(self, _session_id: str) -> dict[str, object]:
+            return {
+                "ready": False,
+                "reasons": [
+                    "Wait for a complete 12-event Scene or LSTM forecast baseline."
+                ],
+                "identity": {"closed_candle_key": "PRIVATE_EVENT_KEY"},
+                "scene_horizon": 12,
+                "lstm_horizon": 12,
+                "current": json.loads(json.dumps(raw_episode)),
+            }
+
+        def start_tracking_episode(self, _session_id: str) -> dict[str, object]:
+            return json.loads(json.dumps(raw_episode))
+
+        def stop_tracking_episode(
+            self,
+            _session_id: str,
+            *,
+            reason: str,
+        ) -> dict[str, object]:
+            stopped = json.loads(json.dumps(raw_episode))
+            stopped["state"] = "STOPPED"
+            stopped["terminal_reason"] = reason
+            return stopped
+
+    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
+        responses = [
+            client.get(
+                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/current"
+            ),
+            client.get(
+                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/readiness"
+            ),
+            client.post(
+                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/start"
+            ),
+            client.post(
+                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/stop",
+                json={"reason": "operator_stop"},
+            ),
+        ]
+        legacy = client.get(
+            "/v1/mobile/window-tracker/sessions/episode-route-test"
+        )
+
+    assert all(response.status_code == 200 for response in responses)
+    assert responses[0].json()["schema_version"] == "PG_TRACKING_EPISODE_PUBLIC_V1"
+    assert responses[1].json()["schema_version"] == (
+        "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1"
+    )
+    assert responses[-1].json()["terminal_reason"] == "STOPPED"
+    assert legacy.status_code == 200
+    assert "tracking_episode" not in legacy.json()
+    assert "tracking_episode_history" not in legacy.json()
+    serialized = json.dumps([response.json() for response in responses]).lower()
+    for secret in (
+        "baseline_forecasts",
+        "committed_plan",
+        "candidate_revision",
+        "private_plan_trace",
+        "private_scene_provider",
+        "private_council_provider",
+        "private_model_version",
+        "private_candidate_model",
+        "private_event_key",
+        "private_",
+        "provider",
+        "source_path",
+        "model_version",
+        "raw_model",
+        "raw_model_score",
+        "scene_horizon",
+        "lstm_horizon",
+    ):
+        assert secret not in serialized
+
+
+def test_operator_route_preserves_twelve_frozen_blocks_through_bounded_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session_id = "episode-bounded-route"
+    bundle = _complete_forecast_bundle(
+        selected_side="SELL",
+        anchor_x=0.55,
+        anchor_y=0.38,
+    )
+    visual_blocks = cast(list[dict[str, object]], bundle["forecast_candles"])
+    sequence_path = [
+        {
+            "step": block["step"],
+            "expected_open_norm": 1.0 - float(cast(float, block["open_y_norm"])),
+            "expected_high_norm": 1.0 - float(cast(float, block["high_y_norm"])),
+            "expected_low_norm": 1.0 - float(cast(float, block["low_y_norm"])),
+            "expected_close_norm": 1.0 - float(cast(float, block["close_y_norm"])),
+            "movement_direction": "SELL",
+            "candle_body_direction": "SELL",
+            "raw_model_score": 0.99,
+            "source_path": r"C:\private\future.json",
+        }
+        for block in visual_blocks
+    ]
+    episode: dict[str, object] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "session_id": session_id,
+        "episode_id": "episode-bounded-1",
+        "state": "ACTIVE",
+        "revision": 5,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "started_at": "2026-07-18T08:00:00Z",
+        "updated_at": "2026-07-18T08:00:00Z",
+        "pair": "EUR/USD",
+        "timeframe": "M5",
+        "committed_plan": {
+            "decision": {"action": "SELL", "summary": "PRIVATE_PLAN_TRACE"},
+        },
+        "baseline_forecasts": {
+            "scene": {
+                "provider": "PRIVATE_SCENE_PROVIDER",
+            },
+            "lstm": {
+                "forecast_path": sequence_path,
+                "model_version": "PRIVATE_MODEL_VERSION",
+            },
+        },
+        "events": [],
+    }
+    live_state: dict[str, object] = {
+        "session_id": session_id,
+        "state_version": 14,
+        "decision_version": 14,
+        "display_frame_id": 14,
+        "chart_frame_id": 14,
+        "overlay_frame_id": 14,
+        "full_overlay_frame_id": 14,
+        "model_vote_frame_id": 14,
+        "frame_bundle_complete_v3": True,
+        "tracking_enabled": True,
+        "last_capture_epoch": 99.0,
+        "last_display_surface_signature": "window-sig-14",
+        "last_window_surface_signature": "window-sig-14",
+        "last_study_surface_signature": "study-sig-14",
+        "overlay_source_window_signature": "window-sig-14",
+        "overlay_source_study_signature": "study-sig-14",
+        "manual_focus_region": {
+            "enabled": True,
+            "normalized_bbox": [0.1, 0.1, 0.9, 0.9],
+        },
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "last_capture_epoch": 99.0,
+        },
+        "tracking_episode": episode,
+        "tracking_episode_history": [
+            {
+                "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
+                "episode_id": "episode-bounded-previous",
+                "state": "STOPPED",
+                "revision": 3,
+                "event_cursor": 1,
+                "event_horizon": 12,
+                "direction_agreement_count": 1,
+                "direction_observation_count": 1,
+                "ended_at": 98.5,
+                "anchor_frame_id": 13,
+                "events": [
+                    {
+                        "event_id": "episode-bounded-previous:E1",
+                        "step": 1,
+                        "observed_at": 98.0,
+                        "predicted_side": "SELL",
+                        "actual_side": "SELL",
+                        "direction_agreement": True,
+                        "frame_id": 13,
+                        "raw_block": {"provider": "PRIVATE_HISTORY_PROVIDER"},
+                    }
+                ],
+            }
+        ],
+        "tracking_episode_readiness": {"ready": True, "reasons": []},
+        # The contributor is deliberately absent.  The frozen episode itself
+        # must continue publishing the twelve block-only objects.
+        "overlays": {"objects": []},
+        "live_visual_state": {"overlays": {"objects": []}},
+    }
+
+    class _Tracker:
+        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return cast(dict[str, object], json.loads(json.dumps(live_state)))
+
+        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return {}
+
+    def _build_state(
+        tracker: object,
+        requested_session_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert isinstance(tracker, _Tracker)
+        assert requested_session_id == session_id
+        return cast(dict[str, object], json.loads(json.dumps(live_state)))
+
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
+    monkeypatch.setattr(
+        mobile_app,
+        "build_live_state_v3_from_tracker_service",
+        _build_state,
+    )
+    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
+        operator_response = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
+        compact_response = client.get(
+            f"/v1/mobile/live/state/v3/{session_id}?mode=INSPECTOR&compact=true"
+        )
+
+    assert operator_response.status_code == 200
+    workspace = cast(_OperatorWorkspaceView, operator_response.json())
+    public_episode = cast(
+        Mapping[str, object],
+        cast(Mapping[str, object], workspace["tracking"])["episode"],
+    )
+    future_blocks = cast(list[dict[str, object]], public_episode["future_blocks"])
+    assert len(future_blocks) == 12
+    assert [block["step"] for block in future_blocks] == list(range(1, 13))
+    public_composite = next(
+        row
+        for row in workspace["overlays"]
+        if row.get("family") == "lstm"
+        and row.get("forecast_role") == "composite"
+    )
+    assert public_composite.get("baseline_locked") is True
+    assert public_composite.get("forecast_candles") == future_blocks
+    assert public_composite["line_points"] == []
+    assert public_composite.get("geometry_kind") == "future_blocks"
+    assert public_composite["kind"] == "future_blocks"
+    assert public_composite["label"] == "Saved future blocks"
+    archived_event = next(
+        row
+        for row in workspace["history"]
+        if row.get("id") == "episode-bounded-previous-e1"
+    )
+    assert archived_event.get("agreement") is True
+    assert archived_event.get("predicted_direction") == "SELL"
+
+    assert compact_response.status_code == 200
+    compact_serialized = json.dumps(compact_response.json()).lower()
+    assert "tracking_episode" not in compact_serialized
+    assert "baseline_forecasts" not in compact_serialized
+    assert "private_scene_provider" not in compact_serialized
+    assert "private_model_version" not in compact_serialized
+    assert "private_plan_trace" not in compact_serialized
+    assert "raw_model_score" not in compact_serialized
+    assert "source_path" not in compact_serialized
+    assert "private_history_provider" not in json.dumps(workspace).lower()
+
+
+def test_projector_synthesizes_episode_owned_future_blocks_without_live_lstm() -> None:
+    payload = _fresh_payload(side="SELL")
+    bundle = _complete_forecast_bundle(
+        selected_side="SELL",
+        anchor_x=0.56,
+        anchor_y=0.37,
+    )
+    episode = _mutable_mapping(payload["tracking_episode"])
+    episode["baseline_forecasts"] = {
+        "scene": {
+            "forecast_candles": bundle["forecast_candles"],
+            "provider": "PRIVATE_PROVIDER",
+        }
+    }
+    payload["overlays"] = {"objects": []}
+    payload["live_visual_state"] = {"overlays": {"objects": []}}
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    rows = [
+        row
+        for row in workspace["overlays"]
+        if row.get("family") == "lstm"
+        and row.get("forecast_role") == "composite"
+    ]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.get("baseline_locked") is True
+    assert row["frame_id"] == 14
+    assert row["coordinate_space"] == "chart"
+    assert row["coordinate_units"] == "normalized"
+    assert len(cast(list[object], row.get("forecast_candles"))) == 12
+    assert row["line_points"] == []
+    assert row.get("geometry_kind") == "future_blocks"
+    anchor = cast(Mapping[str, object], row.get("forecast_anchor"))
+    first_block = cast(Sequence[Mapping[str, object]], row.get("forecast_candles", []))[0]
+    assert float(cast(float, anchor["x_norm"])) < float(cast(float, first_block["x_norm"]))
+    assert anchor["y_norm"] == first_block["open_y_norm"]
+    serialized = json.dumps(row).lower()
+    assert "private" not in serialized
+    assert "provider" not in serialized
+    assert "model" not in serialized
+    assert "source" not in serialized
+
+
+def test_projector_builds_twelve_safe_blocks_from_lstm_only_episode() -> None:
+    payload = _fresh_payload(side="BUY")
+    episode = _mutable_mapping(payload["tracking_episode"])
+    episode["baseline_forecasts"] = {
+        "scene": {},
+        "lstm": {
+            "forecast_path": [
+                {
+                    "step": step,
+                    "expected_open_norm": 0.45 + step * 0.004,
+                    "expected_high_norm": 0.47 + step * 0.004,
+                    "expected_low_norm": 0.43 + step * 0.004,
+                    "expected_close_norm": 0.46 + step * 0.004,
+                    "movement_direction": "BUY",
+                    "candle_body_direction": "BUY",
+                    "raw_model_score": 0.99,
+                }
+                for step in range(1, 13)
+            ],
+            "model_version": "PRIVATE_LSTM_VERSION",
+        },
+    }
+    payload["overlays"] = {"objects": []}
+    payload["live_visual_state"] = {"overlays": {"objects": []}}
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    public_episode = cast(
+        Mapping[str, object],
+        cast(Mapping[str, object], workspace["tracking"])["episode"],
+    )
+    blocks = cast(list[dict[str, object]], public_episode["future_blocks"])
+    composite = next(
+        row
+        for row in workspace["overlays"]
+        if row.get("family") == "lstm"
+        and row.get("forecast_role") == "composite"
+    )
+
+    assert len(blocks) == 12
+    assert [block["step"] for block in blocks] == list(range(1, 13))
+    assert all(
+        float(cast(float, right["x_norm"]))
+        > float(cast(float, left["x_norm"]))
+        for left, right in zip(blocks, blocks[1:])
+    )
+    assert composite.get("forecast_candles") == blocks
+    assert composite.get("baseline_locked") is True
+    serialized = json.dumps(workspace).lower()
+    assert "private_lstm_version" not in serialized
+    assert "raw_model_score" not in serialized
+
+
 def test_fresh_current_authority_can_grant_buy_now() -> None:
     workspace = _build_workspace(_fresh_payload(side="BUY"), now_epoch=100.0)
 
@@ -1191,6 +1858,73 @@ def test_fresh_current_authority_can_grant_buy_now() -> None:
             "chase highs."
         ),
     }
+
+
+def test_entry_permission_fails_closed_without_an_active_tracking_episode() -> None:
+    missing = _fresh_payload(side="BUY")
+    missing.pop("tracking_episode")
+    idle = _fresh_payload(side="BUY")
+    idle["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "episode_id": "",
+        "state": "IDLE",
+        "revision": 0,
+    }
+
+    for payload in (missing, idle):
+        permission = _build_workspace(payload, now_epoch=100.0)["permission"]
+        assert permission["action"] == "WAIT"
+        assert permission["allowed"] is False
+        assert permission["window_open"] is False
+        assert permission["expires_at"] is None
+        assert "Start Tracking" in permission["message"]
+
+
+def test_active_episode_never_authorizes_a_direction_that_differs_from_saved_plan() -> None:
+    payload = _fresh_payload(side="SELL")
+    episode = _mutable_mapping(payload["tracking_episode"])
+    episode["committed_plan"] = {"decision": {"action": "BUY"}}
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    permission = workspace["permission"]
+    public_episode = cast(
+        Mapping[str, object],
+        cast(Mapping[str, object], workspace["tracking"])["episode"],
+    )
+
+    assert cast(Mapping[str, object], public_episode["baseline"])["direction"] == "BUY"
+    assert permission["action"] == "WAIT"
+    assert permission["allowed"] is False
+    assert permission["window_open"] is False
+    assert permission["expires_at"] is None
+    assert permission["valid_for_seconds"] is None
+    assert permission["window_label"] == "Closed"
+    assert permission["entry_location"] == "LOWER_PRICE"
+    assert permission["entry_guidance"] == (
+        "Aim for a lower price inside the verified demand or retest area; do not "
+        "chase highs."
+    )
+    assert permission["message"] == (
+        "Wait. The current proposal differs from the saved tracking plan."
+    )
+
+
+def test_active_episode_without_directional_saved_plan_remains_wait() -> None:
+    payload = _fresh_payload(side="BUY")
+    episode = _mutable_mapping(payload["tracking_episode"])
+    episode["committed_plan"] = {"decision": {"action": "HOLD"}}
+
+    permission = _build_workspace(payload, now_epoch=100.0)["permission"]
+
+    assert permission["action"] == "WAIT"
+    assert permission["allowed"] is False
+    assert permission["window_open"] is False
+    assert permission["expires_at"] is None
+    assert permission["valid_for_seconds"] is None
+    assert permission["window_label"] == "Closed"
+    assert permission["message"] == (
+        "Wait. The saved tracking plan does not permit a directional entry."
+    )
 
 
 def test_open_setup_window_without_current_packet_waits_for_refresh() -> None:
@@ -1346,22 +2080,13 @@ def test_duplicate_wait_keeps_last_forecast_nonzero_but_diagnostic_only() -> Non
     assert workspace["forecast"]["direction"] == "SELL"
     assert workspace["forecast"]["confidence"] == 0.77
     assert workspace["forecast"]["state"] == "STALE"
-    assert "last valid model outlook" in workspace["forecast"]["summary"].lower()
-    assert "diagnostic only" in workspace["forecast"]["summary"].lower()
+    assert "last valid outlook" in workspace["forecast"]["summary"].lower()
+    assert "observation only" in workspace["forecast"]["summary"].lower()
     assert workspace["permission"]["action"] == "WAIT"
     assert workspace["permission"]["allowed"] is False
-    assert len(workspace["overlays"]) == 2
-    assert {row["family"] for row in workspace["overlays"]} == {"lstm"}
-    assert {row.get("forecast_role") for row in workspace["overlays"]} == {
-        "center",
-        "band_90",
-    }
-    assert all(
-        row["lifecycle"] == "stale_diagnostic"
-        and row.get("forecast_status") == "STALE"
-        and row.get("forecast_authorized") is False
-        for row in workspace["overlays"]
-    )
+    # The last textual read remains available, but obsolete LSTM path/band
+    # drawings are not public now that the operator contract is block-only.
+    assert workspace["overlays"] == []
 
 
 @pytest.mark.parametrize("bad_frame", [None, 13])
@@ -1412,7 +2137,7 @@ def test_mismatched_explicit_forecast_does_not_mask_aligned_model_forecast() -> 
 
 
 @pytest.mark.parametrize("forecast_status", ["AUTHORIZED", "NO_EDGE", "LOW_CONFIDENCE"])
-def test_current_center_path_restores_forecast_when_raw_projection_races(
+def test_line_only_lstm_path_cannot_restore_forecast_when_raw_projection_races(
     forecast_status: str,
 ) -> None:
     payload = _fresh_payload(side="SELL")
@@ -1437,17 +2162,14 @@ def test_current_center_path_restores_forecast_when_raw_projection_races(
 
     workspace = _build_workspace(payload, now_epoch=100.0)
 
-    assert workspace["forecast"]["direction"] == "SELL"
-    assert workspace["forecast"]["state"] == "CURRENT"
-    assert workspace["forecast"]["confidence"] == 0.77
-    assert workspace["forecast"]["horizon_seconds"] is None
-    # Presentation roles are never authorization evidence. Even an older
-    # ``*_authorized`` role remains diagnostic when the explicit LSTM artifact,
-    # production, selective-risk, and lineage gates are absent.
-    assert "no reliable edge" in workspace["forecast"]["summary"].lower()
-    assert "diagnostic only" in workspace["forecast"]["summary"].lower()
-    if forecast_status == "LOW_CONFIDENCE":
-        assert "input quality is low" in workspace["forecast"]["summary"].lower()
+    assert workspace["forecast"] == {
+        "direction": "NEUTRAL",
+        "state": "UNKNOWN",
+        "confidence": None,
+        "horizon_seconds": None,
+        "summary": "No reliable next direction is confirmed.",
+    }
+    assert workspace["overlays"] == []
 
 
 def test_current_no_edge_path_completes_partial_raw_forecast_without_hiding_risk_gate() -> None:
@@ -1480,9 +2202,7 @@ def test_current_no_edge_path_completes_partial_raw_forecast_without_hiding_risk
 
     assert workspace["forecast"]["direction"] == "SELL"
     assert workspace["forecast"]["state"] == "CURRENT"
-    assert workspace["forecast"]["confidence"] == 0.77
-    assert "no reliable edge" in workspace["forecast"]["summary"].lower()
-    assert "diagnostic only" in workspace["forecast"]["summary"].lower()
+    assert workspace["forecast"]["confidence"] is None
     assert workspace["permission"]["action"] == "WAIT"
     assert workspace["permission"]["allowed"] is False
 
@@ -1528,12 +2248,10 @@ def test_lstm_path_side_drives_operator_direction_when_body_bias_disagrees() -> 
 
     workspace = _build_workspace(payload, now_epoch=100.0)
 
-    assert workspace["forecast"]["direction"] == "SELL"
+    assert workspace["forecast"]["direction"] == "BUY"
     assert workspace["forecast"]["state"] == "CURRENT"
-    assert workspace["forecast"]["confidence"] == 0.77
-    assert workspace["forecast"]["horizon_seconds"] is None
-    assert "no reliable edge" in workspace["forecast"]["summary"].lower()
-    assert "diagnostic only" in workspace["forecast"]["summary"].lower()
+    assert workspace["forecast"]["confidence"] == 0.91
+    assert workspace["forecast"]["horizon_seconds"] == 60
     assert workspace["permission"]["action"] == "WAIT"
     assert workspace["permission"]["allowed"] is False
 
@@ -2342,12 +3060,12 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
     by_id = {row["id"]: row for row in overlays}
 
     assert by_id["two-candle-current"]["family"] == "two_candle"
-    assert by_id["two-candle-current"]["label"] == "Two-candle study"
+    assert by_id["two-candle-current"]["label"] == "Near-term candle read"
     assert by_id["lstm-study-current"]["family"] == "lstm"
-    assert by_id["lstm-study-current"]["label"] == "LSTM study"
+    assert by_id["lstm-study-current"]["label"] == "12-step future blocks"
     assert by_id["lstm-path-current"]["family"] == "lstm"
     assert by_id["lstm-path-current"]["layer"] == "prediction_path"
-    assert by_id["lstm-path-current"]["label"] == "LSTM V3 events - NO EDGE - diagnostic"
+    assert by_id["lstm-path-current"]["label"] == "Future blocks · no reliable edge"
     assert by_id["lstm-path-current"]["coordinate_units"] == "normalized"
     assert by_id["lstm-path-current"].get("forecast_role") == "composite"
     assert by_id["lstm-path-current"].get("forecast_status") == "NO_EDGE"
@@ -2369,8 +3087,8 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
     assert [row["side"] for row in scenarios] == ["SELL", "BUY", "NEUTRAL"]
     assert [row["selected"] for row in scenarios] == [True, False, False]
     assert [row["probability"] for row in scenarios] == [0.18, 0.72, 0.10]
-    assert len(cast(list[object], scenarios[0]["line_points"])) == 13
-    assert scenarios[0]["line_points"] == by_id["lstm-path-current"]["line_points"]
+    assert all("line_points" not in scenario for scenario in scenarios)
+    assert by_id["lstm-path-current"]["line_points"] == []
     assert all("forecast_path" not in row for row in scenarios)
     assert all("private_artifact_path" not in row for row in scenarios)
     interval = by_id["lstm-path-current"].get("interval")
@@ -2382,12 +3100,19 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
     lstm_rows = [row for row in overlays if row["family"] == "lstm"]
     assert [row.get("forecast_role") for row in lstm_rows].count("composite") == 1
     assert by_id["scene-study-current"]["family"] == "scene_forecaster"
-    assert by_id["scene-study-current"]["label"] == "Scene forecaster"
+    assert by_id["scene-study-current"]["label"] == "Visual outlook"
     assert by_id["council-current"]["family"] == "council"
-    assert by_id["council-current"]["label"] == "Council read"
-    assert by_id["smc-order-block-current"]["family"] == "smc"
-    assert by_id["smc-order-block-current"]["layer"] == "smart_money"
-    assert by_id["smc-order-block-current"]["label"] == "SMC order block"
+    assert by_id["council-current"]["label"] == "Combined analysis"
+    context_overlay = next(row for row in overlays if row["kind"] == "reaction_zone")
+    assert context_overlay["family"] == "market_context"
+    assert context_overlay["layer"] == "market_context"
+    assert context_overlay["label"] == "Reaction zone"
+    assert "smc" not in str(context_overlay["id"]).lower()
+    assert "order" not in str(context_overlay["id"]).lower()
+    serialized_context = json.dumps(context_overlay).lower()
+    assert "smart_money" not in serialized_context
+    assert "order_block" not in serialized_context
+    assert "liquidity" not in serialized_context
 
 
 def test_precision_projected_lstm_composite_survives_full_public_chain() -> None:
@@ -2472,20 +3197,16 @@ def test_precision_projected_lstm_composite_survives_full_public_chain() -> None
     assert lstm["coordinate_space"] == "chart"
     assert lstm["coordinate_units"] == "normalized"
     assert lstm.get("forecast_coordinate_units") == "normalized"
-    assert len(cast(list[object], lstm["line_points"])) == 13
-    assert lstm.get("forecast_band_points") == [
-        [0.55, 0.29],
-        [0.90, 0.23],
-        [0.90, 0.25],
-        [0.55, 0.31],
-        [0.55, 0.29],
-    ]
+    assert lstm["line_points"] == []
+    assert lstm.get("geometry_kind") == "future_blocks"
+    assert lstm.get("forecast_band_points") == []
     assert len(cast(list[object], lstm.get("forecast_candles"))) == 12
     scenarios = cast(list[dict[str, object]], lstm.get("forecast_scenarios"))
     assert len(scenarios) == 3
     assert sum(bool(scenario["selected"]) for scenario in scenarios) == 1
     selected = next(scenario for scenario in scenarios if scenario["selected"])
-    assert selected["line_points"] == lstm["line_points"]
+    assert "line_points" not in selected
+    assert lstm.get("forecast_band_points") == []
     assert lstm.get("forecast_anchor") == {
         "x_norm": 0.55,
         "y_norm": 0.30,
@@ -2502,7 +3223,7 @@ def test_precision_projected_lstm_composite_survives_full_public_chain() -> None
     )
     safe_lstm = [row for row in safe_rows if row.get("family") == "lstm"]
     assert len(safe_lstm) == 1
-    assert len(cast(list[object], safe_lstm[0]["line_points"])) == 13
+    assert safe_lstm[0]["line_points"] == []
 
 
 @pytest.mark.parametrize("failure", ["missing_transform", "space_mismatch"])
@@ -2812,6 +3533,280 @@ def test_history_is_chronological_bounded_and_uses_generated_summaries() -> None
     assert "internal model trace" not in serialized
     assert "private" not in serialized
     assert all(set(row) == {"observed_at", "direction", "state", "summary", "frame_id"} for row in history)
+
+
+def test_episode_history_accepts_action_and_iso_timestamp_without_exposing_internals() -> None:
+    payload = _fresh_payload()
+    payload["recent_studies"] = [
+        {
+            "timestamp": "2026-07-18T08:30:00Z",
+            "frame_id": 13,
+            "action": "SELL",
+            "state": "ENDED",
+            "summary": "Event 3 closed below the starting block.",
+            "episode_id": "episode-safe-1",
+            "event_id": "episode-safe-1-e3",
+            "event_index": 3,
+            "source_path": r"C:\private\episode.json",
+        }
+    ]
+
+    history = _build_workspace(payload, now_epoch=1_768_000_000.0)["history"]
+    event = next(row for row in history if row.get("episode_id") == "episode-safe-1")
+
+    assert event.get("id") == "episode-safe-1-e3"
+    assert event["direction"] == "SELL"
+    assert event.get("event_index") == 3
+    assert event["observed_at"] == 1_784_363_400.0
+    assert event["summary"] == "Event 3 closed below the starting block."
+    assert "source_path" not in event
+
+
+def test_tracking_episode_projects_frozen_plan_blocks_and_before_after_story() -> None:
+    payload = _fresh_payload(side="SELL")
+    payload["tracking_episode_readiness"] = {"ready": True, "reasons": []}
+    visual_blocks = [
+        {
+            "step": step,
+            "x_norm": 0.55 + step * 0.02,
+            "open_y_norm": 0.45 + step * 0.002,
+            "high_y_norm": 0.42 + step * 0.002,
+            "low_y_norm": 0.49 + step * 0.002,
+            "close_y_norm": 0.47 + step * 0.002,
+            "movement_side": "SELL",
+            "body_bias": "SELL",
+        }
+        for step in range(1, 13)
+    ]
+    sequence_path = [
+        {
+            "step": step,
+            "expected_open_norm": 0.55 - step * 0.002,
+            "expected_high_norm": 0.57 - step * 0.002,
+            "expected_low_norm": 0.51 - step * 0.002,
+            "expected_close_norm": 0.53 - step * 0.002,
+            "movement_direction": "SELL",
+            "candle_body_direction": "SELL",
+            "raw_model_buy_probability": 0.01,
+            "source_path": r"C:\private\forecast.json",
+        }
+        for step in range(1, 13)
+    ]
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "episode_id": "episode-public-1",
+        "state": "ACTIVE",
+        "revision": 4,
+        "event_horizon": 12,
+        "event_cursor": 1,
+        "started_at": "2026-07-18T08:00:00Z",
+        "updated_at": "2026-07-18T08:05:00Z",
+        "pair": "EUR/USD OTC",
+        "timeframe": "M5",
+        "committed_plan": {"decision": {"action": "SELL", "summary": "private trace"}},
+        "baseline_forecasts": {
+            "scene": {"forecast_candles": visual_blocks, "provider": "private"},
+            "lstm": {"forecast_path": sequence_path, "model_version": "private"},
+        },
+        "events": [
+            {
+                "event_id": "episode-public-1:E1",
+                "episode_id": "episode-public-1",
+                "step": 1,
+                "observed_at": "2026-07-18T08:05:00Z",
+                "predicted_block": {"side": "SELL"},
+                "actual_block": {"side": "SELL"},
+                "direction_agreement": True,
+                "after_reference": {"frame_id": 14, "source_path": r"C:\private\frame.png"},
+            }
+        ],
+    }
+
+    workspace = _build_workspace(payload, now_epoch=1_784_362_000.0)
+    episode = cast(dict[str, object], cast(dict[str, object], workspace["tracking"])["episode"])
+
+    assert episode["state"] == "ACTIVE"
+    assert episode["progress"] == {"completed": 1, "total": 12}
+    assert len(cast(list[object], episode["future_blocks"])) == 12
+    assert cast(dict[str, object], episode["baseline"])["direction"] == "SELL"
+    assert "matched" in str(cast(dict[str, object], episode["current"])["summary"])
+    event = next(row for row in workspace["history"] if row.get("episode_id") == "episode-public-1")
+    assert event.get("event_index") == 1
+    assert event["direction"] == "SELL"
+    serialized = json.dumps(episode).lower()
+    assert "raw_model" not in serialized
+    assert "provider" not in serialized
+    assert "source_path" not in serialized
+    assert "private trace" not in serialized
+
+
+def test_tracking_episode_archive_is_projected_as_persistent_session_history() -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode_history"] = [
+        {
+            "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
+            "episode_id": "episode-archived-1",
+            "state": "STOPPED",
+            "event_cursor": 7,
+            "event_horizon": 12,
+            "direction_agreement_count": 5,
+            "direction_observation_count": 7,
+            "ended_at": "2026-07-18T09:00:00Z",
+            "anchor_frame_id": 40,
+            "events": [
+                {
+                    "event_id": "episode-archived-1:E1",
+                    "step": 1,
+                    "observed_at": "2026-07-18T08:05:00Z",
+                    "predicted_side": "SELL",
+                    "actual_side": "SELL",
+                    "direction_agreement": True,
+                    "frame_id": 34,
+                    "raw_block": {"provider": "private"},
+                },
+                {
+                    "event_id": "episode-archived-1:E2",
+                    "step": 2,
+                    "observed_at": "2026-07-18T08:10:00Z",
+                    "predicted_side": "SELL",
+                    "actual_side": "BUY",
+                    "direction_agreement": False,
+                    "frame_id": 35,
+                },
+            ],
+            "source_path": r"C:\private\episode.json",
+            "provider": "private-provider",
+        },
+        {
+            "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
+            "episode_id": "episode-archived-2",
+            "state": "COMPLETED",
+            "event_cursor": 1,
+            "event_horizon": 12,
+            "direction_agreement_count": 1,
+            "direction_observation_count": 1,
+            "ended_at": "2026-07-18T10:00:00Z",
+            "anchor_frame_id": 52,
+            "events": [
+                {
+                    "event_id": "episode-archived-2:E1",
+                    "step": 1,
+                    "observed_at": "2026-07-18T09:05:00Z",
+                    "predicted_side": "BUY",
+                    "actual_side": "BUY",
+                    "direction_agreement": True,
+                    "frame_id": 45,
+                }
+            ],
+        },
+    ]
+
+    history = _build_workspace(payload, now_epoch=1_784_400_000.0)["history"]
+    archived = next(
+        row
+        for row in history
+        if row.get("id") == "episode-archived-1-summary"
+    )
+
+    assert archived.get("id") == "episode-archived-1-summary"
+    assert archived.get("event_index") == 7
+    assert archived["frame_id"] == 40
+    assert archived["summary"] == (
+        "Saved tracking study: 7 of 12 events recorded; "
+        "5 of 7 directional blocks matched."
+    )
+    by_id = {
+        str(row.get("id")): row
+        for row in history
+        if row.get("episode_id") in {
+            "episode-archived-1",
+            "episode-archived-2",
+        }
+    }
+    assert {
+        "episode-archived-1-e1",
+        "episode-archived-1-e2",
+        "episode-archived-1-summary",
+        "episode-archived-2-e1",
+        "episode-archived-2-summary",
+    }.issubset(by_id)
+    assert by_id["episode-archived-1-e1"].get("agreement") is True
+    assert by_id["episode-archived-1-e2"].get("agreement") is False
+    assert by_id["episode-archived-2-e1"].get("predicted_direction") == "BUY"
+    serialized = json.dumps(list(by_id.values())).lower()
+    assert "provider" not in serialized
+    assert "source_path" not in serialized
+    assert "raw_block" not in serialized
+    assert "private" not in serialized
+
+
+def test_session_history_preserves_every_retained_episode_event_and_summary() -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode_history"] = [
+        {
+            "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
+            "episode_id": f"episode-retained-{episode_index:02d}",
+            "state": "COMPLETED",
+            "event_cursor": 12,
+            "event_horizon": 12,
+            "direction_agreement_count": 12,
+            "direction_observation_count": 12,
+            "ended_at": float(10_000 + episode_index * 100 + 99),
+            "anchor_frame_id": episode_index * 100,
+            "events": [
+                {
+                    "event_id": f"episode-retained-{episode_index:02d}-e{step}",
+                    "step": step,
+                    "observed_at": float(10_000 + episode_index * 100 + step),
+                    "predicted_side": "BUY",
+                    "actual_side": "BUY",
+                    "direction_agreement": True,
+                    "frame_id": episode_index * 100 + step,
+                }
+                for step in range(1, 13)
+            ],
+        }
+        for episode_index in range(24)
+    ]
+
+    history = _build_workspace(payload, now_epoch=20_000.0)["history"]
+    episode_rows = [row for row in history if row.get("episode_id")]
+    row_ids = {str(row.get("id")) for row in episode_rows}
+
+    assert len(episode_rows) == 24 * 13
+    assert "episode-retained-00-e1" in row_ids
+    assert "episode-retained-00-summary" in row_ids
+    assert "episode-retained-23-e12" in row_ids
+    assert "episode-retained-23-summary" in row_ids
+    observed = [float(row.get("observed_at") or 0.0) for row in episode_rows]
+    assert observed == sorted(observed)
+
+
+def test_tracking_readiness_message_uses_plain_public_language() -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "episode_id": "",
+        "state": "IDLE",
+        "revision": 0,
+    }
+    payload["tracking_episode_readiness"] = {
+        "ready": False,
+        "reasons": ["Wait for a complete 12-event Scene or LSTM forecast baseline."],
+    }
+
+    episode = cast(
+        Mapping[str, object],
+        cast(Mapping[str, object], _build_workspace(payload, now_epoch=100.0)["tracking"])[
+            "episode"
+        ],
+    )
+
+    assert episode["readiness_message"] == "Wait until all 12 future blocks are ready."
+    serialized = json.dumps(episode).lower()
+    assert "scene" not in serialized
+    assert "lstm" not in serialized
+    assert "forecast baseline" not in serialized
 
 
 def test_canonical_current_leg_requires_current_frame_and_ends_previous_pressure() -> None:
@@ -3204,10 +4199,9 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
                 "targets",
                 "invalidation",
                 "council",
-                "smc",
+                "market_context",
                 "two_candle",
                 "lstm",
-                "prediction",
                 "history",
             },
         ),
@@ -3223,7 +4217,7 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
                 "triggers",
                 "targets",
                 "invalidation",
-                "smc",
+                "market_context",
                 "council",
             },
         ),
@@ -3233,11 +4227,11 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
         ),
         "zones": ("INSPECTOR", {"supply_demand"}),
         "plan": ("INSPECTOR", {"council", "triggers", "targets", "invalidation"}),
-        "smc": ("INSPECTOR", {"smc"}),
+        "market_context": ("INSPECTOR", {"market_context"}),
         "two-candle": ("INSPECTOR", {"two_candle"}),
         "scene-forecaster": ("INSPECTOR", set()),
         "lstm": ("INSPECTOR", {"lstm"}),
-        "forecast": ("INSPECTOR", {"two_candle", "lstm", "prediction"}),
+        "forecast": ("INSPECTOR", {"two_candle", "lstm"}),
         "history": ("INSPECTOR", {"history", "major_swings", "local_swings"}),
     }
     public_family_views = cast(
@@ -3272,11 +4266,12 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
                 Sequence[Mapping[str, object]],
                 forecast_row.get("forecast_scenarios"),
             )
-            assert len(endpoint_scenarios) == 3
-            assert all(
-                len(cast(Sequence[object], row["line_points"])) == 13
-                for row in endpoint_scenarios
-            )
+            assert endpoint_scenarios == []
+            assert forecast_row.get("line_points") == []
+            assert forecast_row.get("geometry_kind") == "future_blocks"
+            assert len(
+                cast(Sequence[object], forecast_row.get("forecast_candles"))
+            ) == 12
             assert forecast_row.get("trajectory_mode") == "BUY"
             assert forecast_row.get("trajectory_mode_probability_calibrated") is False
         assert observed_call["compact_public"] is True
@@ -3467,14 +4462,14 @@ def test_current_studies_survive_incomplete_same_lineage_snapshot(
         family: sum(1 for row in workspace["overlays"] if row["family"] == family)
         for family in ("two_candle", "lstm", "prediction")
     }
-    assert counts == {"two_candle": 1, "lstm": 4, "prediction": 0}
+    assert counts == {"two_candle": 1, "lstm": 0, "prediction": 0}
     repaired_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     repaired_families = [
         str(row.get("family"))
         for row in cast(list[dict[str, object]], repaired_snapshot["overlays"])
     ]
     assert repaired_families.count("two_candle") == 1
-    assert repaired_families.count("lstm") == 4
+    assert repaired_families.count("lstm") == 0
     assert repaired_families.count("prediction") == 0
 
 
@@ -3612,6 +4607,22 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
         "full_overlay_frame_id": 14,
         "model_vote_frame_id": 14,
         "tracking_enabled": True,
+        "tracking_episode": {
+            "schema_version": "PG_TRACKING_EPISODE_V1",
+            "episode_id": "episode-cold-wait",
+            "state": "ACTIVE",
+            "revision": 2,
+            "event_cursor": 0,
+            "baseline_forecasts": {
+                "scene": {"provider": "PRIVATE_EPISODE_PROVIDER"},
+                "lstm": {"model_version": "PRIVATE_EPISODE_MODEL"},
+            },
+            "committed_plan": {"summary": "PRIVATE_EPISODE_PLAN"},
+            "candidate_revision": {"source_path": r"C:\private\candidate.json"},
+        },
+        "tracking_episode_history": [
+            {"episode_id": "archived-private", "provider": "PRIVATE_ARCHIVE_PROVIDER"}
+        ],
         "last_capture_epoch": 99.0,
         "last_display_surface_signature": "window-sig-14",
         "last_study_surface_signature": "study-sig-14",
@@ -3802,19 +4813,25 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
     assert compact_response.status_code == 200
     compact_serialized = json.dumps(compact_response.json())
     assert "forecast_snapshot_v3" not in compact_serialized
+    assert "tracking_episode" not in compact_serialized
+    assert "tracking_episode_history" not in compact_serialized
+    assert "PRIVATE_EPISODE_PROVIDER" not in compact_serialized
+    assert "PRIVATE_EPISODE_MODEL" not in compact_serialized
+    assert "PRIVATE_EPISODE_PLAN" not in compact_serialized
+    assert "PRIVATE_ARCHIVE_PROVIDER" not in compact_serialized
     assert "features" not in compact_serialized
     assert "raw_model_" not in compact_serialized
     fresh_workspace = cast(_OperatorWorkspaceView, fresh_response.json())
     fresh_counts = {
         family: sum(1 for row in fresh_workspace["overlays"] if row["family"] == family)
-        for family in {"smc", "supply_demand", "triggers", "two_candle", "lstm", "prediction"}
+        for family in {"market_context", "supply_demand", "triggers", "two_candle", "lstm", "prediction"}
     }
     assert fresh_counts == {
-        "smc": 1,
+        "market_context": 1,
         "supply_demand": 1,
         "triggers": 1,
         "two_candle": 1,
-        "lstm": 4,
+        "lstm": 0,
         "prediction": 0,
     }
     assert all(
@@ -3862,18 +4879,14 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
     waiting_workspace = cast(_OperatorWorkspaceView, all_response.json())
     waiting_counts = {
         family: sum(1 for row in waiting_workspace["overlays"] if row["family"] == family)
-        for family in {"smc", "supply_demand", "triggers", "two_candle", "lstm", "prediction"}
+        for family in {"market_context", "supply_demand", "triggers", "two_candle", "lstm", "prediction"}
     }
     assert waiting_counts == fresh_counts
     assert waiting_workspace["forecast"]["direction"] == "SELL"
-    selected_lstm = next(
-        row
-        for row in waiting_workspace["overlays"]
-        if row["family"] == "lstm" and row.get("forecast_role") == "center"
-    )
-    assert selected_lstm["side"] == "SELL"
-    assert selected_lstm["confidence"] == 0.77
-    assert waiting_workspace["forecast"]["confidence"] == selected_lstm["confidence"]
+    # The line-only LSTM fixture is intentionally excluded by the public
+    # block-only contract, so the aligned near-term candle read owns the
+    # restored forecast confidence.
+    assert waiting_workspace["forecast"]["confidence"] == 0.64
     assert waiting_workspace["forecast"]["state"] == "STALE"
     assert waiting_workspace["permission"] == {
         **waiting_workspace["permission"],
@@ -3899,12 +4912,11 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
     forecast_workspace = cast(_OperatorWorkspaceView, forecast_response.json())
     assert {row["family"] for row in forecast_workspace["overlays"]} == {
         "two_candle",
-        "lstm",
     }
     assert sum(
         row.get("forecast_role") == "center"
         for row in forecast_workspace["overlays"]
-    ) == 1
+    ) == 0
     assert all(
         row.get("forecast_authorized") is False
         and row.get("forecast_status") == "STALE"

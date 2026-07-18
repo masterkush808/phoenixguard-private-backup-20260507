@@ -1,0 +1,37 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venv-dev\\Scripts\\python.exe",
+    "python.analysis.diagnosticMode": "openFilesOnly",
+    "python.analysis.typeCheckingMode": "strict",
+    "python.analysis.indexing": false,
+    "python.analysis.autoImportCompletions": false,
+    "python.analysis.logLevel": "Error",
+    "python.testing.autoTestDiscoverOnSaveEnabled": false,
+    "python.analysis.exclude": [
+        "**/.codex_runtime/**",
+        "**/.pytest_cache/**",
+        "**/.venv*/**",
+        "**/__pycache__/**",
+        "**/node_modules/**",
+        "reports/**",
+        "runtime/**"
+    ],
+    "files.watcherExclude": {
+        "**/.codex_runtime/**": true,
+        "**/.pytest_cache/**": true,
+        "**/.venv*/**": true,
+        "**/__pycache__/**": true,
+        "**/node_modules/**": true,
+        "**/reports/**": true,
+        "**/runtime/**": true
+    },
+    "search.exclude": {
+        "**/.codex_runtime/**": true,
+        "**/.pytest_cache/**": true,
+        "**/.venv*/**": true,
+        "**/__pycache__/**": true,
+        "**/node_modules/**": true,
+        "**/reports/**": true,
+        "**/runtime/**": true
+    }
+}

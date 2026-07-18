@@ -182,6 +182,34 @@ def can_import_sentence_transformers_safely(timeout_sec: int | None = None) -> b
     )
 
 
+def sentence_transformer_runtime_kwargs(
+    *,
+    allow_remote_bootstrap: bool = False,
+    force_download: bool = False,
+) -> dict[str, Any]:
+    """Return the bounded, deterministic constructor policy for text embedders.
+
+    PhoenixGuard's text model is intentionally CPU-owned.  Disabling the
+    Transformers meta-device loader avoids the Windows native storage crash
+    seen when a low-memory process materializes cached weights.  Eager
+    attention is also the smallest dependable implementation for this compact
+    encoder and does not start an additional optimized-attention backend.
+    """
+
+    requested_device = str(
+        os.getenv("PHOENIXGUARD_TEXT_EMBEDDER_DEVICE", "cpu") or "cpu"
+    ).strip().lower()
+    device = requested_device if requested_device in {"cpu", "cuda", "mps"} else "cpu"
+    return {
+        "device": device,
+        "local_files_only": bool(not allow_remote_bootstrap and not force_download),
+        "model_kwargs": {
+            "attn_implementation": "eager",
+            "low_cpu_mem_usage": False,
+        },
+    }
+
+
 def can_import_chronos_safely(timeout_sec: int = 20) -> bool:
     return can_import_module_safely(
         "import chronos",

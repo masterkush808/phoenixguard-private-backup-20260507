@@ -97,7 +97,13 @@ def test_personalization_embedder_defaults_to_cache_only(monkeypatch: pytest.Mon
     engine.ensure_embedder()
 
     assert captured["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
-    assert _captured_kwargs(captured)["local_files_only"] is True
+    kwargs = _captured_kwargs(captured)
+    assert kwargs["device"] == "cpu"
+    assert kwargs["local_files_only"] is True
+    assert kwargs["model_kwargs"] == {
+        "attn_implementation": "eager",
+        "low_cpu_mem_usage": False,
+    }
 
 
 def test_memory_ingest_embedder_defaults_to_cache_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,4 +126,25 @@ def test_memory_ingest_embedder_defaults_to_cache_only(monkeypatch: pytest.Monke
     memory_ingest.EmbedderSingleton.get()
 
     assert captured["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
-    assert _captured_kwargs(captured)["local_files_only"] is True
+    kwargs = _captured_kwargs(captured)
+    assert kwargs["device"] == "cpu"
+    assert kwargs["local_files_only"] is True
+    assert kwargs["model_kwargs"] == {
+        "attn_implementation": "eager",
+        "low_cpu_mem_usage": False,
+    }
+
+
+def test_sentence_transformer_runtime_policy_falls_back_to_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_TEXT_EMBEDDER_DEVICE", "unsupported-accelerator")
+
+    kwargs = core_utils.sentence_transformer_runtime_kwargs(
+        allow_remote_bootstrap=True,
+        force_download=False,
+    )
+
+    assert kwargs["device"] == "cpu"
+    assert kwargs["local_files_only"] is False
+    assert cast(Mapping[str, object], kwargs["model_kwargs"])["low_cpu_mem_usage"] is False

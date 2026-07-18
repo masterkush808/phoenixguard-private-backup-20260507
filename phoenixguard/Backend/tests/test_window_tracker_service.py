@@ -617,6 +617,50 @@ def test_memory_projection_warmup_initializes_text_embedder_without_pixels(
     assert calls[0][1] is None
 
 
+def test_service_defers_memory_projection_warmup_when_launch_policy_disables_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = threading.Event()
+
+    class DeferredWarmupAdapter:
+        def warmup_memory_projection(self) -> None:
+            called.set()
+
+    monkeypatch.setattr(window_tracker_module.RUNTIME, "background_warmup_on_launch", False)
+    monkeypatch.setattr(window_tracker_module, "_memory_projection_warmup_started", False)
+
+    service = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "deferred-warmup",
+        tracking_adapter=DeferredWarmupAdapter(),
+    )
+
+    assert service.memory_projection_warmup_started is False
+    assert called.wait(timeout=0.05) is False
+
+
+def test_service_starts_one_memory_projection_warmup_when_launch_policy_enables_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = threading.Event()
+
+    class EnabledWarmupAdapter:
+        def warmup_memory_projection(self) -> None:
+            called.set()
+
+    monkeypatch.setattr(window_tracker_module.RUNTIME, "background_warmup_on_launch", True)
+    monkeypatch.setattr(window_tracker_module, "_memory_projection_warmup_started", False)
+
+    service = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "enabled-warmup",
+        tracking_adapter=EnabledWarmupAdapter(),
+    )
+
+    assert service.memory_projection_warmup_started is True
+    assert called.wait(timeout=1.0) is True
+
+
 class _FakeCaptureBackend:
     def __init__(self, images: Sequence[Image.Image]) -> None:
         self.images = [image.convert("RGB") for image in images]
@@ -3045,6 +3089,34 @@ def test_live_selector_lane_reads_pair_and_m5_despite_toolbar_clutter() -> None:
     assert market["value"] == "GBP/USD OTC"
     assert float(market["confidence"]) >= 0.42
     assert str(market["raw_text"]).replace(" ", "") == "GBP/USDOTC"
+
+
+def test_tiny_live_m5_glyph_uses_shape_topology_instead_of_m1_guess() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    # Exact seven-pixel topology observed in the live broker's antialiased M5
+    # selector.  The final four columns form a 5: top/middle/bottom bars,
+    # upper-left stroke, and lower-right stroke.
+    compact_m5 = np.asarray(
+        [
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0],
+            [1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0],
+            [1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0],
+            [1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1],
+            [1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1],
+        ],
+        dtype=np.uint8,
+    )
+
+    score_timeframe = cast(
+        Callable[[NDArray[np.uint8]], tuple[str, float]],
+        getattr(adapter, "_score_timeframe_label"),
+    )
+    label, confidence = score_timeframe(compact_m5)
+
+    assert label == "M5"
+    assert confidence >= 0.56
 
 
 def test_market_ocr_domain_decoder_repairs_ambiguous_currency_glyphs_only() -> None:
@@ -7855,7 +7927,7 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
 
     assert 'data-overlay-view="history"' in dashboard_html
     assert 'data-overlay-family="history"' in dashboard_html
-    assert 'data-overlay-family="smc"' in dashboard_html
+    assert 'data-overlay-family="market_context"' in dashboard_html
     assert 'data-overlay-family="lstm"' in dashboard_html
     assert 'data-overlay-family="scene_forecaster"' in dashboard_html
     assert ".surface-trendline.family-scene-forecaster" in dashboard_html
@@ -7868,6 +7940,17 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert "function resolveLabelCollisions(container)" in dashboard_html
     assert "window.resolveLabelCollisions = resolveLabelCollisions;" in dashboard_html
     assert "label-collision-hidden" in dashboard_html
+    lowered = dashboard_html.lower()
+    for private_term in (
+        "smc",
+        "liquidity",
+        "order block",
+        "order_block",
+        "fair value gap",
+        "fair_value_gap",
+        "fvg",
+    ):
+        assert private_term not in lowered
     assert "REPLAY: {objects:" not in dashboard_html
     assert "FULL_HISTORY_READ: {objects:" not in dashboard_html
 
@@ -9883,6 +9966,59 @@ def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch
     assert "cached_chart_bbox" in stages
     assert result.tracking_summary["detected_timeframe"] == "M5"
     assert result.latest_signal["market"] == "EUR/JPY OTC"
+
+
+def test_real_tracking_adapter_rechecks_zero_confidence_cached_timeframe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy")
+    _paint_realistic_market_selector(image, "EUR/JPY OTC")
+    detected_calls = 0
+
+    def confirmed_timeframe(_image: Image.Image) -> dict[str, Any]:
+        nonlocal detected_calls
+        detected_calls += 1
+        return {
+            "value": "M5",
+            "source": "selector_chip",
+            "confidence": 0.91,
+            "bbox": [120, 60, 150, 82],
+        }
+
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", confirmed_timeframe)
+    result = adapter.study(
+        image,
+        session_payload={
+            "execution_controls": {
+                "live_execution_enabled": False,
+                "execution_mode": "shadow",
+                "min_timeframe_confidence": 0.42,
+            },
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            },
+            "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+            "tracking_summary": {
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.0,
+                "detected_market": "EUR/JPY OTC",
+                "market_confidence": 0.91,
+            },
+            "latest_signal": {
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.0,
+                "market": "EUR/JPY OTC",
+                "market_confidence": 0.91,
+            },
+        },
+    )
+
+    assert detected_calls == 1
+    assert result.tracking_summary["detected_timeframe"] == "M5"
+    assert abs(float(result.tracking_summary["timeframe_confidence"]) - 0.91) < 1e-9
+    assert result.latest_signal["timeframe_identity_confirmed"] is True
 
 
 def test_real_tracking_adapter_falls_back_when_fast_resize_merges_candles(

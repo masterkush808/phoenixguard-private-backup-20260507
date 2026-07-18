@@ -6,15 +6,26 @@ import math
 import re
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any, cast
 from urllib.parse import quote
 
 from phoenixguard.decision.entry_window_policy_v3 import entry_location_guidance_v3
+from phoenixguard.tracking.tracking_episode_v3 import (
+    TRACKING_EPISODE_HISTORY_LIMIT,
+    TRACKING_EPISODE_HORIZON,
+    tracking_episode_readiness_v1,
+)
 
 
 OPERATOR_WORKSPACE_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1"
 
 _DIRECTIONAL_SIDES = frozenset({"BUY", "SELL"})
+_NON_EPISODE_HISTORY_LIMIT = 24
+_EPISODE_HISTORY_ROW_LIMIT = (
+    TRACKING_EPISODE_HISTORY_LIMIT * (TRACKING_EPISODE_HORIZON + 1)
+    + TRACKING_EPISODE_HORIZON
+)
 _FORECAST_BELIEF_STATES = frozenset(
     {"RESET", "REACQUIRING", "STABLE", "REVERSAL_PENDING"}
 )
@@ -96,18 +107,18 @@ _OVERLAY_PRESENTATION: dict[str, tuple[str, str, str]] = {
     "ANGLE_VECTOR": ("path", "Possible path", "outlook"),
     "REPLAY_ENTRY": ("entry", "Past entry", "history"),
     "REPLAY_EXIT": ("exit", "Past exit", "history"),
-    "MODEL_COUNCIL_MARKER": ("plan", "Council read", "plan"),
+    "MODEL_COUNCIL_MARKER": ("plan", "Combined analysis", "plan"),
     "REGIME_MARKER": ("context", "Market phase", "structure"),
     "MARKET_PLAY_MARKER": ("setup", "Active setup", "plan"),
     "PRICE_LOCATION_MARKER": ("context", "Price location", "structure"),
-    "TWO_CANDLE_STUDY": ("outlook", "Two-candle study", "outlook"),
-    "LSTM_STUDY": ("outlook", "LSTM study", "outlook"),
-    "SCENE_FORECAST_STUDY": ("outlook", "Scene forecaster", "outlook"),
-    "ORDER_BLOCK": ("zone", "SMC order block", "zones"),
-    "FAIR_VALUE_GAP": ("zone", "SMC fair value gap", "zones"),
-    "LIQUIDITY_POOL": ("zone", "SMC liquidity pool", "zones"),
-    "LIQUIDITY_SWEEP": ("movement", "SMC liquidity sweep", "movement"),
-    "MARKET_STRUCTURE_SHIFT": ("movement", "SMC structure shift", "structure"),
+    "TWO_CANDLE_STUDY": ("outlook", "Near-term candle read", "outlook"),
+    "LSTM_STUDY": ("outlook", "12-step future blocks", "outlook"),
+    "SCENE_FORECAST_STUDY": ("outlook", "Visual outlook", "outlook"),
+    "ORDER_BLOCK": ("zone", "Reaction zone", "zones"),
+    "FAIR_VALUE_GAP": ("zone", "Price imbalance", "zones"),
+    "LIQUIDITY_POOL": ("zone", "Crowded price area", "zones"),
+    "LIQUIDITY_SWEEP": ("movement", "Level sweep", "movement"),
+    "MARKET_STRUCTURE_SHIFT": ("movement", "Structure change", "structure"),
     "ZONE": ("zone", "Price area", "zones"),
     "TREND": ("trend", "Trend", "structure"),
     "ENTRY": ("entry", "Entry area", "plan"),
@@ -150,7 +161,7 @@ _LAYER_FAMILIES = {
     "active_council_decision": "council",
     "prediction_path": "prediction",
     "historical_replay": "history",
-    "smart_money": "smc",
+    "smart_money": "market_context",
 }
 
 _TYPE_FAMILIES = {
@@ -184,11 +195,11 @@ _TYPE_FAMILIES = {
     "PROGRESSION_PATH": "history",
     "REPLAY_ENTRY": "history",
     "REPLAY_EXIT": "history",
-    "ORDER_BLOCK": "smc",
-    "FAIR_VALUE_GAP": "smc",
-    "LIQUIDITY_POOL": "smc",
-    "LIQUIDITY_SWEEP": "smc",
-    "MARKET_STRUCTURE_SHIFT": "smc",
+    "ORDER_BLOCK": "market_context",
+    "FAIR_VALUE_GAP": "market_context",
+    "LIQUIDITY_POOL": "market_context",
+    "LIQUIDITY_SWEEP": "market_context",
+    "MARKET_STRUCTURE_SHIFT": "market_context",
     "ZONE": "supply_demand",
     "TREND": "trendlines",
     "ENTRY": "triggers",
@@ -214,7 +225,59 @@ _FAMILY_FALLBACK_LAYERS = {
     "scene_forecaster": "prediction_path",
     "prediction": "prediction_path",
     "history": "historical_replay",
-    "smc": "smart_money",
+    "market_context": "market_context",
+}
+
+_PUBLIC_LAYER_ALIASES = {
+    # The engine keeps its canonical layer vocabulary internally.  Public
+    # operator payloads use neutral product language so a browser response does
+    # not disclose the strategy taxonomy.
+    "smart_money": "market_context",
+}
+
+# Stable public identifiers let the browser expose individual overlay toggles
+# without publishing the proprietary canonical vocabulary.  The canonical
+# type remains inside the engine and never crosses this operator boundary.
+_PUBLIC_OVERLAY_KINDS: dict[str, tuple[str, str]] = {
+    "CHART_BOUNDS": ("chart_area", "Chart area"),
+    "CURRENT_CANDLE": ("current_price", "Current price"),
+    "IMPULSE_BOX": ("strong_move", "Strong move"),
+    "PULLBACK_BOX": ("pullback", "Pullback"),
+    "RETEST_BOX": ("retest_area", "Retest area"),
+    "CONTINUATION_BOX": ("continuation", "Continuation"),
+    "SNIPER_ENTRY_BOX": ("precision_entry", "Precision entry area"),
+    "TARGET_ZONE_BOX": ("target_area", "Target area"),
+    "INVALIDATION_BOX": ("risk_limit", "Risk limit"),
+    "SUPPLY_ZONE": ("higher_reaction", "Higher-price reaction area"),
+    "DEMAND_ZONE": ("lower_reaction", "Lower-price reaction area"),
+    "OPPOSING_FORCE": ("opposing_area", "Opposing area"),
+    "SUPPORT_TRENDLINE": ("rising_support", "Rising support line"),
+    "RESISTANCE_TRENDLINE": ("falling_resistance", "Falling resistance line"),
+    "INNER_TRENDLINE": ("local_structure_line", "Local structure line"),
+    "ANGLE_VECTOR": ("movement_angle", "Movement angle"),
+    "PROGRESSION_PATH": ("observed_path", "Observed path"),
+    "PREDICTION_PATH": ("possible_path", "Possible path"),
+    "REPLAY_ENTRY": ("past_entry", "Past entry"),
+    "REPLAY_EXIT": ("past_exit", "Past exit"),
+    "MODEL_COUNCIL_MARKER": ("combined_analysis", "Combined analysis"),
+    "REGIME_MARKER": ("market_phase", "Market phase"),
+    "MARKET_PLAY_MARKER": ("active_setup", "Active setup"),
+    "PRICE_LOCATION_MARKER": ("price_location", "Price location"),
+    "TWO_CANDLE_STUDY": ("near_term_read", "Near-term candle read"),
+    "LSTM_STUDY": ("future_blocks", "12-step future blocks"),
+    "SCENE_FORECAST_STUDY": ("visual_outlook", "Visual outlook"),
+    "ORDER_BLOCK": ("reaction_zone", "Reaction zone"),
+    "FAIR_VALUE_GAP": ("price_imbalance", "Price imbalance"),
+    "LIQUIDITY_POOL": ("crowded_price_area", "Crowded price area"),
+    "LIQUIDITY_SWEEP": ("level_sweep", "Level sweep"),
+    "MARKET_STRUCTURE_SHIFT": ("structure_change", "Structure change"),
+    "ZONE": ("price_area", "Price area"),
+    "TREND": ("trend", "Trend"),
+    "ENTRY": ("entry_area", "Entry area"),
+    "TARGET": ("target_area", "Target area"),
+    "RISK": ("risk_limit", "Risk limit"),
+    "MOVEMENT": ("price_movement", "Price movement"),
+    "OUTLOOK": ("possible_path", "Possible path"),
 }
 
 _GROUP_FALLBACK_FAMILIES = {
@@ -340,6 +403,18 @@ def _epoch(*values: object) -> float | None:
         number = _number(value)
         if number is not None and number > 0.0:
             return round(number, 6)
+        text = _text(value, "", limit=80)
+        if not text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed_epoch = parsed.timestamp()
+        if parsed_epoch > 0.0 and math.isfinite(parsed_epoch):
+            return round(parsed_epoch, 6)
     return None
 
 
@@ -1149,9 +1224,17 @@ def _forecast_contract(
         ):
             continue
         points = _point_pairs(overlay.get("line_points") or overlay.get("points"))
-        if len(points) < 2:
+        block_rows = _forecast_candle_rows(overlay.get("forecast_candles"))
+        if len(points) >= 2:
+            delta_y = points[-1][1] - points[0][1]
+        elif len(block_rows) == 12:
+            first_close = _number(block_rows[0].get("close_y_norm"))
+            last_close = _number(block_rows[-1].get("close_y_norm"))
+            if first_close is None or last_close is None:
+                continue
+            delta_y = last_close - first_close
+        else:
             continue
-        delta_y = points[-1][1] - points[0][1]
         if abs(delta_y) <= 1e-9:
             continue
         geometry_side = "SELL" if delta_y > 0.0 else "BUY"
@@ -1337,18 +1420,18 @@ def _forecast_contract(
     }:
         movement_word = "upward" if direction == "BUY" else "downward"
         summary = (
-            f"The current model path leans {movement_word}, but input quality is low "
-            "and its risk gate found no reliable edge. It remains visible, is diagnostic only, "
+            f"The current 12-step outlook leans {movement_word}, but input quality is low "
+            "and the quality checks found no reliable edge. It remains visible for context "
             "and never grants entry permission."
             if center_path_status == "LOW_CONFIDENCE"
-            else f"The current model path leans {movement_word}, but its risk gate "
-            "found no reliable edge. It is diagnostic only and never grants entry permission."
+            else f"The current 12-step outlook leans {movement_word}, but the quality checks "
+            "found no reliable edge. It is observation only and never grants entry permission."
         )
     elif state == "STALE":
         movement_word = "upward" if direction == "BUY" else "downward"
         summary = (
-            f"The last valid model outlook pointed {movement_word}. "
-            "It is diagnostic only while waiting for a new broker frame."
+            f"The last valid outlook pointed {movement_word}. "
+            "It remains observation only while waiting for a new broker frame."
         )
     elif direction in _DIRECTIONAL_SIDES:
         movement_word = "upward" if direction == "BUY" else "downward"
@@ -1460,7 +1543,25 @@ def _permission_contract(
     *,
     now_epoch: float,
 ) -> dict[str, object]:
+    tracking_episode = _mapping(payload.get("tracking_episode"))
+    episode_contract_present = bool(
+        _text(tracking_episode.get("schema_version"), "").upper()
+        == "PG_TRACKING_EPISODE_V1"
+    )
+    episode_state = _text(tracking_episode.get("state"), "IDLE").upper()
+    # Entry permission is deliberately episode-gated.  Missing episode state is
+    # not a legacy opt-in: it is an incomplete contract and therefore WAIT.
+    episode_active = bool(
+        episode_contract_present and episode_state in {"ARMING", "ACTIVE"}
+    )
+    episode_side = _episode_direction(tracking_episode)
+    episode_has_direction = episode_side in _DIRECTIONAL_SIDES
     selected_side = _side(command.get("selected_side"))
+    episode_direction_matches = bool(
+        episode_active
+        and episode_has_direction
+        and selected_side == episode_side
+    )
     command_fresh = freshness.get("state") == "FRESH"
     execution_present = _execution_present(payload, command, now_epoch)
     controls = _mapping(payload.get("execution_controls"))
@@ -1471,7 +1572,12 @@ def _permission_contract(
         if opportunity_open and expires_at is not None
         else None
     )
-    entry_location, entry_guidance = _entry_location_contract(selected_side)
+    # Once an episode has frozen a directional plan, operator guidance must stay
+    # bound to that plan even if a later live proposal fluctuates to the other
+    # side.  Permission can fail closed without silently rewriting where the
+    # operator should wait for the saved plan.
+    guidance_side = episode_side if episode_has_direction else selected_side
+    entry_location, entry_guidance = _entry_location_contract(guidance_side)
     movement_matches = (
         current_move.get("state") == "ACTIVE"
         and current_move.get("direction") == selected_side
@@ -1486,7 +1592,8 @@ def _permission_contract(
         and pressure_state in {"ACTIVE", "UNKNOWN"}
     )
     allowed = bool(
-        command_fresh
+        episode_direction_matches
+        and command_fresh
         and execution_present
         and live_execution_enabled
         and opportunity_open
@@ -1500,6 +1607,19 @@ def _permission_contract(
         next_condition = (
             "Use only the current verified window; stop and wait if live truth changes."
         )
+    elif not episode_active:
+        message = (
+            "Wait. Start Tracking to anchor a plan before entry can be permitted."
+            if not episode_contract_present or episode_state == "IDLE"
+            else "Wait. This tracking episode is closed; start a new episode for another entry study."
+        )
+        next_condition = "Start Tracking after the chart is ready and the next plan is deliberately anchored."
+    elif not episode_has_direction:
+        message = "Wait. The saved tracking plan does not permit a directional entry."
+        next_condition = "Keep observing this episode; start a new one only when a directional plan is deliberately anchored."
+    elif not episode_direction_matches:
+        message = "Wait. The current proposal differs from the saved tracking plan."
+        next_condition = "Keep the saved plan unchanged and wait; start a new episode before studying the opposite direction."
     elif not command_fresh:
         message = "Wait. The latest decision is not fresh enough to act on."
         next_condition = "Wait for a fresh live read."
@@ -1533,12 +1653,20 @@ def _permission_contract(
         "side": selected_side if allowed else "NEUTRAL",
         "message": message,
         "next_condition": next_condition,
-        "expires_at": expires_at if opportunity_open else None,
-        "window_open": opportunity_open,
-        "valid_for_seconds": valid_for_seconds,
+        "expires_at": (
+            expires_at
+            if opportunity_open and episode_direction_matches
+            else None
+        ),
+        "window_open": bool(opportunity_open and episode_direction_matches),
+        "valid_for_seconds": (
+            valid_for_seconds if episode_direction_matches else None
+        ),
         "window_label": _window_label(
-            is_open=opportunity_open,
-            valid_for_seconds=valid_for_seconds,
+            is_open=bool(opportunity_open and episode_direction_matches),
+            valid_for_seconds=(
+                valid_for_seconds if episode_direction_matches else None
+            ),
         ),
         "entry_location": entry_location,
         "entry_guidance": entry_guidance,
@@ -2562,7 +2690,17 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         presentation = _OVERLAY_PRESENTATION.get(raw_type)
         if presentation is None:
             continue
+        # A prediction-path token remains known to the internal contract for
+        # replay/diagnostics, but it is never a public live drawing.  The
+        # separately validated twelve future candle blocks are the only
+        # forward visual published to the operator.
+        if raw_type == "PREDICTION_PATH":
+            continue
         public_type, label, default_group = presentation
+        public_kind, public_kind_label = _PUBLIC_OVERLAY_KINDS.get(
+            raw_type,
+            (public_type, label),
+        )
         group = _LAYER_GROUPS.get(layer, default_group)
         if group not in {"structure", "zones", "movement", "plan", "outlook", "history"}:
             continue
@@ -2570,7 +2708,10 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             raw_type,
             _LAYER_FAMILIES.get(layer, _GROUP_FALLBACK_FAMILIES[group]),
         )
-        public_layer = layer if layer in _LAYER_FAMILIES else _FAMILY_FALLBACK_LAYERS[family]
+        public_layer = _PUBLIC_LAYER_ALIASES.get(
+            layer,
+            layer if layer in _LAYER_FAMILIES else _FAMILY_FALLBACK_LAYERS[family],
+        )
         role = _text(overlay.get("role"), "").lower()
         scene_forecast_overlay = bool(
             raw_type == "SCENE_FORECAST_STUDY"
@@ -2585,7 +2726,9 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             "LSTM_STUDY",
             "SCENE_FORECAST_STUDY",
         }:
-            label = "Scene forecaster"
+            label = "Visual outlook"
+            public_kind = "visual_outlook"
+            public_kind_label = "Visual outlook"
         lstm_forecast_role = ""
         lstm_forecast_status = ""
         if raw_type in {"LSTM_STUDY", "SCENE_FORECAST_STUDY"} and (
@@ -2605,19 +2748,19 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             elif "candle_event_path" in role:
                 lstm_forecast_role = "center"
             forecast_noun = "events" if lstm_forecast_role == "composite" else "path"
-            forecast_prefix = "Scene forecaster" if scene_forecast_overlay else "LSTM V3"
+            forecast_prefix = "Visual outlook" if scene_forecast_overlay else "Future blocks"
             if "stale_diagnostic" in role:
                 lstm_forecast_status = "STALE"
-                label = f"{forecast_prefix} last valid {forecast_noun} - diagnostic"
+                label = f"{forecast_prefix} · last saved {forecast_noun}"
             elif "no_edge" in role:
                 lstm_forecast_status = "NO_EDGE"
-                label = f"{forecast_prefix} {forecast_noun} - NO EDGE - diagnostic"
+                label = f"{forecast_prefix} · no reliable edge"
             elif "low_confidence" in role:
                 lstm_forecast_status = "LOW_CONFIDENCE"
-                label = f"{forecast_prefix} {forecast_noun} - LOW CONFIDENCE - diagnostic"
+                label = f"{forecast_prefix} · low confidence"
             elif role.endswith("_diagnostic"):
                 lstm_forecast_status = "DIAGNOSTIC"
-                label = f"{forecast_prefix} {forecast_noun} - diagnostic"
+                label = f"{forecast_prefix} · observation only"
             elif "authorized" in role and _forecast_overlay_authorized(
                 overlay,
                 _forecast_lane_authorization_evidence(
@@ -2628,12 +2771,12 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 scene_forecaster=scene_forecast_overlay,
             ):
                 lstm_forecast_status = "AUTHORIZED"
-                label = f"{forecast_prefix} authorized {forecast_noun}"
+                label = f"{forecast_prefix} · current {forecast_noun}"
             else:
                 # Legacy V3 path objects remain explicitly diagnostic.  An
                 # absent risk status must never be promoted by presentation.
                 lstm_forecast_status = "NO_EDGE"
-                label = f"{forecast_prefix} {forecast_noun} - NO EDGE - diagnostic"
+                label = f"{forecast_prefix} · no reliable edge"
             belief_contract = _forecast_belief_contract(overlay)
             belief_state = _text(belief_contract.get("belief_state"), "").upper()
             committed_side = _side(belief_contract.get("committed_side"))
@@ -2650,7 +2793,17 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 # A pending/reacquiring scene belief is informative but cannot
                 # surface as an authorized forecast revision.
                 lstm_forecast_status = "NO_EDGE"
-                label = f"{forecast_prefix} {forecast_noun} - revision under review"
+                label = f"{forecast_prefix} · change under review"
+        if (
+            raw_type == "LSTM_STUDY"
+            and not scene_forecast_overlay
+            and lstm_forecast_role
+            and lstm_forecast_role != "composite"
+        ):
+            # LSTM is an object forecast in the operator product.  Boundary,
+            # centre, and band paths remain available to internal validation,
+            # but only the validated twelve-candle composite is public.
+            continue
         raw_coordinate_mode = _text(
             overlay.get("coordinate_space") or overlay.get("coordinate_mode"),
             "CHART_IMAGE_SPACE",
@@ -2700,16 +2853,27 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             or historical
             or (raw_type == "CURRENT_CANDLE" and role and not latest_candle)
         )
-        object_id = _safe_identifier(
+        source_object_id = _safe_identifier(
             overlay.get("overlay_id")
             or overlay.get("id")
             or overlay.get("object_id")
             or overlay.get("track_id"),
             f"overlay-{index + 1}",
         )
-        dedup_key = (object_id, str(overlay_frame or ""))
+        dedup_key = (source_object_id, str(overlay_frame or ""))
         if dedup_key in seen:
             continue
+        object_id = (
+            _stable_public_digest(
+                {
+                    "source": source_object_id,
+                    "kind": public_kind,
+                },
+                prefix="context",
+            )
+            if family == "market_context"
+            else source_object_id
+        )
         public_bounds = _bounds(overlay.get("bounds") or overlay.get("bbox"))
         public_points = _point_pairs(overlay.get("points"))
         public_line_points = _point_pairs(overlay.get("line_points"))
@@ -2738,6 +2902,8 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         public_overlay: dict[str, object] = {
             "id": object_id,
             "type": public_type,
+            "kind": public_kind,
+            "kind_label": public_kind_label,
             "side": _side(overlay.get("side"), overlay.get("direction"), overlay.get("action")),
             "group": group,
             "family": family,
@@ -2957,6 +3123,22 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 public_overlay.update(overlay_belief)
             if bool(interval.get("calibrated")) and interval.get("level") is not None:
                 public_overlay["uncertainty_level"] = interval["level"]
+            if (
+                family == "lstm"
+                and not scene_forecast_overlay
+                and lstm_forecast_role == "composite"
+            ):
+                public_overlay["line_points"] = []
+                public_overlay["forecast_band_points"] = []
+                public_overlay["forecast_scenarios"] = [
+                    {
+                        key: value
+                        for key, value in scenario.items()
+                        if key not in {"line_points", "forecast_path"}
+                    }
+                    for scenario in forecast_scenarios
+                ]
+                public_overlay["geometry_kind"] = "future_blocks"
         public_overlay.update(
             _overlay_identity_and_revisions(overlay, public_overlay)
         )
@@ -2975,12 +3157,611 @@ def _history_summary(direction: str, state: str) -> str:
     return f"{movement_word} movement was observed."
 
 
+def _episode_direction(episode: Mapping[str, Any]) -> str:
+    committed = _mapping(episode.get("committed_plan"))
+    decision = _mapping(committed.get("decision"))
+    council = _mapping(committed.get("model_council"))
+    thesis = _mapping(committed.get("signal_thesis"))
+    return _side(
+        decision.get("execution_action"),
+        decision.get("action"),
+        decision.get("side"),
+        council.get("final_side"),
+        thesis.get("committed_side"),
+        thesis.get("side"),
+    )
+
+
+def _episode_future_blocks(episode: Mapping[str, Any]) -> list[dict[str, object]]:
+    """Project the frozen twelve-event sequence without exposing model data."""
+
+    forecasts = _mapping(episode.get("baseline_forecasts"))
+    sequence = _mapping(forecasts.get("lstm"))
+    visual = _mapping(forecasts.get("scene"))
+    sequence_path = sorted(
+        _rows(sequence.get("forecast_path")),
+        key=lambda row: _integer(row.get("step")),
+    )
+    visual_blocks = sorted(
+        _rows(visual.get("forecast_candles")),
+        key=lambda row: _integer(row.get("step")),
+    )
+    if len(visual_blocks) != 12:
+        if len(sequence_path) != 12:
+            return []
+        explicit_x = [_number(row.get("x_norm")) for row in sequence_path]
+        use_explicit_x = bool(
+            all(value is not None and 0.0 <= value <= 1.0 for value in explicit_x)
+            and all(
+                cast(float, right) > cast(float, left)
+                for left, right in zip(explicit_x, explicit_x[1:])
+            )
+        )
+        # LSTM event rows are normalized prices, not chart Y coordinates.  If
+        # the producer has no frozen X lane, place the 12 blocks in one stable
+        # normalized forward lane.  This is block geometry only; the operator
+        # frontend intentionally draws no LSTM trajectory line.
+        fallback_start_x = 0.64
+        fallback_step_x = 0.34 / 12.0
+        output: list[dict[str, object]] = []
+        for index, row in enumerate(sequence_path, start=1):
+            open_price = _number(row.get("expected_open_norm"))
+            high_price = _number(row.get("expected_high_norm"))
+            low_price = _number(row.get("expected_low_norm"))
+            close_price = _number(row.get("expected_close_norm"))
+            if (
+                open_price is None
+                or high_price is None
+                or low_price is None
+                or close_price is None
+                or any(
+                    value < 0.0 or value > 1.0
+                    for value in (open_price, high_price, low_price, close_price)
+                )
+            ):
+                return []
+            x_norm = (
+                cast(float, explicit_x[index - 1])
+                if use_explicit_x
+                else fallback_start_x + fallback_step_x * index
+            )
+            movement_side = _side(
+                row.get("movement_direction"),
+                row.get("direction"),
+            )
+            body_bias = _side(
+                row.get("candle_body_direction"),
+                row.get("body_bias"),
+            )
+            output.append(
+                {
+                    "step": index,
+                    "label": f"E{index}",
+                    "x_norm": round(max(0.0, min(1.0, x_norm)), 6),
+                    "open_y_norm": round(1.0 - open_price, 6),
+                    "high_y_norm": round(1.0 - high_price, 6),
+                    "low_y_norm": round(1.0 - low_price, 6),
+                    "close_y_norm": round(1.0 - close_price, 6),
+                    "movement_side": movement_side,
+                    "body_bias": body_bias,
+                    "direction_conflict": bool(
+                        movement_side in _DIRECTIONAL_SIDES
+                        and body_bias in _DIRECTIONAL_SIDES
+                        and movement_side != body_bias
+                    ),
+                }
+            )
+        return output
+    if len(sequence_path) != 12:
+        output: list[dict[str, object]] = []
+        for index, block in enumerate(visual_blocks, start=1):
+            values = {
+                key: _number(block.get(key))
+                for key in (
+                    "x_norm",
+                    "open_y_norm",
+                    "high_y_norm",
+                    "low_y_norm",
+                    "close_y_norm",
+                )
+            }
+            if any(value is None for value in values.values()):
+                return []
+            output.append(
+                {
+                    "step": index,
+                    "label": f"E{index}",
+                    **{key: round(max(0.0, min(1.0, cast(float, value))), 6) for key, value in values.items()},
+                    "movement_side": _side(block.get("movement_side"), block.get("side")),
+                    "body_bias": _side(block.get("body_bias"), block.get("direction")),
+                    "direction_conflict": _explicit_bool(block.get("direction_conflict")) is True,
+                }
+            )
+        return output
+
+    first_open = _number(sequence_path[0].get("expected_open_norm"))
+    first_visual_open = _number(visual_blocks[0].get("open_y_norm"))
+    if first_open is None or first_visual_open is None:
+        return []
+    vertical_offset = first_visual_open - (1.0 - first_open)
+
+    def price_y(value: object) -> float | None:
+        number = _number(value)
+        if number is None:
+            return None
+        return round(max(0.0, min(1.0, 1.0 - number + vertical_offset)), 6)
+
+    output = []
+    for index, (row, visual_block) in enumerate(
+        zip(sequence_path, visual_blocks, strict=True),
+        start=1,
+    ):
+        x_norm = _number(visual_block.get("x_norm"))
+        open_y = price_y(row.get("expected_open_norm"))
+        high_y = price_y(row.get("expected_high_norm"))
+        low_y = price_y(row.get("expected_low_norm"))
+        close_y = price_y(row.get("expected_close_norm"))
+        if x_norm is None or None in {open_y, high_y, low_y, close_y}:
+            return []
+        output.append(
+            {
+                "step": index,
+                "label": f"E{index}",
+                "x_norm": round(max(0.0, min(1.0, x_norm)), 6),
+                "open_y_norm": open_y,
+                "high_y_norm": high_y,
+                "low_y_norm": low_y,
+                "close_y_norm": close_y,
+                "movement_side": _side(
+                    row.get("movement_direction"),
+                    row.get("direction"),
+                ),
+                "body_bias": _side(
+                    row.get("candle_body_direction"),
+                    row.get("body_bias"),
+                ),
+                "direction_conflict": bool(
+                    _side(row.get("movement_direction")) in _DIRECTIONAL_SIDES
+                    and _side(row.get("candle_body_direction")) in _DIRECTIONAL_SIDES
+                    and _side(row.get("movement_direction"))
+                    != _side(row.get("candle_body_direction"))
+                ),
+            }
+        )
+    return output
+
+
+def _episode_owned_lstm_composite(
+    episode: Mapping[str, object],
+    *,
+    display_frame_id: int | str | None,
+) -> dict[str, object]:
+    """Build the safe, block-only outlook owned by a frozen episode.
+
+    A live contributor can legitimately disappear for a frame, but that must
+    not erase the baseline the operator deliberately froze.  This public
+    object contains only normalized render geometry and the twelve already
+    sanitized candle blocks; it carries no provider, model, or source fields.
+    """
+
+    frame_id = _frame_id(display_frame_id)
+    episode_id = _safe_identifier(episode.get("episode_id"), "")
+    state = _text(episode.get("state"), "IDLE", limit=24).upper()
+    raw_blocks = episode.get("future_blocks", [])
+    blocks = (
+        [
+            dict(cast(Mapping[str, object], row))
+            for row in cast(Sequence[object], raw_blocks)
+            if isinstance(row, Mapping)
+        ]
+        if isinstance(raw_blocks, Sequence)
+        and not isinstance(raw_blocks, (str, bytes, bytearray))
+        else []
+    )
+    if not episode_id or state == "IDLE" or frame_id is None or len(blocks) != 12:
+        return {}
+    if [_integer(block.get("step")) for block in blocks] != list(range(1, 13)):
+        return {}
+
+    block_points: list[list[float]] = []
+    all_x: list[float] = []
+    all_y: list[float] = []
+    for block in blocks:
+        x_norm = _number(block.get("x_norm"))
+        open_y = _number(block.get("open_y_norm"))
+        high_y = _number(block.get("high_y_norm"))
+        low_y = _number(block.get("low_y_norm"))
+        close_y = _number(block.get("close_y_norm"))
+        if (
+            x_norm is None
+            or open_y is None
+            or high_y is None
+            or low_y is None
+            or close_y is None
+            or any(
+                value < 0.0 or value > 1.0
+                for value in (x_norm, open_y, high_y, low_y, close_y)
+            )
+        ):
+            return {}
+        block_points.append([round(x_norm, 6), round(close_y, 6)])
+        all_x.append(x_norm)
+        all_y.extend((open_y, high_y, low_y, close_y))
+
+    first_x = all_x[0]
+    first_open_y = cast(float, _number(blocks[0].get("open_y_norm")))
+    x_spacing = (
+        max(0.001, all_x[1] - all_x[0])
+        if len(all_x) > 1 and all_x[1] > all_x[0]
+        else 0.01
+    )
+    anchor = [round(max(0.0, first_x - x_spacing), 6), round(first_open_y, 6)]
+    line_points = [anchor, *block_points]
+    bounds = [
+        round(min(point[0] for point in line_points), 6),
+        round(min(all_y), 6),
+        round(max(point[0] for point in line_points), 6),
+        round(max(all_y), 6),
+    ]
+    if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+        return {}
+
+    baseline = _mapping(episode.get("baseline"))
+    direction = _side(baseline.get("direction"))
+    object_id = _stable_public_digest(
+        {"episode_id": episode_id, "role": "saved_future_blocks"},
+        prefix="episode-outlook",
+    )
+    return {
+        "id": object_id,
+        "type": "outlook",
+        "kind": "future_blocks",
+        "kind_label": "12-step future blocks",
+        "side": direction,
+        "group": "outlook",
+        "family": "lstm",
+        "layer": "future_blocks",
+        "label": "Saved future blocks",
+        "label_hidden": True,
+        "bounds": bounds,
+        "points": [],
+        # Bounds and anchor are derived from the immutable block geometry;
+        # no public LSTM trajectory line is published.
+        "line_points": [],
+        "confidence": 0.0,
+        "lifecycle": "current",
+        "frame_id": frame_id,
+        "coordinate_space": "chart",
+        "coordinate_units": "normalized",
+        "forecast_role": "composite",
+        "forecast_status": "NO_EDGE",
+        "forecast_authorized": False,
+        "trade_authorization_status": "NO_EDGE",
+        "forecast_quality_status": "NO_EDGE",
+        "forecast_direction": direction,
+        "body_bias": "NEUTRAL",
+        "direction_conflict": False,
+        "path_confidence_status": "UNAVAILABLE",
+        "forecast_band_points": [],
+        "forecast_candles": blocks,
+        "forecast_scenarios": [],
+        "forecast_anchor": {
+            "x_norm": anchor[0],
+            "y_norm": anchor[1],
+        },
+        "trajectory_mode": direction,
+        "trajectory_mode_probability_calibrated": False,
+        "forecast_coordinate_space": "chart",
+        "forecast_coordinate_units": "normalized",
+        "geometry_kind": "future_blocks",
+        "interval": {"calibrated": False},
+        "horizon_unit": "CANDLE_EVENTS",
+        "clock_time_assumption": "NONE",
+        "baseline_locked": True,
+    }
+
+
+def _episode_event_contract(
+    event: Mapping[str, Any],
+    *,
+    episode_id: str,
+) -> dict[str, object]:
+    step = max(1, min(12, _integer(event.get("step") or event.get("event_index"))))
+    predicted = _mapping(event.get("predicted_block"))
+    actual = _mapping(event.get("actual_block"))
+    predicted_side = _side(predicted.get("side"))
+    actual_side = _side(actual.get("side"))
+    agreement = event.get("direction_agreement")
+    if not isinstance(agreement, bool):
+        agreement = (
+            predicted_side == actual_side
+            if predicted_side in _DIRECTIONAL_SIDES and actual_side in _DIRECTIONAL_SIDES
+            else None
+        )
+    movement_word = "up" if actual_side == "BUY" else "down" if actual_side == "SELL" else "without a confirmed direction"
+    if agreement is True:
+        summary = f"E{step}: price moved {movement_word} and matched the saved future block."
+    elif agreement is False:
+        summary = f"E{step}: price moved {movement_word} and differed from the saved future block."
+    else:
+        summary = f"E{step}: the completed candle was recorded for the before-and-after study."
+    after = _mapping(event.get("after_reference"))
+    return {
+        "id": _safe_identifier(
+            event.get("event_id"),
+            f"{episode_id or 'episode'}-e{step}",
+        ),
+        "episode_id": episode_id,
+        "event_index": step,
+        "observed_at": _epoch(event.get("observed_at")),
+        "direction": actual_side,
+        "predicted_direction": predicted_side,
+        "agreement": agreement,
+        "state": "HISTORICAL",
+        "summary": summary,
+        "frame_id": _frame_id(after.get("frame_id"), event.get("frame_id")),
+    }
+
+
+def _neutral_tracking_readiness_reason(value: object) -> str:
+    """Translate engine readiness evidence into plain operator language."""
+
+    reason = _safe_public_text(value, "", limit=180)
+    normalized = reason.lower()
+    if not normalized:
+        return ""
+    if "focus" in normalized:
+        return "Lock the chart area before starting tracking."
+    if "market identity" in normalized:
+        return "Wait until the selected market is confirmed."
+    if "timeframe identity" in normalized:
+        return "Wait until the chart timeframe is confirmed."
+    if "closed-candle" in normalized or "closed candle" in normalized:
+        return "Wait for one completed candle before starting tracking."
+    if "12-event" in normalized or "forecast baseline" in normalized:
+        return "Wait until all 12 future blocks are ready."
+    if "frame" in normalized or "bundle" in normalized or "publishing" in normalized:
+        return "Wait for the current chart update to finish."
+    return "The chart is still preparing the tracking baseline."
+
+
+def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
+    episode = _mapping(payload.get("tracking_episode"))
+    state = _text(episode.get("state"), "IDLE", limit=24).upper()
+    if state not in {"IDLE", "ARMING", "ACTIVE", "COMPLETED", "INVALIDATED", "STOPPED", "FAILED"}:
+        state = "FAILED"
+    episode_id = _safe_identifier(episode.get("episode_id"), "")
+    horizon = 12
+    cursor = max(0, min(horizon, _integer(episode.get("event_cursor"))))
+    events = [
+        _episode_event_contract(row, episode_id=episode_id)
+        for row in _rows(episode.get("events"))[:horizon]
+    ]
+    if events:
+        cursor = max(cursor, len(events))
+    plan_side = _episode_direction(episode)
+    pair = _safe_public_text(episode.get("pair"), "Market", limit=32)
+    timeframe = _safe_public_text(episode.get("timeframe"), "", limit=16)
+    market_label = " · ".join(part for part in (pair, timeframe) if part)
+    plan_word = "up" if plan_side == "BUY" else "down" if plan_side == "SELL" else "wait"
+    latest_event = events[-1] if events else {}
+    if latest_event:
+        current_title = f"Event {latest_event['event_index']} recorded"
+        current_summary = str(latest_event["summary"])
+    else:
+        current_title = "Waiting for E1"
+        current_summary = "The saved baseline remains unchanged while the next completed candle is observed."
+    terminal_reason = _text(episode.get("terminal_reason"), "", limit=80).upper()
+    if state == "ACTIVE":
+        summary = f"Tracking E{cursor} of {horizon}; the original plan remains anchored."
+    elif state == "COMPLETED":
+        summary = "All 12 events are complete and the before-and-after study is saved."
+    elif state == "STOPPED":
+        summary = "Tracking stopped and the recorded episode remains saved."
+    elif state == "INVALIDATED":
+        summary = "The episode closed because its original market context changed."
+    elif state == "FAILED":
+        summary = "The episode needs attention before another study can begin."
+    else:
+        summary = "Start Tracking to freeze one plan and compare the next 12 completed candles."
+    readiness = _mapping(payload.get("tracking_episode_readiness"))
+    if not readiness:
+        try:
+            readiness = tracking_episode_readiness_v1(payload)
+        except Exception:
+            readiness = {}
+    readiness_reasons = [
+        _neutral_tracking_readiness_reason(reason)
+        for reason in cast(Sequence[object], readiness.get("reasons", []))
+        if _neutral_tracking_readiness_reason(reason)
+    ] if isinstance(readiness.get("reasons"), Sequence) and not isinstance(
+        readiness.get("reasons"), (str, bytes, bytearray)
+    ) else []
+    has_episode = bool(episode_id and state != "IDLE")
+    return {
+        "schema_version": "PG_TRACKING_EPISODE_PUBLIC_V1",
+        "episode_id": episode_id,
+        "state": state,
+        "revision": max(0, _integer(episode.get("revision"))),
+        "event_horizon": horizon,
+        "event_cursor": cursor,
+        "progress": {"completed": cursor, "total": horizon},
+        "started_at": _safe_public_text(episode.get("started_at"), "", limit=48),
+        "updated_at": _safe_public_text(episode.get("updated_at"), "", limit=48),
+        "completed_at": _safe_public_text(
+            episode.get("completed_at") or episode.get("stopped_at"),
+            "",
+            limit=48,
+        ),
+        "summary": summary,
+        "ready": _explicit_bool(readiness.get("ready")) is True,
+        "readiness_message": readiness_reasons[0] if readiness_reasons else "",
+        "baseline": (
+            {
+                "title": f"{market_label or 'Market'} baseline",
+                "summary": f"The original {plan_word} plan was frozen when tracking started.",
+                "direction": plan_side,
+            }
+            if has_episode
+            else {}
+        ),
+        "current": (
+            {
+                "title": current_title,
+                "summary": current_summary,
+                "direction": latest_event.get("direction", "NEUTRAL"),
+            }
+            if has_episode
+            else {}
+        ),
+        "plan": (
+            {
+                "title": "Plan held steady",
+                "summary": "The saved plan is comparison evidence; current Entry status remains the only permission to act.",
+                "direction": plan_side,
+            }
+            if has_episode
+            else {}
+        ),
+        "change_summary": current_summary if has_episode else "",
+        "future_blocks": _episode_future_blocks(episode) if has_episode else [],
+        "events": events,
+        "terminal_reason": (
+            "CONTEXT_CHANGED"
+            if terminal_reason == "PAIR_OR_TIMEFRAME_CHANGED"
+            else "COMPLETE"
+            if terminal_reason == "EVENT_HORIZON_COMPLETE"
+            else "STOPPED"
+            if terminal_reason == "MANUAL_STOP" or state == "STOPPED"
+            else ""
+        ),
+    }
+
+
+def project_public_tracking_episode_v1(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Return the safe episode DTO used by both operator and control routes."""
+
+    return _tracking_episode_contract(cast(Mapping[str, Any], payload))
+
+
+def public_tracking_readiness_message_v1(value: object) -> str:
+    """Return one neutral readiness message without engine terminology."""
+
+    return _neutral_tracking_readiness_reason(value)
+
+
+def _archived_episode_history_contract(value: Mapping[str, Any]) -> dict[str, object]:
+    episode_id = _safe_identifier(value.get("episode_id"), "")
+    if not episode_id:
+        return {}
+    cursor = max(0, min(12, _integer(value.get("event_cursor"))))
+    observations = max(
+        0,
+        min(cursor, _integer(value.get("direction_observation_count"))),
+    )
+    agreements = max(
+        0,
+        min(observations, _integer(value.get("direction_agreement_count"))),
+    )
+    state = _text(value.get("state"), "COMPLETED", limit=24).upper()
+    if state not in {"COMPLETED", "INVALIDATED", "STOPPED", "FAILED"}:
+        state = "COMPLETED"
+    if observations:
+        result_summary = (
+            f"Saved tracking study: {cursor} of 12 events recorded; "
+            f"{agreements} of {observations} directional blocks matched."
+        )
+    else:
+        result_summary = f"Saved tracking study: {cursor} of 12 events recorded."
+    return {
+        "id": f"{episode_id}-summary",
+        "episode_id": episode_id,
+        "event_index": cursor,
+        "observed_at": _epoch(value.get("ended_at"), value.get("updated_at")),
+        "direction": "NEUTRAL",
+        "state": "ENDED" if state != "FAILED" else "STALE",
+        "summary": result_summary,
+        "frame_id": _frame_id(value.get("anchor_frame_id")),
+    }
+
+
+def _archived_episode_event_contracts(
+    value: Mapping[str, Any],
+) -> list[dict[str, object]]:
+    """Project persisted episode events without reopening raw model blocks."""
+
+    episode_id = _safe_identifier(value.get("episode_id"), "")
+    if not episode_id:
+        return []
+    output: list[dict[str, object]] = []
+    for index, event in enumerate(_rows(value.get("events"))[:12], start=1):
+        step = max(1, min(12, _integer(event.get("step")) or index))
+        predicted_side = _side(event.get("predicted_side"))
+        actual_side = _side(event.get("actual_side"))
+        agreement = event.get("direction_agreement")
+        if not isinstance(agreement, bool):
+            agreement = (
+                predicted_side == actual_side
+                if predicted_side in _DIRECTIONAL_SIDES
+                and actual_side in _DIRECTIONAL_SIDES
+                else None
+            )
+        movement_word = (
+            "up"
+            if actual_side == "BUY"
+            else "down"
+            if actual_side == "SELL"
+            else "without a confirmed direction"
+        )
+        if agreement is True:
+            summary = (
+                f"E{step}: price moved {movement_word} and matched the saved future block."
+            )
+        elif agreement is False:
+            summary = (
+                f"E{step}: price moved {movement_word} and differed from the saved future block."
+            )
+        else:
+            summary = (
+                f"E{step}: the completed candle was recorded for the before-and-after study."
+            )
+        output.append(
+            {
+                "id": _safe_identifier(
+                    event.get("event_id"),
+                    f"{episode_id}-e{step}",
+                ),
+                "episode_id": episode_id,
+                "event_index": step,
+                "observed_at": _epoch(event.get("observed_at")),
+                "direction": actual_side,
+                "predicted_direction": predicted_side,
+                "agreement": agreement,
+                "state": "HISTORICAL",
+                "summary": summary,
+                "frame_id": _frame_id(event.get("frame_id")),
+            }
+        )
+    return output
+
+
 def _history_contract(
     payload: Mapping[str, Any],
     current_move: Mapping[str, object],
     pressure_event: Mapping[str, object],
 ) -> list[dict[str, object]]:
     history: list[dict[str, object]] = []
+    active_episode = _tracking_episode_contract(payload)
+    history.extend(
+        cast(list[dict[str, object]], active_episode.get("events", []))
+    )
+    for row in _rows(payload.get("tracking_episode_history")):
+        history.extend(_archived_episode_event_contracts(row))
+        archive = _archived_episode_history_contract(row)
+        if archive:
+            history.append(archive)
     raw_history = _rows(payload.get("recent_studies")) + _rows(payload.get("history"))
     for row in raw_history:
         command = _mapping(row.get("decision_command_center"))
@@ -2991,27 +3772,62 @@ def _history_contract(
             source.get("direction"),
             source.get("side"),
             row.get("side"),
+            row.get("action"),
+            row.get("execution_action"),
             _mapping(row.get("latest_signal")).get("side"),
         )
         observed_at = _epoch(
             source.get("observed_at"),
             source.get("observed_epoch"),
             source.get("ended_at"),
+            row.get("observed_at"),
+            row.get("captured_at"),
+            row.get("timestamp"),
             row.get("published_epoch"),
             row.get("created_epoch"),
             row.get("last_capture_epoch"),
         )
         state = _event_state(source, None)
         history_state = "ENDED" if state == "ENDED" else "STALE" if state == "STALE" else "HISTORICAL"
-        history.append(
-            {
-                "observed_at": observed_at,
-                "direction": direction,
-                "state": history_state,
-                "summary": _history_summary(direction, history_state),
-                "frame_id": _frame_id(source.get("frame_id"), row.get("frame_id")),
-            }
-        )
+        frame_id = _frame_id(source.get("frame_id"), row.get("frame_id"))
+        episode_id = _safe_identifier(row.get("episode_id"), "")
+        event_index = _integer(row.get("event_index") or row.get("event_cursor"))
+        history_item: dict[str, object] = {
+            "observed_at": observed_at,
+            "direction": direction,
+            "state": history_state,
+            "summary": (
+                _safe_public_text(
+                    row.get("summary"),
+                    _history_summary(direction, history_state),
+                    limit=240,
+                )
+                if episode_id
+                else _history_summary(direction, history_state)
+            ),
+            "frame_id": frame_id,
+        }
+        if episode_id:
+            history_item.update(
+                {
+                    "id": _safe_identifier(
+                        row.get("event_id") or row.get("id"),
+                        "-".join(
+                            part
+                            for part in (
+                                episode_id,
+                                str(frame_id or "frame"),
+                                str(event_index or 0),
+                                str(int(observed_at or 0.0)),
+                            )
+                            if part
+                        ),
+                    ),
+                    "episode_id": episode_id,
+                    "event_index": event_index,
+                }
+            )
+        history.append(history_item)
 
     pressure_state = _text(pressure_event.get("state"), "UNKNOWN").upper()
     pressure_direction = _text(pressure_event.get("direction"), "NEUTRAL").upper()
@@ -3039,15 +3855,39 @@ def _history_contract(
             }
         )
 
-    deduplicated: dict[tuple[object, object, object, object], dict[str, object]] = {}
+    deduplicated: dict[tuple[object, object, object, object, object], dict[str, object]] = {}
     for item in history:
-        key = (item.get("observed_at"), item.get("direction"), item.get("state"), item.get("frame_id"))
+        key = (
+            item.get("id"),
+            item.get("observed_at"),
+            item.get("direction"),
+            item.get("state"),
+            item.get("frame_id"),
+        )
         deduplicated[key] = item
     ordered = sorted(
         deduplicated.values(),
         key=lambda item: (_number(item.get("observed_at")) or 0.0, str(item.get("frame_id") or "")),
     )
-    return ordered[-24:]
+    # The durable archive retains 24 episodes.  Each terminal episode can
+    # contain twelve event rows plus one summary, and the currently active
+    # episode can contribute twelve more events.  Preserve that complete,
+    # already-bounded before/after record instead of silently flattening it to
+    # only 24 rows.  Ordinary rolling context remains capped independently so
+    # unrelated study rows cannot grow the public response without bound.
+    episode_rows = [item for item in ordered if item.get("episode_id")]
+    context_rows = [item for item in ordered if not item.get("episode_id")]
+    retained = [
+        *episode_rows[-_EPISODE_HISTORY_ROW_LIMIT:],
+        *context_rows[-_NON_EPISODE_HISTORY_LIMIT:],
+    ]
+    return sorted(
+        retained,
+        key=lambda item: (
+            _number(item.get("observed_at")) or 0.0,
+            str(item.get("frame_id") or ""),
+        ),
+    )
 
 
 def build_operator_workspace_v1(
@@ -3100,6 +3940,37 @@ def build_operator_workspace_v1(
         now_epoch=current_epoch,
     )
     overlays = _sanitize_overlays(source, display_frame)
+    tracking_episode = _tracking_episode_contract(source)
+    frozen_future_blocks = cast(
+        list[dict[str, object]],
+        tracking_episode.get("future_blocks", []),
+    )
+    if len(frozen_future_blocks) == 12 and tracking_episode.get("state") != "IDLE":
+        overlays = [
+            {
+                **overlay,
+                "forecast_candles": [dict(block) for block in frozen_future_blocks],
+                "baseline_locked": True,
+            }
+            if overlay.get("family") == "lstm"
+            and overlay.get("forecast_role") == "composite"
+            else overlay
+            for overlay in overlays
+        ]
+        has_current_lstm_composite = any(
+            overlay.get("family") == "lstm"
+            and overlay.get("forecast_role") == "composite"
+            and overlay.get("lifecycle") == "current"
+            and _frame_matches(overlay.get("frame_id"), display_frame)
+            for overlay in overlays
+        )
+        if not has_current_lstm_composite:
+            frozen_composite = _episode_owned_lstm_composite(
+                tracking_episode,
+                display_frame_id=display_frame,
+            )
+            if frozen_composite:
+                overlays.append(frozen_composite)
     forecast = _forecast_contract(
         source,
         command,
@@ -3136,6 +4007,7 @@ def build_operator_workspace_v1(
         _integer(source.get("sequence_id")),
         _integer(display_frame),
         _integer(source.get("capture_count")),
+        _integer(tracking_episode.get("revision")),
     )
     market = {
         "symbol": _safe_public_text(
@@ -3187,6 +4059,7 @@ def build_operator_workspace_v1(
             "state": tracking_state,
             "updated_at": observed_at,
             "history_count": len(history),
+            "episode": tracking_episode,
         },
         "freshness": freshness,
         "current_move": current_move,
@@ -3211,4 +4084,9 @@ def build_operator_workspace_v1(
     return result
 
 
-__all__ = ["OPERATOR_WORKSPACE_SCHEMA_VERSION", "build_operator_workspace_v1"]
+__all__ = [
+    "OPERATOR_WORKSPACE_SCHEMA_VERSION",
+    "build_operator_workspace_v1",
+    "project_public_tracking_episode_v1",
+    "public_tracking_readiness_message_v1",
+]
