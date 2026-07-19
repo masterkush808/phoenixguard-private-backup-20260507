@@ -7,11 +7,13 @@ from typing import Iterator
 
 import pytest
 
+import phoenixguard.runtime.disk_growth_guard_v3 as disk_guard_module
 from phoenixguard.runtime.disk_growth_guard_v3 import (
     DiskGrowthGuardError,
     DiskGrowthGuardMode,
     DiskGrowthGuardTarget,
     assert_safe_target,
+    build_default_targets,
     directory_size,
     parse_size_bytes,
     run_disk_growth_guard,
@@ -144,3 +146,75 @@ def test_disk_growth_guard_does_not_delete_recent_live_files(tmp_path: Path) -> 
     assert report.targets[0].triggered is True
     assert report.total_bytes_removed == 0
     assert (runtime / "fresh.jpg").exists()
+
+
+def test_disk_growth_guard_never_traverses_or_deletes_nested_reparse_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports = tmp_path / "reports"
+    _write(reports / "old.bin", 16)
+    junction = reports / "junction"
+    protected_file = junction / "outside-owned.bin"
+    _write(protected_file, 64)
+    original_is_reparse_point = disk_guard_module._is_reparse_point  # pyright: ignore[reportPrivateUsage]
+
+    def simulated_reparse(path: Path) -> bool:
+        return path == junction or original_is_reparse_point(path)
+
+    monkeypatch.setattr(disk_guard_module, "_is_reparse_point", simulated_reparse)
+    target = DiskGrowthGuardTarget(
+        name="reports",
+        path=reports,
+        max_bytes=0,
+        low_water_bytes=0,
+        mode=DiskGrowthGuardMode.RESET_CHILDREN,
+        min_age_seconds=0.0,
+    )
+
+    report = run_disk_growth_guard([target], apply=True, allowed_roots=(tmp_path,), protected=())
+
+    assert report.total_bytes_removed == 16
+    assert not (reports / "old.bin").exists()
+    assert protected_file.exists()
+    assert all(Path(action.path) != junction for action in report.targets[0].actions)
+
+
+def test_default_guard_covers_registry_logs_and_delete_only_archive(tmp_path: Path) -> None:
+    targets = build_default_targets(
+        max_bytes=512 * 1024 * 1024,
+        low_water_bytes=384 * 1024 * 1024,
+        project_root=tmp_path,
+    )
+    by_name = {target.name: target for target in targets}
+
+    assert by_name["live_window_tracker_sessions"].max_bytes == 256 * 1024 * 1024
+    assert by_name["market_registry"].max_bytes == 16 * 1024 * 1024
+    assert by_name["market_registry"].min_age_seconds == 0.0
+    assert by_name["runtime_logs"].max_bytes == 64 * 1024 * 1024
+    assert by_name["tracker_launcher_stdout"].max_bytes == 16 * 1024 * 1024
+    assert by_name["legacy_archive"].max_bytes == 0
+    assert by_name["legacy_archive"].path == tmp_path / "_archive"
+
+
+def test_zero_byte_reset_target_removes_empty_archive_root(tmp_path: Path) -> None:
+    archive = tmp_path / "_archive"
+    archive.mkdir()
+    target = DiskGrowthGuardTarget(
+        name="legacy_archive",
+        path=archive,
+        max_bytes=0,
+        low_water_bytes=0,
+        mode=DiskGrowthGuardMode.RESET_CHILDREN,
+        min_age_seconds=0.0,
+    )
+
+    report = run_disk_growth_guard(
+        [target],
+        apply=True,
+        allowed_roots=(tmp_path,),
+        protected=(),
+    )
+
+    assert report.targets[0].bytes_after == 0
+    assert not archive.exists()

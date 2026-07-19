@@ -127,6 +127,60 @@
       "Do not fade overbought or oversold conditions blindly."
     ]
   },
+  "order_positioning": {
+    "principle": "Detect observable chart structure first, derive order-positioning evidence second, and freeze the selected geometry when a tracking episode starts.",
+    "taxonomy_authority": "Use exchange and regulator order semantics. The Art of Currency Trading supports the same taxonomy; FOREX BLACK BOOK page 20 is retained for structure concepts but is not authoritative for order naming.",
+    "intent_required": [
+      "ENTRY_LIMIT",
+      "ENTRY_STOP",
+      "PROTECTIVE_STOP"
+    ],
+    "canonical_overlays": [
+      "BUY_LIMIT_ZONE",
+      "SELL_LIMIT_ZONE",
+      "BUY_STOP_ENTRY_ZONE",
+      "SELL_STOP_ENTRY_ZONE",
+      "PROTECTIVE_STOP_ZONE"
+    ],
+    "placement_rules": [
+      "BUY_LIMIT_ZONE must be below the origin price and overlap validated lower support, demand, role-flip, or pullback structure.",
+      "SELL_LIMIT_ZONE must be above the origin price and overlap validated higher resistance, supply, role-flip, or rally structure.",
+      "BUY_STOP_ENTRY_ZONE is a narrow strip above a validated resistance, range, flag, or confirmation-candle high.",
+      "SELL_STOP_ENTRY_ZONE is a narrow strip below a validated support, range, flag, or confirmation-candle low.",
+      "PROTECTIVE_STOP_ZONE belongs beyond the source structure or full candle-pattern extreme with a chart-noise buffer and must never overlap an entry area.",
+      "A candlestick pattern contributes evidence only when location, trend, confirmation, filtering, and freshness agree.",
+      "A sweep reversal requires the visible level, sweep, reclaim, structure confirmation, activation strip, and protection beyond the sweep extreme in that order."
+    ],
+    "episode_freeze": {
+      "freeze_at": "latest confirmed closed candle when Start Tracking succeeds",
+      "immutable_fields": [
+        "zone_id",
+        "overlay_type",
+        "intent",
+        "side",
+        "normalized_bounds",
+        "source_candle_ids",
+        "source_structure_ids",
+        "activation_rule",
+        "invalidation_rule"
+      ],
+      "mutable_fields": [
+        "status",
+        "last_observed_step",
+        "touch_count",
+        "result_reason"
+      ],
+      "late_chase_rule": "If price has already travelled beyond a fresh opportunity, mark MISSED or LATE_CHASE and do not create a replacement box at the current candle."
+    },
+    "training_boundary": "Current BUY and SELL screenshots are direction labels, not order-zone ground truth. Train vision on observable candles, swings, breaks, reclaims, zones and trendline anchors; train a final positioning detector only after expert-reviewed episode-aware bounding-box annotations exist.",
+    "anti_patterns": [
+      "Do not infer actual resting broker orders from a chart screenshot.",
+      "Do not use the same type for an entry stop and a protective stop.",
+      "Do not move a frozen episode box to follow each new candle.",
+      "Do not regenerate an entry after the move is already several candles in progress.",
+      "Do not let an overlay authorize a trade."
+    ]
+  },
   "fx_context": {
     "fields": [
       "pair_liquidity_class",

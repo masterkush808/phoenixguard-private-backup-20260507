@@ -1,0 +1,1465 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://808fx.local/schemas/phoenixguard_order_positioning_annotation_v3.schema.json",
+  "title": "PhoenixGuard V3 Episode-Aware Order Positioning Annotation",
+  "description": "Human-review contract for causal, episode-frozen limit, stop-entry, and protective-stop opportunity zones. This contract describes visual evidence and never authorizes or places an order.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "annotation_id",
+    "annotation_phase",
+    "geometry_source_annotation_id",
+    "episode",
+    "frame",
+    "market_context",
+    "zones",
+    "negative_labels",
+    "outcome",
+    "review",
+    "leakage_guard",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "PHOENIXGUARD_ORDER_POSITIONING_ANNOTATION_V3"
+    },
+    "annotation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "annotation_phase": {
+      "type": "string",
+      "enum": [
+        "PRE_OUTCOME",
+        "POST_OUTCOME_REVIEW"
+      ]
+    },
+    "geometry_source_annotation_id": {
+      "description": "Null for the causal pre-outcome record. A post-outcome review must name the immutable pre-outcome geometry record.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "episode": {
+      "$ref": "#/$defs/episode"
+    },
+    "frame": {
+      "$ref": "#/$defs/frame"
+    },
+    "market_context": {
+      "$ref": "#/$defs/marketContext"
+    },
+    "zones": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/zone"
+      },
+      "uniqueItems": true
+    },
+    "negative_labels": {
+      "description": "Explicit negative evidence. NO_VALID_ZONE can be side-scoped and can coexist with valid zones for the opposite side.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/negativeLabel"
+      },
+      "uniqueItems": true
+    },
+    "outcome": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/outcome"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "review": {
+      "$ref": "#/$defs/review"
+    },
+    "leakage_guard": {
+      "$ref": "#/$defs/leakageGuard"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    }
+  },
+  "allOf": [
+    {
+      "anyOf": [
+        {
+          "properties": {
+            "zones": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "negative_labels": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "annotation_phase": {
+            "const": "PRE_OUTCOME"
+          }
+        },
+        "required": [
+          "annotation_phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "geometry_source_annotation_id": {
+            "type": "null"
+          },
+          "outcome": {
+            "type": "null"
+          },
+          "provenance": {
+            "properties": {
+              "future_frames_visible_to_annotator": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "annotation_phase": {
+            "const": "POST_OUTCOME_REVIEW"
+          }
+        },
+        "required": [
+          "annotation_phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "geometry_source_annotation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "outcome": {
+            "$ref": "#/$defs/outcome"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "review": {
+            "properties": {
+              "training_eligibility": {
+                "const": "ELIGIBLE"
+              }
+            },
+            "required": [
+              "training_eligibility"
+            ]
+          }
+        },
+        "required": [
+          "review"
+        ]
+      },
+      "then": {
+        "properties": {
+          "annotation_phase": {
+            "const": "PRE_OUTCOME"
+          },
+          "review": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "DOUBLE_REVIEWED",
+                  "ADJUDICATED"
+                ]
+              },
+              "disagreement_present": {
+                "const": false
+              },
+              "geometry_locked": {
+                "const": true
+              },
+              "reviewer_ids": {
+                "minItems": 1
+              },
+              "exclusion_reasons": {
+                "maxItems": 0
+              }
+            }
+          },
+          "leakage_guard": {
+            "properties": {
+              "split_assignment": {
+                "enum": [
+                  "TRAIN",
+                  "VALIDATION",
+                  "TEST"
+                ]
+              }
+            }
+          },
+          "provenance": {
+            "properties": {
+              "future_frames_visible_to_annotator": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "A semantic validator must additionally verify ordered boxes, pixel/normalized equivalence, plot containment, unique IDs, valid cross-references, side-scoped NO_VALID_ZONE consistency, price-axis orientation, and episode-group split isolation.",
+  "$defs": {
+    "bboxPx": {
+      "description": "Pixel box [x1, y1, x2, y2]. A semantic validator must enforce x2 > x1 and y2 > y1.",
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "number",
+          "minimum": 0
+        }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "bboxNormalized": {
+      "description": "Plot-relative normalized box [x1, y1, x2, y2], derived by subtracting the plot origin and dividing by plot width or height. A semantic validator must enforce ordered coordinates and pixel equivalence.",
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "episode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "episode_id",
+        "episode_revision",
+        "pair_key",
+        "timeframe",
+        "started_at",
+        "anchor_frame_id",
+        "anchor_closed_candle_key",
+        "tracking_horizon_candles",
+        "split_group_id",
+        "baseline_frozen",
+        "status",
+        "supersedes_episode_id",
+        "supersession_reason"
+      ],
+      "properties": {
+        "episode_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "episode_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pair_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeframe": {
+          "type": "string",
+          "minLength": 1
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "anchor_frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "anchor_closed_candle_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tracking_horizon_candles": {
+          "const": 12
+        },
+        "split_group_id": {
+          "description": "Stable group joining the episode and every related frame, crop, annotation revision, and outcome review.",
+          "type": "string",
+          "minLength": 1
+        },
+        "baseline_frozen": {
+          "const": true
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PENDING_FIRST_COMPLETE_FRAME",
+            "TRACKING",
+            "COMPLETE",
+            "STOPPED_AND_SAVED",
+            "ABANDONED",
+            "INVALIDATED"
+          ]
+        },
+        "supersedes_episode_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supersession_reason": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "EXPLICIT_RESET",
+            "PAIR_CHANGED",
+            "TIMEFRAME_CHANGED",
+            "SOURCE_LOCK_CHANGED",
+            "CHART_TRANSFORM_UNUSABLE",
+            "HARD_INVALIDATION"
+          ]
+        }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "captured_at",
+        "source_image_sha256",
+        "width",
+        "height",
+        "chart_bounds_px",
+        "plot_bounds_px",
+        "chart_transform_id",
+        "source_lock_id",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "complete_closed_candle_confirmed",
+        "price_axis_direction"
+      ],
+      "properties": {
+        "frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_image_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "source_reference": {
+          "description": "Optional non-secret repository-relative or dataset-relative reference; the hash remains authoritative.",
+          "type": "string"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "chart_bounds_px": {
+          "$ref": "#/$defs/bboxPx"
+        },
+        "plot_bounds_px": {
+          "$ref": "#/$defs/bboxPx"
+        },
+        "chart_transform_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_lock_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "closed_candle_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "closed_candle_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete_closed_candle_confirmed": {
+          "const": true
+        },
+        "price_axis_direction": {
+          "description": "Explicit transform orientation used to compare price semantics with vertical pixel geometry; a validator must never assume the usual chart orientation.",
+          "type": "string",
+          "enum": [
+            "HIGHER_PRICE_AT_SMALLER_Y",
+            "HIGHER_PRICE_AT_LARGER_Y"
+          ]
+        }
+      }
+    },
+    "marketContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_price_proxy",
+        "current_price_y_px",
+        "candidate_scope",
+        "global_direction",
+        "local_direction",
+        "range_state",
+        "spread_or_uncertainty_tolerance"
+      ],
+      "properties": {
+        "current_price_proxy": {
+          "type": "number"
+        },
+        "current_price_y_px": {
+          "type": "number",
+          "minimum": 0
+        },
+        "candidate_scope": {
+          "type": "string",
+          "enum": [
+            "BUY",
+            "SELL",
+            "BOTH"
+          ]
+        },
+        "global_direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "local_direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "range_state": {
+          "type": "string",
+          "enum": [
+            "TRENDING",
+            "RANGING",
+            "TRANSITION",
+            "UNCERTAIN"
+          ]
+        },
+        "spread_or_uncertainty_tolerance": {
+          "$ref": "#/$defs/buffer"
+        }
+      }
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "UP",
+        "DOWN",
+        "SIDEWAYS",
+        "TRANSITION",
+        "UNKNOWN"
+      ]
+    },
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zone_id",
+        "label",
+        "side",
+        "thesis_side",
+        "order_kind",
+        "order_role",
+        "human_decision",
+        "public_label",
+        "bbox_px",
+        "bbox_normalized",
+        "anchor_price_proxy",
+        "lower_price_proxy",
+        "upper_price_proxy",
+        "price_relation_at_anchor",
+        "buffer",
+        "evidence",
+        "validity",
+        "quality"
+      ],
+      "properties": {
+        "zone_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "enum": [
+            "BUY_LIMIT_ZONE",
+            "SELL_LIMIT_ZONE",
+            "BUY_STOP_ENTRY_ZONE",
+            "SELL_STOP_ENTRY_ZONE",
+            "PROTECTIVE_STOP_ZONE"
+          ]
+        },
+        "side": {
+          "description": "Actual broker order side. For protection this is opposite the thesis side: SELL protects a long thesis and BUY protects a short thesis.",
+          "type": "string",
+          "enum": [
+            "BUY",
+            "SELL"
+          ]
+        },
+        "thesis_side": {
+          "description": "Direction of the thesis being entered or protected. Entry zones match side; protective stops use the opposite actual order side.",
+          "type": "string",
+          "enum": [
+            "BUY",
+            "SELL"
+          ]
+        },
+        "order_kind": {
+          "type": "string",
+          "enum": [
+            "BUY_LIMIT",
+            "SELL_LIMIT",
+            "BUY_STOP",
+            "SELL_STOP"
+          ]
+        },
+        "order_role": {
+          "type": "string",
+          "enum": [
+            "PASSIVE_ENTRY",
+            "MOMENTUM_ENTRY",
+            "PROTECTIVE_INVALIDATION"
+          ]
+        },
+        "human_decision": {
+          "type": "string",
+          "enum": [
+            "ACCEPTED",
+            "ADJUSTED"
+          ]
+        },
+        "public_label": {
+          "description": "Plain-language UI text; proprietary technique names are not required.",
+          "type": "string",
+          "minLength": 1
+        },
+        "bbox_px": {
+          "$ref": "#/$defs/bboxPx"
+        },
+        "bbox_normalized": {
+          "$ref": "#/$defs/bboxNormalized"
+        },
+        "anchor_price_proxy": {
+          "type": "number"
+        },
+        "lower_price_proxy": {
+          "type": "number"
+        },
+        "upper_price_proxy": {
+          "type": "number"
+        },
+        "price_relation_at_anchor": {
+          "type": "string",
+          "enum": [
+            "BELOW_CURRENT",
+            "ABOVE_CURRENT",
+            "AT_CURRENT_TOLERANCE"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "quality": {
+          "$ref": "#/$defs/zoneQuality"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "label": {
+                "const": "BUY_LIMIT_ZONE"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          },
+          "then": {
+            "properties": {
+              "side": {
+                "const": "BUY"
+              },
+              "thesis_side": {
+                "const": "BUY"
+              },
+              "order_kind": {
+                "const": "BUY_LIMIT"
+              },
+              "order_role": {
+                "const": "PASSIVE_ENTRY"
+              },
+              "price_relation_at_anchor": {
+                "enum": [
+                  "BELOW_CURRENT",
+                  "AT_CURRENT_TOLERANCE"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "label": {
+                "const": "SELL_LIMIT_ZONE"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          },
+          "then": {
+            "properties": {
+              "side": {
+                "const": "SELL"
+              },
+              "thesis_side": {
+                "const": "SELL"
+              },
+              "order_kind": {
+                "const": "SELL_LIMIT"
+              },
+              "order_role": {
+                "const": "PASSIVE_ENTRY"
+              },
+              "price_relation_at_anchor": {
+                "enum": [
+                  "ABOVE_CURRENT",
+                  "AT_CURRENT_TOLERANCE"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "label": {
+                "const": "BUY_STOP_ENTRY_ZONE"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          },
+          "then": {
+            "properties": {
+              "side": {
+                "const": "BUY"
+              },
+              "thesis_side": {
+                "const": "BUY"
+              },
+              "order_kind": {
+                "const": "BUY_STOP"
+              },
+              "order_role": {
+                "const": "MOMENTUM_ENTRY"
+              },
+              "price_relation_at_anchor": {
+                "const": "ABOVE_CURRENT"
+              },
+              "evidence": {
+                "properties": {
+                  "confirmation_closed_candle_keys": {
+                    "minItems": 1
+                  },
+                  "confirmation_events": {
+                    "minItems": 1
+                  },
+                  "confirmation_side": {
+                    "const": "BUY"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "label": {
+                "const": "SELL_STOP_ENTRY_ZONE"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          },
+          "then": {
+            "properties": {
+              "side": {
+                "const": "SELL"
+              },
+              "thesis_side": {
+                "const": "SELL"
+              },
+              "order_kind": {
+                "const": "SELL_STOP"
+              },
+              "order_role": {
+                "const": "MOMENTUM_ENTRY"
+              },
+              "price_relation_at_anchor": {
+                "const": "BELOW_CURRENT"
+              },
+              "evidence": {
+                "properties": {
+                  "confirmation_closed_candle_keys": {
+                    "minItems": 1
+                  },
+                  "confirmation_events": {
+                    "minItems": 1
+                  },
+                  "confirmation_side": {
+                    "const": "SELL"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "label": {
+                "const": "PROTECTIVE_STOP_ZONE"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          },
+          "then": {
+            "properties": {
+              "order_role": {
+                "const": "PROTECTIVE_INVALIDATION"
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "side": {
+                    "const": "SELL"
+                  },
+                  "thesis_side": {
+                    "const": "BUY"
+                  },
+                  "order_kind": {
+                    "const": "SELL_STOP"
+                  },
+                  "price_relation_at_anchor": {
+                    "const": "BELOW_CURRENT"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "side": {
+                    "const": "BUY"
+                  },
+                  "thesis_side": {
+                    "const": "SELL"
+                  },
+                  "order_kind": {
+                    "const": "BUY_STOP"
+                  },
+                  "price_relation_at_anchor": {
+                    "const": "ABOVE_CURRENT"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "unit",
+        "rationale"
+      ],
+      "properties": {
+        "value": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unit": {
+          "type": "string",
+          "enum": [
+            "PRICE_PROXY",
+            "PIXEL",
+            "CANDLE_RANGE_FRACTION",
+            "SPREAD_MULTIPLE",
+            "NONE"
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_families",
+        "hard_anchor_count",
+        "anchor_candle_indices",
+        "anchor_candle_ids",
+        "anchor_candle_bboxes_px",
+        "swing_anchor_indices",
+        "source_zone_ids",
+        "trendline_ids",
+        "confirmation_closed_candle_keys",
+        "confirmation_events",
+        "confirmation_side",
+        "opposing_structure_ids",
+        "rationale"
+      ],
+      "properties": {
+        "evidence_families": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "SUPPLY_DEMAND",
+              "TRENDLINE",
+              "CHANNEL",
+              "CANDLESTICK",
+              "MARKET_STRUCTURE",
+              "LIQUIDITY",
+              "ORDER_BLOCK",
+              "FAIR_VALUE_GAP",
+              "SESSION_LEVEL",
+              "ROUND_NUMBER"
+            ]
+          }
+        },
+        "hard_anchor_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "anchor_candle_indices": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "anchor_candle_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "anchor_candle_bboxes_px": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/bboxPx"
+          }
+        },
+        "swing_anchor_indices": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "source_zone_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "trendline_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "confirmation_closed_candle_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "confirmation_events": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "BREAK_OF_STRUCTURE",
+              "MARKET_STRUCTURE_SHIFT",
+              "RECLAIM_AFTER_SWEEP",
+              "SUPPORT_RECLAIM",
+              "RESISTANCE_REJECTION",
+              "ORDER_BLOCK_RETEST",
+              "LIQUIDITY_SWEEP"
+            ]
+          }
+        },
+        "confirmation_side": {
+          "description": "Direction confirmed by the completed-candle event; null when the zone does not use confirmation.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "BUY",
+            "SELL",
+            null
+          ]
+        },
+        "opposing_structure_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_closed_candle_key",
+        "prospective_at_creation",
+        "already_crossed_at_creation",
+        "late_after_move",
+        "stale_after_candles",
+        "invalidation_rule",
+        "replacement_policy"
+      ],
+      "properties": {
+        "created_closed_candle_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prospective_at_creation": {
+          "const": true
+        },
+        "already_crossed_at_creation": {
+          "const": false
+        },
+        "late_after_move": {
+          "const": false
+        },
+        "stale_after_candles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "invalidation_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "replacement_policy": {
+          "const": "FROZEN_UNTIL_EPISODE_END_OR_HARD_INVALIDATION"
+        }
+      }
+    },
+    "zoneQuality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "human_confidence",
+        "geometry_confidence",
+        "causal_visibility_confirmed",
+        "not_chasing_confirmed",
+        "inside_plot_confirmed",
+        "price_relationship_confirmed"
+      ],
+      "properties": {
+        "human_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "geometry_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "causal_visibility_confirmed": {
+          "const": true
+        },
+        "not_chasing_confirmed": {
+          "const": true
+        },
+        "inside_plot_confirmed": {
+          "const": true
+        },
+        "price_relationship_confirmed": {
+          "const": true
+        }
+      }
+    },
+    "negativeLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "negative_id",
+        "label",
+        "side_scope",
+        "reason_codes",
+        "rationale"
+      ],
+      "properties": {
+        "negative_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "const": "NO_VALID_ZONE"
+        },
+        "side_scope": {
+          "type": "string",
+          "enum": [
+            "BUY",
+            "SELL",
+            "BOTH"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "MID_RANGE",
+              "ALREADY_CROSSED",
+              "LATE_AFTER_MOVE",
+              "NO_HARD_ANCHOR",
+              "CONFLICTING_STRUCTURE",
+              "OPPOSING_FORCE_TOO_CLOSE",
+              "OUTSIDE_PLOT",
+              "STALE_FRAME",
+              "PAIR_OR_TIMEFRAME_UNCERTAIN",
+              "INSUFFICIENT_HISTORY",
+              "NO_CAUSAL_SETUP",
+              "TRANSFORM_UNCERTAIN",
+              "OTHER"
+            ]
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometry_unchanged_from_source",
+        "observed_completed_candles",
+        "episode_complete",
+        "zone_observations",
+        "favoured_path",
+        "reviewed_at"
+      ],
+      "properties": {
+        "geometry_unchanged_from_source": {
+          "const": true
+        },
+        "observed_completed_candles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
+        },
+        "episode_complete": {
+          "type": "boolean"
+        },
+        "zone_observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/zoneObservation"
+          }
+        },
+        "favoured_path": {
+          "type": "string",
+          "enum": [
+            "PRIMARY",
+            "ALTERNATIVE",
+            "NEITHER",
+            "UNRESOLVED"
+          ]
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "zoneObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zone_id",
+        "state_sequence",
+        "first_touch_episode_index",
+        "maximum_favourable_excursion_normalized",
+        "maximum_adverse_excursion_normalized"
+      ],
+      "properties": {
+        "zone_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state_sequence": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "enum": [
+              "UNTOUCHED",
+              "APPROACHING",
+              "TOUCHED",
+              "RESPECTED",
+              "REJECTED",
+              "BROKEN",
+              "INVALIDATED",
+              "EXPIRED"
+            ]
+          }
+        },
+        "first_touch_episode_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 12
+        },
+        "maximum_favourable_excursion_normalized": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maximum_adverse_excursion_normalized": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "annotator_ids",
+        "reviewer_ids",
+        "adjudicator_id",
+        "disagreement_present",
+        "geometry_locked",
+        "training_eligibility",
+        "exclusion_reasons",
+        "notes"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "DRAFT",
+            "SINGLE_REVIEWED",
+            "DOUBLE_REVIEWED",
+            "ADJUDICATED"
+          ]
+        },
+        "annotator_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reviewer_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "adjudicator_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disagreement_present": {
+          "type": "boolean"
+        },
+        "geometry_locked": {
+          "type": "boolean"
+        },
+        "training_eligibility": {
+          "type": "string",
+          "enum": [
+            "ELIGIBLE",
+            "REVIEW_REQUIRED",
+            "EXCLUDED"
+          ]
+        },
+        "exclusion_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "AMBIGUOUS_GEOMETRY",
+              "CONTRADICTORY_REVIEW",
+              "FUTURE_LEAKAGE",
+              "NON_CAUSAL_ANNOTATION",
+              "STALE_SOURCE",
+              "TRANSFORM_UNCERTAIN",
+              "DUPLICATE_CONFLICT",
+              "INSUFFICIENT_EVIDENCE",
+              "OTHER"
+            ]
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "leakageGuard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "episode_group_hash",
+        "source_capture_group",
+        "source_sequence_id",
+        "perceptual_group_id",
+        "pair_time_bucket",
+        "split_assignment",
+        "grouping_dimensions",
+        "no_cross_split_related_frames"
+      ],
+      "properties": {
+        "episode_group_hash": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "source_capture_group": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sequence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "perceptual_group_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pair_time_bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "split_assignment": {
+          "type": "string",
+          "enum": [
+            "TRAIN",
+            "VALIDATION",
+            "TEST",
+            "UNASSIGNED"
+          ]
+        },
+        "grouping_dimensions": {
+          "type": "array",
+          "minItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "EPISODE",
+              "SOURCE_CAPTURE",
+              "SOURCE_SEQUENCE",
+              "PERCEPTUAL_DUPLICATE",
+              "ANNOTATION_REVISION",
+              "DERIVED_CROP",
+              "OUTCOME_REVIEW"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": "EPISODE"
+              }
+            },
+            {
+              "contains": {
+                "const": "SOURCE_CAPTURE"
+              }
+            },
+            {
+              "contains": {
+                "const": "SOURCE_SEQUENCE"
+              }
+            },
+            {
+              "contains": {
+                "const": "PERCEPTUAL_DUPLICATE"
+              }
+            }
+          ]
+        },
+        "no_cross_split_related_frames": {
+          "const": true
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "annotated_at",
+        "tool_version",
+        "doctrine_version",
+        "source_kind",
+        "future_frames_visible_to_annotator",
+        "visible_until_closed_candle_key",
+        "book_evidence_refs",
+        "weak_candidate_ids"
+      ],
+      "properties": {
+        "annotated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tool_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "doctrine_version": {
+          "const": "ORDER_POSITIONING_V3_2026-07-19"
+        },
+        "source_kind": {
+          "description": "A weak proposal becomes usable only after human review; this enum does not claim a trained detector.",
+          "type": "string",
+          "enum": [
+            "HUMAN",
+            "HUMAN_ADJUDICATED",
+            "WEAK_SUPERVISION_HUMAN_REVIEWED"
+          ]
+        },
+        "future_frames_visible_to_annotator": {
+          "type": "boolean"
+        },
+        "visible_until_closed_candle_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "book_evidence_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "weak_candidate_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

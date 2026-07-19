@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -122,6 +123,55 @@ def _scene(key: str = "closed-0", sequence: int = 10, side: str = "BUY") -> dict
             },
         ],
     }
+
+
+def _stable_reprojection_candles(
+    *,
+    scale_x: float = 1.0,
+    offset_x: float = 0.0,
+    scale_y: float = 1.0,
+    offset_y: float = 0.0,
+) -> list[dict[str, Any]]:
+    anchors = [
+        {
+            "track_id": "stable-a",
+            "is_closed": True,
+            "direction": "BUY",
+            "x_norm": 0.18,
+            "close_y_norm": 0.34,
+        },
+        {
+            "track_id": "stable-b",
+            "is_closed": True,
+            "direction": "SELL",
+            "x_norm": 0.38,
+            "close_y_norm": 0.47,
+        },
+        {
+            "track_id": "stable-c",
+            "is_closed": True,
+            "direction": "BUY",
+            "x_norm": 0.61,
+            "close_y_norm": 0.59,
+        },
+        {
+            "track_id": "stable-d",
+            "is_closed": True,
+            "direction": "SELL",
+            "x_norm": 0.79,
+            "close_y_norm": 0.41,
+        },
+    ]
+    for anchor in anchors:
+        anchor["x_norm"] = round(
+            scale_x * float(anchor["x_norm"]) + offset_x,
+            6,
+        )
+        anchor["close_y_norm"] = round(
+            scale_y * float(anchor["close_y_norm"]) + offset_y,
+            6,
+        )
+    return anchors
 
 
 def _ready_session(
@@ -294,6 +344,53 @@ def _recovered_gap_session(session: dict[str, Any]) -> dict[str, Any]:
     return updated
 
 
+def _positioning_overlay(
+    overlay_type: str,
+    side: str,
+    bounds: list[float],
+    *,
+    track_id: str,
+) -> dict[str, Any]:
+    confirmation_side = "BUY" if side == "SELL" else "SELL"
+    return {
+        "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+        "overlay_id": f"render-{track_id}-10",
+        "object_id": f"object-{track_id}",
+        "track_id": track_id,
+        "type": overlay_type,
+        "side": side,
+        "frame_id": 10,
+        "sequence_id": "episode-positioning-sequence",
+        "chart_transform_id": "episode-positioning-transform",
+        "broker_source_lock_id": "episode-positioning-source",
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "bounds": bounds,
+        "confidence": 0.91,
+        "truth_score": 0.90,
+        "lifecycle_state": "ACTIVE",
+        "anchor_candle_indices": [7, 9],
+        "anchor_evidence_status": "VALID",
+        "anchor_evidence": {"valid": True},
+        "confirmation_state": "CONFIRMED",
+        "confirmation_evidence": {
+            "valid": True,
+            "state": "CONFIRMED",
+            "is_closed": True,
+            "closed_candle_key": "positioning-break-confirmed",
+            "side": confirmation_side,
+            "event_type": "BREAK_OF_STRUCTURE",
+        },
+        "anchor_quality": {
+            "score": 0.92,
+            "has_candle_anchor": True,
+            "has_sequence_anchor": True,
+            "inside_plot_area": True,
+            "matches_symbol_timeframe": True,
+            "chart_transform_valid": True,
+        },
+    }
+
+
 def test_tracking_episode_requires_a_complete_event_locked_baseline() -> None:
     readiness = tracking_episode_readiness_v1({"session_id": "not-ready"})
     paused_session = _ready_session()
@@ -353,6 +450,186 @@ def test_readiness_derives_transform_from_valid_scene_when_anchor_metadata_is_nu
     assert advanced["events"][0]["path_fit_by_id"]["PATH_A"]["status"] == (
         "MEASURED"
     )
+
+
+def test_tracking_episode_freezes_order_areas_and_only_advances_their_status() -> None:
+    session = _ready_session(side="BUY")
+    baseline_tracking = cast(dict[str, Any], session["tracking_summary"])
+    baseline_tracking["tracked_candles"] = [
+        *_stable_reprojection_candles(),
+        *cast(list[dict[str, Any]], baseline_tracking["tracked_candles"]),
+    ]
+    session["overlay_objects"] = [
+        _positioning_overlay(
+            "DEMAND_ZONE",
+            "BUY",
+            [300.0, 300.0, 650.0, 340.0],
+            track_id="demand-source",
+        ),
+        _positioning_overlay(
+            "SUPPLY_ZONE",
+            "SELL",
+            [300.0, 180.0, 650.0, 210.0],
+            track_id="supply-source",
+        ),
+    ]
+
+    started = start_tracking_episode_v1(
+        {},
+        session,
+        episode_id="episode-frozen-order-areas",
+        now_iso="2026-07-18T00:00:00+00:00",
+    )
+    started_plan = cast(dict[str, Any], started["positioning_plan"])
+    original_geometry = {
+        zone["zone_id"]: deepcopy(zone["bounds"])
+        for zone in cast(list[dict[str, Any]], started_plan["zones"])
+    }
+    next_session = _next_closed_event(session, step=1, side="BUY")
+    cast(dict[str, Any], next_session["tracking_summary"])["tracked_candles"] = [
+        *_stable_reprojection_candles(
+            scale_x=1.02,
+            offset_x=0.01,
+            scale_y=0.96,
+            offset_y=0.02,
+        ),
+        {
+            "track_id": "11",
+            "is_closed": True,
+            "direction": "BUY",
+            "open_y": 302.0,
+            "close_y": 315.0,
+            "top_y": 295.0,
+            "bottom_y": 325.0,
+        }
+    ]
+    # Sequence and chart-transform identifiers may advance as the broker chart
+    # scrolls. The broker source and global closed-candle fit remain the proof;
+    # current source boxes never replace frozen plan semantics or geometry.
+    current_source = _positioning_overlay(
+        "DEMAND_ZONE",
+        "BUY",
+        [310.0, 305.0, 660.0, 345.0],
+        track_id="demand-source",
+    )
+    current_source["frame_id"] = 11
+    current_source["sequence_id"] = "episode-positioning-sequence-after-scroll"
+    current_source["chart_transform_id"] = "episode-positioning-transform-after-scroll"
+    next_session["overlay_objects"] = [current_source]
+
+    advanced = advance_tracking_episode_v1(
+        started,
+        next_session,
+        now_iso="2026-07-18T00:05:00+00:00",
+    )
+    advanced_plan = cast(dict[str, Any], advanced["positioning_plan"])
+
+    assert started_plan["status"] == "TRACKING"
+    assert started_plan["frozen"] is True
+    assert {zone["intent"] for zone in started_plan["zones"]} == {
+        "ENTRY_LIMIT",
+        "ENTRY_STOP",
+        "PROTECTIVE_STOP",
+    }
+    assert advanced_plan["advance_status"] == "APPLIED"
+    assert advanced_plan["step"] == 1
+    assert {
+        zone["zone_id"]: zone["bounds"]
+        for zone in cast(list[dict[str, Any]], advanced_plan["zones"])
+    } == original_geometry
+    assert cast(dict[str, Any], advanced["events"][0])[
+        "order_positioning_progress"
+    ]["step"] == 1
+
+
+def test_persisted_live_maturity_mapping_blocks_a_fresh_late_positioning_plan() -> None:
+    session = _ready_session(side="BUY")
+    session["overlay_objects"] = [
+        _positioning_overlay(
+            "DEMAND_ZONE",
+            "BUY",
+            [300.0, 300.0, 650.0, 340.0],
+            track_id="demand-source",
+        )
+    ]
+    latest = cast(dict[str, Any], session["latest_signal"])
+    latest["opportunity_maturity"] = {
+        "schema_version": "PG_OPPORTUNITY_MATURITY_V3",
+        "state": "LATE_CHASE",
+        "book_strategy": {
+            "state": "MISSED",
+            "maturity_state": "LATE",
+        },
+    }
+    latest["opportunity_maturity_state"] = "LATE_CHASE"
+    latest["allowance_package"] = {"timing_mode": "LATE_CHASE"}
+
+    started = start_tracking_episode_v1(
+        {},
+        session,
+        episode_id="episode-live-late-shape",
+        now_iso="2026-07-18T00:00:00+00:00",
+    )
+    plan = cast(dict[str, Any], started["positioning_plan"])
+
+    assert plan["status"] == "BLOCKED"
+    assert plan.get("zones", []) == []
+    assert "LATE_CHASE_FIVE_OR_MORE_FAVORABLE_CANDLES" in plan["candidate_blockers"]
+
+
+def test_order_positioning_advance_rejects_changed_live_source_lock() -> None:
+    session = _ready_session(side="BUY")
+    baseline_tracking = cast(dict[str, Any], session["tracking_summary"])
+    baseline_tracking["tracked_candles"] = [
+        *_stable_reprojection_candles(),
+        *cast(list[dict[str, Any]], baseline_tracking["tracked_candles"]),
+    ]
+    session["overlay_objects"] = [
+        _positioning_overlay(
+            "DEMAND_ZONE",
+            "BUY",
+            [300.0, 300.0, 650.0, 340.0],
+            track_id="demand-source",
+        )
+    ]
+    started = start_tracking_episode_v1(
+        {},
+        session,
+        episode_id="episode-source-lock-change",
+        now_iso="2026-07-18T00:00:00+00:00",
+    )
+    next_session = _next_closed_event(session, step=1, side="BUY")
+    cast(dict[str, Any], next_session["tracking_summary"])["tracked_candles"] = [
+        *_stable_reprojection_candles(),
+        {
+            "track_id": "11",
+            "is_closed": True,
+            "direction": "BUY",
+            "open_y": 302.0,
+            "close_y": 315.0,
+            "top_y": 295.0,
+            "bottom_y": 325.0,
+        },
+    ]
+    changed_source = _positioning_overlay(
+        "DEMAND_ZONE",
+        "BUY",
+        [310.0, 305.0, 660.0, 345.0],
+        track_id="demand-source",
+    )
+    changed_source["frame_id"] = 11
+    changed_source["broker_source_lock_id"] = "different-live-source"
+    next_session["overlay_objects"] = [changed_source]
+
+    advanced = advance_tracking_episode_v1(
+        started,
+        next_session,
+        now_iso="2026-07-18T00:05:00+00:00",
+    )
+    plan = cast(dict[str, Any], advanced["positioning_plan"])
+
+    assert plan["advance_status"] == "REJECTED"
+    assert "ACTUAL_BROKER_SOURCE_LOCK_ID_MISMATCH" in plan["blockers"]
 
 
 def test_readiness_blocks_when_transform_scale_cannot_be_derived() -> None:
@@ -1663,6 +1940,164 @@ def test_terminal_episode_archive_survives_a_fresh_runtime_root_without_authorit
         ).is_file()
     finally:
         restarted_tracker.shutdown()
+
+
+def _terminal_durable_episode(
+    session_id: str,
+    episode_id: str,
+    *,
+    updated_at: str,
+    note: str = "",
+) -> dict[str, Any]:
+    episode = default_tracking_episode_v1(session_id=session_id)
+    episode.update(
+        {
+            "episode_id": episode_id,
+            "state": "STOPPED",
+            "revision": 2,
+            "started_at": updated_at,
+            "updated_at": updated_at,
+            "stopped_at": updated_at,
+            "terminal_reason": "operator_stop",
+            "pair": "GBPUSD_OTC",
+            "timeframe": "M5",
+            "committed_plan": {"operator_note": note} if note else {},
+        }
+    )
+    return episode
+
+
+def test_durable_tracking_records_history_and_ledger_have_hard_caps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_TRACKING_HISTORY_RECORD_MAX_MB", "0.0625")
+    monkeypatch.setenv("PHOENIXGUARD_TRACKING_HISTORY_LEDGER_MAX_MB", "0.03125")
+    monkeypatch.setenv("PHOENIXGUARD_TRACKING_HISTORY_LEDGER_TAIL_LINES", "16")
+    durable_root = tmp_path / "durable_history"
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "runtime" / "window_tracker",
+        tracking_episode_archive_root=durable_root,
+        capture_backend=_NoCaptureBackend(),
+        tracking_adapter=_NoTrackingAdapter(),
+        focus_selector_backend=_NoFocusSelector(),  # type: ignore[arg-type]
+    )
+    session_id = "bounded-session"
+    idle = default_tracking_episode_v1(session_id=session_id)
+    try:
+        oversized = _terminal_durable_episode(
+            session_id,
+            "episode-oversized",
+            updated_at="2026-07-18T00:00:00+00:00",
+            note="x" * 400_000,
+        )
+        tracker._persist_durable_tracking_episode_transition(  # pyright: ignore[reportPrivateUsage]
+            session_id,
+            idle,
+            oversized,
+            source="bounded_record_test",
+        )
+        oversized_path = (
+            durable_root
+            / "sessions"
+            / session_id
+            / "episodes"
+            / "episode-oversized.json"
+        )
+        oversized_payload = json.loads(oversized_path.read_text(encoding="utf-8"))
+
+        assert oversized_path.stat().st_size <= 64 * 1024
+        assert oversized_payload["episode_id"] == "episode-oversized"
+        assert oversized_payload["storage_compaction"]["reason"] == "RECORD_BYTE_LIMIT"
+
+        for index in range(27):
+            episode = _terminal_durable_episode(
+                session_id,
+                f"episode-{index:02d}",
+                updated_at=f"2026-07-18T00:{index:02d}:00+00:00",
+            )
+            tracker._persist_durable_tracking_episode_transition(  # pyright: ignore[reportPrivateUsage]
+                session_id,
+                idle,
+                episode,
+                source="bounded_history_test",
+            )
+
+        session_dir = durable_root / "sessions" / session_id
+        records = list((session_dir / "episodes").glob("*.json"))
+        history = json.loads((session_dir / "history.json").read_text(encoding="utf-8"))
+
+        assert len(records) == 24
+        assert len(history["episodes"]) == 24
+        assert (session_dir / "events.jsonl").stat().st_size <= 32 * 1024
+        assert not list(durable_root.rglob("_archive"))
+        assert not list(durable_root.rglob("*quarantine*"))
+    finally:
+        tracker.shutdown()
+
+
+def test_durable_tracking_global_retention_preserves_active_session_and_24_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_TRACKING_HISTORY_MAX_SESSIONS", "3")
+    monkeypatch.setenv("PHOENIXGUARD_TRACKING_HISTORY_MAX_TOTAL_MB", "0.125")
+    monkeypatch.setenv("PHOENIXGUARD_TRACKING_HISTORY_RECORD_MAX_MB", "0.0625")
+    durable_root = tmp_path / "durable_history"
+    sessions_root = durable_root / "sessions"
+    for index in range(5):
+        session_dir = sessions_root / f"inactive-{index}"
+        session_dir.mkdir(parents=True)
+        payload_path = session_dir / "legacy.bin"
+        payload_path.write_bytes(b"x" * (60 * 1024))
+        os.utime(payload_path, (1000.0 + index, 1000.0 + index))
+
+    active_episode_dir = sessions_root / "active-session" / "episodes"
+    active_episode_dir.mkdir(parents=True)
+    for index in range(24):
+        (active_episode_dir / f"retained-{index:02d}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "runtime" / "window_tracker",
+        tracking_episode_archive_root=durable_root,
+        capture_backend=_NoCaptureBackend(),
+        tracking_adapter=_NoTrackingAdapter(),
+        focus_selector_backend=_NoFocusSelector(),  # type: ignore[arg-type]
+    )
+    try:
+        active = _terminal_durable_episode(
+            "active-session",
+            "retained-new",
+            updated_at="2026-07-18T01:00:00+00:00",
+        )
+        tracker._persist_durable_tracking_episode_transition(  # pyright: ignore[reportPrivateUsage]
+            "active-session",
+            default_tracking_episode_v1(session_id="active-session"),
+            active,
+            source="global_retention_test",
+        )
+
+        retained_session_dirs = [
+            path for path in sessions_root.iterdir() if path.is_dir()
+        ]
+        retained_bytes = sum(
+            path.stat().st_size
+            for session_dir in retained_session_dirs
+            for path in session_dir.rglob("*")
+            if path.is_file()
+        )
+        active_records = list(active_episode_dir.glob("*.json"))
+
+        assert (sessions_root / "active-session").is_dir()
+        assert len(active_records) == 24
+        assert len(retained_session_dirs) <= 3
+        assert retained_bytes <= 128 * 1024
+        assert not (sessions_root / "inactive-0").exists()
+    finally:
+        tracker.shutdown()
 
 
 def test_tracking_episode_api_routes_are_separate_from_worker_start_stop(

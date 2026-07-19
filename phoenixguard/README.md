@@ -108,21 +108,41 @@ After the burn is complete and the report has been reviewed, add `--confirm-dele
 the allowlisted generated paths older than the age gate. This purge does not target
 `runtime\live\data_live\mobile_api\window_tracker\sessions\...` active session files.
 
-The canonical live launcher also starts a disk-growth guard by default. It caps generated
-runtime/session memory at `2GB` per target and prunes down to `1536MB` when a target crosses the
-cap. This is the behind-the-scenes protection for long burns and VPS deployments:
+The canonical live launcher also starts a disk-growth guard by default. Its global ceiling is
+`512MB`, with tighter source-specific limits: `16MB` for the live market registry, `64MB` for live
+logs, `128MB` for current-session artifacts, and `256MB` for reports. The registry also compacts
+itself atomically, so long sessions do not create an append-only RAM/disk leak:
 
 ```powershell
-.\.venv-live\Scripts\python.exe .\Backend\tools\phoenixguard_disk_growth_guard.py --once --apply --limit 2GB --low-water 1536MB
+.\.venv-live\Scripts\python.exe .\Backend\tools\phoenixguard_disk_growth_guard.py --once --apply --limit 512MB --low-water 384MB
 ```
 
-The guard only targets generated artifacts: `runtime\live` tracker artifacts/logs,
-`.codex_runtime`, `reports`, `_archive`, `Business\web\.next`, and optional operator
-`.codex\sessions` history. It refuses protected roots such as `models`, `book knowledge`,
-`808 Memory`, `memory_bank`, `data`, `config`, and source code. Disable it only for a deliberate
-maintenance run with `PHOENIXGUARD_DISK_GUARD_ENABLED=0`.
+The guard only targets generated artifacts: `runtime\live` tracker artifacts/logs/market registry,
+`.codex_runtime`, `reports`, disposable `_archive`, and `Business\web\.next`. The canonical launcher
+never includes operator `.codex\sessions` history. It refuses protected roots such as `models`,
+`book knowledge`, `808 Memory`, `memory_bank`, `data`, `config`, and source code. The cold-start
+cleaner also rejects symlink/junction redirection and skips every project virtual environment.
+Long-running child stdout/stderr, overlay debug dumps, and Uvicorn access logs are discarded by
+default; bounded structured status and guard reports remain available. Disable the guard only for a
+deliberate maintenance run with `PHOENIXGUARD_DISK_GUARD_ENABLED=0`.
+
+Durable before/after episode history is mission data, not a runtime backup. It is separately bounded
+to 24 episodes per session, 32 session directories and 64 MiB total by default, with 1 MiB record and
+ledger ceilings. The current session is protected; oldest inactive sessions are deleted directly
+when the global budget is exceeded, with no quarantine or second archive copy.
 
 ## Fast Safe Restart
+
+For a repository-wide strict type check without one large Node heap competing with VS Code, use:
+
+```powershell
+.\.venv-dev\Scripts\python.exe .\Backend\tools\run_isolated_pyright_v3.py
+```
+
+The runner discovers every Python/stub file outside generated/environment roots, checks them in
+fresh 10-file processes, enables warning failures, uses one worker, and caps each Node heap at
+512 MB. It writes no archive or per-batch report files and still includes the source
+`phoenixguard/runtime` package.
 
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live
 dashboard without any floating editor window.
@@ -170,9 +190,10 @@ Get-CimInstance Win32_Process |
 
 Start-Sleep -Seconds 3
 
-# Back up and clear stale runtime/cache state. This preserves models, memory,
-# user configuration, reports, and current package-reporter state boundaries.
-.\.venv-live\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
+# Permanently delete disposable runtime/cache state. No backup archive is created.
+# Models, books, durable tracking history, and user configuration are preserved.
+# Generated reports are disposable and are deleted with the runtime/cache state.
+.\.venv-live\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply --delete
 if ($LASTEXITCODE -ne 0) { throw "Runtime cleanup failed. Launch aborted." }
 
 # Canonical final V3 live launch. -NoBrowser prevents popup/editor launch.
@@ -336,7 +357,7 @@ Start-Sleep -Seconds 3
 $python = ".\.venv-live\Scripts\python.exe"
 
 # Clear V3 runtime/cache state before a cold launch.
-& $python .\Backend\tools\clean_v3_runtime_state.py --apply
+& $python .\Backend\tools\clean_v3_runtime_state.py --apply --delete
 if ($LASTEXITCODE -ne 0) {
     throw "Runtime cleanup failed. Launch aborted."
 }

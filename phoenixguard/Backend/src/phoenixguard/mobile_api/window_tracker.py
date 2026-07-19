@@ -13,6 +13,8 @@ import math
 import os
 import re
 import secrets
+import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -70,12 +72,15 @@ from phoenixguard.tracking.market_object_tracker_v3 import (
     derive_trendline_overlays,
 )
 from phoenixguard.tracking.tracking_episode_v3 import (
+    TRACKING_EPISODE_HISTORY_LIMIT,
+    TRACKING_EPISODE_HORIZON,
     advance_tracking_episode_v1,
     default_tracking_episode_v1,
     normalize_tracking_episode_v1,
     reset_tracking_episode_v1,
     start_tracking_episode_v1,
     stop_tracking_episode_v1,
+    tracking_episode_history_entry_v1,
     tracking_episode_readiness_v1,
     update_tracking_episode_history_v1,
 )
@@ -124,6 +129,11 @@ _FORECAST_ACTION_POLL_AFTER_MS = 250
 _FORECAST_ACTION_MAX_PENDING = 4
 _FORECAST_ACTION_MAX_RETAINED = 128
 _FORECAST_ACTION_TERMINAL_STATUSES = frozenset({"ready", "degraded", "stale", "error"})
+_DURABLE_TRACKING_HISTORY_DEFAULT_MAX_SESSIONS = 32
+_DURABLE_TRACKING_HISTORY_DEFAULT_MAX_TOTAL_MB = 64.0
+_DURABLE_TRACKING_HISTORY_DEFAULT_MAX_RECORD_MB = 1.0
+_DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_MAX_MB = 1.0
+_DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_TAIL_LINES = 512
 
 
 def _forecast_action_timeout_sec() -> float:
@@ -343,7 +353,7 @@ _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 30.0
 _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC = 300.0
 _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC = 0.5
 _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC = 30.0
-_TRACKER_ARTIFACT_RETENTION_FRAMES = 240
+_TRACKER_ARTIFACT_RETENTION_FRAMES = 144
 _EXECUTION_HISTORY_AREA_MIN_SAMPLE = 6
 _EXECUTION_BUY_HISTORY_HIGH_POSITION = 0.74
 _EXECUTION_BUY_HISTORY_STRETCH_POSITION = 0.88
@@ -4713,6 +4723,15 @@ def _slugify(value: str, fallback: str) -> str:
     return slug or fallback
 
 
+def _bounded_storage_slug(value: str, fallback: str, *, max_chars: int) -> str:
+    slug = _slugify(value, fallback)
+    if len(slug) <= max_chars:
+        return slug
+    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:12]
+    prefix_length = max(1, max_chars - len(digest) - 1)
+    return f"{slug[:prefix_length]}-{digest}"
+
+
 def _read_json_payload(path: Path) -> Any:
     data = path.read_bytes()
     try:
@@ -4780,6 +4799,168 @@ def _read_json(path: Path, default: Any) -> Any:
     return default
 
 
+def _encode_json_mapping(payload: Mapping[str, Any]) -> bytes:
+    try:
+        import orjson
+
+        return orjson.dumps(
+            dict(payload),
+            option=orjson.OPT_NON_STR_KEYS,
+            default=str,
+        )
+    except Exception:
+        return json.dumps(
+            dict(payload),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+
+
+def _compact_durable_json_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int,
+    max_mapping_items: int,
+    max_sequence_items: int,
+    max_string_chars: int,
+) -> Any:
+    """Build a deterministic JSON value without allowing payload fan-out."""
+
+    if depth >= max_depth:
+        return None
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return max(-(2**63), min((2**63) - 1, value))
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value[:max_string_chars]
+    if isinstance(value, Mapping):
+        output: dict[str, Any] = {}
+        for raw_key, item in list(cast(Mapping[Any, Any], value).items())[
+            :max_mapping_items
+        ]:
+            key = str(raw_key)[:128]
+            if not key:
+                continue
+            compact = _compact_durable_json_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_mapping_items=max_mapping_items,
+                max_sequence_items=max_sequence_items,
+                max_string_chars=max_string_chars,
+            )
+            if compact is not None:
+                output[key] = compact
+        return output
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        output_list: list[Any] = []
+        for item in cast(Sequence[Any], value)[:max_sequence_items]:
+            compact = _compact_durable_json_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_mapping_items=max_mapping_items,
+                max_sequence_items=max_sequence_items,
+                max_string_chars=max_string_chars,
+            )
+            if compact is not None:
+                output_list.append(compact)
+        return output_list
+    return str(value)[:max_string_chars]
+
+
+def _bounded_durable_json_mapping(
+    payload: Mapping[str, Any],
+    *,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Keep a durable record under its hard byte budget without making copies."""
+
+    original = dict(payload)
+    if len(_encode_json_mapping(original)) <= max_bytes:
+        return original
+    for limits in (
+        (8, 96, 48, 2048),
+        (7, 64, 24, 512),
+        (6, 32, 16, 192),
+    ):
+        compact = _compact_durable_json_value(
+            original,
+            max_depth=limits[0],
+            max_mapping_items=limits[1],
+            max_sequence_items=limits[2],
+            max_string_chars=limits[3],
+        )
+        compact_mapping = _mapping_to_dict(compact)
+        if compact_mapping and len(_encode_json_mapping(compact_mapping)) <= max_bytes:
+            compact_mapping["storage_compaction"] = {
+                "schema_version": "PG_DURABLE_STORAGE_COMPACTION_V1",
+                "reason": "RECORD_BYTE_LIMIT",
+            }
+            if len(_encode_json_mapping(compact_mapping)) <= max_bytes:
+                return compact_mapping
+
+    history_summary = tracking_episode_history_entry_v1(original)
+    minimal = {
+        key: original.get(key)
+        for key in (
+            "schema_version",
+            "session_id",
+            "episode_id",
+            "state",
+            "revision",
+            "event_cursor",
+            "event_horizon",
+            "started_at",
+            "updated_at",
+            "stopped_at",
+            "completed_at",
+            "terminal_reason",
+            "pair",
+            "timeframe",
+        )
+    }
+    minimal.update(
+        {
+            "anchor": original.get("anchor", {}),
+            "positioning_plan": original.get("positioning_plan", {}),
+            "baseline_forecasts": original.get("baseline_forecasts", {}),
+            "events": original.get("events", []),
+            "history_summary": history_summary,
+            "storage_compaction": {
+                "schema_version": "PG_DURABLE_STORAGE_COMPACTION_V1",
+                "reason": "RECORD_BYTE_LIMIT",
+            },
+        }
+    )
+    compact_minimal = _mapping_to_dict(
+        _compact_durable_json_value(
+            minimal,
+            max_depth=6,
+            max_mapping_items=32,
+            max_sequence_items=16,
+            max_string_chars=128,
+        )
+    )
+    if not compact_minimal:
+        raise ValueError("Unable to compact durable tracking history record.")
+    if len(_encode_json_mapping(compact_minimal)) > max_bytes:
+        compact_minimal.pop("baseline_forecasts", None)
+        compact_minimal.pop("positioning_plan", None)
+        compact_minimal.pop("events", None)
+    if len(_encode_json_mapping(compact_minimal)) > max_bytes:
+        raise ValueError("Durable tracking history byte budget is too small.")
+    return compact_minimal
+
+
 def _json_snapshot_freshness_key(payload: Any, mtime_ns: int) -> tuple[float, int, int]:
     if not isinstance(payload, Mapping):
         return (0.0, 0, int(mtime_ns or 0))
@@ -4803,12 +4984,7 @@ def _json_snapshot_freshness_key(payload: Any, mtime_ns: int) -> tuple[float, in
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import orjson
-
-        payload_bytes = orjson.dumps(dict(payload), option=orjson.OPT_NON_STR_KEYS, default=str)
-    except Exception:
-        payload_bytes = json.dumps(dict(payload), ensure_ascii=True, separators=(",", ":"), default=str).encode("utf-8")
+    payload_bytes = _encode_json_mapping(payload)
     last_error: Exception | None = None
     for attempt in range(10):
         tmp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -23376,6 +23552,7 @@ class ContinuousWindowTrackerService:
             tracking_episode_archive_root
         )
         self.tracking_episode_archive_root.mkdir(parents=True, exist_ok=True)
+        self._durable_tracking_episode_retention_lock = threading.RLock()
         self.capture_backend = cast(WindowCaptureBackend, capture_backend or WindowsWindowCaptureBackend())
         self.tracking_adapter = cast(WindowTrackingAdapter, tracking_adapter or PhoenixGuardWindowTrackingAdapter())
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
@@ -23638,9 +23815,10 @@ class ContinuousWindowTrackerService:
         return self._session_dir(session_id) / "tracking_episode_state.json"
 
     def _durable_tracking_episode_session_dir(self, session_id: str) -> Path:
-        return self.tracking_episode_archive_root / "sessions" / _slugify(
+        return self.tracking_episode_archive_root / "sessions" / _bounded_storage_slug(
             session_id,
             "session",
+            max_chars=96,
         )
 
     def _durable_tracking_episode_record_path(
@@ -23651,7 +23829,7 @@ class ContinuousWindowTrackerService:
         return (
             self._durable_tracking_episode_session_dir(session_id)
             / "episodes"
-            / f"{_slugify(episode_id, 'episode')}.json"
+            / f"{_bounded_storage_slug(episode_id, 'episode', max_chars=112)}.json"
         )
 
     def _durable_tracking_episode_history_path(self, session_id: str) -> Path:
@@ -23660,13 +23838,301 @@ class ContinuousWindowTrackerService:
     def _durable_tracking_episode_ledger_path(self, session_id: str) -> Path:
         return self._durable_tracking_episode_session_dir(session_id) / "events.jsonl"
 
+    def _durable_tracking_episode_record_max_bytes(self) -> int:
+        max_mb = min(
+            4.0,
+            _env_float(
+                "PHOENIXGUARD_TRACKING_HISTORY_RECORD_MAX_MB",
+                _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_RECORD_MB,
+                0.0625,
+            ),
+        )
+        return int(max_mb * 1024.0 * 1024.0)
+
+    def _write_bounded_durable_tracking_json(
+        self,
+        path: Path,
+        payload: Mapping[str, Any],
+    ) -> None:
+        max_bytes = self._durable_tracking_episode_record_max_bytes()
+        bounded = _bounded_durable_json_mapping(payload, max_bytes=max_bytes)
+        _write_json_atomic(path, bounded)
+
+    @staticmethod
+    def _is_reparse_or_symlink(path: Path) -> bool:
+        try:
+            attributes = int(getattr(path.lstat(), "st_file_attributes", 0) or 0)
+            return path.is_symlink() or bool(
+                attributes & int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+            )
+        except OSError:
+            return True
+
+    @classmethod
+    def _durable_tree_size_and_mtime(cls, directory: Path) -> tuple[int, float]:
+        total_bytes = 0
+        latest_mtime = 0.0
+        if cls._is_reparse_or_symlink(directory):
+            return total_bytes, latest_mtime
+        try:
+            for root, dir_names, file_names in os.walk(directory, followlinks=False):
+                root_path = Path(root)
+                dir_names[:] = [
+                    name
+                    for name in dir_names
+                    if not cls._is_reparse_or_symlink(root_path / name)
+                ]
+                for name in file_names:
+                    path = root_path / name
+                    if cls._is_reparse_or_symlink(path):
+                        continue
+                    try:
+                        metadata = path.stat()
+                    except OSError:
+                        continue
+                    total_bytes += max(0, int(metadata.st_size))
+                    latest_mtime = max(latest_mtime, float(metadata.st_mtime))
+        except OSError:
+            return total_bytes, latest_mtime
+        try:
+            latest_mtime = max(latest_mtime, float(directory.stat().st_mtime))
+        except OSError:
+            pass
+        return total_bytes, latest_mtime
+
+    def _remove_durable_tracking_session_dir(self, directory: Path) -> bool:
+        sessions_root = self.tracking_episode_archive_root / "sessions"
+        try:
+            if directory.parent.resolve() != sessions_root.resolve():
+                return False
+        except OSError:
+            return False
+        if self._is_reparse_or_symlink(directory):
+            LOGGER.warning(
+                "Refusing to prune reparse-point durable tracking history %s.",
+                directory,
+            )
+            return False
+        try:
+            shutil.rmtree(directory)
+            return True
+        except OSError:
+            LOGGER.warning(
+                "Unable to prune old durable tracking history session %s.",
+                directory,
+                exc_info=True,
+            )
+            return False
+
+    def _prune_durable_episode_records(self, session_dir: Path) -> None:
+        episode_dir = session_dir / "episodes"
+        if not episode_dir.is_dir() or self._is_reparse_or_symlink(episode_dir):
+            return
+        max_record_bytes = self._durable_tracking_episode_record_max_bytes()
+        records = sorted(
+            (
+                path
+                for path in episode_dir.glob("*.json")
+                if path.is_file() and not self._is_reparse_or_symlink(path)
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        retained = {path.name for path in records[:TRACKING_EPISODE_HISTORY_LIMIT]}
+        for record in records[:TRACKING_EPISODE_HISTORY_LIMIT]:
+            try:
+                oversized = record.stat().st_size > max_record_bytes
+            except OSError:
+                continue
+            if not oversized:
+                continue
+            self._write_bounded_durable_tracking_json(
+                record,
+                {
+                    "schema_version": "PG_TRACKING_EPISODE_V1",
+                    "session_id": session_dir.name,
+                    "episode_id": record.stem,
+                    "state": "FAILED",
+                    "revision": 0,
+                    "event_cursor": 0,
+                    "event_horizon": TRACKING_EPISODE_HORIZON,
+                    "terminal_reason": "LEGACY_RECORD_EXCEEDED_STORAGE_CAP",
+                    "storage_compaction": {
+                        "schema_version": "PG_DURABLE_STORAGE_COMPACTION_V1",
+                        "reason": "LEGACY_RECORD_EXCEEDED_STORAGE_CAP",
+                    },
+                },
+            )
+        for old_record in records[TRACKING_EPISODE_HISTORY_LIMIT:]:
+            for candidate in (
+                old_record,
+                old_record.with_suffix(old_record.suffix + ".last_good"),
+            ):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    LOGGER.warning(
+                        "Unable to prune old durable tracking episode record %s.",
+                        candidate,
+                    )
+        for fallback in episode_dir.glob("*.json.last_good"):
+            primary_name = fallback.name[: -len(".last_good")]
+            try:
+                fallback_within_cap = fallback.stat().st_size <= max_record_bytes
+            except OSError:
+                fallback_within_cap = False
+            if primary_name in retained and fallback_within_cap:
+                continue
+            try:
+                fallback.unlink()
+            except OSError:
+                LOGGER.warning(
+                    "Unable to prune stale durable tracking fallback %s.",
+                    fallback,
+                )
+        stale_before = time.time() - 300.0
+        for temporary in episode_dir.glob("*.tmp"):
+            try:
+                if temporary.stat().st_mtime < stale_before:
+                    temporary.unlink()
+            except OSError:
+                LOGGER.debug(
+                    "Unable to prune stale durable tracking temporary file %s.",
+                    temporary,
+                    exc_info=True,
+                )
+
+    def _prune_durable_tracking_episode_storage_locked(
+        self,
+        *,
+        protected_session_id: str,
+    ) -> dict[str, Any]:
+        """Delete oldest inactive history until hard count and byte caps hold."""
+
+        sessions_root = self.tracking_episode_archive_root / "sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+        protected_name = _bounded_storage_slug(
+            protected_session_id,
+            "session",
+            max_chars=96,
+        )
+        session_dirs = [
+            path
+            for path in sessions_root.iterdir()
+            if path.is_dir() and not self._is_reparse_or_symlink(path)
+        ]
+        for session_dir in session_dirs:
+            self._prune_durable_episode_records(session_dir)
+
+        max_sessions = min(
+            128,
+            _env_int(
+                "PHOENIXGUARD_TRACKING_HISTORY_MAX_SESSIONS",
+                _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_SESSIONS,
+                1,
+            ),
+        )
+        max_total_mb = min(
+            512.0,
+            _env_float(
+                "PHOENIXGUARD_TRACKING_HISTORY_MAX_TOTAL_MB",
+                _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_TOTAL_MB,
+                0.125,
+            ),
+        )
+        max_total_bytes = int(max_total_mb * 1024.0 * 1024.0)
+        removed: list[str] = []
+
+        def snapshot() -> list[tuple[Path, int, float]]:
+            rows = [
+                (path, *self._durable_tree_size_and_mtime(path))
+                for path in session_dirs
+                if path.exists()
+            ]
+            rows.sort(key=lambda row: (row[2], row[0].name))
+            return rows
+
+        rows = snapshot()
+        while len(rows) > max_sessions:
+            candidate = next(
+                (row for row in rows if row[0].name != protected_name),
+                None,
+            )
+            if candidate is None or not self._remove_durable_tracking_session_dir(
+                candidate[0]
+            ):
+                break
+            removed.append(candidate[0].name)
+            rows = snapshot()
+
+        total_bytes = sum(row[1] for row in rows)
+        while total_bytes > max_total_bytes:
+            candidate = next(
+                (row for row in rows if row[0].name != protected_name),
+                None,
+            )
+            if candidate is None or not self._remove_durable_tracking_session_dir(
+                candidate[0]
+            ):
+                break
+            removed.append(candidate[0].name)
+            rows = snapshot()
+            total_bytes = sum(row[1] for row in rows)
+
+        return {
+            "schema_version": "PG_DURABLE_TRACKING_RETENTION_REPORT_V1",
+            "protected_session": protected_name,
+            "retained_session_count": len(rows),
+            "retained_bytes": total_bytes,
+            "max_sessions": max_sessions,
+            "max_total_bytes": max_total_bytes,
+            "within_limits": len(rows) <= max_sessions
+            and total_bytes <= max_total_bytes,
+            "removed_sessions": removed,
+        }
+
+    def _prune_durable_tracking_episode_storage(
+        self,
+        *,
+        protected_session_id: str,
+    ) -> dict[str, Any]:
+        with self._durable_tracking_episode_retention_lock:
+            return self._prune_durable_tracking_episode_storage_locked(
+                protected_session_id=protected_session_id,
+            )
+
     def _load_durable_tracking_episode_history(
         self,
         session_id: str,
     ) -> list[dict[str, Any]]:
-        raw = _mapping_to_dict(
-            _read_json(self._durable_tracking_episode_history_path(session_id), {})
+        history_path = self._durable_tracking_episode_history_path(session_id)
+        max_bytes = self._durable_tracking_episode_record_max_bytes()
+        candidates = (
+            history_path,
+            history_path.with_suffix(history_path.suffix + ".last_good"),
         )
+        try:
+            if any(
+                path.exists() and self._is_reparse_or_symlink(path)
+                for path in candidates
+            ):
+                LOGGER.warning(
+                    "Refusing to read reparse-point durable tracking history for %s.",
+                    session_id,
+                )
+                return []
+            if history_path.is_file() and history_path.stat().st_size > max_bytes:
+                LOGGER.warning(
+                    "Ignoring oversized durable tracking history for %s; the next terminal transition will replace it within the hard cap.",
+                    session_id,
+                )
+                return []
+            fallback_path = candidates[1]
+            if fallback_path.is_file() and fallback_path.stat().st_size > max_bytes:
+                fallback_path.unlink()
+        except OSError:
+            return []
+        raw = _mapping_to_dict(_read_json(history_path, {}))
         return update_tracking_episode_history_v1(raw.get("episodes"), {})
 
     def _merge_tracking_episode_history(
@@ -23695,9 +24161,25 @@ class ContinuousWindowTrackerService:
             ),
             reverse=True,
         )
-        return rows[:24]
+        return rows[:TRACKING_EPISODE_HISTORY_LIMIT]
 
     def _persist_durable_tracking_episode_transition(
+        self,
+        session_id: str,
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+        *,
+        source: str,
+    ) -> None:
+        with self._durable_tracking_episode_retention_lock:
+            self._persist_durable_tracking_episode_transition_locked(
+                session_id,
+                before,
+                after,
+                source=source,
+            )
+
+    def _persist_durable_tracking_episode_transition_locked(
         self,
         session_id: str,
         before: Mapping[str, Any],
@@ -23738,24 +24220,42 @@ class ContinuousWindowTrackerService:
             session_id,
             episode_id,
         )
-        _write_json_atomic(record_path, record_episode)
+        self._write_bounded_durable_tracking_json(record_path, record_episode)
         ledger_path = self._durable_tracking_episode_ledger_path(session_id)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         transition = {
             "schema_version": "PG_TRACKING_EPISODE_TRANSITION_V1",
-            "timestamp": str(after_episode.get("updated_at", "") or _now_iso()),
-            "session_id": str(session_id),
-            "episode_id": episode_id,
-            "source": str(source or "episode_transition"),
-            "from_state": str(before_episode.get("state", "IDLE") or "IDLE"),
-            "to_state": str(after_episode.get("state", "IDLE") or "IDLE"),
+            "timestamp": str(after_episode.get("updated_at", "") or _now_iso())[:64],
+            "session_id": str(session_id)[:256],
+            "episode_id": episode_id[:256],
+            "source": str(source or "episode_transition")[:128],
+            "from_state": str(before_episode.get("state", "IDLE") or "IDLE")[:32],
+            "to_state": str(after_episode.get("state", "IDLE") or "IDLE")[:32],
             "revision": after_revision,
             "event_cursor": int(after_episode.get("event_cursor", 0) or 0),
-            "terminal_reason": str(after_episode.get("terminal_reason", "") or ""),
+            "terminal_reason": str(after_episode.get("terminal_reason", "") or "")[:512],
         }
         with ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(transition, sort_keys=True) + "\n")
-        self._prune_session_event_log(ledger_path)
+        self._prune_session_event_log(
+            ledger_path,
+            max_mb=min(
+                4.0,
+                _env_float(
+                    "PHOENIXGUARD_TRACKING_HISTORY_LEDGER_MAX_MB",
+                    _DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_MAX_MB,
+                    0.03125,
+                ),
+            ),
+            keep_lines=min(
+                4096,
+                _env_int(
+                    "PHOENIXGUARD_TRACKING_HISTORY_LEDGER_TAIL_LINES",
+                    _DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_TAIL_LINES,
+                    1,
+                ),
+            ),
+        )
 
         terminal_history = update_tracking_episode_history_v1([], record_episode)
         if terminal_history:
@@ -23764,7 +24264,7 @@ class ContinuousWindowTrackerService:
                 session_id,
                 terminal_history,
             )
-            _write_json_atomic(
+            self._write_bounded_durable_tracking_json(
                 history_path,
                 {
                     "schema_version": "PG_TRACKING_EPISODE_ARCHIVE_V1",
@@ -23778,20 +24278,15 @@ class ContinuousWindowTrackerService:
                 },
             )
 
-        episode_dir = record_path.parent
-        records = sorted(
-            episode_dir.glob("*.json"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
+        self._prune_durable_episode_records(record_path.parent.parent)
+        retention = self._prune_durable_tracking_episode_storage_locked(
+            protected_session_id=session_id,
         )
-        for old_record in records[24:]:
-            try:
-                old_record.unlink()
-            except OSError:
-                LOGGER.warning(
-                    "Unable to prune old durable tracking episode record %s.",
-                    old_record,
-                )
+        if not bool(retention.get("within_limits", False)):
+            LOGGER.warning(
+                "Protected durable tracking history for %s exceeds the global byte cap; no active-session evidence was deleted.",
+                session_id,
+            )
 
     def _persist_tracking_episode_transition(
         self,
@@ -23900,15 +24395,51 @@ class ContinuousWindowTrackerService:
                 session_id,
             )
 
-    def _prune_session_event_log(self, path: Path) -> None:
+    def _prune_session_event_log(
+        self,
+        path: Path,
+        *,
+        max_mb: float | None = None,
+        keep_lines: int | None = None,
+    ) -> None:
         try:
-            max_mb = _env_float("PHOENIXGUARD_TRACKER_EVENT_LOG_MAX_MB", 24.0, 0.001)
-            keep_lines = _env_int("PHOENIXGUARD_TRACKER_EVENT_LOG_TAIL_LINES", 2000, 1)
-            max_bytes = int(max_mb * 1024.0 * 1024.0)
+            resolved_max_mb = (
+                _env_float("PHOENIXGUARD_TRACKER_EVENT_LOG_MAX_MB", 24.0, 0.001)
+                if max_mb is None
+                else max(0.001, float(max_mb))
+            )
+            resolved_keep_lines = (
+                _env_int("PHOENIXGUARD_TRACKER_EVENT_LOG_TAIL_LINES", 2000, 1)
+                if keep_lines is None
+                else max(1, int(keep_lines))
+            )
+            max_bytes = int(resolved_max_mb * 1024.0 * 1024.0)
             if max_bytes <= 0 or not path.exists() or path.stat().st_size <= max_bytes:
                 return
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            tail = lines[-keep_lines:]
+            file_size = path.stat().st_size
+            start_offset = max(0, file_size - max_bytes)
+            with path.open("rb") as source:
+                source.seek(start_offset)
+                tail_bytes = source.read(max_bytes)
+            if start_offset > 0:
+                first_newline = tail_bytes.find(b"\n")
+                tail_bytes = (
+                    tail_bytes[first_newline + 1 :]
+                    if first_newline >= 0
+                    else b""
+                )
+            lines = tail_bytes.decode("utf-8", errors="ignore").splitlines()
+            tail_reversed: list[str] = []
+            retained_bytes = 0
+            for line in reversed(lines[-resolved_keep_lines:]):
+                line_bytes = len((line + "\n").encode("utf-8"))
+                if line_bytes > max_bytes:
+                    continue
+                if retained_bytes + line_bytes > max_bytes:
+                    break
+                tail_reversed.append(line)
+                retained_bytes += line_bytes
+            tail = list(reversed(tail_reversed))
             tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
             tmp_path.write_text(("\n".join(tail) + ("\n" if tail else "")), encoding="utf-8")
             tmp_path.replace(path)
@@ -25810,8 +26341,8 @@ class ContinuousWindowTrackerService:
             _TRACKER_ARTIFACT_RETENTION_FRAMES,
             24,
         )
-        max_age_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC", 7200.0, 300.0)
-        max_mb = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB", 256.0, 32.0)
+        max_age_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC", 5400.0, 300.0)
+        max_mb = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB", 128.0, 32.0)
         decision_keep = _env_int("PHOENIXGUARD_TRACKER_DECISION_RETENTION_FILES", 12, 1)
         prune_interval_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC", 30.0, 5.0)
         try:

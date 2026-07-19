@@ -238,9 +238,9 @@ def main() -> int:
         }
         for record in records
     ]
-    archive_root = ROOT / "_archive"
-    archive_root.mkdir(exist_ok=True)
-    quarantine_manifest_path = archive_root / "quarantine_manifest.json"
+    # Cleanup analysis is disposable report output. Never create or reuse an
+    # archive tree; the canonical cleaner removes this report root directly.
+    quarantine_manifest_path = REPORT_DIR / "quarantine_manifest.json"
     existing_records: list[dict[str, object]] = []
     if quarantine_manifest_path.exists():
         try:

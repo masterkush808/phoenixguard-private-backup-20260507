@@ -162,7 +162,7 @@ def main() -> int:
     if runtime_entries:
         preview = ", ".join(path.name for path in runtime_entries[:6])
         suffix = "" if len(runtime_entries) <= 6 else f", +{len(runtime_entries) - 6} more"
-        runtime_detail = f"active runtime state present ({preview}{suffix}); use clean_v3_runtime_state.py --apply before cold launch"
+        runtime_detail = f"active runtime state present ({preview}{suffix}); use clean_v3_runtime_state.py --apply --delete before cold launch"
     else:
         runtime_detail = "CLEAN"
     print(status_line("Runtime Cache", True, runtime_detail))

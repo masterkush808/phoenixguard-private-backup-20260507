@@ -174,6 +174,7 @@ def test_kill_switch_targets_named_stack_roles_without_repo_wide_python_fallback
     text = _read("Developer/developer_tools/phoenixguard_kill_switch.py")
 
     assert '"phoenixguard_disk_growth_guard.py"' in text
+    assert 'command = [sys.executable, str(cleaner), "--apply", "--delete"]' in text
     assert 'repo_text in command and "phoenixguard" in command' not in text
     assert "if row.name.lower() in STACK_PROCESS_NAMES:" not in text
 
@@ -224,6 +225,12 @@ def test_canonical_live_launcher_bounds_native_threads_and_avoids_codex_session_
     assert text.index(python_profile_fragment) < resolver_index
     assert "$env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '0'" in text
     assert "$env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '1'" not in text
+    assert "$env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES = '512MB'" in text
+    assert "$env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES = '384MB'" in text
+    assert "$env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG = '0'" in text
+    assert "$env:PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS = '0'" in text
+    assert "$env:PHOENIXGUARD_UVICORN_ACCESS_LOG = '0'" in text
+    assert "$env:PHOENIXGUARD_PERSIST_CHILD_STDIO = '0'" in text
 
 
 def test_canonical_live_launchers_keep_display_and_forecast_frames_atomic() -> None:
@@ -236,6 +243,33 @@ def test_canonical_live_launchers_keep_display_and_forecast_frames_atomic() -> N
         for line in full_local.splitlines()
         if "PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT =" in line
     )
+
+
+def test_live_launch_paths_disable_source_bytecode_cache_growth() -> None:
+    powershell_launchers = (
+        "Backend/launch/launch_phoenixguard_live_ready.ps1",
+        "Backend/launch/start_phoenixguard_full_local.ps1",
+    )
+    python_entrypoints = (
+        "Backend/launch/start_phoenixguard_24_7_tracker.py",
+        "Backend/launch/start_phoenixguard_mobile_api.py",
+    )
+
+    for relative_path in powershell_launchers:
+        text = _read(relative_path)
+        bytecode_guard = "$env:PYTHONDONTWRITEBYTECODE = '1'"
+        assert bytecode_guard in text
+        assert text.index(bytecode_guard) < text.index("Resolve-PhoenixGuardPythonRuntime")
+
+    for relative_path in python_entrypoints:
+        text = _read(relative_path)
+        environment_guard = 'os.environ["PYTHONDONTWRITEBYTECODE"] = "1"'
+        interpreter_guard = "sys.dont_write_bytecode = True"
+        bootstrap_import = "from _pg_bootstrap import ensure_project_paths"
+        assert environment_guard in text
+        assert interpreter_guard in text
+        assert text.index(environment_guard) < text.index(bootstrap_import)
+        assert text.index(interpreter_guard) < text.index(bootstrap_import)
 
 
 def test_all_production_tracker_and_shooter_defaults_are_thirty_seconds() -> None:

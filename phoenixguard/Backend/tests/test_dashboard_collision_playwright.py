@@ -670,6 +670,10 @@ def test_live_session_stream_coalesces_updates_into_atomic_operator_refreshes(
         )
         assert requests == [
             {
+                "href": "/v1/mobile/window-tracker/sessions/operator-test/tracking-episodes/readiness",
+                "method": "GET",
+            },
+            {
                 "href": "/v1/mobile/operator/state/v1/operator-test?view=all",
                 "method": "GET",
             }
@@ -705,11 +709,12 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             "layers-clear",
             "run-forecast",
             "show-future-path",
-                "tracking-start",
-                "tracking-stop",
-                "tracking-path-a",
-                "tracking-path-b",
-                "tracking-plan-toggle",
+            "tracking-start",
+            "tracking-stop",
+            "tracking-reset",
+            "tracking-path-a",
+            "tracking-path-b",
+            "tracking-plan-toggle",
             "zoom-out",
             "zoom-fit",
             "zoom-actual",
@@ -724,7 +729,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             )
         ) == static_button_ids
         assert page.locator("button[data-overlay-view]").count() == 8
-        assert page.locator("button[data-overlay-family]").count() == 16
+        assert page.locator("button[data-overlay-family]").count() == 17
         assert page.locator("button[data-label-mode]").count() == 3
         assert page.locator("input[type=range]").count() == 2
 
@@ -781,7 +786,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         page.locator("#layers-all").click()
         assert (
             page.locator("button[data-overlay-family][aria-pressed=true]").count()
-            == 16
+            == 17
         )
         families = page.locator("button[data-overlay-family]").evaluate_all(
             "nodes => nodes.map(node => node.dataset.overlayFamily)"
@@ -817,7 +822,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         request_count = page.evaluate("window.__FETCH_REQUESTS.length")
         page.locator("#refresh-view").click()
         page.wait_for_function(
-            "count => window.__FETCH_REQUESTS.length === count + 1",
+            "count => window.__FETCH_REQUESTS.length === count + 2",
             arg=request_count,
         )
 
@@ -1822,7 +1827,7 @@ def test_tracking_plan_individual_controls_and_sequence_blocks_render_without_di
 
         page.locator("#detailed-overlay-controls").evaluate("node => node.open = true")
         support_toggle = page.locator(
-            '[data-overlay-kind="rising_support_line"]'
+            '#detailed-overlay-list .kind-filter[data-overlay-kind="rising_support_line"]'
         )
         assert support_toggle.count() == 1
         support_toggle.click()
@@ -2051,7 +2056,13 @@ def test_simple_is_default_and_explore_does_not_restore_workspace_navigation(
 
         fetch_urls = page.evaluate("window.__FETCH_URLS.slice()")
         assert fetch_urls
-        assert all("/v1/mobile/operator/state/v1/" in url for url in fetch_urls)
+        assert any("/v1/mobile/operator/state/v1/" in url for url in fetch_urls)
+        assert any(url.endswith("/tracking-episodes/readiness") for url in fetch_urls)
+        assert all(
+            "/v1/mobile/operator/state/v1/" in url
+            or url.endswith("/tracking-episodes/readiness")
+            for url in fetch_urls
+        )
 
 
 def test_overlay_explorer_updates_aria_state_locally_from_the_atomic_all_pool(
@@ -2101,7 +2112,7 @@ def test_inflight_atomic_all_refresh_survives_local_forecast_toggle(
             updated,
         )
         page.wait_for_function(
-            "count => window.__FETCH_REQUESTS.length === count + 1",
+            "count => window.__FETCH_REQUESTS.length === count + 2",
             arg=request_count,
         )
 
@@ -2130,6 +2141,10 @@ def test_inflight_atomic_all_refresh_survives_local_forecast_toggle(
             "start => window.__FETCH_REQUESTS.slice(start)", request_count
         )
         assert requests == [
+            {
+                "href": "/v1/mobile/window-tracker/sessions/operator-test/tracking-episodes/readiness",
+                "method": "GET",
+            },
             {
                 "href": "/v1/mobile/operator/state/v1/operator-test?view=all",
                 "method": "GET",
@@ -2190,6 +2205,10 @@ def test_same_visual_poll_updates_permission_without_rerendering_overlays(
             "start => window.__FETCH_REQUESTS.slice(start)", request_count
         )
         assert requests == [
+            {
+                "href": "/v1/mobile/window-tracker/sessions/operator-test/tracking-episodes/readiness",
+                "method": "GET",
+            },
             {
                 "href": "/v1/mobile/operator/state/v1/operator-test?view=all",
                 "method": "GET",
@@ -3126,6 +3145,78 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
         assert page.locator('[data-overlay-id="scene-current"]').count() >= 1
 
 
+def test_frozen_order_areas_have_independent_always_visible_controls(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    specs = (
+        ("saved-buy-limit", "lower_price_buy_area", "Lower-price buy area", "BUY", [0.48, 0.58, 0.68, 0.63]),
+        ("saved-sell-limit", "higher_price_sell_area", "Higher-price sell area", "SELL", [0.48, 0.28, 0.68, 0.33]),
+        ("saved-buy-stop", "upside_break_area", "Upside break area", "BUY", [0.70, 0.24, 0.84, 0.26]),
+        ("saved-sell-stop", "downside_break_area", "Downside break area", "SELL", [0.70, 0.66, 0.84, 0.68]),
+        ("saved-plan-failure", "plan_failure_area", "Plan failure area", "BUY", [0.48, 0.70, 0.68, 0.73]),
+    )
+    payload["overlays"].extend(
+        {
+            "id": overlay_id,
+            "type": "entry" if kind != "plan_failure_area" else "risk",
+            "side": side,
+            "group": "plan",
+            "family": "order_positioning",
+            "layer": "order_positioning",
+            "kind": kind,
+            "kind_label": label,
+            "label": label,
+            "label_hidden": True,
+            "bounds": bounds,
+            "points": [],
+            "line_points": [],
+            "confidence": 0.84,
+            "lifecycle": "current",
+            "frame_id": 42,
+            "coordinate_space": "chart",
+            "coordinate_units": "normalized",
+            "positioning_status": "WAITING",
+            "positioning_basis": "Saved chart structure",
+            "immutable_geometry": True,
+            "evidence_only": True,
+        }
+        for overlay_id, kind, label, side, bounds in specs
+    )
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator('[data-layer-count="order_positioning"]').inner_text() == "5"
+        assert {
+            row[0]
+            for row in specs
+        }.issubset(
+            set(
+                page.locator("[data-overlay-id]").evaluate_all(
+                    "nodes => nodes.map(node => node.dataset.overlayId)"
+                )
+            )
+        )
+
+        buy_limit_control = page.locator(
+            '[data-overlay-kind-control="lower_price_buy_area"]'
+        )
+        buy_limit_control.click()
+        assert buy_limit_control.get_attribute("aria-pressed") == "false"
+        assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 0
+        assert page.locator('[data-overlay-id="saved-sell-limit"]').count() == 1
+        assert page.locator('[data-overlay-id="saved-plan-failure"]').count() == 1
+
+        buy_limit_control.click()
+        assert buy_limit_control.get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 1
+
+        page.locator('[data-overlay-id="saved-plan-failure"]').click()
+        inspector = page.locator("#inspector-explanation").inner_text().lower()
+        assert "separate from an entry area" in inspector
+        assert "does not slide" in inspector
+        assert "entry permission remains separate" in inspector
+
+
 def test_show_all_and_clear_switch_every_public_family_atomically(
     chromium_browser: Browser,
 ) -> None:
@@ -3235,13 +3326,64 @@ def test_scene_split_migration_runs_once_and_preserves_independent_reload_choice
         assert page.locator('[data-overlay-family="lstm"]').get_attribute(
             "aria-pressed"
         ) == "true"
+
+
+def test_existing_live_preset_migrates_order_positioning_without_touching_custom_choice(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+        page.evaluate(
+            """
+            () => {
+              localStorage.setItem(
+                'phoenixguard.overlay.layers.v1',
+                JSON.stringify(['current_candles', 'market_context', 'council'])
+              );
+              localStorage.setItem('phoenixguard.overlay.preset.v1', 'live');
+              localStorage.removeItem('phoenixguard.overlay.layers.order-positioning-migration.v1');
+            }
+            """
+        )
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function(
+            "expected => window.PhoenixGuardDashboard?.getState().revision === expected",
+            arg=42,
+        )
+
+        assert "order_positioning" in page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
+        )
+        assert page.evaluate(
+            "localStorage.getItem('phoenixguard.overlay.layers.order-positioning-migration.v1')"
+        ) == "1"
+
+        page.evaluate(
+            """
+            () => {
+              localStorage.setItem('phoenixguard.overlay.layers.v1', JSON.stringify(['trendlines']));
+              localStorage.setItem('phoenixguard.overlay.preset.v1', 'custom');
+              localStorage.removeItem('phoenixguard.overlay.layers.order-positioning-migration.v1');
+            }
+            """
+        )
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function(
+            "expected => window.PhoenixGuardDashboard?.getState().revision === expected",
+            arg=42,
+        )
+        assert page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
+        ) == ["trendlines"]
+        assert page.evaluate(
+            "localStorage.getItem('phoenixguard.overlay.layers.order-positioning-migration.v1')"
+        ) == "1"
         page.locator('[data-overlay-family="scene_forecaster"]').click()
         assert page.locator(
             '[data-overlay-family="scene_forecaster"]'
-        ).get_attribute("aria-pressed") == "false"
+        ).get_attribute("aria-pressed") == "true"
         assert page.locator('[data-overlay-family="lstm"]').get_attribute(
             "aria-pressed"
-        ) == "true"
+        ) == "false"
 
         page.reload(wait_until="domcontentloaded")
         page.wait_for_function(
@@ -3250,13 +3392,13 @@ def test_scene_split_migration_runs_once_and_preserves_independent_reload_choice
         )
         assert page.evaluate(
             "window.PhoenixGuardDashboard.getState().activeFamilies"
-        ) == ["lstm"]
+        ) == ["trendlines", "scene_forecaster"]
         assert page.locator(
             '[data-overlay-family="scene_forecaster"]'
-        ).get_attribute("aria-pressed") == "false"
+        ).get_attribute("aria-pressed") == "true"
         assert page.locator('[data-overlay-family="lstm"]').get_attribute(
             "aria-pressed"
-        ) == "true"
+        ) == "false"
 
 
 def test_all_overlay_toggles_are_local_and_reuse_detached_semantic_nodes(

@@ -31,7 +31,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="PhoenixGuard disk growth guard. Caps generated runtime/session memory artifacts.",
     )
-    parser.add_argument("--limit", default="", help="Per-target cap, for example 2GB, 512MB, or bytes. Default: 2GB.")
+    parser.add_argument("--limit", default="", help="Global target ceiling, for example 512MB or bytes. Default: 512MB.")
     parser.add_argument("--low-water", default="", help="Target size after pruning. Default: 75% of --limit.")
     parser.add_argument("--apply", action="store_true", help="Delete/prune generated artifacts. Without this it is a dry run.")
     parser.add_argument("--once", action="store_true", help="Run one sweep and exit.")

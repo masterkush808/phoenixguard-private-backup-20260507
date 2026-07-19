@@ -8,7 +8,10 @@ import pytest
 
 from phoenixguard.vision.v3_overlay_contract import (
     DIAGNOSTIC_OVERLAY_TYPES,
+    HARD_ANCHOR_REQUIRED_TYPES,
     MODE_ALLOWED_TYPES,
+    ORDER_POSITIONING_OVERLAY_TYPES,
+    OVERLAY_LAYER_ORDER,
     OVERLAY_TYPES,
     REQUIRED_FIELDS,
     TYPE_LAYER_MAP,
@@ -24,6 +27,7 @@ from phoenixguard.vision.v3_overlay_contract import (
     normalize_view_mode,
     overlay_is_visible,
     overlay_rejection_reasons,
+    overlay_type_priority,
     prediction_overlay_config,
     prediction_overlay_enabled,
     rectangles_overlap,
@@ -273,6 +277,28 @@ def test_full_overlay_vocabulary_aliases_normalize_to_canonical_types() -> None:
         "SNIPER_SELL": "SNIPER_ENTRY_BOX",
         "ENTRY_AREA_ZONE": "SNIPER_ENTRY_BOX",
         "ENTRY_LEVEL": "SNIPER_ENTRY_BOX",
+        "BUY_LIMIT_ZONE": "BUY_LIMIT_ZONE",
+        "BUY_LIMIT": "BUY_LIMIT_ZONE",
+        "BUY_LIMIT_AREA": "BUY_LIMIT_ZONE",
+        "BUY_LIMIT_ORDER_ZONE": "BUY_LIMIT_ZONE",
+        "SELL_LIMIT_ZONE": "SELL_LIMIT_ZONE",
+        "SELL_LIMIT": "SELL_LIMIT_ZONE",
+        "SELL_LIMIT_AREA": "SELL_LIMIT_ZONE",
+        "SELL_LIMIT_ORDER_ZONE": "SELL_LIMIT_ZONE",
+        "BUY_STOP_ENTRY_ZONE": "BUY_STOP_ENTRY_ZONE",
+        "BUY_STOP": "BUY_STOP_ENTRY_ZONE",
+        "BUY_STOP_ZONE": "BUY_STOP_ENTRY_ZONE",
+        "BUY_STOP_ORDER_ZONE": "BUY_STOP_ENTRY_ZONE",
+        "SELL_STOP_ENTRY_ZONE": "SELL_STOP_ENTRY_ZONE",
+        "SELL_STOP": "SELL_STOP_ENTRY_ZONE",
+        "SELL_STOP_ZONE": "SELL_STOP_ENTRY_ZONE",
+        "SELL_STOP_ORDER_ZONE": "SELL_STOP_ENTRY_ZONE",
+        "PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP_ZONE",
+        "PROTECTIVE_STOP": "PROTECTIVE_STOP_ZONE",
+        "PROTECTIVE_INVALIDATION_ZONE": "PROTECTIVE_STOP_ZONE",
+        "BUY_PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP_ZONE",
+        "SELL_PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP_ZONE",
+        "STOP_LOSS_ZONE": "PROTECTIVE_STOP_ZONE",
         "TARGET_ZONE_BOX": "TARGET_ZONE_BOX",
         "TARGET": "TARGET_ZONE_BOX",
         "TARGET_ZONE": "TARGET_ZONE_BOX",
@@ -391,6 +417,194 @@ def test_full_overlay_vocabulary_aliases_normalize_to_canonical_types() -> None:
 
 
 @pytest.mark.parametrize(
+    (
+        "overlay_type",
+        "raw_side",
+        "expected_side",
+        "expected_thesis_side",
+        "expected_kind",
+        "expected_intent",
+        "expected_role",
+        "expected_label",
+        "expected_evidence",
+        "expected_color_token",
+        "expected_line_style",
+    ),
+    [
+        (
+            "BUY_LIMIT_ZONE",
+            "SELL",
+            "BUY",
+            "BUY",
+            "BUY_LIMIT",
+            "ENTRY_LIMIT",
+            "buy_limit",
+            "BUY LIMIT",
+            "limit_order_area",
+            "buy-limit-position",
+            "solid",
+        ),
+        (
+            "SELL_LIMIT_ZONE",
+            "BUY",
+            "SELL",
+            "SELL",
+            "SELL_LIMIT",
+            "ENTRY_LIMIT",
+            "sell_limit",
+            "SELL LIMIT",
+            "limit_order_area",
+            "sell-limit-position",
+            "solid",
+        ),
+        (
+            "BUY_STOP_ENTRY_ZONE",
+            "SELL",
+            "BUY",
+            "BUY",
+            "BUY_STOP",
+            "ENTRY_STOP",
+            "buy_stop_entry",
+            "BUY STOP ENTRY",
+            "stop_entry_area",
+            "buy-stop-entry-position",
+            "dashed",
+        ),
+        (
+            "SELL_STOP_ENTRY_ZONE",
+            "BUY",
+            "SELL",
+            "SELL",
+            "SELL_STOP",
+            "ENTRY_STOP",
+            "sell_stop_entry",
+            "SELL STOP ENTRY",
+            "stop_entry_area",
+            "sell-stop-entry-position",
+            "dashed",
+        ),
+        (
+            "PROTECTIVE_STOP_ZONE",
+            "SELL",
+            "SELL",
+            "BUY",
+            "SELL_STOP",
+            "PROTECTIVE_STOP",
+            "protective_stop",
+            "PROTECTIVE STOP",
+            "protective_stop_band",
+            "protective-stop",
+            "dashed",
+        ),
+    ],
+)
+def test_order_positioning_types_are_live_safe_semantic_boxes(
+    overlay_type: str,
+    raw_side: str,
+    expected_side: str,
+    expected_thesis_side: str,
+    expected_kind: str,
+    expected_intent: str,
+    expected_role: str,
+    expected_label: str,
+    expected_evidence: str,
+    expected_color_token: str,
+    expected_line_style: str,
+) -> None:
+    overlay = normalize_v3_overlay_object(
+        _base_overlay(
+            overlay_id=f"order-position-{overlay_type.lower()}",
+            object_id=f"order-position-{overlay_type.lower()}",
+            track_id=f"order-position-{overlay_type.lower()}",
+            type=overlay_type,
+            side=raw_side,
+            layer="trigger_zones",
+            role=overlay_type.lower(),
+            label=overlay_type,
+            visible_modes=["CLEAN_LIVE", "ORDER_POSITIONING", "ACTIVE_CONTEXT"],
+            thesis_side=expected_thesis_side,
+            order_kind="CONTRADICTORY_INPUT",
+            confirmation_state="CONFIRMED_CLOSED",
+            confirmation_event="BREAK_OF_STRUCTURE",
+            confirmation_side=expected_thesis_side,
+            confirmation_closed_candle_index=5,
+            trade_authorization_status="AUTHORIZED",
+            entry_authority_active=True,
+            order_authority_active=True,
+        ),
+        strict=False,
+    )
+
+    assert overlay["type"] == overlay_type
+    assert overlay["side"] == expected_side
+    assert overlay["thesis_side"] == expected_thesis_side
+    assert overlay["layer"] == "order_positioning"
+    assert overlay["role"] == expected_role
+    assert overlay["display_label"] == expected_label
+    assert overlay["order_kind"] == expected_kind
+    assert overlay["intent"] == expected_intent
+    assert overlay["trade_authorization_status"] == "EVIDENCE_ONLY"
+    assert overlay["entry_authority_active"] is False
+    assert overlay["order_authority_active"] is False
+    assert overlay["evidence_only"] is True
+    assert cast(dict[str, object], overlay["anchor_evidence"])["evidence_type"] == expected_evidence
+    assert cast(dict[str, object], overlay["style"])["color_token"] == expected_color_token
+    assert cast(dict[str, object], overlay["style"])["line_style"] == expected_line_style
+    assert overlay_type in HARD_ANCHOR_REQUIRED_TYPES
+    assert overlay_type_priority(overlay_type) >= 96
+    assert overlay_is_visible(overlay, "CLEAN_LIVE") is True
+    assert overlay_is_visible(overlay, "ORDER_POSITIONING") is True
+    assert validate_v3_overlay_object(overlay).ok is True
+
+
+def test_order_positioning_mode_and_layer_are_first_class() -> None:
+    profile = view_mode_profile("limits-and-stops")
+
+    assert normalize_view_mode("order positions") == "ORDER_POSITIONING"
+    assert profile["mode"] == "ORDER_POSITIONING"
+    assert set(profile["allowed_types"]) == set(ORDER_POSITIONING_OVERLAY_TYPES)
+    assert profile["layer_visibility"]["order_positioning"] is True
+    assert all(
+        not visible
+        for layer, visible in profile["layer_visibility"].items()
+        if layer != "order_positioning"
+    )
+    assert OVERLAY_LAYER_ORDER.index("trendlines") < OVERLAY_LAYER_ORDER.index(
+        "order_positioning"
+    ) < OVERLAY_LAYER_ORDER.index("trigger_zones")
+
+
+def test_order_positioning_live_modes_require_a_wick_anchor() -> None:
+    overlay = normalize_v3_overlay_object(
+        _base_overlay(
+            overlay_id="buy-limit-without-wick",
+            object_id="buy-limit-without-wick",
+            track_id="buy-limit-without-wick",
+            type="BUY_LIMIT_ZONE",
+            side="BUY",
+            layer="order_positioning",
+            label="BUY LIMIT",
+            touch_points=[],
+            anchor_wick_points=[],
+            anchor_evidence={
+                "evidence_type": "limit_order_area",
+                "valid": True,
+                "candle_indices": [4, 5],
+                "touch_points": [],
+            },
+            visible_modes=["CLEAN_LIVE", "ORDER_POSITIONING"],
+        ),
+        strict=False,
+    )
+
+    assert "missing_order_position_wick_anchor" in overlay_rejection_reasons(
+        overlay,
+        "ORDER_POSITIONING",
+    )
+    assert overlay_is_visible(overlay, "ORDER_POSITIONING") is False
+
+
+@pytest.mark.parametrize(
     "alias",
     [
         "DEBUG_RAW_DETECTION",
@@ -493,6 +707,11 @@ def test_visible_labels_are_locked_to_approved_dictionary() -> None:
     assert is_approved_overlay_display_label("SUPPORT TRENDLINE") is True
     assert is_approved_overlay_display_label("RESISTANCE TRENDLINE") is True
     assert is_approved_overlay_display_label("INNER TRENDLINE") is True
+    assert is_approved_overlay_display_label("BUY LIMIT") is True
+    assert is_approved_overlay_display_label("SELL LIMIT") is True
+    assert is_approved_overlay_display_label("BUY STOP ENTRY") is True
+    assert is_approved_overlay_display_label("SELL STOP ENTRY") is True
+    assert is_approved_overlay_display_label("PROTECTIVE STOP") is True
     assert is_approved_overlay_display_label("SNIPER ENTRY BOX") is False
 
     sniper = normalize_v3_overlay_object(

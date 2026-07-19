@@ -4,6 +4,16 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any, Final, Literal, cast
 
+from phoenixguard.decision.order_positioning_v3 import (
+    ORDER_POSITIONING_ACTUAL_SCHEMA_VERSION,
+    advance_order_positioning_plan_v3,
+    build_order_positioning_candidates_v3,
+    fit_order_positioning_reprojection_v3,
+    freeze_order_positioning_plan_v3,
+    inverse_reproject_order_positioning_y_v3,
+    order_positioning_plan_anchors_valid_v3,
+)
+
 
 TRACKING_EPISODE_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_V1"
 TRACKING_EPISODE_EVENT_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_EVENT_V1"
@@ -339,6 +349,7 @@ def default_tracking_episode_v1(*, session_id: str = "") -> dict[str, Any]:
         "timeframe": "",
         "anchor": {},
         "committed_plan": {},
+        "positioning_plan": {},
         "baseline_forecasts": {"scene": {}, "lstm": {}, "memory": {}},
         "candidate_revision": {},
         "events": [],
@@ -400,7 +411,7 @@ def normalize_tracking_episode_v1(
         0,
         _integer(source.get("last_processed_closed_candle_sequence")),
     )
-    for key in ("anchor", "committed_plan", "candidate_revision"):
+    for key in ("anchor", "committed_plan", "positioning_plan", "candidate_revision"):
         normalized[key] = _safe_mapping(source.get(key))
     normalized["observation_state"] = _normalize_observation_state(
         source.get("observation_state")
@@ -665,6 +676,299 @@ def _baseline_forecasts(session: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+_POSITIONING_SOURCE_TYPES: Final = frozenset(
+    {
+        "DEMAND_ZONE",
+        "SUPPLY_ZONE",
+        "ORDER_BLOCK",
+        "RETEST_BOX",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+    }
+)
+
+
+def _positioning_overlay_rows(session: Mapping[str, Any]) -> list[dict[str, Any]]:
+    containers: list[Any] = [
+        session.get("v3_overlay_objects"),
+        session.get("overlay_objects"),
+    ]
+    for parent_key in ("overlays", "live_visual_state", "live_state_v3"):
+        parent = _mapping(session.get(parent_key))
+        overlay_container = _mapping(parent.get("overlays")) or parent
+        containers.extend(
+            (
+                overlay_container.get("objects"),
+                overlay_container.get("all_objects"),
+            )
+        )
+    tracking = _mapping(session.get("tracking_summary"))
+    containers.extend(
+        (
+            tracking.get("v3_overlay_objects"),
+            tracking.get("overlay_objects"),
+        )
+    )
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for container in containers:
+        for row in _rows(container, limit=512):
+            key = _text(
+                row.get("overlay_id"),
+                row.get("id"),
+                row.get("object_id"),
+                row.get("track_id"),
+            )
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            output.append(row)
+    return output
+
+
+def _order_positioning_candidate_v3(
+    session: Mapping[str, Any],
+    *,
+    frame_id: int,
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    overlays = _positioning_overlay_rows(session)
+    current_frame = str(frame_id)
+    lineage_rows = [
+        row
+        for row in overlays
+        if _text(row.get("frame_id")) == current_frame
+        and _text(row.get("schema_version")) == "PG_V3_OVERLAY_OBJECT_V1"
+        and _text(row.get("type")).upper() in _POSITIONING_SOURCE_TYPES
+        and "CHART" in _text(row.get("coordinate_mode")).upper()
+        and "PLOT" not in _text(row.get("coordinate_mode")).upper()
+    ]
+    lineage_rows.sort(
+        key=lambda row: (
+            _text(row.get("sequence_id")),
+            _text(row.get("chart_transform_id")),
+            _text(row.get("broker_source_lock_id")),
+            _text(row.get("track_id"), row.get("object_id")),
+        )
+    )
+    lineage_keys = {
+        (
+            _text(row.get("sequence_id")),
+            _text(row.get("chart_transform_id")),
+            _text(row.get("broker_source_lock_id")),
+            _text(row.get("coordinate_mode")).upper(),
+        )
+        for row in lineage_rows
+    }
+    lineage = lineage_rows[0] if len(lineage_keys) == 1 else {}
+    coordinate_mode = _text(lineage.get("coordinate_mode")).upper()
+    scene = _scene_forecast(session)
+    raw_size = scene.get("source_image_size")
+    size = (
+        cast(Sequence[Any], raw_size)
+        if isinstance(raw_size, Sequence)
+        and not isinstance(raw_size, (str, bytes, bytearray))
+        else ()
+    )
+    width = _number(size[0]) if len(size) >= 2 else None
+    height = _number(size[1]) if len(size) >= 2 else None
+    if "NORMALIZED" in coordinate_mode:
+        chart_bounds: list[float] = [0.0, 0.0, 1.0, 1.0]
+    elif width is not None and height is not None and width > 0.0 and height > 0.0:
+        chart_bounds = [0.0, 0.0, width, height]
+    else:
+        chart_bounds = []
+    actual = _actual_closed_candle(session, identity)
+    close_level = _number(actual.get("chart_close_norm"))
+    current_price_y = (
+        close_level
+        if close_level is not None and "NORMALIZED" in coordinate_mode
+        else close_level * height
+        if close_level is not None and height is not None
+        else None
+    )
+    latest = _mapping(session.get("latest_signal"))
+    tracking = _mapping(session.get("tracking_summary"))
+    thesis = (
+        _mapping(session.get("signal_thesis_v3"))
+        or _mapping(latest.get("signal_thesis_v3"))
+        or _mapping(tracking.get("signal_thesis_v3"))
+    )
+    side = _direction(thesis.get("side"), thesis.get("effective_side"))
+    thesis_state = _text(thesis.get("state"), thesis.get("status")).upper()
+    opportunity = (
+        _mapping(session.get("execution_opportunity_window_v3"))
+        or _mapping(latest.get("execution_opportunity_window_v3"))
+    )
+    maturity = (
+        _mapping(latest.get("opportunity_maturity"))
+        or _mapping(session.get("opportunity_maturity"))
+    )
+    book_strategy = (
+        _mapping(latest.get("book_strategy"))
+        or _mapping(session.get("book_strategy"))
+    )
+    allowance = (
+        _mapping(latest.get("allowance_package"))
+        or _mapping(session.get("allowance_package"))
+    )
+    promotion = (
+        _mapping(latest.get("promotion_trace"))
+        or _mapping(session.get("promotion_trace"))
+    )
+    execution_timing = _mapping(latest.get("execution_timing"))
+    timing_decision = _mapping(latest.get("timing_decision"))
+    timing_tokens = {
+        _text(value).upper()
+        for value in (
+            thesis.get("entry_state"),
+            thesis.get("maturity"),
+            latest.get("entry_state"),
+            latest.get("opportunity_maturity_state"),
+            session.get("opportunity_maturity_state"),
+            maturity.get("state"),
+            book_strategy.get("state"),
+            book_strategy.get("maturity_state"),
+            latest.get("book_strategy_state"),
+            allowance.get("timing_mode"),
+            allowance.get("opportunity_maturity"),
+            allowance.get("book_strategy_maturity"),
+            promotion.get("timing_mode"),
+            latest.get("timing_mode"),
+            execution_timing.get("timing_mode"),
+            execution_timing.get("state"),
+            timing_decision.get("timing_mode"),
+            timing_decision.get("state"),
+            opportunity.get("status"),
+            opportunity.get("state"),
+        )
+        if _text(value)
+    }
+    favorable_value = _text(
+        opportunity.get("favorable_candles_since_origin"),
+        maturity.get("favorable_candles_since_origin"),
+        thesis.get("favorable_candles_since_origin"),
+        latest.get("favorable_candles_since_origin"),
+        session.get("favorable_candles_since_origin"),
+    )
+    explicit_favorable = max(
+        0,
+        _integer(favorable_value),
+    )
+    favorable_candles = (
+        5
+        if timing_tokens.intersection({"LATE", "LATE_CHASE", "MISSED"})
+        else explicit_favorable
+    )
+    transform = _transform_contract(session)
+    return build_order_positioning_candidates_v3(
+        {
+            "side": side,
+            "thesis_verified": bool(
+                thesis
+                and side in {"BUY", "SELL"}
+                and thesis_state not in {"", "INVALID", "INVALIDATED", "EXPIRED", "STALE"}
+            ),
+            "frame_id": frame_id,
+            "sequence_id": lineage.get("sequence_id"),
+            "chart_transform_id": lineage.get("chart_transform_id"),
+            "broker_source_lock_id": lineage.get("broker_source_lock_id"),
+            "market": identity.get("pair"),
+            "timeframe": identity.get("timeframe"),
+            "coordinate_mode": coordinate_mode,
+            "price_axis_orientation": "SCREEN_Y_INCREASES_DOWN",
+            "chart_bounds": chart_bounds,
+            "current_price_y": current_price_y,
+            "current_price_verified": close_level is not None,
+            "timing_verified": bool(
+                _text(identity.get("closed_candle_key"))
+                and transform.get("status") == "LOCKED"
+            ),
+            "display_band_norm": transform.get("close_tolerance"),
+            "display_band_verified": transform.get("status") == "LOCKED",
+            "display_band_basis": "VERIFIED_MEDIAN_CANDLE_RANGE",
+            "favorable_candles_since_origin": favorable_candles,
+            "overlay_objects": overlays,
+            "reprojection_anchors": tracking_reprojection_anchors_v3(session),
+        }
+    )
+
+
+def _order_positioning_actual_v3(
+    plan: Mapping[str, Any],
+    session: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    frame_id: int,
+    closed_candle_key: str,
+    transform_proven: bool,
+) -> dict[str, Any]:
+    current_frame = str(frame_id)
+    lineage_rows = [
+        row
+        for row in _positioning_overlay_rows(session)
+        if _text(row.get("frame_id")) == current_frame
+        and _text(row.get("schema_version")) == "PG_V3_OVERLAY_OBJECT_V1"
+        and _text(row.get("type")).upper() in _POSITIONING_SOURCE_TYPES
+        and "CHART" in _text(row.get("coordinate_mode")).upper()
+        and "PLOT" not in _text(row.get("coordinate_mode")).upper()
+    ]
+    lineage_keys = {
+        (
+            _text(row.get("sequence_id")),
+            _text(row.get("chart_transform_id")),
+            _text(row.get("broker_source_lock_id")),
+        )
+        for row in lineage_rows
+    }
+    lineage = next(iter(lineage_keys)) if len(lineage_keys) == 1 else ("", "", "")
+    reprojection = fit_order_positioning_reprojection_v3(
+        plan.get("reprojection_anchors"),
+        tracking_reprojection_anchors_v3(session),
+    )
+    top = inverse_reproject_order_positioning_y_v3(
+        actual.get("chart_top_norm"),
+        reprojection,
+    )
+    bottom = inverse_reproject_order_positioning_y_v3(
+        actual.get("chart_bottom_norm"),
+        reprojection,
+    )
+    close = inverse_reproject_order_positioning_y_v3(
+        actual.get("chart_close_norm"),
+        reprojection,
+    )
+    identity = _identity(session)
+    return {
+        "schema_version": ORDER_POSITIONING_ACTUAL_SCHEMA_VERSION,
+        "verified": bool(
+            transform_proven
+            and order_positioning_plan_anchors_valid_v3(plan)
+            and reprojection.get("status") == "PROVEN"
+            and top is not None
+            and bottom is not None
+            and close is not None
+            and all(lineage)
+        ),
+        "is_closed": True,
+        "frame_id": frame_id,
+        "closed_candle_key": closed_candle_key,
+        "sequence_id": lineage[0],
+        "chart_transform_id": lineage[1],
+        "broker_source_lock_id": lineage[2],
+        "market": identity.get("pair"),
+        "timeframe": identity.get("timeframe"),
+        "coordinate_mode": "CHART_NORMALIZED",
+        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+        "high_y_norm": top,
+        "low_y_norm": bottom,
+        "close_y_norm": close,
+        "reprojection_status": reprojection.get("status"),
+        "reprojection_reason": reprojection.get("reason"),
+        "reprojection_matched_anchor_count": reprojection.get("matched_anchor_count"),
+    }
+
+
 def _point_pairs(value: Any, *, limit: int = 13) -> list[list[float]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -883,22 +1187,33 @@ def _derived_scene_vertical_scale(scene: Mapping[str, Any]) -> float | None:
     return round(scale, 6) if scale is not None else None
 
 
-def _source_image_height(scene: Mapping[str, Any]) -> float | None:
+def _source_image_dimensions(
+    scene: Mapping[str, Any],
+) -> tuple[float, float] | None:
     identity_state = _mapping(scene.get("closed_candle_identity_state"))
     for value in (
         scene.get("source_image_size"),
         identity_state.get("source_image_size"),
     ):
         if isinstance(value, Mapping):
-            height = _number(_mapping(value).get("height"))
+            dimensions = _mapping(value)
+            width = _number(dimensions.get("width"))
+            height = _number(dimensions.get("height"))
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
             size = cast(Sequence[Any], value)
+            width = _number(size[0]) if len(size) >= 2 else None
             height = _number(size[1]) if len(size) >= 2 else None
         else:
+            width = None
             height = None
-        if height is not None and height > 0.0:
-            return height
+        if width is not None and height is not None and width > 0.0 and height > 0.0:
+            return width, height
     return None
+
+
+def _source_image_height(scene: Mapping[str, Any]) -> float | None:
+    dimensions = _source_image_dimensions(scene)
+    return dimensions[1] if dimensions is not None else None
 
 
 def _normalized_observation_geometry(
@@ -936,6 +1251,73 @@ def _normalized_observation_geometry(
             else None
         ),
     }
+
+
+def tracking_reprojection_anchors_v3(
+    session: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return stable, closed-candle anchors on the chart-normalized plane."""
+
+    tracking = _mapping(session.get("tracking_summary"))
+    scene = _scene_forecast(session)
+    dimensions = _source_image_dimensions(scene)
+    width = dimensions[0] if dimensions is not None else None
+    anchors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candle in _rows(tracking.get("tracked_candles"), limit=256):
+        if candle.get("is_closed") is not True:
+            continue
+        anchor_id = _text(
+            candle.get("track_id"),
+            candle.get("object_id"),
+            candle.get("candle_id"),
+        )
+        if not anchor_id or anchor_id in seen:
+            continue
+        x_norm = _number(
+            candle.get("x_norm")
+            if candle.get("x_norm") is not None
+            else candle.get("normalized_x")
+            if candle.get("normalized_x") is not None
+            else candle.get("center_x_norm")
+        )
+        if x_norm is None and width is not None:
+            center_x = _number(
+                candle.get("center_x_px")
+                if candle.get("center_x_px") is not None
+                else candle.get("center_x")
+            )
+            raw_bbox = candle.get("bbox") or candle.get("bounds")
+            if (
+                center_x is None
+                and isinstance(raw_bbox, Sequence)
+                and not isinstance(raw_bbox, (str, bytes, bytearray))
+            ):
+                bbox = cast(Sequence[Any], raw_bbox)
+                left = _number(bbox[0]) if len(bbox) >= 4 else None
+                right = _number(bbox[2]) if len(bbox) >= 4 else None
+                if left is not None and right is not None:
+                    center_x = 0.5 * (left + right)
+            if center_x is not None:
+                x_norm = center_x / width
+        y_norm = _number(_normalized_observation_geometry(candle, scene).get("chart_close_norm"))
+        if (
+            x_norm is None
+            or y_norm is None
+            or not 0.0 <= x_norm <= 1.0
+            or not 0.0 <= y_norm <= 1.0
+        ):
+            continue
+        seen.add(anchor_id)
+        anchors.append(
+            {
+                "anchor_id": anchor_id,
+                "x_norm": round(x_norm, 6),
+                "y_norm": round(y_norm, 6),
+            }
+        )
+    anchors.sort(key=lambda row: (float(row["x_norm"]), str(row["anchor_id"])))
+    return anchors[-24:]
 
 
 def _entry_thesis(session: Mapping[str, Any]) -> dict[str, Any]:
@@ -1462,6 +1844,25 @@ def start_tracking_episode_v1(
         ),
         "starting_candle": _actual_closed_candle(session, identity),
     }
+    positioning_candidate = _order_positioning_candidate_v3(
+        session,
+        frame_id=int(readiness["frame_id"]),
+        identity=identity,
+    )
+    positioning_plan = freeze_order_positioning_plan_v3(
+        positioning_candidate,
+        normalized_episode_id,
+        str(identity["closed_candle_key"]),
+        int(readiness["frame_id"]),
+        str(now_iso),
+    )
+    if positioning_plan.get("status") == "BLOCKED":
+        positioning_plan["candidate_blockers"] = list(
+            cast(Sequence[Any], positioning_candidate.get("blockers", []))
+        )[:16]
+        positioning_plan["rejected_source_count"] = len(
+            _rows(positioning_candidate.get("rejected_sources"), limit=128)
+        )
     started = {
         "schema_version": TRACKING_EPISODE_SCHEMA_VERSION,
         "session_id": _text(session.get("session_id")),
@@ -1479,6 +1880,7 @@ def start_tracking_episode_v1(
         "timeframe": str(identity["timeframe"]),
         "anchor": _safe_mapping(anchor),
         "committed_plan": _committed_plan(session),
+        "positioning_plan": _safe_mapping(positioning_plan),
         "baseline_forecasts": _baseline_forecasts(session),
         "candidate_revision": {},
         "events": [],
@@ -2396,6 +2798,34 @@ def advance_tracking_episode_v1(
                 ),
             },
         }
+        positioning_plan = _mapping(normalized.get("positioning_plan"))
+        if positioning_plan.get("frozen") is True:
+            positioning_step = max(0, _integer(positioning_plan.get("step"))) + 1
+            positioning_plan = advance_order_positioning_plan_v3(
+                positioning_plan,
+                _order_positioning_actual_v3(
+                    positioning_plan,
+                    session,
+                    actual,
+                    frame_id=frame_id,
+                    closed_candle_key=closed_key,
+                    transform_proven=transform_proven,
+                ),
+                positioning_step,
+            )
+            normalized["positioning_plan"] = _safe_mapping(positioning_plan)
+            status_counts: dict[str, int] = {}
+            for zone in _rows(positioning_plan.get("zones"), limit=24):
+                zone_status = _text(zone.get("status"), "UNKNOWN").upper()
+                status_counts[zone_status] = status_counts.get(zone_status, 0) + 1
+            event["order_positioning_progress"] = {
+                "advance_status": _text(
+                    positioning_plan.get("advance_status"),
+                    "REJECTED",
+                ),
+                "step": max(0, _integer(positioning_plan.get("step"))),
+                "status_counts": status_counts,
+            }
         events.append(_safe_mapping(event))
         processed.append(closed_key)
         normalized["last_processed_closed_candle_key"] = closed_key
@@ -2591,5 +3021,6 @@ __all__ = [
     "tracking_episode_is_active_v1",
     "tracking_episode_history_entry_v1",
     "tracking_episode_readiness_v1",
+    "tracking_reprojection_anchors_v3",
     "update_tracking_episode_history_v1",
 ]

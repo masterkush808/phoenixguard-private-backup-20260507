@@ -77,6 +77,11 @@ OVERLAY_TYPES: tuple[str, ...] = (
     "RETEST_BOX",
     "CONTINUATION_BOX",
     "SNIPER_ENTRY_BOX",
+    "BUY_LIMIT_ZONE",
+    "SELL_LIMIT_ZONE",
+    "BUY_STOP_ENTRY_ZONE",
+    "SELL_STOP_ENTRY_ZONE",
+    "PROTECTIVE_STOP_ZONE",
     "TARGET_ZONE_BOX",
     "INVALIDATION_BOX",
     "SUPPLY_ZONE",
@@ -132,6 +137,79 @@ SMART_MONEY_OVERLAY_TYPES: frozenset[str] = frozenset(
     }
 )
 
+ORDER_POSITIONING_OVERLAY_TYPES: frozenset[str] = frozenset(
+    {
+        "BUY_LIMIT_ZONE",
+        "SELL_LIMIT_ZONE",
+        "BUY_STOP_ENTRY_ZONE",
+        "SELL_STOP_ENTRY_ZONE",
+        "PROTECTIVE_STOP_ZONE",
+    }
+)
+
+ORDER_POSITIONING_SIDE_BY_TYPE: dict[str, str] = {
+    "BUY_LIMIT_ZONE": "BUY",
+    "SELL_LIMIT_ZONE": "SELL",
+    "BUY_STOP_ENTRY_ZONE": "BUY",
+    "SELL_STOP_ENTRY_ZONE": "SELL",
+}
+
+ORDER_KIND_BY_TYPE: dict[str, str] = {
+    "BUY_LIMIT_ZONE": "BUY_LIMIT",
+    "SELL_LIMIT_ZONE": "SELL_LIMIT",
+    "BUY_STOP_ENTRY_ZONE": "BUY_STOP",
+    "SELL_STOP_ENTRY_ZONE": "SELL_STOP",
+    "PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP",
+}
+
+ORDER_INTENT_BY_TYPE: dict[str, str] = {
+    "BUY_LIMIT_ZONE": "ENTRY_LIMIT",
+    "SELL_LIMIT_ZONE": "ENTRY_LIMIT",
+    "BUY_STOP_ENTRY_ZONE": "ENTRY_STOP",
+    "SELL_STOP_ENTRY_ZONE": "ENTRY_STOP",
+    "PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP",
+}
+
+STOP_ENTRY_CONFIRMATION_EVENTS: frozenset[str] = frozenset(
+    {
+        "BREAK_OF_STRUCTURE",
+        "MARKET_STRUCTURE_SHIFT",
+        "RECLAIM_AFTER_SWEEP",
+        "SUPPORT_RECLAIM",
+        "RESISTANCE_REJECTION",
+        "ORDER_BLOCK_RETEST",
+        "LIQUIDITY_SWEEP",
+    }
+)
+
+_STOP_ENTRY_CONFIRMATION_EVENT_ALIASES: dict[str, str] = {
+    "BOS": "BREAK_OF_STRUCTURE",
+    "BREAK_OF_STRUCTURE": "BREAK_OF_STRUCTURE",
+    "MSS": "MARKET_STRUCTURE_SHIFT",
+    "MARKET_STRUCTURE_SHIFT": "MARKET_STRUCTURE_SHIFT",
+    "RECLAIM_AFTER_SWEEP": "RECLAIM_AFTER_SWEEP",
+    "SUPPORT_RECLAIM": "SUPPORT_RECLAIM",
+    "RESISTANCE_REJECTION": "RESISTANCE_REJECTION",
+    "ORDER_BLOCK_RETEST": "ORDER_BLOCK_RETEST",
+    "LIQUIDITY_SWEEP": "LIQUIDITY_SWEEP",
+}
+
+_CLOSED_CONFIRMATION_STATE_ALIASES: frozenset[str] = frozenset(
+    {
+        "CONFIRMED_CLOSED",
+        "CLOSED_CONFIRMED",
+        "VALIDATED_CLOSED",
+        "CLOSED_VALIDATED",
+    }
+)
+
+_LEGACY_PROTECTIVE_STOP_SEMANTICS: dict[str, tuple[str, str, str]] = {
+    # Legacy BUY/SELL names referred to the protected thesis. Canonical side
+    # always means the actual broker order side.
+    "BUY_PROTECTIVE_STOP_ZONE": ("SELL", "BUY", "SELL_STOP"),
+    "SELL_PROTECTIVE_STOP_ZONE": ("BUY", "SELL", "BUY_STOP"),
+}
+
 AnchorEvidenceType = Literal[
     "candle_body_cluster",
     "wick_rejection_cluster",
@@ -154,6 +232,9 @@ AnchorEvidenceType = Literal[
     "current_candle",
     "target_band",
     "invalidation_band",
+    "limit_order_area",
+    "stop_entry_area",
+    "protective_stop_band",
     "chart_bounds",
     "broker_control",
     "diagnostic",
@@ -266,6 +347,9 @@ ANCHOR_EVIDENCE_TYPES: tuple[str, ...] = (
     "current_candle",
     "target_band",
     "invalidation_band",
+    "limit_order_area",
+    "stop_entry_area",
+    "protective_stop_band",
     "chart_bounds",
     "broker_control",
     "diagnostic",
@@ -279,6 +363,7 @@ HARD_ANCHOR_REQUIRED_TYPES: frozenset[str] = frozenset(
         "RETEST_BOX",
         "CONTINUATION_BOX",
         "SNIPER_ENTRY_BOX",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
         "SUPPLY_ZONE",
@@ -336,6 +421,7 @@ VIEW_MODES: tuple[str, ...] = (
     "LOCAL",
     "SUPPLY_DEMAND",
     "TRENDLINES",
+    "ORDER_POSITIONING",
     "TRIGGER",
     "TARGET",
     "INVALIDATION",
@@ -405,6 +491,11 @@ APPROVED_OVERLAY_DISPLAY_LABELS: tuple[str, ...] = (
     "LIQUIDITY POOL",
     "LIQUIDITY SWEEP",
     "MARKET STRUCTURE SHIFT",
+    "BUY LIMIT",
+    "SELL LIMIT",
+    "BUY STOP ENTRY",
+    "SELL STOP ENTRY",
+    "PROTECTIVE STOP",
     "SNIPER",
     "SNIPER BUY",
     "SNIPER SELL",
@@ -441,6 +532,17 @@ LEGACY_DISPLAY_LABEL_ALIASES: dict[str, str] = {
     "TARGET_ZONE": "TARGET",
     "SNIPER_ENTRY_BOX": "SNIPER",
     "SNIPER_ENTRY": "SNIPER",
+    "BUY_LIMIT_ZONE": "BUY LIMIT",
+    "BUY_LIMIT_AREA": "BUY LIMIT",
+    "SELL_LIMIT_ZONE": "SELL LIMIT",
+    "SELL_LIMIT_AREA": "SELL LIMIT",
+    "BUY_STOP_ENTRY_ZONE": "BUY STOP ENTRY",
+    "BUY_STOP_ZONE": "BUY STOP ENTRY",
+    "SELL_STOP_ENTRY_ZONE": "SELL STOP ENTRY",
+    "SELL_STOP_ZONE": "SELL STOP ENTRY",
+    "PROTECTIVE_STOP_ZONE": "PROTECTIVE STOP",
+    "PROTECTIVE_INVALIDATION_ZONE": "PROTECTIVE STOP",
+    "STOP_LOSS_ZONE": "PROTECTIVE STOP",
     "TRIGGER_ZONE_BOX": "TRIGGER",
     "TRIGGER_ZONE": "TRIGGER",
     "INVALIDATION_BOX": "INVALID",
@@ -484,6 +586,13 @@ VIEW_MODE_ALIASES: dict[str, str] = {
     "TRENDLINE": "TRENDLINES",
     "TRENDLINES": "TRENDLINES",
     "TRENDLINE_LAYER": "TRENDLINES",
+    "ORDER": "ORDER_POSITIONING",
+    "ORDERS": "ORDER_POSITIONING",
+    "ORDER_POSITION": "ORDER_POSITIONING",
+    "ORDER_POSITIONS": "ORDER_POSITIONING",
+    "ORDER_POSITIONING_LAYER": "ORDER_POSITIONING",
+    "LIMITS_AND_STOPS": "ORDER_POSITIONING",
+    "LIMIT_STOP_ZONES": "ORDER_POSITIONING",
     "TRIGGERS": "TRIGGER",
     "TRIGGER_ZONE": "TRIGGER",
     "TRIGGER_ZONES": "TRIGGER",
@@ -545,6 +654,7 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
         "LOCAL",
         "SUPPLY_DEMAND",
         "TRENDLINES",
+        "ORDER_POSITIONING",
         "TRIGGER",
         "TARGET",
         "INVALIDATION",
@@ -557,6 +667,15 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
     "LOCAL": {"LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"},
     "SUPPLY_DEMAND": {"SUPPLY_DEMAND", "CLEAN_LIVE", "GLOBAL", "LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"},
     "TRENDLINES": {"TRENDLINES", "CLEAN_LIVE", "GLOBAL", "LOCAL", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"},
+    "ORDER_POSITIONING": {
+        "ORDER_POSITIONING",
+        "CLEAN_LIVE",
+        "ACTIVE_CONTEXT",
+        "FULL_HISTORY_READ",
+        "REPLAY",
+        "PREDICTION",
+        "INSPECTOR",
+    },
     "TRIGGER": {"TRIGGER", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "TARGET": {"TARGET", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "INVALIDATION": {"INVALIDATION", "TARGET", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
@@ -572,6 +691,7 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
         "LOCAL",
         "SUPPLY_DEMAND",
         "TRENDLINES",
+        "ORDER_POSITIONING",
         "TRIGGER",
         "TARGET",
         "INVALIDATION",
@@ -589,6 +709,7 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
         "PATH",
         "SUPPLY_DEMAND",
         "TRENDLINES",
+        "ORDER_POSITIONING",
         "GLOBAL",
         "LOCAL",
         "TRIGGER",
@@ -604,6 +725,7 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
         "LOCAL",
         "SUPPLY_DEMAND",
         "TRENDLINES",
+        "ORDER_POSITIONING",
         "TRIGGER",
         "TARGET",
         "INVALIDATION",
@@ -615,6 +737,7 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
     "PREDICTION": {
         "PREDICTION",
         "ACTIVE_CONTEXT",
+        "ORDER_POSITIONING",
         "TRIGGER",
         "TARGET",
         "INVALIDATION",
@@ -708,6 +831,42 @@ TYPE_ALIASES: dict[str, str] = {
     "SNIPER_SELL": "SNIPER_ENTRY_BOX",
     "ENTRY_AREA_ZONE": "SNIPER_ENTRY_BOX",
     "ENTRY_LEVEL": "SNIPER_ENTRY_BOX",
+    "BUY_LIMIT": "BUY_LIMIT_ZONE",
+    "BUY_LIMIT_AREA": "BUY_LIMIT_ZONE",
+    "BUY_LIMIT_ORDER": "BUY_LIMIT_ZONE",
+    "BUY_LIMIT_ORDER_ZONE": "BUY_LIMIT_ZONE",
+    "BUY_LIMIT_ZONE": "BUY_LIMIT_ZONE",
+    "LIMIT_BUY_ZONE": "BUY_LIMIT_ZONE",
+    "SELL_LIMIT": "SELL_LIMIT_ZONE",
+    "SELL_LIMIT_AREA": "SELL_LIMIT_ZONE",
+    "SELL_LIMIT_ORDER": "SELL_LIMIT_ZONE",
+    "SELL_LIMIT_ORDER_ZONE": "SELL_LIMIT_ZONE",
+    "SELL_LIMIT_ZONE": "SELL_LIMIT_ZONE",
+    "LIMIT_SELL_ZONE": "SELL_LIMIT_ZONE",
+    "BUY_STOP": "BUY_STOP_ENTRY_ZONE",
+    "BUY_STOP_ENTRY": "BUY_STOP_ENTRY_ZONE",
+    "BUY_STOP_ENTRY_AREA": "BUY_STOP_ENTRY_ZONE",
+    "BUY_STOP_ENTRY_ZONE": "BUY_STOP_ENTRY_ZONE",
+    "BUY_STOP_ORDER": "BUY_STOP_ENTRY_ZONE",
+    "BUY_STOP_ORDER_ZONE": "BUY_STOP_ENTRY_ZONE",
+    "BUY_STOP_ZONE": "BUY_STOP_ENTRY_ZONE",
+    "SELL_STOP": "SELL_STOP_ENTRY_ZONE",
+    "SELL_STOP_ENTRY": "SELL_STOP_ENTRY_ZONE",
+    "SELL_STOP_ENTRY_AREA": "SELL_STOP_ENTRY_ZONE",
+    "SELL_STOP_ENTRY_ZONE": "SELL_STOP_ENTRY_ZONE",
+    "SELL_STOP_ORDER": "SELL_STOP_ENTRY_ZONE",
+    "SELL_STOP_ORDER_ZONE": "SELL_STOP_ENTRY_ZONE",
+    "SELL_STOP_ZONE": "SELL_STOP_ENTRY_ZONE",
+    "PROTECTIVE_INVALIDATION": "PROTECTIVE_STOP_ZONE",
+    "PROTECTIVE_INVALIDATION_ZONE": "PROTECTIVE_STOP_ZONE",
+    "PROTECTIVE_STOP": "PROTECTIVE_STOP_ZONE",
+    "PROTECTIVE_STOP_AREA": "PROTECTIVE_STOP_ZONE",
+    "PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP_ZONE",
+    "BUY_PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP_ZONE",
+    "SELL_PROTECTIVE_STOP_ZONE": "PROTECTIVE_STOP_ZONE",
+    "STOP_LOSS": "PROTECTIVE_STOP_ZONE",
+    "STOP_LOSS_AREA": "PROTECTIVE_STOP_ZONE",
+    "STOP_LOSS_ZONE": "PROTECTIVE_STOP_ZONE",
     "PRIMARY": "RETEST_BOX",
     "PRIMARY_TRIGGER": "RETEST_BOX",
     "TRIGGER_PRIMARY": "RETEST_BOX",
@@ -847,6 +1006,11 @@ TYPE_LAYER_MAP: dict[str, str] = {
     "RETEST_BOX": "trigger_zones",
     "CONTINUATION_BOX": "trigger_zones",
     "SNIPER_ENTRY_BOX": "trigger_zones",
+    "BUY_LIMIT_ZONE": "order_positioning",
+    "SELL_LIMIT_ZONE": "order_positioning",
+    "BUY_STOP_ENTRY_ZONE": "order_positioning",
+    "SELL_STOP_ENTRY_ZONE": "order_positioning",
+    "PROTECTIVE_STOP_ZONE": "order_positioning",
     "TARGET_ZONE_BOX": "target_zones",
     "INVALIDATION_BOX": "invalidation",
     "SUPPLY_ZONE": "supply_demand",
@@ -881,6 +1045,7 @@ TYPE_LAYER_MAP: dict[str, str] = {
 }
 
 SEMANTIC_LAYER_LOCK_TYPES: set[str] = {
+    *ORDER_POSITIONING_OVERLAY_TYPES,
     "TARGET_ZONE_BOX",
     "INVALIDATION_BOX",
     "SUPPORT_TRENDLINE",
@@ -899,6 +1064,7 @@ OVERLAY_LAYER_ORDER: tuple[str, ...] = (
     "local_swings",
     "supply_demand",
     "trendlines",
+    "order_positioning",
     "trigger_zones",
     "target_zones",
     "invalidation",
@@ -947,6 +1113,16 @@ LAYER_ALIASES: dict[str, str] = {
     "SUPPORT_TRENDLINE": "trendlines",
     "RESISTANCE_TRENDLINE": "trendlines",
     "INNER_TRENDLINE": "trendlines",
+    "ORDER": "order_positioning",
+    "ORDERS": "order_positioning",
+    "ORDER_POSITION": "order_positioning",
+    "ORDER_POSITIONS": "order_positioning",
+    "ORDER_POSITIONING": "order_positioning",
+    "BUY_LIMIT": "order_positioning",
+    "SELL_LIMIT": "order_positioning",
+    "BUY_STOP": "order_positioning",
+    "SELL_STOP": "order_positioning",
+    "PROTECTIVE_STOP": "order_positioning",
     "TRIGGER": "trigger_zones",
     "TRIGGERS": "trigger_zones",
     "TRIGGER_ZONE": "trigger_zones",
@@ -999,6 +1175,11 @@ LAYER_ALIASES: dict[str, str] = {
 OVERLAY_TYPE_PRIORITY: dict[str, int] = {
     "CHART_BOUNDS": 105,
     "CURRENT_CANDLE": 100,
+    "BUY_LIMIT_ZONE": 98,
+    "SELL_LIMIT_ZONE": 98,
+    "BUY_STOP_ENTRY_ZONE": 97,
+    "SELL_STOP_ENTRY_ZONE": 97,
+    "PROTECTIVE_STOP_ZONE": 96,
     "SNIPER_ENTRY_BOX": 95,
     "RETEST_BOX": 90,
     "CONTINUATION_BOX": 86,
@@ -1045,6 +1226,11 @@ TYPE_ROLE_MAP: dict[str, str] = {
     "RETEST_BOX": "trigger",
     "CONTINUATION_BOX": "continuation",
     "SNIPER_ENTRY_BOX": "sniper",
+    "BUY_LIMIT_ZONE": "buy_limit",
+    "SELL_LIMIT_ZONE": "sell_limit",
+    "BUY_STOP_ENTRY_ZONE": "buy_stop_entry",
+    "SELL_STOP_ENTRY_ZONE": "sell_stop_entry",
+    "PROTECTIVE_STOP_ZONE": "protective_stop",
     "TARGET_ZONE_BOX": "target",
     "INVALIDATION_BOX": "invalidation",
     "SUPPLY_ZONE": "supply",
@@ -1139,6 +1325,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "RETEST_BOX",
         "CONTINUATION_BOX",
         "SNIPER_ENTRY_BOX",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
         "SUPPLY_ZONE",
@@ -1168,6 +1355,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     },
     "SUPPLY_DEMAND": {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"},
     "TRENDLINES": {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"},
+    "ORDER_POSITIONING": set(ORDER_POSITIONING_OVERLAY_TYPES),
     "TRIGGER": {"RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"},
     "TARGET": {"TARGET_ZONE_BOX", "OPPOSING_FORCE"},
     "INVALIDATION": {"INVALIDATION_BOX", "OPPOSING_FORCE"},
@@ -1196,6 +1384,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "RETEST_BOX",
         "CONTINUATION_BOX",
         "SNIPER_ENTRY_BOX",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
         "ANGLE_VECTOR",
@@ -1208,6 +1397,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "SUPPLY_ZONE",
         "DEMAND_ZONE",
         "OPPOSING_FORCE",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
     },
     "PREDICTION": {
         "CHART_BOUNDS",
@@ -1216,6 +1406,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
         "OPPOSING_FORCE",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
         "ANGLE_VECTOR",
     },
     "BROKER": {"BROKER_CONTROL"},
@@ -1232,6 +1423,7 @@ _ALL_OVERLAY_LAYERS: tuple[str, ...] = (
     "local_swings",
     "supply_demand",
     "trendlines",
+    "order_positioning",
     "trigger_zones",
     "target_zones",
     "invalidation",
@@ -1256,6 +1448,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "local_swings",
         "supply_demand",
         "trendlines",
+        "order_positioning",
         "trigger_zones",
         "target_zones",
         "invalidation",
@@ -1267,6 +1460,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     "LOCAL": _layer_visibility("chart_bounds", "recent_candles", "local_swings", "trigger_zones"),
     "SUPPLY_DEMAND": _layer_visibility("supply_demand"),
     "TRENDLINES": _layer_visibility("trendlines"),
+    "ORDER_POSITIONING": _layer_visibility("order_positioning"),
     "TRIGGER": _layer_visibility("trigger_zones", "target_zones"),
     "TARGET": _layer_visibility("target_zones", "supply_demand"),
     "INVALIDATION": _layer_visibility("supply_demand", "invalidation"),
@@ -1282,6 +1476,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "local_swings",
         "supply_demand",
         "trendlines",
+        "order_positioning",
         "trigger_zones",
         "target_zones",
         "invalidation",
@@ -1295,6 +1490,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "local_swings",
         "supply_demand",
         "trendlines",
+        "order_positioning",
         "trigger_zones",
         "target_zones",
         "invalidation",
@@ -1308,6 +1504,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "local_swings",
         "supply_demand",
         "trendlines",
+        "order_positioning",
         "trigger_zones",
         "target_zones",
         "invalidation",
@@ -1318,6 +1515,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     "PREDICTION": _layer_visibility(
         "chart_bounds",
         "supply_demand",
+        "order_positioning",
         "trigger_zones",
         "target_zones",
         "invalidation",
@@ -1388,6 +1586,88 @@ def _sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return list(cast(Sequence[object], value))
     return []
+
+
+def _canonical_token_list(value: object) -> list[str]:
+    items: list[object]
+    if isinstance(value, str):
+        items = [part for part in value.replace(";", ",").split(",") if part.strip()]
+    else:
+        items = _sequence(value)
+    tokens: list[str] = []
+    for item in items:
+        token = _canonical_token(item)
+        if token:
+            tokens.append(_STOP_ENTRY_CONFIRMATION_EVENT_ALIASES.get(token, token))
+    return list(dict.fromkeys(tokens))
+
+
+def _normalize_stop_entry_confirmation(raw: Mapping[str, object]) -> dict[str, object]:
+    state_token = _canonical_token(
+        raw.get("confirmation_state")
+        or raw.get("closed_confirmation_state")
+        or raw.get("confirmation_status")
+    )
+    confirmation_state = "CONFIRMED_CLOSED" if state_token in _CLOSED_CONFIRMATION_STATE_ALIASES else ""
+    confirmation_side = _normalize_side(
+        raw.get("confirmation_side")
+        or raw.get("confirmation_direction")
+        or raw.get("confirmed_side")
+    )
+    knowledge_tags = _canonical_token_list(raw.get("knowledge_tags") or raw.get("strategy_tags"))
+    evidence_tokens = _canonical_token_list(
+        raw.get("evidence_tokens")
+        or raw.get("confirmation_evidence_tokens")
+        or raw.get("confirmation_tags")
+    )
+    event_token = _canonical_token(
+        raw.get("confirmation_event")
+        or raw.get("confirmation_type")
+        or raw.get("market_structure_event")
+    )
+    confirmation_event = _STOP_ENTRY_CONFIRMATION_EVENT_ALIASES.get(event_token, "")
+    if not confirmation_event:
+        confirmed_tokens = [
+            token
+            for token in (*knowledge_tags, *evidence_tokens)
+            if token in STOP_ENTRY_CONFIRMATION_EVENTS
+        ]
+        if len(set(confirmed_tokens)) == 1:
+            confirmation_event = confirmed_tokens[0]
+    candle_key = _text(
+        raw.get("confirmation_closed_candle_key")
+        or raw.get("closed_confirmation_candle_key")
+        or raw.get("confirmation_candle_key")
+    )
+    candle_index: int | None = None
+    for key in (
+        "confirmation_closed_candle_index",
+        "closed_confirmation_candle_index",
+        "confirmation_candle_index",
+    ):
+        if raw.get(key) in (None, ""):
+            continue
+        candle_index = _anchor_candle_index(raw.get(key))
+        break
+    valid = bool(
+        confirmation_state == "CONFIRMED_CLOSED"
+        and confirmation_side in {"BUY", "SELL"}
+        and confirmation_event in STOP_ENTRY_CONFIRMATION_EVENTS
+        and (candle_key or candle_index is not None)
+    )
+    result: dict[str, object] = {
+        "confirmation_state": confirmation_state,
+        "confirmation_side": confirmation_side,
+        "confirmation_event": confirmation_event,
+        "knowledge_tags": knowledge_tags,
+        "evidence_tokens": evidence_tokens,
+        "stop_entry_confirmation_valid": valid,
+    }
+    if candle_key:
+        result["confirmation_closed_candle_key"] = candle_key
+    if candle_index is not None:
+        result["confirmation_closed_candle_index"] = candle_index
+    return result
 
 
 def _normalized_layer_value(value: Any) -> str:
@@ -1566,6 +1846,12 @@ def _anchor_evidence_type_for_overlay(overlay_type: str, role: str) -> str:
         return "failed_retest" if "failed" in role_text else "break_and_retest"
     if overlay_type == "SNIPER_ENTRY_BOX":
         return "break_and_retest"
+    if overlay_type in {"BUY_LIMIT_ZONE", "SELL_LIMIT_ZONE"}:
+        return "limit_order_area"
+    if overlay_type in {"BUY_STOP_ENTRY_ZONE", "SELL_STOP_ENTRY_ZONE"}:
+        return "stop_entry_area"
+    if overlay_type == "PROTECTIVE_STOP_ZONE":
+        return "protective_stop_band"
     if overlay_type == "TARGET_ZONE_BOX":
         return "target_band"
     if overlay_type == "INVALIDATION_BOX":
@@ -1656,7 +1942,14 @@ def _normalize_display_state(raw: Mapping[str, object], overlay_type: str, lifec
         token = "INSPECTOR_LABEL"
     if token in DISPLAY_STATES:
         return token
-    if overlay_type in {"CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}:
+    if overlay_type in {
+        "CURRENT_CANDLE",
+        "SNIPER_ENTRY_BOX",
+        "RETEST_BOX",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
+        "TARGET_ZONE_BOX",
+        "INVALIDATION_BOX",
+    }:
         return "FULL"
     if overlay_type in {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"} or lifecycle_state in {"HISTORICAL", "STALE", "BROKEN_REFERENCE", "CONSUMED_REFERENCE"}:
         return "GHOSTED"
@@ -1786,6 +2079,7 @@ def _anchor_quality_for_overlay(
         "RESISTANCE_TRENDLINE",
         "INNER_TRENDLINE",
         "SNIPER_ENTRY_BOX",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
     } and not has_wick_anchor:
@@ -1847,7 +2141,27 @@ def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: 
         color_token = "neutral-context"
         stroke = "#d6e2f0"
         fill = "rgba(214, 226, 240, 0.12)"
-    if overlay_type in {"RETEST_BOX", "SNIPER_ENTRY_BOX"}:
+    if overlay_type == "BUY_LIMIT_ZONE":
+        color_token = "buy-limit-position"
+        stroke = "#20d49b"
+        fill = "rgba(32, 212, 155, 0.18)"
+    elif overlay_type == "SELL_LIMIT_ZONE":
+        color_token = "sell-limit-position"
+        stroke = "#f58b45"
+        fill = "rgba(245, 139, 69, 0.18)"
+    elif overlay_type == "BUY_STOP_ENTRY_ZONE":
+        color_token = "buy-stop-entry-position"
+        stroke = "#35b7ff"
+        fill = "rgba(53, 183, 255, 0.14)"
+    elif overlay_type == "SELL_STOP_ENTRY_ZONE":
+        color_token = "sell-stop-entry-position"
+        stroke = "#d493ff"
+        fill = "rgba(212, 147, 255, 0.14)"
+    elif overlay_type == "PROTECTIVE_STOP_ZONE":
+        color_token = "protective-stop"
+        stroke = "#ff4d5c"
+        fill = "rgba(255, 77, 92, 0.08)"
+    elif overlay_type in {"RETEST_BOX", "SNIPER_ENTRY_BOX"}:
         color_token = "trigger-confirmation"
         stroke = "#f4c95d"
         fill = "rgba(244, 201, 93, 0.14)"
@@ -1892,7 +2206,7 @@ def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: 
         stroke = "#8fa7bb"
         fill = "rgba(143, 167, 187, 0.07)"
     line_style = "solid"
-    if overlay_type == "INVALIDATION_BOX":
+    if overlay_type in {"BUY_STOP_ENTRY_ZONE", "SELL_STOP_ENTRY_ZONE", "PROTECTIVE_STOP_ZONE", "INVALIDATION_BOX"}:
         line_style = "dashed"
     if display_state == "GHOSTED" or lifecycle_state in {"HISTORICAL", "STALE", "BROKEN_REFERENCE", "CONSUMED_REFERENCE"}:
         line_style = "dotted"
@@ -1900,6 +2214,7 @@ def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: 
     if overlay_type in {
         "SNIPER_ENTRY_BOX",
         "RETEST_BOX",
+        *ORDER_POSITIONING_OVERLAY_TYPES,
         "TARGET_ZONE_BOX",
         "CURRENT_CANDLE",
         "LIQUIDITY_SWEEP",
@@ -2136,6 +2451,16 @@ def normalize_overlay_type(raw: Any, *, layer: Any = "", role: Any = "", side: A
         return "RESISTANCE_TRENDLINE"
     if role_value in {"inner_trend", "inner_trendline", "inner_line", "micro_trendline", "local_trendline"}:
         return "INNER_TRENDLINE"
+    if role_value in {"buy_limit", "buy_limit_area", "buy_limit_order", "limit_buy"}:
+        return "BUY_LIMIT_ZONE"
+    if role_value in {"sell_limit", "sell_limit_area", "sell_limit_order", "limit_sell"}:
+        return "SELL_LIMIT_ZONE"
+    if role_value in {"buy_stop", "buy_stop_entry", "buy_stop_entry_area", "buy_stop_order"}:
+        return "BUY_STOP_ENTRY_ZONE"
+    if role_value in {"sell_stop", "sell_stop_entry", "sell_stop_entry_area", "sell_stop_order"}:
+        return "SELL_STOP_ENTRY_ZONE"
+    if role_value in {"protective_stop", "protective_invalidation", "stop_loss", "position_stop"}:
+        return "PROTECTIVE_STOP_ZONE"
     if role_value in {"sniper", "entry", "aggressive_sniper", "sniper_entry"}:
         return "SNIPER_ENTRY_BOX"
     if role_value in {"target", "buy_target", "sell_target"}:
@@ -2269,6 +2594,16 @@ def short_label_for_overlay(overlay_type: Any, side: Any = "", label: Any = "") 
         return "CHART BOUNDS"
     if overlay_type_value == "SNIPER_ENTRY_BOX":
         return f"SNIPER {side_value}" if side_value != "HOLD" else "SNIPER"
+    if overlay_type_value == "BUY_LIMIT_ZONE":
+        return "BUY LIMIT"
+    if overlay_type_value == "SELL_LIMIT_ZONE":
+        return "SELL LIMIT"
+    if overlay_type_value == "BUY_STOP_ENTRY_ZONE":
+        return "BUY STOP ENTRY"
+    if overlay_type_value == "SELL_STOP_ENTRY_ZONE":
+        return "SELL STOP ENTRY"
+    if overlay_type_value == "PROTECTIVE_STOP_ZONE":
+        return "PROTECTIVE STOP"
     if overlay_type_value == "RETEST_BOX":
         return "TRIGGER"
     if overlay_type_value == "CONTINUATION_BOX":
@@ -2400,10 +2735,44 @@ def normalize_v3_overlay_object(
     if bounds is None:
         raise V3OverlayContractError("V3 overlay object has invalid bounds")
 
+    raw_type_token = _canonical_token(raw.get("type"))
     side = _normalize_side(raw.get("side") or raw.get("direction") or raw.get("action"))
     layer = _normalized_layer_value(raw.get("layer") or raw.get("_layer"))
     role = str(raw.get("role") or raw.get("kind") or raw.get("box_type") or "").strip().lower()
     overlay_type = normalize_overlay_type(raw.get("type"), layer=layer, role=role, side=side)
+    side = ORDER_POSITIONING_SIDE_BY_TYPE.get(overlay_type, side)
+    thesis_side = _normalize_side(raw.get("thesis_side"))
+    legacy_protective_semantics = _LEGACY_PROTECTIVE_STOP_SEMANTICS.get(raw_type_token)
+    legacy_protective_semantics_conflict = False
+    if legacy_protective_semantics is not None:
+        actual_side, protected_thesis_side, protective_order_kind = legacy_protective_semantics
+        explicit_thesis_side = _normalize_side(raw.get("thesis_side"))
+        explicit_order_kind = _canonical_token(raw.get("order_kind"))
+        legacy_protective_semantics_conflict = bool(
+            (explicit_thesis_side != "HOLD" and explicit_thesis_side != protected_thesis_side)
+            or (
+                explicit_order_kind
+                and explicit_order_kind not in {"PROTECTIVE_STOP", protective_order_kind}
+            )
+        )
+        side = actual_side
+        thesis_side = protected_thesis_side
+    elif overlay_type in ORDER_POSITIONING_SIDE_BY_TYPE:
+        thesis_side = side
+    protective_order_kind = _canonical_token(raw.get("order_kind"))
+    if overlay_type == "PROTECTIVE_STOP_ZONE" and protective_order_kind not in {"BUY_STOP", "SELL_STOP"}:
+        protective_order_kind = f"{side}_STOP" if side in {"BUY", "SELL"} else "PROTECTIVE_STOP"
+    protective_semantics_valid = bool(
+        overlay_type != "PROTECTIVE_STOP_ZONE"
+        or (
+            (side, thesis_side, protective_order_kind)
+            in {
+                ("SELL", "BUY", "SELL_STOP"),
+                ("BUY", "SELL", "BUY_STOP"),
+            }
+            and not legacy_protective_semantics_conflict
+        )
+    )
     coordinate_mode = _normalize_coordinate_mode(raw.get("coordinate_mode") or raw.get("space"), bounds)
     bounds = _convert_bounds_for_mode(bounds, coordinate_mode, image_size)
     bounds = [round(float(value), 6) for value in bounds]
@@ -2479,6 +2848,35 @@ def normalize_v3_overlay_object(
         chart_transform_id=chart_transform_value,
     )
     style = _semantic_overlay_style(raw, overlay_type, side, lifecycle, display_state, z_index)
+    confirmation_metadata = _normalize_stop_entry_confirmation(raw)
+    has_confirmation_metadata = bool(
+        overlay_type in {"BUY_STOP_ENTRY_ZONE", "SELL_STOP_ENTRY_ZONE"}
+        or any(
+            raw.get(key) not in (None, "", [], {})
+            for key in (
+                "confirmation_state",
+                "closed_confirmation_state",
+                "confirmation_status",
+                "confirmation_event",
+                "confirmation_type",
+                "market_structure_event",
+                "confirmation_side",
+                "confirmation_direction",
+                "confirmed_side",
+                "confirmation_closed_candle_key",
+                "closed_confirmation_candle_key",
+                "confirmation_candle_key",
+                "confirmation_closed_candle_index",
+                "closed_confirmation_candle_index",
+                "confirmation_candle_index",
+                "knowledge_tags",
+                "strategy_tags",
+                "evidence_tokens",
+                "confirmation_evidence_tokens",
+                "confirmation_tags",
+            )
+        )
+    )
 
     row: dict[str, object] = {
         "schema_version": V3_OVERLAY_SCHEMA_VERSION,
@@ -2531,7 +2929,11 @@ def normalize_v3_overlay_object(
             )
         ),
         "layer": resolved_layer,
-        "role": _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, "")),
+        "role": (
+            TYPE_ROLE_MAP[overlay_type]
+            if overlay_type in ORDER_POSITIONING_OVERLAY_TYPES
+            else _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, ""))
+        ),
         "visible_default": bool(
             raw.get(
                 "visible_default",
@@ -2551,6 +2953,31 @@ def normalize_v3_overlay_object(
             "group_type": _text(raw.get("group_type")),
         },
     }
+    if overlay_type in ORDER_POSITIONING_OVERLAY_TYPES:
+        # Order-position boxes are chart evidence. They can describe a watched
+        # location, but they must never become execution authority merely by
+        # passing through the visual contract.
+        row.update(
+            {
+                "intent": ORDER_INTENT_BY_TYPE[overlay_type],
+                "order_kind": (
+                    protective_order_kind
+                    if overlay_type == "PROTECTIVE_STOP_ZONE"
+                    else ORDER_KIND_BY_TYPE[overlay_type]
+                ),
+                "thesis_side": thesis_side,
+                "trade_authorization_status": "EVIDENCE_ONLY",
+                "entry_authority_active": False,
+                "order_authority_active": False,
+                "evidence_only": True,
+            }
+        )
+        if overlay_type == "PROTECTIVE_STOP_ZONE":
+            row["protective_semantics_valid"] = protective_semantics_valid
+        if legacy_protective_semantics is not None:
+            row["legacy_protective_alias"] = raw_type_token
+    if has_confirmation_metadata:
+        row.update(confirmation_metadata)
     geometry_points = _normalize_overlay_points(
         raw.get("line_points")
         or raw.get("points")
@@ -2623,6 +3050,34 @@ def normalize_v3_overlay_object(
         "validation_reason",
         "zone_family",
         "entry_authority_active",
+        "order_authority_active",
+        "order_kind",
+        "intent",
+        "route",
+        "thesis_side",
+        "protected_entry_zone_id",
+        "zone_id",
+        "timing_state",
+        "late_chase",
+        "plan_id",
+        "episode_id",
+        "baseline_closed_candle_key",
+        "origin_frame_id",
+        "structural_reference_ids",
+        "price_relation_at_origin",
+        "position_status",
+        "positioning_status",
+        "positioning_basis",
+        "immutable_geometry",
+        "reprojection_only",
+        "evidence_only",
+        "normalized_bounds",
+        "boundary_y_norm",
+        "source_overlay_id",
+        "source_object_id",
+        "source_track_id",
+        "source_type",
+        "source_anchor_candle_indices",
         "liquidity_pool_type",
         "liquidity_source",
         "role_flip_state",
@@ -2698,6 +3153,58 @@ def validate_v3_overlay_object(overlay: Mapping[str, object]) -> OverlayValidati
     overlay_type = str(overlay.get("type") or "").strip().upper()
     if overlay_type and not is_known_overlay_type(overlay_type):
         issues.append(OverlayContractIssue("type", f"invalid:{overlay_type}"))
+    canonical_overlay_type = normalize_overlay_type(overlay_type)
+    expected_order_side = ORDER_POSITIONING_SIDE_BY_TYPE.get(canonical_overlay_type)
+    if expected_order_side is not None and _normalize_side(overlay.get("side")) != expected_order_side:
+        issues.append(
+            OverlayContractIssue(
+                "side",
+                f"order_type_requires:{expected_order_side}",
+            )
+        )
+    if canonical_overlay_type in ORDER_POSITIONING_SIDE_BY_TYPE:
+        thesis_side = _normalize_side(overlay.get("thesis_side"))
+        if thesis_side != expected_order_side:
+            issues.append(
+                OverlayContractIssue(
+                    "thesis_side",
+                    f"entry_order_type_requires:{expected_order_side}",
+                )
+            )
+    if canonical_overlay_type == "PROTECTIVE_STOP_ZONE":
+        protective_tuple = (
+            _normalize_side(overlay.get("side")),
+            _normalize_side(overlay.get("thesis_side")),
+            _canonical_token(overlay.get("order_kind")),
+        )
+        if protective_tuple not in {
+            ("SELL", "BUY", "SELL_STOP"),
+            ("BUY", "SELL", "BUY_STOP"),
+        }:
+            issues.append(
+                OverlayContractIssue(
+                    "protective_stop_semantics",
+                    "side_must_be_actual_order_side_and_opposite_thesis_side",
+                )
+            )
+        if overlay.get("protective_semantics_valid") is False:
+            issues.append(OverlayContractIssue("protective_semantics_valid", "legacy_or_explicit_conflict"))
+    if canonical_overlay_type in {"BUY_STOP_ENTRY_ZONE", "SELL_STOP_ENTRY_ZONE"}:
+        confirmation = _normalize_stop_entry_confirmation(overlay)
+        if confirmation.get("stop_entry_confirmation_valid") is not True:
+            issues.append(
+                OverlayContractIssue(
+                    "stop_entry_confirmation",
+                    "requires_named_event_on_completed_candle",
+                )
+            )
+        elif _normalize_side(confirmation.get("confirmation_side")) != expected_order_side:
+            issues.append(
+                OverlayContractIssue(
+                    "confirmation_side",
+                    f"stop_entry_order_type_requires:{expected_order_side}",
+                )
+            )
     if overlay.get("coordinate_mode") not in (None, "") and not is_known_coordinate_mode(overlay.get("coordinate_mode")):
         issues.append(OverlayContractIssue("coordinate_mode", f"invalid:{overlay.get('coordinate_mode')}"))
     raw_anchor_type = _canonical_token(overlay.get("anchor_type"))
@@ -2771,6 +3278,7 @@ def view_mode_profile(mode: str) -> dict[str, Any]:
             "LOCAL",
             "SUPPLY_DEMAND",
             "TRENDLINES",
+            "ORDER_POSITIONING",
             "TRIGGER",
             "TARGET",
             "INVALIDATION",
@@ -2878,6 +3386,20 @@ def overlay_rejection_reasons(
         quality_score = _float(quality.get("score") if quality is not None else None, 0.0)
         if quality_score < 0.65:
             reasons.append(f"anchor_quality_below_live_threshold:{quality_score:.2f}")
+        if (
+            str(normalized.get("type") or "") in ORDER_POSITIONING_OVERLAY_TYPES
+            and (quality is None or quality.get("has_wick_anchor") is not True)
+        ):
+            reasons.append("missing_order_position_wick_anchor")
+    normalized_type = str(normalized.get("type") or "")
+    if normalized_mode in LIVE_VIEW_MODES and normalized_type in {"BUY_STOP_ENTRY_ZONE", "SELL_STOP_ENTRY_ZONE"}:
+        if normalized.get("stop_entry_confirmation_valid") is not True:
+            reasons.append("missing_closed_stop_entry_confirmation")
+        elif _normalize_side(normalized.get("confirmation_side")) != _normalize_side(normalized.get("side")):
+            reasons.append("stop_entry_confirmation_side_mismatch")
+    if normalized_mode in LIVE_VIEW_MODES and normalized_type == "PROTECTIVE_STOP_ZONE":
+        if normalized.get("protective_semantics_valid") is not True:
+            reasons.append("invalid_protective_stop_semantics")
     if str(normalized.get("type") or "") in OPERATOR_CHART_HIDDEN_TYPES and normalized_mode not in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"}:
         reasons.append(f"operator_chart_hidden:{normalized['type']}")
     label_texts = {
@@ -3131,6 +3653,10 @@ __all__ = [
     "LIFECYCLE_STATES",
     "LEGACY_DISPLAY_LABEL_ALIASES",
     "MODE_ALLOWED_TYPES",
+    "ORDER_INTENT_BY_TYPE",
+    "ORDER_KIND_BY_TYPE",
+    "ORDER_POSITIONING_OVERLAY_TYPES",
+    "ORDER_POSITIONING_SIDE_BY_TYPE",
     "OVERLAY_LAYER_ORDER",
     "OVERLAY_TYPES",
     "OVERLAY_TYPE_PRIORITY",
@@ -3141,6 +3667,7 @@ __all__ = [
     "REQUIRED_FIELDS",
     "REQUIRED_V3_OVERLAY_FIELDS",
     "SMART_MONEY_OVERLAY_TYPES",
+    "STOP_ENTRY_CONFIRMATION_EVENTS",
     "TYPE_LAYER_MAP",
     "TYPE_ROLE_MAP",
     "V3OverlayContractError",

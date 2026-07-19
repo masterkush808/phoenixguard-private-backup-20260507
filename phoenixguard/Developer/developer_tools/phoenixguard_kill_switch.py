@@ -258,8 +258,8 @@ def kill_targets(targets: set[int], rows_by_pid: dict[int, ProcessRow], *, dry_r
 
 def clean_runtime_state(args: argparse.Namespace) -> int:
     cleaner = PROJECT_ROOT / "Backend" / "tools" / "clean_v3_runtime_state.py"
-    command = [sys.executable, str(cleaner), "--apply"]
-    print("kill_switch: cleaning V3 runtime/cache state")
+    command = [sys.executable, str(cleaner), "--apply", "--delete"]
+    print("kill_switch: permanently deleting disposable V3 runtime/cache state")
     print("kill_switch: " + " ".join(command))
     if args.dry_run:
         return 0

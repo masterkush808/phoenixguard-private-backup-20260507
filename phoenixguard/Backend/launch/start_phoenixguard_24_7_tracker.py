@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
+
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 
 _PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
@@ -12,7 +16,7 @@ PROJECT_ROOT = ensure_project_paths()
 
 import argparse
 import json
-import os
+import shutil
 import subprocess
 import threading
 import time
@@ -314,6 +318,8 @@ def _session_dir(script_dir: Path, session_id: str) -> Path:
 
 
 def _quarantine_stale_session_on_boot(script_dir: Path, session_id: str) -> bool:
+    """Purge disposable stale runtime state; durable episode history lives outside this tree."""
+
     enabled = str(os.getenv("PHOENIXGUARD_RESET_STALE_TRACKER_SESSION_ON_BOOT", "1") or "1").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return False
@@ -325,24 +331,40 @@ def _quarantine_stale_session_on_boot(script_dir: Path, session_id: str) -> bool
     except ValueError:
         stale_after_sec = 300.0
     session_path = _session_dir(script_dir, session_id)
+    sessions_dir = session_path.parent.resolve()
+    removed_any = False
+    for stale_path in session_path.parent.glob(f"{session_path.name}_stale_*"):
+        try:
+            if stale_path.resolve().parent != sessions_dir:
+                print(f"WARNING: refusing stale-session purge outside {sessions_dir}: {stale_path}", flush=True)
+                continue
+            if stale_path.is_dir():
+                shutil.rmtree(stale_path)
+            elif stale_path.exists():
+                stale_path.unlink()
+            removed_any = True
+            print(f"Purged obsolete tracker runtime session '{stale_path.name}'.", flush=True)
+        except Exception as exc:
+            print(f"WARNING: obsolete tracker runtime purge skipped for {stale_path}: {exc}", flush=True)
     session_json = session_path / "session.json"
     if not session_json.exists():
-        return False
+        return removed_any
     try:
         payload: Any = json.loads(session_json.read_text(encoding="utf-8"))
         last_capture_epoch = float(cast(JsonDict, payload).get("last_capture_epoch") or 0.0) if isinstance(payload, dict) else 0.0
     except Exception:
         last_capture_epoch = 0.0
     if last_capture_epoch <= 0.0 or time.time() - last_capture_epoch <= stale_after_sec:
-        return False
-    target = session_path.with_name(f"{session_path.name}_stale_{time.strftime('%Y%m%d_%H%M%S')}")
+        return removed_any
     try:
-        session_path.replace(target)
-        print(f"Quarantined stale tracker session '{session_id}' -> {target}", flush=True)
+        if session_path.resolve().parent != sessions_dir:
+            raise RuntimeError(f"refusing stale-session purge outside {sessions_dir}: {session_path}")
+        shutil.rmtree(session_path)
+        print(f"Purged stale tracker runtime session '{session_id}' without creating an archive.", flush=True)
         return True
     except Exception as exc:
-        print(f"WARNING: stale tracker session quarantine skipped: {exc}", flush=True)
-        return False
+        print(f"WARNING: stale tracker session purge skipped: {exc}", flush=True)
+        return removed_any
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -873,7 +895,14 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_LIVE_WINDOW_JPEG_QUALITY", "78")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N", "300")
+    os.environ.setdefault("PHOENIXGUARD_TRACKER_ARTIFACT_RETENTION_FRAMES", "144")
+    os.environ.setdefault("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC", "5400")
+    os.environ.setdefault("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB", "128")
     os.environ.setdefault("PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC", "300.0")
+    os.environ.setdefault("PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES", str(16 * 1024 * 1024))
+    os.environ.setdefault("PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES", "4000")
+    os.environ.setdefault("PHOENIXGUARD_OVERLAY_PERSIST_DEBUG", "0")
+    os.environ.setdefault("PHOENIXGUARD_UVICORN_ACCESS_LOG", "0")
     os.environ.setdefault("PHOENIXGUARD_TRUST_LOCKED_WINDOW_DESCRIPTOR", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MIN_CAPTURE_INTERVAL_SEC", "0.5")

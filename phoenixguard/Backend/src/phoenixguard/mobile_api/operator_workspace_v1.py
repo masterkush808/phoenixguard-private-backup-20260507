@@ -11,10 +11,17 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from phoenixguard.decision.entry_window_policy_v3 import entry_location_guidance_v3
+from phoenixguard.decision.order_positioning_v3 import (
+    fit_order_positioning_reprojection_v3,
+    order_positioning_plan_anchors_valid_v3,
+    order_positioning_plan_geometry_valid_v3,
+    reproject_order_positioning_bounds_v3,
+)
 from phoenixguard.tracking.tracking_episode_v3 import (
     TRACKING_EPISODE_HISTORY_LIMIT,
     TRACKING_EPISODE_HORIZON,
     tracking_episode_readiness_v1,
+    tracking_reprojection_anchors_v3,
 )
 
 
@@ -95,6 +102,11 @@ _OVERLAY_PRESENTATION: dict[str, tuple[str, str, str]] = {
     "SUPPLY_ZONE": ("zone", "Supply area", "zones"),
     "DEMAND_ZONE": ("zone", "Demand area", "zones"),
     "OPPOSING_FORCE": ("barrier", "Opposing area", "zones"),
+    "BUY_LIMIT_ZONE": ("entry", "Lower-price buy area", "plan"),
+    "SELL_LIMIT_ZONE": ("entry", "Higher-price sell area", "plan"),
+    "BUY_STOP_ENTRY_ZONE": ("entry", "Upside break area", "plan"),
+    "SELL_STOP_ENTRY_ZONE": ("entry", "Downside break area", "plan"),
+    "PROTECTIVE_STOP_ZONE": ("risk", "Plan failure area", "plan"),
     "SNIPER_ENTRY_BOX": ("entry", "Entry area", "plan"),
     "RETEST_BOX": ("entry", "Retest area", "plan"),
     "TRIGGER_BOX": ("entry", "Entry trigger", "plan"),
@@ -134,6 +146,7 @@ _LAYER_GROUPS = {
     "local_swings": "structure",
     "trendlines": "structure",
     "supply_demand": "zones",
+    "order_positioning": "plan",
     "recent_candles": "movement",
     "trigger_zones": "plan",
     "target_zones": "plan",
@@ -154,6 +167,7 @@ _LAYER_FAMILIES = {
     "major_swings": "major_swings",
     "local_swings": "local_swings",
     "supply_demand": "supply_demand",
+    "order_positioning": "order_positioning",
     "trendlines": "trendlines",
     "trigger_zones": "triggers",
     "target_zones": "targets",
@@ -176,6 +190,11 @@ _TYPE_FAMILIES = {
     "SUPPLY_ZONE": "supply_demand",
     "DEMAND_ZONE": "supply_demand",
     "OPPOSING_FORCE": "supply_demand",
+    "BUY_LIMIT_ZONE": "order_positioning",
+    "SELL_LIMIT_ZONE": "order_positioning",
+    "BUY_STOP_ENTRY_ZONE": "order_positioning",
+    "SELL_STOP_ENTRY_ZONE": "order_positioning",
+    "PROTECTIVE_STOP_ZONE": "order_positioning",
     "SNIPER_ENTRY_BOX": "triggers",
     "RETEST_BOX": "triggers",
     "TRIGGER_BOX": "triggers",
@@ -215,6 +234,7 @@ _FAMILY_FALLBACK_LAYERS = {
     "major_swings": "major_swings",
     "local_swings": "local_swings",
     "supply_demand": "supply_demand",
+    "order_positioning": "order_positioning",
     "trendlines": "trendlines",
     "triggers": "trigger_zones",
     "targets": "target_zones",
@@ -251,6 +271,11 @@ _PUBLIC_OVERLAY_KINDS: dict[str, tuple[str, str]] = {
     "SUPPLY_ZONE": ("higher_reaction", "Higher-price reaction area"),
     "DEMAND_ZONE": ("lower_reaction", "Lower-price reaction area"),
     "OPPOSING_FORCE": ("opposing_area", "Opposing area"),
+    "BUY_LIMIT_ZONE": ("lower_price_buy_area", "Lower-price buy area"),
+    "SELL_LIMIT_ZONE": ("higher_price_sell_area", "Higher-price sell area"),
+    "BUY_STOP_ENTRY_ZONE": ("upside_break_area", "Upside break area"),
+    "SELL_STOP_ENTRY_ZONE": ("downside_break_area", "Downside break area"),
+    "PROTECTIVE_STOP_ZONE": ("plan_failure_area", "Plan failure area"),
     "SUPPORT_TRENDLINE": ("rising_support", "Rising support line"),
     "RESISTANCE_TRENDLINE": ("falling_resistance", "Falling resistance line"),
     "INNER_TRENDLINE": ("local_structure_line", "Local structure line"),
@@ -2403,6 +2428,232 @@ def _overlay_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return _rows(payload.get("overlay_objects"))
 
 
+_ORDER_POSITIONING_TYPES = frozenset(
+    {
+        "BUY_LIMIT_ZONE",
+        "SELL_LIMIT_ZONE",
+        "BUY_STOP_ENTRY_ZONE",
+        "SELL_STOP_ENTRY_ZONE",
+        "PROTECTIVE_STOP_ZONE",
+    }
+)
+
+_ORDER_POSITIONING_SOURCE_TYPES = frozenset(
+    {
+        "DEMAND_ZONE",
+        "SUPPLY_ZONE",
+        "ORDER_BLOCK",
+        "RETEST_BOX",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+    }
+)
+
+_ADAPTIVE_PLAN_OVERLAY_TYPES = frozenset(
+    {
+        "SNIPER_ENTRY_BOX",
+        "RETEST_BOX",
+        "TRIGGER_BOX",
+        "TRIGGER_ZONE",
+        "TARGET_ZONE_BOX",
+        "INVALIDATION_BOX",
+        "INVALIDATION_ZONE",
+    }
+)
+
+_PUBLIC_POSITIONING_STATES = frozenset(
+    {
+        "WAITING",
+        "STANDBY",
+        "ARMED",
+        "APPROACHING",
+        "TOUCHED",
+        "ACTIVATED",
+        "RESPECTED",
+        "FAVORED",
+        "FAILED",
+        "MISSED",
+        "EXPIRED",
+        "AMBIGUOUS",
+        "INVALIDATED",
+    }
+)
+
+
+def _episode_order_positioning_rows(
+    payload: Mapping[str, Any],
+    *,
+    display_frame_id: int | str | None,
+) -> list[Mapping[str, Any]]:
+    """Reproject one immutable plan through a globally proven candle transform."""
+
+    episode = _mapping(payload.get("tracking_episode"))
+    state = _text(episode.get("state"), "IDLE", limit=24).upper()
+    episode_id = _safe_identifier(episode.get("episode_id"), "")
+    if (
+        not episode_id
+        or state != "ACTIVE"
+        or display_frame_id is None
+    ):
+        return []
+    plan = _mapping(episode.get("positioning_plan"))
+    zones = _rows(plan.get("zones") or plan.get("order_zones"))[:24]
+    if (
+        not zones
+        or plan.get("frozen") is not True
+        or not order_positioning_plan_geometry_valid_v3(plan)
+        or not order_positioning_plan_anchors_valid_v3(plan)
+    ):
+        return []
+    anchor = _mapping(episode.get("anchor"))
+    plan_source_lock_id = _text(plan.get("broker_source_lock_id"))
+    def normalize_market(value: Any) -> str:
+        return re.sub(r"[^A-Z0-9]", "", _text(value).upper())
+    if (
+        not normalize_market(plan.get("market"))
+        or normalize_market(plan.get("market"))
+        != normalize_market(episode.get("pair"))
+        or not _text(plan.get("timeframe"))
+        or _text(plan.get("timeframe")).upper()
+        != _text(episode.get("timeframe")).upper()
+    ):
+        return []
+    current_lineages: set[tuple[str, str, str]] = set()
+    for row in _overlay_rows(payload):
+        row_frame = _frame_id(row.get("frame_id"), row.get("display_frame_id"))
+        if (
+            row_frame is None
+            or not _frame_matches(row_frame, display_frame_id)
+            or _text(row.get("schema_version")) != "PG_V3_OVERLAY_OBJECT_V1"
+            or _coordinate_space(row) != "chart"
+            or _text(row.get("type"), "", limit=48).upper()
+            not in _ORDER_POSITIONING_SOURCE_TYPES
+        ):
+            continue
+        current_lineages.add(
+            (
+                _text(row.get("sequence_id")),
+                _text(row.get("chart_transform_id")),
+                _text(row.get("broker_source_lock_id")),
+            )
+        )
+    if len(current_lineages) != 1:
+        return []
+    current_sequence_id, current_transform_id, current_source_lock_id = next(
+        iter(current_lineages)
+    )
+    if (
+        not current_sequence_id
+        or not current_transform_id
+        or not current_source_lock_id
+        or current_source_lock_id != plan_source_lock_id
+    ):
+        return []
+    reprojection = fit_order_positioning_reprojection_v3(
+        plan.get("reprojection_anchors"),
+        tracking_reprojection_anchors_v3(payload),
+    )
+    if reprojection.get("status") != "PROVEN":
+        return []
+
+    output: list[Mapping[str, Any]] = []
+    for index, zone in enumerate(zones):
+        overlay_type = _text(
+            zone.get("overlay_type") or zone.get("type"),
+            "",
+            limit=48,
+        ).upper()
+        if not overlay_type:
+            intent = _text(zone.get("intent"), "", limit=32).upper()
+            order_kind = _text(zone.get("order_kind"), "", limit=32).upper()
+            overlay_type = {
+                ("ENTRY_LIMIT", "BUY_LIMIT"): "BUY_LIMIT_ZONE",
+                ("ENTRY_LIMIT", "SELL_LIMIT"): "SELL_LIMIT_ZONE",
+                ("ENTRY_STOP", "BUY_STOP"): "BUY_STOP_ENTRY_ZONE",
+                ("ENTRY_STOP", "SELL_STOP"): "SELL_STOP_ENTRY_ZONE",
+            }.get((intent, order_kind), "")
+            if intent == "PROTECTIVE_STOP":
+                overlay_type = "PROTECTIVE_STOP_ZONE"
+        if overlay_type not in _ORDER_POSITIONING_TYPES:
+            return []
+        raw_bounds = zone.get("normalized_bounds") or zone.get("bounds")
+        if not isinstance(raw_bounds, Sequence) or isinstance(
+            raw_bounds,
+            (str, bytes, bytearray),
+        ):
+            return []
+        bounds = [_number(value) for value in cast(Sequence[object], raw_bounds)[:4]]
+        if (
+            len(bounds) != 4
+            or any(value is None or not 0.0 <= value <= 1.0 for value in bounds)
+        ):
+            return []
+        projected_bounds = reproject_order_positioning_bounds_v3(
+            cast(list[float], bounds),
+            reprojection,
+        )
+        if len(projected_bounds) != 4:
+            return []
+        left, top, right, bottom = projected_bounds
+        if right <= left or bottom <= top:
+            continue
+        status = _text(zone.get("status"), "WAITING", limit=24).upper()
+        if status not in _PUBLIC_POSITIONING_STATES:
+            status = "AMBIGUOUS"
+        source_id = _safe_identifier(
+            zone.get("zone_id") or zone.get("order_zone_id"),
+            f"{episode_id}-order-area-{index + 1}",
+        )
+        label = _OVERLAY_PRESENTATION[overlay_type][1]
+        output.append(
+            {
+                "overlay_id": source_id,
+                "object_id": source_id,
+                "track_id": source_id,
+                "type": overlay_type,
+                "layer": "order_positioning",
+                "role": "episode_frozen_order_area",
+                "side": _side(zone.get("side")),
+                "label": label,
+                "label_hidden": True,
+                "bounds": [left, top, right, bottom],
+                "coordinate_space": "CHART_NORMALIZED",
+                "coordinate_units": "normalized",
+                "frame_id": display_frame_id,
+                "confidence": _confidence(
+                    zone.get("confidence"),
+                    zone.get("source_confidence"),
+                    zone.get("source_truth_score"),
+                ),
+                "lifecycle_state": "ACTIVE",
+                "positioning_status": status,
+                "positioning_basis": _safe_public_text(
+                    zone.get("public_basis") or zone.get("basis_label"),
+                    (
+                        "Lower-price reaction area"
+                        if _text(zone.get("source_type")).upper()
+                        in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"}
+                        else "Higher-price reaction area"
+                        if _text(zone.get("source_type")).upper()
+                        in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}
+                        else "Validated chart reaction"
+                    ),
+                    limit=96,
+                ),
+                "immutable_geometry": True,
+                "geometry_reprojected": True,
+                "reprojection_method": "GLOBAL_CLOSED_CANDLE_AFFINE_V1",
+                "evidence_only": True,
+                "episode_id": episode_id,
+                "origin_frame_id": _frame_id(
+                    zone.get("origin_frame_id"),
+                    anchor.get("frame_id"),
+                ),
+            }
+        )
+    return output
+
+
 def _forecast_lane_authorization_evidence(
     payload: Mapping[str, Any],
     overlay: Mapping[str, Any],
@@ -2675,9 +2926,19 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         _text(visual_observation.get("status")).upper() == "WAITING_FOR_NEW_FRAME"
         and _explicit_bool(visual_observation.get("new_visual_evidence")) is not True
     )
-    for index, overlay in enumerate(_overlay_rows(payload)[:256]):
+    frozen_positioning_rows = _episode_order_positioning_rows(
+        payload,
+        display_frame_id=display_frame_id,
+    )
+    source_rows = [*frozen_positioning_rows, *_overlay_rows(payload)]
+    for index, overlay in enumerate(source_rows[:256]):
         raw_type = _text(overlay.get("type") or overlay.get("overlay_type") or overlay.get("kind"), "").upper()
         layer = _text(overlay.get("layer"), "").lower()
+        if frozen_positioning_rows and raw_type in _ADAPTIVE_PLAN_OVERLAY_TYPES:
+            # Once tracking owns a frozen order-positioning plan, current-frame
+            # trigger/target copies must not slide over it.  Their source
+            # evidence remains available through structure, zones and replay.
+            continue
         if (
             layer in {"broker_controls", "diagnostics"}
             or "BROKER" in layer.upper()
@@ -2925,6 +3186,28 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             "coordinate_space": _coordinate_space(overlay),
             "coordinate_units": coordinate_units,
         }
+        if raw_type in _ORDER_POSITIONING_TYPES:
+            positioning_status = _text(
+                overlay.get("positioning_status"),
+                "WAITING",
+                limit=24,
+            ).upper()
+            public_overlay.update(
+                {
+                    "positioning_status": (
+                        positioning_status
+                        if positioning_status in _PUBLIC_POSITIONING_STATES
+                        else "AMBIGUOUS"
+                    ),
+                    "positioning_basis": _safe_public_text(
+                        overlay.get("positioning_basis"),
+                        "Saved chart structure",
+                        limit=96,
+                    ),
+                    "immutable_geometry": True,
+                    "evidence_only": True,
+                }
+            )
         if scene_forecast_overlay:
             public_overlay.update(_scene_forecast_boundary_contract(overlay))
         if lstm_forecast_role:
@@ -3592,6 +3875,50 @@ def _episode_observation_contract(episode: Mapping[str, Any]) -> dict[str, objec
     }
 
 
+def _episode_order_area_contract(episode: Mapping[str, Any]) -> dict[str, object]:
+    plan = _mapping(episode.get("positioning_plan"))
+    zones = [
+        row
+        for row in _rows(plan.get("zones"))[:12]
+        if (
+            _text(row.get("intent"), "", limit=32).upper()
+            in {"ENTRY_LIMIT", "ENTRY_STOP", "PROTECTIVE_STOP"}
+            or _text(
+                row.get("overlay_type") or row.get("type"),
+                "",
+                limit=48,
+            ).upper()
+            in _ORDER_POSITIONING_TYPES
+        )
+    ]
+    frozen = plan.get("frozen") is True and bool(zones)
+    if not frozen:
+        return {
+            "status": "UNAVAILABLE",
+            "count": 0,
+            "message": (
+                "No chart-verified order area was available at the starting candle. "
+                "Tracking continues without inventing one."
+            ),
+        }
+    statuses: dict[str, int] = {}
+    for zone in zones:
+        status = _text(zone.get("status"), "WAITING", limit=24).upper()
+        if status not in _PUBLIC_POSITIONING_STATES:
+            status = "AMBIGUOUS"
+        statuses[status] = statuses.get(status, 0) + 1
+    plan_status = _text(plan.get("status"), "TRACKING", limit=24).upper()
+    return {
+        "status": "COMPLETE" if plan_status == "COMPLETE" else "TRACKING",
+        "count": len(zones),
+        "message": (
+            f"{len(zones)} order area{'s' if len(zones) != 1 else ''} were saved "
+            "at the starting candle; their geometry remains fixed."
+        ),
+        "status_counts": statuses,
+    }
+
+
 def _episode_path_comparison_contract(
     episode: Mapping[str, Any],
     observation: Mapping[str, object],
@@ -3937,6 +4264,7 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
         "progress": {"completed": cursor, "total": horizon},
         "observation": observation,
         "path_comparison": path_comparison,
+        "order_areas": _episode_order_area_contract(episode) if has_episode else {},
         "started_at": _safe_public_text(episode.get("started_at"), "", limit=48),
         "updated_at": _safe_public_text(episode.get("updated_at"), "", limit=48),
         "completed_at": _safe_public_text(

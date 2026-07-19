@@ -1,4 +1,5 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingWriteHost", "", Justification = "Operator launcher prints explicit live-runtime status.")]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSUseShouldProcessForStateChangingFunctions", "", Justification = "This non-interactive launcher intentionally performs explicit startup actions.")]
 param(
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'The Most Innovative Trading Platform' }),
     [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
@@ -14,6 +15,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+# Compatibility wrappers still pass this retired switch. Keep it bindable while
+# the canonical launcher always performs its bounded readiness preview.
+Write-Verbose "Retired compatibility input SkipPreview=$([bool]$SkipPreview) is ignored."
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $ProjectRoot
 
@@ -83,6 +88,30 @@ function ConvertTo-ProcessArgumentString {
             $value
         }
     }) -join ' ')
+}
+
+function Test-PhoenixGuardOwnedCommandLine {
+    param(
+        [AllowEmptyString()]
+        [string]$CommandLine,
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)]
+        [string[]]$TargetPattern
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+    if ($CommandLine.IndexOf($RepositoryRoot, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return $false
+    }
+    foreach ($pattern in $TargetPattern) {
+        if ($CommandLine -like $pattern) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-LiveReadinessSnapshot {
@@ -244,42 +273,6 @@ function Get-LiveRuntimeAuthoritySnapshot {
     return [pscustomobject]$result
 }
 
-function Start-LiveReadyShooter {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BaseUrl,
-        [Parameter(Mandatory = $true)]
-        [string]$SessionId,
-        [Parameter(Mandatory = $true)]
-        [double]$PollSec,
-        [Parameter(Mandatory = $true)]
-        [string]$BrokerWindowQuery,
-        [int]$BrokerWindowHwnd = 0
-    )
-
-    $pollText = ([string][double]$PollSec).Replace(',', '.')
-    $runtimeLogRoot = if ($env:PHOENIXGUARD_RUNTIME_DIR) { $env:PHOENIXGUARD_RUNTIME_DIR } else { Join-Path -Path $ProjectRoot -ChildPath 'runtime\live' }
-    $logDir = Join-Path -Path $runtimeLogRoot -ChildPath 'logs'
-    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $outPath = Join-Path -Path $logDir -ChildPath "shooter-live-ready-$stamp.out.log"
-    $errPath = Join-Path -Path $logDir -ChildPath "shooter-live-ready-$stamp.err.log"
-    $args = @(
-        'Backend\launch\shooter.py',
-        'signal',
-        '--session-id',
-        $SessionId,
-        '--base-url',
-        $BaseUrl,
-        '--poll',
-        $pollText,
-        '--heartbeat',
-        '4.0'
-    )
-    Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
-    Write-Host "Shooter package reporter log: $errPath"
-}
-
 Write-Host "PhoenixGuard V3 live-ready launch"
 Write-Host "  Session: $SessionId"
 Write-Host "  Broker window query: $BrokerWindowQuery"
@@ -320,6 +313,15 @@ $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK = '1'
 $env:PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE = '0'
 $env:PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = '20.0'
 $env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC = '300.0'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_TRACKER_ARTIFACT_RETENTION_FRAMES' -Value '144'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC' -Value '5400'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB' -Value '128'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES' -Value '16777216'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES' -Value '4000'
+$env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG = '0'
+$env:PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS = '0'
+$env:PHOENIXGUARD_UVICORN_ACCESS_LOG = '0'
+$env:PHOENIXGUARD_PERSIST_CHILD_STDIO = '0'
 $env:PHOENIXGUARD_SHOOTER_POLL_SEC = ([string][double]$ShooterPollSec).Replace(',', '.')
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '1'
 $runtimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
@@ -334,17 +336,15 @@ if (-not $env:PHOENIXGUARD_DISK_GUARD_ENABLED) {
     $env:PHOENIXGUARD_DISK_GUARD_ENABLED = '1'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES) {
-    $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES = '2GB'
+    $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES = '512MB'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES) {
-    $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES = '1536MB'
+    $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES = '384MB'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC) {
     $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC = '300'
 }
-if (-not $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS) {
-    $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '0'
-}
+$env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '0'
 
 Write-Host ""
 Write-Host "Preflight: stop existing live stack"
@@ -371,20 +371,14 @@ try {
     $processRows = @(Get-CimInstance Win32_Process)
     $processRowsAvailable = $true
 } catch {
-    Write-Warning "Process command-line scan unavailable: $($_.Exception.Message). Falling back to PhoenixGuard port cleanup only."
+    Write-Warning "Process command-line scan unavailable: $($_.Exception.Message). Cleanup will not stop unattributed port owners."
 }
 $targetProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
 if ($processRowsAvailable) {
     $processRows | Where-Object {
         $commandLine = [string]$_.CommandLine
-        $matchesTarget = $false
-        foreach ($pattern in $targetPatterns) {
-            if ($commandLine -like $pattern) {
-                $matchesTarget = $true
-                break
-            }
-        }
-        (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ([int]$_.ProcessId) -ne $currentPid -and $matchesTarget
+        ([int]$_.ProcessId) -ne $currentPid -and
+            (Test-PhoenixGuardOwnedCommandLine -CommandLine $commandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns)
     } | ForEach-Object {
         [void]$targetProcessIds.Add([int]$_.ProcessId)
     }
@@ -394,12 +388,10 @@ try {
         Get-NetTCPConnection -LocalPort $cleanupPort -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
             $ownerPid = [int]$_.OwningProcess
             if ($ownerPid -ne $currentPid) {
-                if (-not $processRowsAvailable) {
-                    [void]$targetProcessIds.Add($ownerPid)
-                } else {
+                if ($processRowsAvailable) {
                     $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
                     $ownerCommandLine = [string]$owner.CommandLine
-                    if ($ownerCommandLine -like '*phoenixguard*' -or $ownerCommandLine -like '*start_phoenixguard_mobile_api.py*' -or $ownerCommandLine -like '*next*') {
+                    if (Test-PhoenixGuardOwnedCommandLine -CommandLine $ownerCommandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns) {
                         [void]$targetProcessIds.Add($ownerPid)
                     }
                 }
@@ -476,16 +468,11 @@ if ($env:PHOENIXGUARD_DISK_GUARD_ENABLED -eq '0') {
     if ($env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS -ne '0') {
         $guardArgs += '--include-codex-sessions'
     }
-    $guardLogDir = $env:PHOENIXGUARD_LOGS_DIR
-    if (-not (Test-Path -LiteralPath $guardLogDir)) {
-        New-Item -ItemType Directory -Path $guardLogDir -Force | Out-Null
-    }
-    $guardStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $guardOutPath = Join-Path -Path $guardLogDir -ChildPath "disk-growth-guard-$guardStamp.out.log"
-    $guardErrPath = Join-Path -Path $guardLogDir -ChildPath "disk-growth-guard-$guardStamp.err.log"
+    $guardOutPath = 'NUL'
+    $guardErrPath = '\\.\NUL'
     Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $guardArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $guardOutPath -RedirectStandardError $guardErrPath | Out-Null
     Write-Host "  enabled=true cap=$guardLimit low_water=$guardLowWater interval_sec=$guardInterval"
-    Write-Host "  guard_log=$guardErrPath"
+    Write-Host "  guard_stdio=discarded report=runtime/live/disk_growth_guard_report.json"
 } else {
     Write-Warning "Backend\tools\phoenixguard_disk_growth_guard.py not found. Disk cap worker not started."
 }
@@ -497,12 +484,13 @@ Write-Host ""
 Write-Host "Launching single FINAL_LIVE tracker, Model Council, package reporter, and bridge stack..."
 $childLaunchProfile = if ($DisableShooter) { 'TRACKER_PLUS_COUNCIL' } else { 'FULL' }
 $launchArgs = @{
+    ApiHost = '127.0.0.1'
+    ApiPort = 8793
+    SessionId = $SessionId
     CaptureIntervalSec = $CaptureIntervalSec
     BrokerWindowQuery = $BrokerWindowQuery
     BrokerWindowHwnd = $BrokerWindowHwnd
     Profile = $childLaunchProfile
-    ShooterMode = 'PACKAGE_REPORTER'
-    RecordActionEvidence = $false
     NoStatusLoop = $true
     DashboardBrowser = $DashboardBrowser
 }

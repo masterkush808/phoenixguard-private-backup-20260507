@@ -1,9 +1,14 @@
 from __future__ import annotations
+from collections import deque
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+import hashlib
 import json
 import os
+import re
+import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from numbers import Real
 from typing import Any, cast
@@ -18,6 +23,21 @@ DEFAULT_LIFECYCLE = "CANDIDATE"
 DEFAULT_IOU_THRESHOLD = 0.5
 DEFAULT_CONFIRM_TRUTH = 0.75
 DEFAULT_STALE_SECONDS = 30
+DEFAULT_REGISTRY_MAX_BYTES = 16 * 1024 * 1024
+DEFAULT_REGISTRY_RETAIN_LINES = 4000
+DEFAULT_REGISTRY_RECORD_MAX_BYTES = 256 * 1024
+MIN_REGISTRY_RECORD_MAX_BYTES = 4 * 1024
+_REGISTRY_WRITE_LOCK = threading.RLock()
+_SAFE_SESSION_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$")
+_WINDOWS_RESERVED_STEMS = {
+    "AUX",
+    "CLOCK$",
+    "CON",
+    "NUL",
+    "PRN",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 def _now_iso() -> str:
@@ -99,6 +119,310 @@ def _entry_last_seen_epoch(entry: Mapping[str, object]) -> float:
     return 0.0
 
 
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    try:
+        return max(minimum, int(float(str(os.getenv(name, default) or default).strip())))
+    except (TypeError, ValueError):
+        return max(minimum, int(default))
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _safe_session_token(session_id: object) -> str:
+    """Return a stable filename token without changing ordinary session IDs."""
+
+    raw = str(session_id or "").strip()
+    if (
+        _SAFE_SESSION_TOKEN.fullmatch(raw) is not None
+        and raw.upper() not in _WINDOWS_RESERVED_STEMS
+    ):
+        return raw
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:20]
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", raw).strip("-_")[:48] or "session"
+    if slug.upper() in _WINDOWS_RESERVED_STEMS:
+        slug = "session"
+    return f"{slug}-{digest}"
+
+
+def _assert_resolved_containment(path: Path, root: Path) -> Path:
+    """Resolve *path* and reject any child that escapes its declared root."""
+
+    resolved_root = root.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"path escapes declared root: {resolved_path}") from exc
+    return resolved_path
+
+
+def _registry_file(session_id: object) -> Path:
+    token = _safe_session_token(session_id)
+    return _assert_resolved_containment(REGISTRY_DIR / f"{token}.jsonl", REGISTRY_DIR)
+
+
+def _bounded_identity(value: object, *, max_chars: int = 160) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:20]
+    return f"{text[: max_chars - 22]}~{digest}"
+
+
+def _compact_scalar(value: object) -> object | None:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (str, bytes, bytearray)):
+        return _bounded_identity(value)
+    return None
+
+
+def _compact_geometry_value(value: object, *, depth: int = 0) -> object | None:
+    """Keep bounded coordinate data while rejecting arbitrary nested payloads."""
+
+    if depth > 2:
+        return None
+    scalar = _compact_scalar(value)
+    if scalar is not None:
+        return scalar
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        kept: dict[str, object] = {}
+        for raw_key, raw_value in list(source.items())[:24]:
+            key = str(raw_key)
+            if key not in {
+                "x",
+                "y",
+                "x1",
+                "y1",
+                "x2",
+                "y2",
+                "width",
+                "height",
+                "left",
+                "right",
+                "top",
+                "bottom",
+                "start",
+                "end",
+            }:
+                continue
+            compacted = _compact_geometry_value(raw_value, depth=depth + 1)
+            if compacted is not None:
+                kept[key] = compacted
+        return kept or None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        kept_items: list[object] = []
+        for item in list(cast(Sequence[object], value))[:32]:
+            compacted = _compact_geometry_value(item, depth=depth + 1)
+            if compacted is not None:
+                kept_items.append(compacted)
+        return kept_items or None
+    return None
+
+
+def _compact_registry_entry(entry: Mapping[str, object], *, original_bytes: int) -> dict[str, object]:
+    overlay = _mapping(entry.get("overlay"))
+    compact_overlay: dict[str, object] = {}
+    for key in (
+        "id",
+        "key",
+        "overlay_id",
+        "object_id",
+        "track_id",
+        "type",
+        "kind",
+        "label",
+        "role",
+        "side",
+        "direction",
+        "source_agent",
+        "lifecycle_state",
+        "truth_score",
+        "confidence",
+    ):
+        if key not in overlay:
+            continue
+        compacted = _compact_scalar(overlay.get(key))
+        if compacted is not None:
+            compact_overlay[key] = compacted
+    for key in (
+        "bbox",
+        "box",
+        "rect",
+        "normalized_bbox",
+        "anchors",
+        "points",
+        "start",
+        "end",
+        "x",
+        "y",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "width",
+        "height",
+    ):
+        if key not in overlay:
+            continue
+        compacted = _compact_geometry_value(overlay.get(key))
+        if compacted is not None:
+            compact_overlay[key] = compacted
+
+    compact: dict[str, object] = {
+        "record_compacted": True,
+        "record_original_bytes": original_bytes,
+        "timestamp": _bounded_identity(entry.get("timestamp")),
+        "created_at": _bounded_identity(entry.get("created_at")),
+        "updated_at": _bounded_identity(entry.get("updated_at")),
+        "last_seen_at": _bounded_identity(entry.get("last_seen_at")),
+        "session_id": _bounded_identity(entry.get("session_id")),
+        "overlay_id": _bounded_identity(entry.get("overlay_id")),
+        "object_id": _bounded_identity(entry.get("object_id")),
+        "track_id": _bounded_identity(entry.get("track_id")),
+        "lifecycle_state": _bounded_identity(entry.get("lifecycle_state")),
+        "truth_score": _float(entry.get("truth_score")),
+        "merge_count": _int(entry.get("merge_count")),
+        "merged_into": _bounded_identity(entry.get("merged_into")),
+        "overlay": compact_overlay,
+    }
+    chart_transform = _mapping(entry.get("chart_transform"))
+    compact_transform: dict[str, object] = {}
+    for key in ("chart_transform_id", "frame_id", "width", "height", "chart_bounds"):
+        if key not in chart_transform:
+            continue
+        compacted = _compact_geometry_value(chart_transform.get(key))
+        if compacted is not None:
+            compact_transform[key] = compacted
+    if compact_transform:
+        compact["chart_transform"] = compact_transform
+    return compact
+
+
+def _json_line_bytes(value: Mapping[str, object]) -> bytes:
+    payload = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+    return payload.encode("utf-8", errors="replace") + b"\n"
+
+
+def _encode_registry_entry(entry: Mapping[str, object]) -> bytes:
+    max_bytes = _env_int(
+        "PHOENIXGUARD_MARKET_REGISTRY_RECORD_MAX_BYTES",
+        DEFAULT_REGISTRY_RECORD_MAX_BYTES,
+        minimum=MIN_REGISTRY_RECORD_MAX_BYTES,
+    )
+    encoded = _json_line_bytes(entry)
+    if len(encoded) <= max_bytes:
+        return encoded
+    compact = _compact_registry_entry(entry, original_bytes=len(encoded))
+    encoded = _json_line_bytes(compact)
+    if len(encoded) <= max_bytes:
+        return encoded
+
+    # The configured minimum is large enough for this identity/truth/geometry
+    # core. This final form makes the bound explicit even if future fields are
+    # added to the richer compact representation.
+    overlay = _mapping(compact.get("overlay"))
+    geometry = {
+        key: overlay[key]
+        for key in (
+            "id",
+            "key",
+            "type",
+            "kind",
+            "bbox",
+            "box",
+            "rect",
+            "normalized_bbox",
+            "anchors",
+            "points",
+            "start",
+            "end",
+            "x",
+            "y",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "width",
+            "height",
+        )
+        if key in overlay
+    }
+    minimal: dict[str, object] = {
+        "record_compacted": True,
+        "record_original_bytes": len(encoded),
+        "timestamp": _bounded_identity(entry.get("timestamp"), max_chars=80),
+        "session_id": _bounded_identity(entry.get("session_id"), max_chars=80),
+        "overlay_id": _bounded_identity(entry.get("overlay_id"), max_chars=80),
+        "object_id": _bounded_identity(entry.get("object_id"), max_chars=80),
+        "track_id": _bounded_identity(entry.get("track_id"), max_chars=80),
+        "lifecycle_state": _bounded_identity(entry.get("lifecycle_state"), max_chars=40),
+        "truth_score": _float(entry.get("truth_score")),
+        "overlay": geometry,
+    }
+    encoded = _json_line_bytes(minimal)
+    if len(encoded) > max_bytes:
+        raise ValueError("bounded market-registry record exceeds configured maximum")
+    return encoded
+
+
+def _compact_registry_file(session_file: Path) -> None:
+    """Atomically retain a recent bounded tail; durable tracking episodes live elsewhere."""
+
+    session_file = _assert_resolved_containment(session_file, REGISTRY_DIR)
+
+    max_bytes = _env_int(
+        "PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES",
+        DEFAULT_REGISTRY_MAX_BYTES,
+        minimum=1024,
+    )
+    try:
+        if not session_file.exists() or session_file.stat().st_size <= max_bytes:
+            return
+    except OSError:
+        return
+    retain_lines = _env_int(
+        "PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES",
+        DEFAULT_REGISTRY_RETAIN_LINES,
+        minimum=1,
+    )
+    low_water_bytes = max(1024, max_bytes // 2)
+    recent_lines = _read_recent_jsonl_lines(
+        session_file,
+        max_lines=retain_lines,
+        max_line_bytes=low_water_bytes,
+    )
+    retained_reversed: list[bytes] = []
+    retained_bytes = 0
+    for line in reversed(recent_lines):
+        encoded = line.encode("utf-8", errors="ignore") + b"\n"
+        if len(encoded) > low_water_bytes:
+            continue
+        if retained_bytes + len(encoded) > low_water_bytes:
+            break
+        retained_reversed.append(encoded)
+        retained_bytes += len(encoded)
+    retained_reversed.reverse()
+    tmp_path = _assert_resolved_containment(
+        session_file.with_name(
+            f".{session_file.name}.{os.getpid():x}.{time.monotonic_ns():x}.compact.tmp"
+        ),
+        REGISTRY_DIR,
+    )
+    try:
+        tmp_path.write_bytes(b"".join(retained_reversed))
+        tmp_path.replace(session_file)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _bbox_iou(a: Sequence[float], b: Sequence[float]) -> float:
     """Compute IoU for [x1,y1,x2,y2] boxes. Returns 0.0 on error."""
     try:
@@ -127,44 +451,57 @@ def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, objec
     Best-effort: does not raise on write errors.
     New entries include lifecycle timestamps and merge metadata.
     """
-    session_file = REGISTRY_DIR / f"{session_id}.jsonl"
+    session_file = _registry_file(session_id)
     ts = _now_iso()
+    lines: list[bytes] = []
     try:
-        with session_file.open("a", encoding="utf-8") as fh:
-            for obj in objects:
-                overlay = dict(obj)
-                overlay_id = str(overlay.get("id") or overlay.get("key") or overlay.get("label") or f"overlay_{hash(str(overlay))}")
-                entry: dict[str, object] = {
-                    "timestamp": ts,
-                    "created_at": ts,
-                    "updated_at": ts,
-                    "session_id": session_id,
-                    "chart_transform": dict(chart_transform) if chart_transform is not None else None,
-                    "overlay": overlay,
-                    # enrich defaults
-                    "overlay_id": overlay_id,
-                    "object_id": str(overlay.get("object_id") or overlay.get("id") or ""),
-                    "track_id": str(overlay.get("track_id") or ""),
-                    "lifecycle_state": str(overlay.get("lifecycle_state") or DEFAULT_LIFECYCLE),
-                    "truth_score": _float(overlay.get("truth_score") or overlay.get("confidence") or 0.0),
-                    "merge_count": _int(overlay.get("merge_count") or 0),
-                    "merged_into": overlay.get("merged_into") or None,
-                    "last_seen_at": ts,
-                }
-                fh.write(json.dumps(entry, default=str) + "\n")
+        REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        for obj in objects:
+            overlay = dict(obj)
+            overlay_id = str(overlay.get("id") or overlay.get("key") or overlay.get("label") or f"overlay_{hash(str(overlay))}")
+            entry: dict[str, object] = {
+                "timestamp": ts,
+                "created_at": ts,
+                "updated_at": ts,
+                "session_id": session_id,
+                "chart_transform": dict(chart_transform) if chart_transform is not None else None,
+                "overlay": overlay,
+                "overlay_id": overlay_id,
+                "object_id": str(overlay.get("object_id") or overlay.get("id") or ""),
+                "track_id": str(overlay.get("track_id") or ""),
+                "lifecycle_state": str(overlay.get("lifecycle_state") or DEFAULT_LIFECYCLE),
+                "truth_score": _float(overlay.get("truth_score") or overlay.get("confidence") or 0.0),
+                "merge_count": _int(overlay.get("merge_count") or 0),
+                "merged_into": overlay.get("merged_into") or None,
+                "last_seen_at": ts,
+            }
+            lines.append(_encode_registry_entry(entry))
+        with _REGISTRY_WRITE_LOCK:
+            with session_file.open("ab") as fh:
+                fh.writelines(lines)
+            _compact_registry_file(session_file)
     except Exception:
         pass
-    # Debug: write a best-effort dump of what was persisted for easier tracing
-    try:
-        runtime_root = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or Path(RUNTIME.project_root) / "runtime" / "live")
-        debug_dir = runtime_root / "overlay_persist_logs"
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        dbg_path = debug_dir / f"{session_id}_{int(time.time())}.json"
-        dump: dict[str, object] = {"session_id": session_id, "objects": [dict(o) for o in objects], "chart_transform": dict(chart_transform) if chart_transform is not None else None}
-        dbg_path.write_text(json.dumps(dump, default=str), encoding="utf-8")
-    except Exception:
-        # swallow errors to keep persistence best-effort
-        pass
+    if _env_enabled("PHOENIXGUARD_OVERLAY_PERSIST_DEBUG", False):
+        try:
+            runtime_root = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or Path(RUNTIME.project_root) / "runtime" / "live")
+            debug_dir = _assert_resolved_containment(
+                runtime_root / "overlay_persist_logs",
+                runtime_root,
+            )
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            dbg_path = _assert_resolved_containment(
+                debug_dir / f"{_safe_session_token(session_id)}_{uuid.uuid4().hex}.json",
+                debug_dir,
+            )
+            dump: dict[str, object] = {
+                "session_id": session_id,
+                "objects": [dict(obj) for obj in objects],
+                "chart_transform": dict(chart_transform) if chart_transform is not None else None,
+            }
+            dbg_path.write_text(json.dumps(dump, default=str), encoding="utf-8")
+        except Exception:
+            pass
     return session_file
 
 
@@ -224,7 +561,7 @@ def _normalize_loaded_market_entry(entry: Mapping[str, object]) -> Mapping[str, 
 
 
 def load_market_objects(session_id: str) -> list[Mapping[str, object]]:
-    session_file = REGISTRY_DIR / f"{session_id}.jsonl"
+    session_file = _registry_file(session_id)
     results: list[Mapping[str, object]] = []
     if not session_file.exists():
         return results
@@ -243,26 +580,37 @@ def load_market_objects(session_id: str) -> list[Mapping[str, object]]:
     return [_normalize_loaded_market_entry(entry) for entry in results]
 
 
-def _read_recent_jsonl_lines(path: Path, *, max_lines: int = 2000, chunk_size: int = 65536) -> list[str]:
+def _read_recent_jsonl_lines(
+    path: Path,
+    *,
+    max_lines: int = 2000,
+    max_line_bytes: int | None = None,
+) -> list[str]:
+    path = _assert_resolved_containment(path, REGISTRY_DIR)
     if max_lines <= 0 or not path.exists():
         return []
+    line_limit = max_line_bytes or _env_int(
+        "PHOENIXGUARD_MARKET_REGISTRY_RECORD_MAX_BYTES",
+        DEFAULT_REGISTRY_RECORD_MAX_BYTES,
+        minimum=MIN_REGISTRY_RECORD_MAX_BYTES,
+    )
     try:
+        recent: deque[str] = deque(maxlen=max_lines)
         with path.open("rb") as fh:
-            fh.seek(0, 2)
-            position = fh.tell()
-            buffer = b""
-            lines: list[bytes] = []
-            while position > 0 and len(lines) <= max_lines:
-                read_size = min(int(chunk_size), position)
-                position -= read_size
-                fh.seek(position)
-                buffer = fh.read(read_size) + buffer
-                lines = buffer.splitlines()
-            return [
-                line.decode("utf-8", errors="ignore")
-                for line in lines[-max_lines:]
-                if line.strip()
-            ]
+            while True:
+                raw = fh.readline(line_limit + 1)
+                if not raw:
+                    break
+                oversized = len(raw) > line_limit and not raw.endswith(b"\n")
+                if oversized:
+                    while raw and not raw.endswith(b"\n"):
+                        raw = fh.readline(line_limit + 1)
+                    continue
+                stripped = raw.rstrip(b"\r\n")
+                if not stripped or len(stripped) + 1 > line_limit:
+                    continue
+                recent.append(stripped.decode("utf-8", errors="ignore"))
+        return list(recent)
     except Exception:
         return []
 
@@ -271,7 +619,7 @@ def load_recent_market_objects(session_id: str, *, max_lines: int = 2000) -> lis
     entries: list[Mapping[str, object]] = []
     candidates = _registry_session_candidates(session_id) or [str(session_id or "").strip()]
     for candidate in candidates:
-        session_file = REGISTRY_DIR / f"{candidate}.jsonl"
+        session_file = _registry_file(candidate)
         if not session_file.exists():
             continue
         for line in _read_recent_jsonl_lines(session_file, max_lines=max_lines):
@@ -347,17 +695,20 @@ def _registry_session_candidates(session_id: str) -> list[str]:
     normalized = str(session_id or "").strip()
     if not normalized:
         return []
-    candidates: list[str] = [normalized]
-    parts = normalized.split("-")
-    while len(parts) > 1:
-        parts = parts[:-1]
-        candidate = "-".join(parts).strip()
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
+    exact_token = _safe_session_token(normalized)
+    candidates: list[str] = [exact_token]
+    if exact_token == normalized:
+        parts = normalized.split("-")
+        while len(parts) > 1:
+            parts = parts[:-1]
+            candidate = "-".join(parts).strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
     try:
         for path in sorted(REGISTRY_DIR.glob("*.jsonl")):
+            path = _assert_resolved_containment(path, REGISTRY_DIR)
             stem = path.stem.strip()
-            if stem.startswith(normalized) and stem not in candidates:
+            if stem.startswith(exact_token) and stem not in candidates:
                 candidates.append(stem)
             for candidate in tuple(candidates):
                 if candidate and stem.startswith(candidate) and stem not in candidates:
@@ -369,9 +720,12 @@ def _registry_session_candidates(session_id: str) -> list[str]:
 
 def _write_entry(session_id: str, entry: Mapping[str, object]) -> None:
     try:
-        session_file = REGISTRY_DIR / f"{session_id}.jsonl"
-        with session_file.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, default=str) + "\n")
+        session_file = _registry_file(session_id)
+        REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        with _REGISTRY_WRITE_LOCK:
+            with session_file.open("ab") as fh:
+                fh.write(_encode_registry_entry(entry))
+            _compact_registry_file(session_file)
     except Exception:
         pass
 

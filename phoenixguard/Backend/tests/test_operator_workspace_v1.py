@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -319,6 +320,63 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
     }
 
 
+def _positioning_anchor_rows(
+    *,
+    scale_x: float = 1.0,
+    offset_x: float = 0.0,
+    scale_y: float = 1.0,
+    offset_y: float = 0.0,
+) -> list[dict[str, object]]:
+    baseline = (
+        ("stable-a", 0.18, 0.34),
+        ("stable-b", 0.38, 0.47),
+        ("stable-c", 0.61, 0.59),
+        ("stable-d", 0.79, 0.41),
+    )
+    return [
+        {
+            "track_id": anchor_id,
+            "is_closed": True,
+            "x_norm": round(scale_x * x_norm + offset_x, 6),
+            "close_y_norm": round(scale_y * y_norm + offset_y, 6),
+        }
+        for anchor_id, x_norm, y_norm in baseline
+    ]
+
+
+def _seal_positioning_plan(plan: dict[str, object]) -> None:
+    zones = cast(list[dict[str, object]], plan["zones"])
+    static = [
+        {
+            key: value
+            for key, value in zone.items()
+            if key not in {"status", "status_reason", "last_updated_step"}
+        }
+        for zone in zones
+    ]
+    geometry_snapshot = json.dumps(
+        static,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    anchors = cast(list[dict[str, object]], plan["reprojection_anchors"])
+    anchor_snapshot = json.dumps(
+        anchors,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    plan["geometry_snapshot"] = geometry_snapshot
+    plan["geometry_fingerprint"] = hashlib.sha256(
+        geometry_snapshot.encode("utf-8")
+    ).hexdigest()
+    plan["reprojection_anchor_snapshot"] = anchor_snapshot
+    plan["reprojection_anchor_fingerprint"] = hashlib.sha256(
+        anchor_snapshot.encode("utf-8")
+    ).hexdigest()
+
+
 def _all_keys(value: object) -> set[str]:
     keys: set[str] = set()
     if isinstance(value, Mapping):
@@ -386,6 +444,216 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
     assert r"C:\\secret" not in serialized
     assert "exec-secret" not in serialized
     assert "private-agent" not in serialized
+
+
+def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_boxes() -> None:
+    payload = _fresh_payload(side="BUY")
+    episode = _mutable_mapping(payload["tracking_episode"])
+    episode["anchor"] = {"frame_id": 9, "closed_candle_key": "closed-9"}
+    positioning_plan: dict[str, object] = {
+        "schema_version": "PG_ORDER_POSITIONING_PLAN_V3",
+        "frozen": True,
+        "sequence_id": "episode-positioning-sequence",
+        "chart_transform_id": "episode-positioning-transform",
+        "broker_source_lock_id": "episode-positioning-source",
+        "market": "EUR/USD",
+        "timeframe": "M5",
+        "reprojection_anchors": [
+            {
+                "anchor_id": row["track_id"],
+                "x_norm": row["x_norm"],
+                "y_norm": row["close_y_norm"],
+            }
+            for row in _positioning_anchor_rows()
+        ],
+        "zones": [
+            {
+                "zone_id": "episode-test-active:buy-limit:zone-1",
+                "overlay_type": "BUY_LIMIT_ZONE",
+                "side": "BUY",
+                "normalized_bounds": [0.56, 0.52, 0.78, 0.58],
+                "source_bounds": [0.56, 0.52, 0.78, 0.58],
+                "source_type": "DEMAND_ZONE",
+                "source_track_id": "demand-source",
+                "status": "APPROACHING",
+                "confidence": 0.84,
+                "public_basis": "Lower-price reaction area",
+                "origin_frame_id": 9,
+            },
+            {
+                "zone_id": "episode-test-active:buy-stop:zone-2",
+                "overlay_type": "BUY_STOP_ENTRY_ZONE",
+                "side": "BUY",
+                "normalized_bounds": [0.64, 0.36, 0.82, 0.38],
+                "source_bounds": [0.64, 0.38, 0.82, 0.44],
+                "source_type": "SUPPLY_ZONE",
+                "source_track_id": "supply-source",
+                "status": "WAITING",
+                "confidence": 0.79,
+                "public_basis": "Completed-candle confirmation",
+                "origin_frame_id": 9,
+            },
+            {
+                "zone_id": "episode-test-active:protective-stop:zone-3",
+                "overlay_type": "PROTECTIVE_STOP_ZONE",
+                "side": "SELL",
+                "normalized_bounds": [0.56, 0.58, 0.78, 0.60],
+                "source_bounds": [0.56, 0.52, 0.78, 0.58],
+                "source_type": "DEMAND_ZONE",
+                "source_track_id": "demand-source",
+                "status": "WAITING",
+                "confidence": 0.84,
+                "public_basis": "Original idea boundary",
+                "origin_frame_id": 9,
+            },
+        ],
+    }
+    _seal_positioning_plan(positioning_plan)
+    episode["positioning_plan"] = positioning_plan
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking["tracked_candles"] = _positioning_anchor_rows()
+    payload["overlays"] = {
+        "objects": [
+            {
+                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+                "overlay_id": "demand-frame-14",
+                "object_id": "demand-object",
+                "track_id": "demand-source",
+                "type": "DEMAND_ZONE",
+                "side": "BUY",
+                "layer": "supply_demand",
+                "bounds": [0.56, 0.52, 0.78, 0.58],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "sequence_id": "current-positioning-sequence-14",
+                "chart_transform_id": "current-positioning-transform-14",
+                "broker_source_lock_id": "episode-positioning-source",
+            },
+            {
+                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+                "overlay_id": "supply-frame-14",
+                "object_id": "supply-object",
+                "track_id": "supply-source",
+                "type": "SUPPLY_ZONE",
+                "side": "SELL",
+                "layer": "supply_demand",
+                "bounds": [0.64, 0.38, 0.82, 0.44],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "sequence_id": "current-positioning-sequence-14",
+                "chart_transform_id": "current-positioning-transform-14",
+                "broker_source_lock_id": "episode-positioning-source",
+            },
+            {
+                "overlay_id": "moving-target-frame-14",
+                "type": "TARGET_ZONE_BOX",
+                "side": "BUY",
+                "layer": "target_zones",
+                "bounds": [0.55, 0.20, 0.78, 0.27],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+            },
+        ]
+    }
+
+    first = _build_workspace(payload, now_epoch=100.0)
+    first_areas = [
+        row for row in first["overlays"] if row["family"] == "order_positioning"
+    ]
+
+    assert {row["kind"] for row in first_areas} == {
+        "lower_price_buy_area",
+        "upside_break_area",
+        "plan_failure_area",
+    }
+    assert all(row["frame_id"] == 14 for row in first_areas)
+    assert all(row["coordinate_units"] == "normalized" for row in first_areas)
+    assert all(cast(dict[str, object], row)["immutable_geometry"] is True for row in first_areas)
+    assert not any(row["kind"] == "target_area" for row in first["overlays"])
+    public_episode = _mutable_mapping(
+        cast(dict[str, object], first["tracking"])["episode"]
+    )
+    assert _mutable_mapping(public_episode["order_areas"])["count"] == 3
+    first_geometry = {row["id"]: row["bounds"] for row in first_areas}
+
+    payload["display_frame_id"] = 15
+    command = _mutable_mapping(payload["decision_command_center"])
+    _mutable_mapping(command["current_movement"])["frame_id"] = 15
+    _mutable_mapping(command["pressure_event"])["frame_id"] = 15
+    tracking["tracked_candles"] = _positioning_anchor_rows(
+        scale_x=1.02,
+        offset_x=0.01,
+        scale_y=0.96,
+        offset_y=0.02,
+    )
+    payload["overlays"] = {
+        "objects": [
+            {
+                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+                "overlay_id": "demand-frame-15",
+                "object_id": "demand-object",
+                "track_id": "demand-source",
+                "type": "DEMAND_ZONE",
+                "side": "BUY",
+                "layer": "supply_demand",
+                "bounds": [0.57, 0.54, 0.79, 0.60],
+                "frame_id": 15,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "sequence_id": "current-positioning-sequence-15",
+                "chart_transform_id": "current-positioning-transform-15",
+                "broker_source_lock_id": "episode-positioning-source",
+            },
+            {
+                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+                "overlay_id": "supply-frame-15",
+                "object_id": "supply-object",
+                "track_id": "supply-source",
+                "type": "SUPPLY_ZONE",
+                "side": "SELL",
+                "layer": "supply_demand",
+                "bounds": [0.65, 0.40, 0.83, 0.46],
+                "frame_id": 15,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "sequence_id": "current-positioning-sequence-15",
+                "chart_transform_id": "current-positioning-transform-15",
+                "broker_source_lock_id": "episode-positioning-source",
+            },
+        ]
+    }
+    second = _build_workspace(payload, now_epoch=101.0)
+    second_areas = [
+        row for row in second["overlays"] if row["family"] == "order_positioning"
+    ]
+
+    assert {row["id"]: row["bounds"] for row in second_areas} != first_geometry
+    assert all(row["frame_id"] == 15 for row in second_areas)
+    serialized = json.dumps(second_areas)
+    assert "BUY_LIMIT_ZONE" not in serialized
+    assert "closed-9" not in serialized
+
+    payload["display_frame_id"] = 16
+    _mutable_mapping(command["current_movement"])["frame_id"] = 16
+    _mutable_mapping(command["pressure_event"])["frame_id"] = 16
+    bad_anchors = _positioning_anchor_rows(
+        scale_x=1.02,
+        offset_x=0.01,
+        scale_y=0.96,
+        offset_y=0.02,
+    )
+    bad_anchors[-1]["close_y_norm"] = 0.75
+    tracking["tracked_candles"] = bad_anchors
+    current_objects = cast(
+        list[dict[str, object]],
+        _mutable_mapping(payload["overlays"])["objects"],
+    )
+    for row in current_objects:
+        row["frame_id"] = 16
+        row["sequence_id"] = "current-positioning-sequence-16"
+        row["chart_transform_id"] = "current-positioning-transform-16"
+    unproven = _build_workspace(payload, now_epoch=102.0)
+    assert not any(
+        row["family"] == "order_positioning" for row in unproven["overlays"]
+    )
 
 
 def test_operator_forecast_keeps_user_truth_and_strips_runtime_telemetry() -> None:

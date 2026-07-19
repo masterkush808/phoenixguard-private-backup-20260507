@@ -43,11 +43,13 @@ phoenixguard_cloud_watchdog.py / phoenixguard-cloud-watchdog.service
 
 Backend/tools/phoenixguard_disk_growth_guard.py
   Background disk-growth guard for generated runtime/session memory. The live
-  launcher starts it by default with a 2 GB cap and 1.5 GB low-water reset
-  target. It prunes generated artifacts only: runtime tracker artifacts, logs,
-  reports, .codex_runtime, _archive, Business/web/.next, and optional operator
-  ~/.codex/sessions history. It refuses protected roots such as models, book
-  knowledge, calibration/config, data, 808 Memory, and memory_bank.
+  launcher starts it by default with a 512 MB global ceiling and 384 MB
+  low-water target, plus tighter per-source caps. It prunes generated artifacts
+  only: runtime tracker artifacts, bounded registry/log state, reports,
+  .codex_runtime, disposable _archive content, and Business/web/.next. The
+  canonical launcher never includes operator ~/.codex/sessions. It refuses
+  protected roots such as models, book knowledge, calibration/config, data,
+  808 Memory, and memory_bank.
 
 linux_cloud_brain_bootstrap.sh
   Ubuntu VPS bootstrap for the cheapest cloud-brain deployment: clone repo,
@@ -87,7 +89,7 @@ Before a release or migration, run:
 ```text
 python Developer/deployment/verify_release_readiness.py
 python Developer/deployment/verify_universal_frame_feed.py --base-url http://127.0.0.1:8793
-python Backend/tools/phoenixguard_disk_growth_guard.py --once --apply --limit 2GB --low-water 1536MB
+python Backend/tools/phoenixguard_disk_growth_guard.py --once --apply --limit 512MB --low-water 384MB
 ```
 
 For production upload smoke tests where signatures are required:

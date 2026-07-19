@@ -6,8 +6,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import time
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 from phoenixguard.paths import BUSINESS_ROOT, PROJECT_ROOT
 
@@ -113,7 +114,7 @@ class DiskGrowthGuardError(RuntimeError):
     pass
 
 
-DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_LOW_WATER_RATIO = 0.75
 DEFAULT_MIN_AGE_SECONDS = 120.0
 
@@ -158,6 +159,98 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def _is_reparse_point(path: Path) -> bool:
+    """Return true for symlinks and Windows junction/reparse entries."""
+
+    try:
+        is_symlink = getattr(path, "is_symlink", None)
+        if callable(is_symlink) and bool(is_symlink()):
+            return True
+        lstat = getattr(path, "lstat", None)
+        attributes = int(getattr(lstat(), "st_file_attributes", 0)) if callable(lstat) else 0
+    except OSError:
+        return True
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & reparse_flag)
+
+
+def _safe_descendants(path: Path) -> Iterator[Path]:
+    """Yield contained descendants without traversing filesystem indirections."""
+
+    if _is_reparse_point(path) or not path.exists() or not path.is_dir():
+        return
+    root = path.resolve()
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = tuple(directory.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if _is_reparse_point(child):
+                continue
+            try:
+                resolved = child.resolve()
+            except OSError:
+                continue
+            if not _is_relative_to(resolved, root):
+                continue
+            yield child
+            try:
+                if child.is_dir():
+                    pending.append(child)
+            except OSError:
+                continue
+
+
+def _is_safe_member(path: Path, *, root: Path) -> bool:
+    if _is_reparse_point(path) or _is_reparse_point(root):
+        return False
+    try:
+        return _is_relative_to(path.resolve(), root.resolve())
+    except OSError:
+        return False
+
+
+def _contains_reparse_descendant(path: Path) -> bool:
+    if _is_reparse_point(path):
+        return True
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = tuple(directory.iterdir())
+        except OSError:
+            return True
+        for child in children:
+            if _is_reparse_point(child):
+                return True
+            try:
+                if child.is_dir():
+                    pending.append(child)
+            except OSError:
+                return True
+    return False
+
+
+def _has_reparse_component(path: Path, *, allowed_roots: Sequence[Path]) -> bool:
+    lexical_path = Path(os.path.abspath(path.expanduser()))
+    lexical_roots = tuple(Path(os.path.abspath(root.expanduser())) for root in allowed_roots)
+    matching_root = next((root for root in lexical_roots if _is_relative_to(lexical_path, root)), None)
+    if matching_root is None:
+        return True
+    current = lexical_path
+    while True:
+        if current.exists() and _is_reparse_point(current):
+            return True
+        if current == matching_root:
+            return False
+        if current.parent == current:
+            return True
+        current = current.parent
+
+
 def protected_roots(project_root: Path = PROJECT_ROOT) -> tuple[Path, ...]:
     candidates = (
         project_root / "models",
@@ -174,6 +267,8 @@ def protected_roots(project_root: Path = PROJECT_ROOT) -> tuple[Path, ...]:
 
 
 def assert_safe_target(path: Path, *, allowed_roots: Sequence[Path], protected: Sequence[Path]) -> Path:
+    if _has_reparse_component(path, allowed_roots=allowed_roots):
+        raise DiskGrowthGuardError(f"Refusing disk guard target through a symlink, junction, or reparse point: {path}")
     intended = path.expanduser().resolve()
     existing_or_parent = _resolve_existing_or_parent(path)
     if not any(
@@ -197,7 +292,7 @@ def assert_safe_target(path: Path, *, allowed_roots: Sequence[Path], protected: 
 
 def directory_size(path: Path) -> int:
     try:
-        if not path.exists():
+        if _is_reparse_point(path) or not path.exists():
             return 0
         if path.is_file():
             return path.stat().st_size
@@ -205,7 +300,7 @@ def directory_size(path: Path) -> int:
         return 0
     total = 0
     try:
-        for file_path in path.rglob("*"):
+        for file_path in _safe_descendants(path):
             try:
                 if file_path.is_file():
                     total += file_path.stat().st_size
@@ -220,14 +315,14 @@ def directory_size(path: Path) -> int:
 
 def _file_entries(path: Path, *, now_epoch: float, min_age_seconds: float) -> list[tuple[float, int, Path]]:
     rows: list[tuple[float, int, Path]] = []
-    if not path.exists():
+    if _is_reparse_point(path) or not path.exists():
         return rows
     if path.is_file():
         stat = path.stat()
         if now_epoch - stat.st_mtime >= min_age_seconds:
             rows.append((stat.st_mtime, stat.st_size, path))
         return rows
-    for file_path in path.rglob("*"):
+    for file_path in _safe_descendants(path):
         try:
             if not file_path.is_file():
                 continue
@@ -243,10 +338,12 @@ def _file_entries(path: Path, *, now_epoch: float, min_age_seconds: float) -> li
 
 def _child_entries(path: Path, *, now_epoch: float, min_age_seconds: float) -> list[tuple[float, int, Path]]:
     rows: list[tuple[float, int, Path]] = []
-    if not path.exists() or not path.is_dir():
+    if _is_reparse_point(path) or not path.exists() or not path.is_dir():
         return rows
     for child in path.iterdir():
         try:
+            if not _is_safe_member(child, root=path):
+                continue
             child_stat = child.stat()
             if child.is_file():
                 if now_epoch - child_stat.st_mtime < min_age_seconds:
@@ -259,7 +356,7 @@ def _child_entries(path: Path, *, now_epoch: float, min_age_seconds: float) -> l
             oldest_mtime = child_stat.st_mtime
             has_recent_file = False
             has_file = False
-            for file_path in child.rglob("*"):
+            for file_path in _safe_descendants(child):
                 if not file_path.is_file():
                     continue
                 has_file = True
@@ -282,17 +379,31 @@ def _child_entries(path: Path, *, now_epoch: float, min_age_seconds: float) -> l
     return rows
 
 
-def _remove(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path, ignore_errors=True)
-    elif path.exists():
-        path.unlink(missing_ok=True)
+def _remove(path: Path, *, target_root: Path) -> bool:
+    try:
+        if not _is_safe_member(path, root=target_root):
+            return False
+        if path.is_dir():
+            if _contains_reparse_descendant(path):
+                return False
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink(missing_ok=True)
+        return not path.exists()
+    except OSError:
+        # Active Windows log handles can temporarily refuse deletion. Keep the
+        # guard alive and retry on the next sweep instead of crashing it.
+        return False
 
 
 def _remove_empty_dirs(path: Path) -> None:
-    if not path.exists() or not path.is_dir():
+    if _is_reparse_point(path) or not path.exists() or not path.is_dir():
         return
-    dirs = sorted((p for p in path.rglob("*") if p.is_dir()), key=lambda item: len(item.parts), reverse=True)
+    dirs = sorted(
+        (p for p in _safe_descendants(path) if p.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
     for directory in dirs:
         try:
             directory.rmdir()
@@ -310,17 +421,20 @@ def _prune_oldest_files(target: DiskGrowthGuardTarget, *, apply: bool) -> tuple[
         now_epoch=time.time(),
         min_age_seconds=target.min_age_seconds,
     ):
-        action = DiskGrowthGuardAction(
-            target=target.name,
-            path=str(file_path),
-            action="delete_file",
-            bytes_removed=size,
-            reason=f"target exceeded {target.max_bytes} bytes",
-            applied=apply,
+        removed = not apply or _remove(file_path, target_root=target.path)
+        actions.append(
+            DiskGrowthGuardAction(
+                target=target.name,
+                path=str(file_path),
+                action="delete_file",
+                bytes_removed=size if removed else 0,
+                reason=f"target exceeded {target.max_bytes} bytes",
+                applied=bool(apply and removed),
+            )
         )
-        actions.append(action)
         if apply:
-            _remove(file_path)
+            if not removed:
+                continue
         current_size = max(0, current_size - size)
         if current_size <= target.low_water_bytes:
             break
@@ -333,29 +447,44 @@ def _prune_oldest_files(target: DiskGrowthGuardTarget, *, apply: bool) -> tuple[
 def _reset_children(target: DiskGrowthGuardTarget, *, apply: bool) -> tuple[int, tuple[DiskGrowthGuardAction, ...]]:
     current_size = directory_size(target.path)
     actions: list[DiskGrowthGuardAction] = []
-    if current_size <= target.max_bytes or not target.path.exists() or not target.path.is_dir():
+    if not target.path.exists() or not target.path.is_dir():
+        return current_size, tuple(actions)
+    if current_size <= target.max_bytes:
+        if apply and target.max_bytes == 0:
+            try:
+                target.path.rmdir()
+            except OSError:
+                pass
         return current_size, tuple(actions)
     for _mtime, size, child in _child_entries(
         target.path,
         now_epoch=time.time(),
         min_age_seconds=target.min_age_seconds,
     ):
-        action = DiskGrowthGuardAction(
-            target=target.name,
-            path=str(child),
-            action="delete_child",
-            bytes_removed=size,
-            reason=f"target exceeded {target.max_bytes} bytes",
-            applied=apply,
+        removed = not apply or _remove(child, target_root=target.path)
+        actions.append(
+            DiskGrowthGuardAction(
+                target=target.name,
+                path=str(child),
+                action="delete_child",
+                bytes_removed=size if removed else 0,
+                reason=f"target exceeded {target.max_bytes} bytes",
+                applied=bool(apply and removed),
+            )
         )
-        actions.append(action)
         if apply:
-            _remove(child)
+            if not removed:
+                continue
         current_size = max(0, current_size - size)
         if current_size <= target.low_water_bytes:
             break
     if apply:
         current_size = directory_size(target.path)
+        if target.max_bytes == 0 and current_size == 0:
+            try:
+                target.path.rmdir()
+            except OSError:
+                pass
     return current_size, tuple(actions)
 
 
@@ -423,36 +552,79 @@ def build_default_targets(
     reports_dir = project_root / "reports"
     codex_runtime_dir = project_root / ".codex_runtime"
     archive_dir = project_root / "_archive"
+    session_cap = min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_SESSION_RUNTIME_MAX_BYTES"), default=256 * 1024 * 1024))
+    session_low = min(low, parse_size_bytes(os.getenv("PHOENIXGUARD_SESSION_RUNTIME_LOW_BYTES"), default=128 * 1024 * 1024))
+    registry_cap = min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES"), default=16 * 1024 * 1024))
+    registry_low = min(low, parse_size_bytes(os.getenv("PHOENIXGUARD_MARKET_REGISTRY_LOW_BYTES"), default=8 * 1024 * 1024))
+    live_log_cap = min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_LIVE_LOG_MAX_BYTES"), default=64 * 1024 * 1024))
+    live_log_low = min(low, parse_size_bytes(os.getenv("PHOENIXGUARD_LIVE_LOG_LOW_BYTES"), default=32 * 1024 * 1024))
+    debug_cap = min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_OVERLAY_DEBUG_MAX_BYTES"), default=16 * 1024 * 1024))
+    debug_low = min(low, parse_size_bytes(os.getenv("PHOENIXGUARD_OVERLAY_DEBUG_LOW_BYTES"), default=4 * 1024 * 1024))
+    report_cap = min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_REPORT_MAX_BYTES"), default=256 * 1024 * 1024))
+    report_low = min(low, parse_size_bytes(os.getenv("PHOENIXGUARD_REPORT_LOW_BYTES"), default=128 * 1024 * 1024))
+    launcher_log_cap = min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_LAUNCHER_LOG_MAX_BYTES"), default=16 * 1024 * 1024))
     targets: list[DiskGrowthGuardTarget] = [
         DiskGrowthGuardTarget(
-            name="live_window_tracker_artifacts",
+            name="live_window_tracker_sessions",
             path=runtime_dir / "data_live" / "mobile_api" / "window_tracker" / "sessions",
-            max_bytes=cap,
-            low_water_bytes=low,
+            max_bytes=session_cap,
+            low_water_bytes=min(session_low, session_cap),
             mode=DiskGrowthGuardMode.OLDEST_FILES,
             min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
         ),
         DiskGrowthGuardTarget(
+            name="market_registry",
+            path=runtime_dir / "data_live" / "market_registry",
+            max_bytes=registry_cap,
+            low_water_bytes=min(registry_low, registry_cap),
+            mode=DiskGrowthGuardMode.OLDEST_FILES,
+            min_age_seconds=0.0,
+        ),
+        DiskGrowthGuardTarget(
             name="live_logs",
             path=runtime_dir / "logs_live",
-            max_bytes=cap,
-            low_water_bytes=low,
+            max_bytes=live_log_cap,
+            low_water_bytes=min(live_log_low, live_log_cap),
+            mode=DiskGrowthGuardMode.OLDEST_FILES,
+            min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
+        ),
+        DiskGrowthGuardTarget(
+            name="runtime_logs",
+            path=runtime_dir / "logs",
+            max_bytes=live_log_cap,
+            low_water_bytes=min(live_log_low, live_log_cap),
+            mode=DiskGrowthGuardMode.OLDEST_FILES,
+            min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
+        ),
+        DiskGrowthGuardTarget(
+            name="tracker_launcher_stdout",
+            path=runtime_dir / "tracker_launcher_stdout.log",
+            max_bytes=launcher_log_cap,
+            low_water_bytes=0,
+            mode=DiskGrowthGuardMode.OLDEST_FILES,
+            min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
+        ),
+        DiskGrowthGuardTarget(
+            name="tracker_launcher_stderr",
+            path=runtime_dir / "tracker_launcher_stderr.log",
+            max_bytes=launcher_log_cap,
+            low_water_bytes=0,
             mode=DiskGrowthGuardMode.OLDEST_FILES,
             min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
         ),
         DiskGrowthGuardTarget(
             name="overlay_persist_logs",
             path=runtime_dir / "overlay_persist_logs",
-            max_bytes=cap,
-            low_water_bytes=low,
+            max_bytes=debug_cap,
+            low_water_bytes=min(debug_low, debug_cap),
             mode=DiskGrowthGuardMode.OLDEST_FILES,
             min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
         ),
         DiskGrowthGuardTarget(
             name="reports",
             path=reports_dir,
-            max_bytes=cap,
-            low_water_bytes=low,
+            max_bytes=report_cap,
+            low_water_bytes=min(report_low, report_cap),
             mode=DiskGrowthGuardMode.OLDEST_FILES,
             min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
         ),
@@ -465,12 +637,12 @@ def build_default_targets(
             min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
         ),
         DiskGrowthGuardTarget(
-            name="archive",
+            name="legacy_archive",
             path=archive_dir,
-            max_bytes=cap,
-            low_water_bytes=low,
+            max_bytes=0,
+            low_water_bytes=0,
             mode=DiskGrowthGuardMode.RESET_CHILDREN,
-            min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
+            min_age_seconds=0.0,
         ),
         DiskGrowthGuardTarget(
             name="business_next_cache",

@@ -1920,6 +1920,19 @@
       background: rgba(242, 200, 102, 0.04);
     }
 
+    .surface-hotspot.family-order-positioning {
+      border-width: 1.5px;
+      border-style: solid;
+      background: rgba(242, 200, 102, 0.025);
+      box-shadow: inset 0 0 0 1px rgba(255, 247, 220, 0.025);
+    }
+
+    .surface-hotspot.family-order-positioning[data-overlay-kind="plan_failure_area"] {
+      border-color: var(--warn);
+      border-style: dashed;
+      background: rgba(232, 200, 120, 0.035);
+    }
+
     .surface-hotspot span {
       position: absolute;
       top: -22px;
@@ -2252,6 +2265,22 @@
       display: flex;
       flex-wrap: wrap;
       gap: 5px;
+    }
+
+    .order-area-kind-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      width: 100%;
+      margin-top: 7px;
+      padding-top: 7px;
+      border-top: 1px solid rgba(242, 200, 102, 0.12);
+    }
+
+    .order-area-kind-controls .layer-filter {
+      min-height: 27px;
+      padding-inline: 8px;
+      font-size: 10px;
     }
 
     .layer-filter {
@@ -3426,10 +3455,18 @@
             <div class="layer-filter-list" aria-label="Market context and trade map overlays">
               <button class="layer-filter" type="button" data-overlay-family="market_context" aria-pressed="true">Reaction map <span class="layer-count" data-layer-count="market_context">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="council" aria-pressed="true">Combined analysis <span class="layer-count" data-layer-count="council">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="order_positioning" aria-pressed="true">Order areas <span class="layer-count" data-layer-count="order_positioning">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="triggers" aria-pressed="true">Entry triggers <span class="layer-count" data-layer-count="triggers">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="targets" aria-pressed="true">Targets <span class="layer-count" data-layer-count="targets">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="invalidation" aria-pressed="true">Risk limits <span class="layer-count" data-layer-count="invalidation">0</span></button>
               <button class="layer-filter" id="tracking-plan-toggle" type="button" data-tracking-plan-control aria-expanded="false">Playbook overlays <span class="layer-count" id="tracking-plan-count">0</span></button>
+              <div class="order-area-kind-controls" aria-label="Individual order-area overlays">
+                <button class="layer-filter" type="button" data-overlay-kind-control="lower_price_buy_area" aria-pressed="true">Buy lower · limit</button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="higher_price_sell_area" aria-pressed="true">Sell higher · limit</button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="upside_break_area" aria-pressed="true">Buy above · stop</button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="downside_break_area" aria-pressed="true">Sell below · stop</button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="plan_failure_area" aria-pressed="true">Plan fails here</button>
+              </div>
             </div>
             <div class="playbook-panel" id="tracking-plan-panel" data-ready="false" aria-live="polite" hidden>
               <strong>Tracking plan</strong>
@@ -3628,6 +3665,8 @@
     const DISABLED_OVERLAY_KINDS_STORAGE_KEY = "phoenixguard.overlay.disabled-kinds.v1";
     const OVERLAY_SCENE_SPLIT_MIGRATION_KEY = "phoenixguard.overlay.layers.scene-split-migration.v1";
     const OVERLAY_SCENE_SPLIT_MIGRATION_VERSION = "1";
+    const OVERLAY_ORDER_POSITIONING_MIGRATION_KEY = "phoenixguard.overlay.layers.order-positioning-migration.v1";
+    const OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION = "1";
     const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"]);
     const ALL_OVERLAY_FAMILIES = Object.freeze([
       "chart_bounds",
@@ -3636,6 +3675,7 @@
       "local_swings",
       "supply_demand",
       "trendlines",
+      "order_positioning",
       "triggers",
       "targets",
       "invalidation",
@@ -3649,11 +3689,11 @@
     ]);
     const OVERLAY_PRESETS = Object.freeze({
       all: ALL_OVERLAY_FAMILIES,
-      live: ["current_candles", "market_context", "council", "triggers", "targets", "invalidation"],
-      market_context: ["market_context", "supply_demand", "triggers", "targets", "invalidation"],
+      live: ["current_candles", "market_context", "council", "order_positioning"],
+      market_context: ["market_context", "supply_demand", "order_positioning"],
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
-      plan: ["council", "triggers", "targets", "invalidation"],
+      plan: ["council", "order_positioning", "triggers", "targets", "invalidation"],
       forecast: ["two_candle", "scene_forecaster", "lstm", "prediction"],
       history: ["history", "major_swings", "local_swings"],
     });
@@ -3666,6 +3706,7 @@
       "trendlines",
       "market_context",
       "council",
+      "order_positioning",
       "triggers",
       "targets",
       "invalidation",
@@ -3718,6 +3759,11 @@
       "trend",
       "entry_area",
       "price_movement",
+      "lower_price_buy_area",
+      "higher_price_sell_area",
+      "upside_break_area",
+      "downside_break_area",
+      "plan_failure_area",
     ]);
     const EPISODE_OUTLOOK_FAMILIES = Object.freeze([
       "two_candle",
@@ -3740,6 +3786,7 @@
       local_swings: "This mark tracks a nearer pullback or continuation inside the larger move.",
       supply_demand: "This area marks a price region where movement previously reacted or may react again.",
       trendlines: "This line follows visible structure and stays attached to the same chart coordinates.",
+      order_positioning: "These areas preserve the original order-positioning study for the active 12-candle episode. Their status may update, but their saved geometry does not slide to chase price.",
       triggers: "This is a watched entry trigger. It does not grant permission by itself.",
       targets: "This is a watched target area for an active plan.",
       invalidation: "This area shows where the watched plan would no longer be valid.",
@@ -3910,6 +3957,7 @@
       const raw = readStoredValue(OVERLAY_LAYERS_STORAGE_KEY, "");
       if (!raw) {
         writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
+        writeStoredValue(OVERLAY_ORDER_POSITIONING_MIGRATION_KEY, OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION);
         return fallback;
       }
       try {
@@ -3920,21 +3968,36 @@
         const migrated = parsed.filter(function (family) {
           return typeof family === "string" && ALL_OVERLAY_FAMILIES.includes(family);
         });
-        const migrationPending = readStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, "")
+        const sceneMigrationPending = readStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, "")
           !== OVERLAY_SCENE_SPLIT_MIGRATION_VERSION;
-        if (migrationPending && migrated.includes("lstm") && !migrated.includes("scene_forecaster")) {
+        if (sceneMigrationPending && migrated.includes("lstm") && !migrated.includes("scene_forecaster")) {
           // The former single `lstm` control displayed the scene forecaster.
           // Replace that legacy meaning exactly once; the newly real LSTM must
           // remain an independent opt-in instead of appearing unexpectedly.
           migrated.splice(migrated.indexOf("lstm"), 1);
           migrated.push("scene_forecaster");
         }
+        const orderMigrationPending = readStoredValue(OVERLAY_ORDER_POSITIONING_MIGRATION_KEY, "")
+          !== OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION;
+        const storedPreset = readStoredPreset();
+        if (
+          orderMigrationPending
+          && ["all", "live", "market_context", "plan"].includes(storedPreset)
+          && !migrated.includes("order_positioning")
+        ) {
+          migrated.push("order_positioning");
+        }
         const enabled = migrated.filter(function (family) {
           return typeof family === "string" && ALL_OVERLAY_FAMILIES.includes(family);
         });
-        if (migrationPending || migrated.length !== parsed.length) {
+        if (sceneMigrationPending || orderMigrationPending || migrated.length !== parsed.length) {
           writeStoredValue(OVERLAY_LAYERS_STORAGE_KEY, JSON.stringify(enabled));
-          writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
+          if (sceneMigrationPending) {
+            writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
+          }
+          if (orderMigrationPending) {
+            writeStoredValue(OVERLAY_ORDER_POSITIONING_MIGRATION_KEY, OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION);
+          }
         }
         return new Set(enabled.length ? enabled : fallback);
       } catch (_error) {
@@ -6483,6 +6546,7 @@
     function overlayFamilyTitle(family) {
       const labels = {
         market_context: "Reaction map",
+        order_positioning: "Order areas",
         scene_forecaster: "Visual outlook",
         lstm: "12-step sequence outlook",
         two_candle: "Near-term candle read",
@@ -6613,6 +6677,10 @@
       } else {
         items.push("Start tracking to anchor the current chart and keep one plan across the full study.");
       }
+      const orderAreas = safeObject(episode.order_areas);
+      if (episodeIsActive(episode) && safeText(orderAreas.message, "")) {
+        items.push(neutralPublicText(orderAreas.message, "Order-area evidence is being checked from the starting candle."));
+      }
       if (families.length) {
         items.push("Supporting evidence: " + families.slice(0, 6).map(overlayFamilyTitle).join(", ") + ".");
       }
@@ -6689,6 +6757,16 @@
       });
       const entries = Array.from(kinds.entries()).sort(function (left, right) {
         return left[1].label.localeCompare(right[1].label);
+      });
+      document.querySelectorAll("[data-overlay-kind-control]").forEach(function (button) {
+        const kind = safeText(button.dataset.overlayKindControl, "").toLowerCase();
+        const available = kinds.has(kind);
+        const enabled = !state.disabledKinds.has(kind);
+        button.setAttribute("aria-pressed", enabled ? "true" : "false");
+        button.dataset.available = available ? "true" : "false";
+        button.title = available
+          ? (enabled ? "Hide this saved order area" : "Show this saved order area")
+          : "This area appears only when the starting chart provides verified positioning evidence";
       });
       setText(els.detailedOverlayCount, entries.length ? entries.length + " available" : "No current marks");
       if (!entries.length) {
@@ -7956,6 +8034,7 @@
           : "");
       button.dataset.overlayId = id;
       button.dataset.overlayFamilyId = family;
+      button.dataset.overlayKind = overlayKind(overlay);
       button.dataset.overlayLayer = safeText(overlay.layer, "");
       button.dataset.priority = String(overlayPriority(overlay));
       button.setAttribute("aria-label", overlayLabel(overlay));
@@ -8385,6 +8464,36 @@
           + " Body bias is " + bodyWord + "."
           + (overlay.direction_conflict === true ? " The body and movement readings disagree." : "")
           + intervalCopy;
+      }
+      if (family === "order_positioning") {
+        const kind = overlayKind(overlay);
+        const explanations = {
+          lower_price_buy_area: "A conventional buy-limit study: this lower-price area was supported by the starting chart and may never be reached or filled.",
+          higher_price_sell_area: "A conventional sell-limit study: this higher-price area was supported by the starting chart and may never be reached or filled.",
+          upside_break_area: "A conventional buy-stop entry study: price must first prove the saved upward break area instead of being chased after the move.",
+          downside_break_area: "A conventional sell-stop entry study: price must first prove the saved downward break area instead of being chased after the move.",
+          plan_failure_area: "This saved protection area marks where the original chart idea would fail; it is separate from an entry area.",
+        };
+        const statusLabels = {
+          WAITING: "waiting",
+          STANDBY: "waiting until its paired entry is active",
+          ARMED: "protection is armed",
+          APPROACHING: "price is approaching",
+          TOUCHED: "price touched the area",
+          ACTIVATED: "the saved condition activated",
+          RESPECTED: "price respected the area",
+          FAVORED: "the move favored the saved idea",
+          FAILED: "the saved idea failed",
+          MISSED: "the opportunity moved away; do not chase",
+          EXPIRED: "the saved study expired",
+          INVALIDATED: "the saved idea was invalidated",
+          AMBIGUOUS: "the result is unclear",
+        };
+        const status = safeText(overlay.positioning_status, "WAITING").toUpperCase();
+        const basis = neutralPublicText(overlay.positioning_basis, "Saved chart structure");
+        return (explanations[kind] || FAMILY_EXPLANATIONS.order_positioning)
+          + " It was frozen when tracking started and does not slide on later candles. Current status: "
+          + (statusLabels[status] || "under review") + ". Basis: " + basis + ". Evidence only; entry permission remains separate.";
       }
       return FAMILY_EXPLANATIONS[family] || GROUP_EXPLANATIONS[group] || GROUP_EXPLANATIONS.structure;
     }
@@ -8852,6 +8961,11 @@
     document.querySelectorAll("[data-overlay-family]").forEach(function (button) {
       button.addEventListener("click", function () {
         toggleOverlayFamily(button.dataset.overlayFamily);
+      });
+    });
+    document.querySelectorAll("[data-overlay-kind-control]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        toggleOverlayKind(button.dataset.overlayKindControl);
       });
     });
     els.layersAll.addEventListener("click", function () {

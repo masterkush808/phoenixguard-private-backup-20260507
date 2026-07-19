@@ -1,11 +1,13 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingWriteHost", "", Justification = "Interactive operator launcher prints concise status lines.")]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSUseShouldProcessForStateChangingFunctions", "", Justification = "This non-interactive launcher intentionally starts local child processes and a dashboard browser.")]
 param(
     [string]$ApiHost = $(if ($env:PHOENIXGUARD_MOBILE_API_HOST) { $env:PHOENIXGUARD_MOBILE_API_HOST } else { '127.0.0.1' }),
     [int]$ApiPort = $(if ($env:PHOENIXGUARD_MOBILE_API_PORT) { [int]$env:PHOENIXGUARD_MOBILE_API_PORT } else { 8793 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }),
     [ValidateSet('FULL', 'TRACKER_ONLY', 'TRACKER_PLUS_COUNCIL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED')]
-    [string]$Profile = 'FULL',
+    [Alias('Profile')]
+    [string]$LaunchProfile = 'FULL',
     [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }),
     [double]$ShooterMinConfidence = 0.2,
     [ValidateSet('PACKAGE_REPORTER')]
@@ -30,6 +32,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+# These retired controls remain accepted so existing wrappers and operator
+# shortcuts do not fail parameter binding. FINAL_LIVE no longer lets them arm
+# broker clicks or calibration actions.
+Write-Verbose ("Retired compatibility inputs ignored: min_confidence={0}, shooter_mode={1}, broker_speed={2}, action_speed={3}, record_evidence={4}, calibration_expiry={5}, calibration_side={6}, calibration_wait={7}, calibration_time_only={8}" -f $ShooterMinConfidence, $ShooterMode, $BrokerSpeedProfile, $ActionSpeed, [bool]$RecordActionEvidence, $CalibrationTestExpirySeconds, $CalibrationTestSide, $CalibrationTestTimeFillWaitSeconds, [bool]$CalibrationTestTimeOnly)
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $ProjectRoot
 $backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
@@ -55,8 +62,11 @@ if ($pythonScriptsDir -and -not ([string]$env:PATH).ToLowerInvariant().StartsWit
 $defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 $runtimeDir = $defaultRuntimeDir
 $statusPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
-$trackerStdoutPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log'
-$trackerStderrPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stderr.log'
+$persistChildStdio = ($env:PHOENIXGUARD_PERSIST_CHILD_STDIO -eq '1')
+$discardStdoutPath = 'NUL'
+$discardStderrPath = '\\.\NUL'
+$trackerStdoutPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log' } else { $discardStdoutPath }
+$trackerStderrPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stderr.log' } else { $discardStderrPath }
 $baseUrl = "http://$ApiHost`:$ApiPort"
 $dashboardUrl = "$baseUrl/v3/mobile/window-tracker/dashboard/$SessionId"
 $finalLaunchProfile = 'FINAL_LIVE'
@@ -81,15 +91,21 @@ $env:PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB = if ($env:PHOENIXGUARD_POCKE
 $env:PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE = if ($env:PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE) { $env:PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE } else { '0' }
 $env:PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = if ($env:PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC) { $env:PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC } else { '20.0' }
 $env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC = if ($env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC) { $env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC } else { '300.0' }
+$env:PHOENIXGUARD_TRACKER_ARTIFACT_RETENTION_FRAMES = if ($env:PHOENIXGUARD_TRACKER_ARTIFACT_RETENTION_FRAMES) { $env:PHOENIXGUARD_TRACKER_ARTIFACT_RETENTION_FRAMES } else { '144' }
+$env:PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC = if ($env:PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC) { $env:PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC } else { '5400' }
+$env:PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB = if ($env:PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB) { $env:PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB } else { '128' }
+$env:PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES = if ($env:PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES) { $env:PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES } else { '16777216' }
+$env:PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES = if ($env:PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES) { $env:PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES } else { '4000' }
+$env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG = if ($env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG) { $env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG } else { '0' }
+$env:PHOENIXGUARD_UVICORN_ACCESS_LOG = if ($env:PHOENIXGUARD_UVICORN_ACCESS_LOG) { $env:PHOENIXGUARD_UVICORN_ACCESS_LOG } else { '0' }
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = if ($env:PHOENIXGUARD_FAST_FOCUS_PREVIEW) { $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW } else { '1' }
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 
-$launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $Profile
+$launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $LaunchProfile
 $launchMt4Bridge = -not ($env:PHOENIXGUARD_MT4_BRIDGE_ENABLED -and $env:PHOENIXGUARD_MT4_BRIDGE_ENABLED.Trim().ToLowerInvariant() -in @('0', 'false', 'off', 'no'))
-$startupTestSignal = $false
 $brokerClickPath = 'RETIRED_PACKAGE_REPORTER_ONLY'
 
 function Get-PhoenixGuardBrowserExecutable {
@@ -131,7 +147,7 @@ function Get-PhoenixGuardBrowserExecutable {
     return ''
 }
 
-function Get-PhoenixGuardDashboardBrowserArguments {
+function Get-PhoenixGuardDashboardBrowserArgument {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateSet('chrome', 'edge')]
@@ -175,7 +191,7 @@ function Start-PhoenixGuardDashboardBrowser {
 
     $browserPath = Get-PhoenixGuardBrowserExecutable -BrowserName $BrowserName
     if ($browserPath) {
-        $browserArguments = Get-PhoenixGuardDashboardBrowserArguments -BrowserName $BrowserName -Url $Url
+        $browserArguments = Get-PhoenixGuardDashboardBrowserArgument -BrowserName $BrowserName -Url $Url
         $browserArgumentString = ConvertTo-PhoenixGuardProcessArgumentString -Arguments $browserArguments
         Start-Process -FilePath $browserPath -ArgumentList $browserArgumentString
         return
@@ -203,9 +219,33 @@ function ConvertTo-PhoenixGuardProcessArgumentString {
     }) -join ' ')
 }
 
+function Test-PhoenixGuardOwnedCommandLine {
+    param(
+        [AllowEmptyString()]
+        [string]$CommandLine,
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)]
+        [string[]]$TargetPattern
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+    if ($CommandLine.IndexOf($RepositoryRoot, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return $false
+    }
+    foreach ($pattern in $TargetPattern) {
+        if ($CommandLine -like $pattern) {
+            return $true
+        }
+    }
+    return $false
+}
+
 Write-Host "PhoenixGuard launch profile: $finalLaunchProfile"
 Write-Host "  Runtime profile: FINAL_LIVE (package-governed live execution)"
-Write-Host "  Launcher compatibility input: $Profile"
+Write-Host "  Launcher compatibility input: $LaunchProfile"
 Write-Host "  Tracker: ON"
 Write-Host "  Model Council V3: ON"
 Write-Host "  Market Reality: ON"
@@ -220,22 +260,41 @@ if (-not (Test-Path -LiteralPath $runtimeDir)) {
 }
 
 function Start-TrackerChildProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChildApiHost,
+        [Parameter(Mandatory = $true)]
+        [int]$ChildApiPort,
+        [Parameter(Mandatory = $true)]
+        [string]$ChildSessionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ChildBrokerWindowQuery,
+        [Parameter(Mandatory = $true)]
+        [string]$ChildTrackerFocusRegion,
+        [Parameter(Mandatory = $true)]
+        [double]$ChildCaptureIntervalSec,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('chrome', 'default', 'edge')]
+        [string]$ChildDashboardBrowser,
+        [int]$BrokerWindowHwnd = 0
+    )
+
     $trackerArgs = @(
         'Backend\launch\start_phoenixguard_24_7_tracker.py',
         '--host',
-        $ApiHost,
+        $ChildApiHost,
         '--port',
-        "$ApiPort",
+        "$ChildApiPort",
         '--session-id',
-        $SessionId,
+        $ChildSessionId,
         '--window-query',
-        $BrokerWindowQuery,
+        $ChildBrokerWindowQuery,
         '--focus-region',
-        $TrackerFocusRegion,
+        $ChildTrackerFocusRegion,
         '--capture-interval',
-        "$CaptureIntervalSec",
+        "$ChildCaptureIntervalSec",
         '--dashboard-browser',
-        $DashboardBrowser,
+        $ChildDashboardBrowser,
         '--no-open-dashboard'
     )
     if ($BrokerWindowHwnd -gt 0) {
@@ -269,21 +328,15 @@ if (-not $NoKillExisting) {
             $processRows = @(Get-CimInstance Win32_Process)
             $processRowsAvailable = $true
         } catch {
-            Write-Warning "Process command-line scan unavailable: $($_.Exception.Message). Falling back to PhoenixGuard port cleanup only."
+            Write-Warning "Process command-line scan unavailable: $($_.Exception.Message). Cleanup will not stop unattributed port owners."
         }
         $targetProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
 
         if ($processRowsAvailable) {
             $processRows | Where-Object {
                 $commandLine = [string]$_.CommandLine
-                $matchesTarget = $false
-                foreach ($pattern in $targetPatterns) {
-                    if ($commandLine -like $pattern) {
-                        $matchesTarget = $true
-                        break
-                    }
-                }
-                (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ([int]$_.ProcessId) -ne $currentPid -and $matchesTarget
+                ([int]$_.ProcessId) -ne $currentPid -and
+                    (Test-PhoenixGuardOwnedCommandLine -CommandLine $commandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns)
             } | ForEach-Object {
                 [void]$targetProcessIds.Add([int]$_.ProcessId)
             }
@@ -295,12 +348,10 @@ if (-not $NoKillExisting) {
                 Get-NetTCPConnection -LocalPort $cleanupPort -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
                     $ownerPid = [int]$_.OwningProcess
                     if ($ownerPid -ne $currentPid) {
-                        if (-not $processRowsAvailable) {
-                            [void]$targetProcessIds.Add($ownerPid)
-                        } else {
+                        if ($processRowsAvailable) {
                             $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
                             $ownerCommandLine = [string]$owner.CommandLine
-                            if ($ownerCommandLine -like '*phoenixguard*' -or $ownerCommandLine -like '*start_phoenixguard_mobile_api.py*' -or $ownerCommandLine -like '*next*') {
+                            if (Test-PhoenixGuardOwnedCommandLine -CommandLine $ownerCommandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns) {
                                 [void]$targetProcessIds.Add($ownerPid)
                             }
                         }
@@ -342,14 +393,25 @@ if ($LASTEXITCODE -ne 0) {
     throw "Configured PhoenixGuard Python environment verification failed. Launch aborted."
 }
 
+$trackerLaunchParameters = @{
+    ChildApiHost = $ApiHost
+    ChildApiPort = $ApiPort
+    ChildSessionId = $SessionId
+    ChildBrokerWindowQuery = $BrokerWindowQuery
+    ChildTrackerFocusRegion = $TrackerFocusRegion
+    ChildCaptureIntervalSec = $CaptureIntervalSec
+    ChildDashboardBrowser = $DashboardBrowser
+    BrokerWindowHwnd = $BrokerWindowHwnd
+}
+
 Write-Host "Starting PhoenixGuard tracker on $baseUrl"
-$trackerProcess = Start-TrackerChildProcess
+$trackerProcess = Start-TrackerChildProcess @trackerLaunchParameters
 
 $deadline = (Get-Date).AddSeconds(90)
 while ((Get-Date) -lt $deadline) {
     if ($trackerProcess.HasExited) {
         Write-Warning "Tracker launcher exited during startup with code $($trackerProcess.ExitCode). Restarting. Logs: $trackerStdoutPath / $trackerStderrPath"
-        $trackerProcess = Start-TrackerChildProcess
+        $trackerProcess = Start-TrackerChildProcess @trackerLaunchParameters
         Start-Sleep -Seconds 1
     }
     try {
@@ -384,11 +446,16 @@ try {
         Write-Host "Starting shooter package reporter against $baseUrl"
         $effectiveShooterPollSec = [double]$ShooterPollSec
         $pollText = ([string]$effectiveShooterPollSec).Replace(',', '.')
-        $logDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
-        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $outPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.out.log"
-        $errPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.err.log"
+        if ($persistChildStdio) {
+            $logDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
+            New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+            $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+            $outPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.out.log"
+            $errPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.err.log"
+        } else {
+            $outPath = $discardStdoutPath
+            $errPath = $discardStderrPath
+        }
         $shooterArgs = @(
             'Backend\launch\shooter.py',
             'signal',
@@ -402,9 +469,9 @@ try {
             '4.0'
         )
         Start-Process -FilePath $pythonPath -ArgumentList $shooterArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
-        Write-Host "Shooter package reporter log: $errPath"
+        Write-Host $(if ($persistChildStdio) { "Shooter package reporter log: $errPath" } else { 'Shooter child stdio: discarded (bounded structured state remains enabled)' })
     } elseif ($session) {
-        Write-Host "Profile $Profile selected; tracker started without shooter."
+        Write-Host "Profile $LaunchProfile selected; tracker started without shooter."
     }
     if ($session -and $launchMt4Bridge) {
         Write-Host "Starting MT4 file bridge against $baseUrl"
@@ -412,11 +479,16 @@ try {
         $bridgePollText = ([string][double]$bridgePollSec).Replace(',', '.')
         $bridgeTimeoutSec = if ($env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC) { [double]$env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC } else { 20.0 }
         $bridgeTimeoutText = ([string]$bridgeTimeoutSec).Replace(',', '.')
-        $bridgeLogDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
-        New-Item -ItemType Directory -Force -Path $bridgeLogDir | Out-Null
-        $bridgeStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $bridgeOutPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.out.log"
-        $bridgeErrPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.err.log"
+        if ($persistChildStdio) {
+            $bridgeLogDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
+            New-Item -ItemType Directory -Force -Path $bridgeLogDir | Out-Null
+            $bridgeStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+            $bridgeOutPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.out.log"
+            $bridgeErrPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.err.log"
+        } else {
+            $bridgeOutPath = $discardStdoutPath
+            $bridgeErrPath = $discardStderrPath
+        }
         $bridgeArgs = @(
             'Backend\tools\phoenixguard_mt4_file_bridge.py',
             '--session-id',
@@ -439,7 +511,7 @@ try {
             $bridgeArgs += @('--timeframe-override', $env:PHOENIXGUARD_MT4_TIMEFRAME)
         }
         Start-Process -FilePath $pythonPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
-        Write-Host "MT4 file bridge log: $bridgeOutPath"
+        Write-Host $(if ($persistChildStdio) { "MT4 file bridge log: $bridgeOutPath" } else { 'MT4 bridge child stdio: discarded (bounded status/metrics files remain enabled)' })
     } elseif ($session) {
         Write-Host "MT4 file bridge disabled by PHOENIXGUARD_MT4_BRIDGE_ENABLED=$env:PHOENIXGUARD_MT4_BRIDGE_ENABLED"
     }
@@ -481,8 +553,12 @@ if (-not (Test-Path -LiteralPath $statusPath)) {
 
 Write-Host "Dashboard: $dashboardUrl"
 Write-Host "Status: $statusPath"
-Write-Host "Tracker launcher logs: $trackerStdoutPath"
-Write-Host "Tracker launcher errors: $trackerStderrPath"
+if ($persistChildStdio) {
+    Write-Host "Tracker launcher logs: $trackerStdoutPath"
+    Write-Host "Tracker launcher errors: $trackerStderrPath"
+} else {
+    Write-Host "Tracker child stdio: discarded; runtime state and health endpoints remain authoritative"
+}
 if ($NoStatusLoop) {
     return
 }
@@ -514,7 +590,7 @@ while ($true) {
             Stop-Process -Id $trackerProcess.Id -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
         }
-        $trackerProcess = Start-TrackerChildProcess
+        $trackerProcess = Start-TrackerChildProcess @trackerLaunchParameters
         $healthFailureCount = 0
         Start-Sleep -Seconds 2
     }

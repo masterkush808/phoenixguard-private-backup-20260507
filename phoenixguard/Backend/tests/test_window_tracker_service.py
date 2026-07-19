@@ -6228,6 +6228,14 @@ def _complete_scene_forecast_for_persistence(
             "step": index,
             "x_norm": line_points[index][0],
             "open_y_norm": line_points[index - 1][1],
+            "high_y_norm": min(
+                line_points[index - 1][1], line_points[index][1]
+            )
+            - 0.001,
+            "low_y_norm": max(
+                line_points[index - 1][1], line_points[index][1]
+            )
+            + 0.001,
             "close_y_norm": line_points[index][1],
         }
         for index in range(1, 13)

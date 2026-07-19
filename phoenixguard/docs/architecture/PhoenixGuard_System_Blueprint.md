@@ -235,8 +235,8 @@ $python = ".\.venv\Scripts\python.exe"
 ```
 
 The safe restart sequence first requests tracker stop/emergency-stop through the API if it is alive,
-then kills PhoenixGuard processes launched from the repo or known runtime entrypoints, then backs up
-and clears runtime/cache state:
+then kills PhoenixGuard processes launched from the repo or known runtime entrypoints, then
+permanently clears allowlisted runtime/cache state without creating another archive:
 
 ```powershell
 $base = "http://127.0.0.1:8793"
@@ -258,7 +258,7 @@ Get-CimInstance Win32_Process |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 3
-.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
+.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply --delete
 ```
 
 The final live dashboard stack is launched with:
@@ -432,10 +432,20 @@ PhoenixGuard considered an entry at the moment the packet allowed it.
 The final V3 architecture treats storage growth as a production risk. The tracker is a live reader
 and predictor, not an unlimited recorder. The hardening adds these guards:
 
-- `Backend/tools/clean_v3_runtime_state.py --apply` backs up and clears stale runtime/cache state while
-  preserving calibration files.
+- `Backend/tools/clean_v3_runtime_state.py --apply --delete` permanently removes disposable
+  runtime/cache state without creating another archive, rejects target and nested junction/symlink redirection,
+  skips every project virtual environment, and preserves calibration files plus durable
+  tracking-episode history.
+- Durable episode persistence is capped per record, ledger, session, total bytes, and inactive
+  session count; the active session remains protected while oldest inactive histories are deleted
+  directly without creating a second archive.
+- The market registry uses contained, sanitized session filenames, caps each encoded record, and
+  compacts atomically to a recent bounded tail. Live overlay debug copies are disabled in the
+  canonical launcher.
 - Overlay geometry dumps are disabled by default through `PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS=0`.
 - When overlay geometry dumps are enabled, they are pruned by file count, age, and size.
+- Canonical long-running child stdout/stderr is discarded; bounded structured state, health,
+  status, and guard reports remain authoritative without append-only launcher logs.
 - Tracker event logs are bounded by `PHOENIXGUARD_TRACKER_EVENT_LOG_MAX_MB` and tail-line retention.
 - Decision artifacts are compact by default unless `PHOENIXGUARD_FULL_DECISION_ARTIFACTS=1` is
   explicitly set.
@@ -1004,9 +1014,10 @@ The final V3 architecture deliberately avoids unbounded growth during one-second
 
 | Growth Source                   | Control                                                                                                                        |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Runtime cache and old artifacts | `Backend/tools/clean_v3_runtime_state.py --apply` moves stale runtime/cache paths into `_archive/runtime_backup`.                      |
+| Runtime cache and old artifacts | `Backend/tools/clean_v3_runtime_state.py --apply --delete` purges allowlisted generated state without creating an archive.          |
+| Market registry                 | Safe session filenames, 256 KiB maximum records, atomic recent-tail compaction, and a 16 MB directory cap.                      |
 | Overlay geometry dumps          | Disabled by default; optional pruning by max files, max MB, and max age.                                                       |
-| Event logs                      | Tracker JSONL logs are bounded by MB and tail-line count.                                                                      |
+| Event logs                      | Tracker JSONL logs are bounded; canonical child stdout/stderr and Uvicorn access logs are disabled.                            |
 | Decision payload persistence    | Compact by default through `PHOENIXGUARD_FULL_DECISION_ARTIFACTS=0`.                                                           |
 | Entry screenshots               | Pruned in normal runtime and intentionally retained only for burn/forensic runs.                                               |
 | Hardening studies               | Kept under `%LOCALAPPDATA%\PhoenixGuard\hardening_studies` and intended to be cleaned between burns unless needed as evidence. |

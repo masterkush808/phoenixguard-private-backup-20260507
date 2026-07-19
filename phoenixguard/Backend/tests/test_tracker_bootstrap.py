@@ -280,7 +280,7 @@ def test_launcher_reconciles_fresh_persisted_running_session_worker(
     assert not any(path.endswith("/stop") for _method, path in calls)
 
 
-def test_quarantine_stale_session_on_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_stale_session_on_boot_is_purged_without_archive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     session_dir.mkdir(parents=True)
@@ -293,7 +293,30 @@ def test_quarantine_stale_session_on_boot(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     assert tracker_launcher.quarantine_stale_session_on_boot(tmp_path, "pocket-live-8788") is True
     assert not session_dir.exists()
-    assert list(session_dir.parent.glob("pocket-live-8788_stale_*"))
+    assert not list(session_dir.parent.glob("pocket-live-8788_stale_*"))
+
+
+def test_stale_session_cleanup_removes_old_quarantine_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    sessions_dir = data_dir / "mobile_api" / "window_tracker" / "sessions"
+    current_dir = sessions_dir / "pocket-live-8788"
+    stale_dir = sessions_dir / "pocket-live-8788_stale_20260719_010101"
+    current_dir.mkdir(parents=True)
+    stale_dir.mkdir(parents=True)
+    (current_dir / "session.json").write_text(
+        json.dumps({"session_id": "pocket-live-8788", "last_capture_epoch": 999.0}),
+        encoding="utf-8",
+    )
+    (stale_dir / "old-window.jpg").write_bytes(b"derived")
+    monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
+
+    assert tracker_launcher.quarantine_stale_session_on_boot(tmp_path, "pocket-live-8788") is True
+    assert current_dir.exists()
+    assert not stale_dir.exists()
 
 
 def test_live_fast_display_heartbeat_runs_in_shadow_mode(monkeypatch: pytest.MonkeyPatch) -> None:

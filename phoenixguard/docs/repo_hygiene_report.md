@@ -22,8 +22,8 @@ import/reference pass would risk breaking the live tracker.
 
 ## Next Hygiene Pass
 
-Run an import/reference analysis before moving anything into `_archive/legacy_quarantine/`. The
-duplicate classes to inspect are:
+Run an import/reference analysis before permanently deleting anything. Do not create a quarantine
+or backup archive; delete only files proven generated or unused. The duplicate classes to inspect are:
 
 - packet builders: `rg "build_execution_packet|PG_EXECUTION_PACKET"`
 - signal parsers: `rg "execution_action|candidate_action|latest_signal"`

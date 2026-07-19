@@ -1,7 +1,7 @@
 # PhoenixGuard Live Tracking Blueprint
 
 Status: canonical live-runtime and tracking-episode blueprint
-Updated: 2026-07-18
+Updated: 2026-07-19
 Runtime profile: `FINAL_LIVE`
 Canonical session: `pocket-live-8788`
 
@@ -209,6 +209,7 @@ internally:
 | Key areas | demand, supply, support, resistance, opposing force | Visible when relevant |
 | Trend guides | support, resistance, and inner trendlines; angle vectors | Toggleable and candle-anchored |
 | Entry plan | trigger, preferred entry, target, invalidation | Visible only with valid geometry and context |
+| Order positioning | lower-price buy, higher-price sell, upside/downside confirmation, plan failure | Frozen at Start; each valid area remains independently toggleable |
 | Future blocks | 12 LSTM/Scene candle blocks and bounded progression | Toggleable; never drawn as a misleading single line |
 | History | replay entry/exit and prior progression | Ghosted and non-authoritative |
 | Diagnostics | raw detection, rejected/stale geometry, transform and anchor debug | Hidden outside Diagnostics mode |
@@ -216,6 +217,15 @@ internally:
 Aliases are normalized into the V3 contract. Internal strategy tags may support scoring, but the
 normal frontend uses plain English and does not expose backend telemetry or private strategy
 vocabulary. Toggle state changes visibility only; it never changes execution trust.
+
+At Start, verified structure may produce rule-derived limit, closed-confirmation stop-entry, and
+protective-invalidation candidate areas. Raw supply/demand or a strategy label cannot create a
+stop-entry area by itself. The candidate plan is fingerprinted and frozen. Later chart scroll or
+rescale is handled only through one residual-bounded transform fitted from at least three stable
+closed-candle IDs; no individual moving source box is allowed to drag a frozen area. If that fit is
+not proven on a frame, the frozen positioning layer is hidden rather than guessed. This is currently
+a deterministic, reviewable mapper and annotation foundation—not a newly trained localization
+model.
 
 Primary implementation:
 
@@ -327,6 +337,7 @@ Start creates a unique episode ID and freezes the before-state:
 - Committed trading plan/thesis.
 - Scene, LSTM, and memory baselines.
 - Start-time permission snapshot.
+- Rule-derived order-positioning areas, their structural sources, and stable candle-anchor snapshot.
 - Twelve-event horizon.
 
 The frozen baseline prevents the system from rewriting its original prediction after every moving
@@ -338,6 +349,7 @@ While the baseline remains fixed, these live facts continue to update:
 
 - Current forming-candle movement.
 - Exact chart image and valid overlays.
+- Display reprojection of frozen order areas when a global closed-candle fit is proven.
 - Freshness and source-lock health.
 - Newly completed actual candles.
 - Predicted-versus-actual event scores.
@@ -457,8 +469,11 @@ data/mobile_api/window_tracker/tracking_episode_archive_v1/sessions/<session>/
 ```
 
 The durable archive contains per-episode records, history, and an event ledger. It intentionally
-survives live-runtime cleanup and is bounded to the most recent 24 episodes. Public history is a
-sanitized summary, not a dump of private model geometry.
+survives live-runtime cleanup. Retention is bounded to the most recent 24 episodes per session, 32
+session directories by default, 64 MiB total by default, 1 MiB per record, and a byte/line-bounded
+ledger. The active session is never selected by global pruning; oldest inactive sessions are
+permanently deleted without archive or quarantine copies. Public history is a sanitized summary, not
+a dump of private model geometry.
 
 ## 14. Key public endpoints
 
@@ -600,8 +615,10 @@ powershell -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_li
 - `Backend/src/phoenixguard/decision/scene_forecast_contributor_v3.py`
 - `Backend/src/phoenixguard/decision/lstm_candle_sequence_contributor_v3.py`
 - `Backend/src/phoenixguard/decision/forecast_belief_tracker_v3.py`
+- `Backend/src/phoenixguard/decision/order_positioning_v3.py`
 - `Backend/src/phoenixguard/decision/model_council_v3.py`
 - `Backend/src/phoenixguard/vision/v3_overlay_contract.py`
+- `Backend/src/phoenixguard/vision/order_positioning_annotation_v3.py`
 - `Backend/src/phoenixguard/vision/overlay_geometry.py`
 - `Frontend/dashboard/static/window_tracker_dashboard.html`
 
@@ -617,6 +634,7 @@ powershell -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_li
 - [Overlay Modes](../frontend_v4/overlay_modes.md)
 - [V3 Language Constitution](../../Backend/src/phoenixguard/V3_LANGUAGE_CONSTITUTION.md)
 - [Tracking Episode Lifecycle Tests](../../Backend/tests/test_tracking_episode_v3.py)
+- [Order Positioning V3 Doctrine](../decision/ORDER_POSITIONING_V3_DOCTRINE.md)
 
 Older V2 tracker documents describe historical architecture and are not the authority for the current
 12-event tracking lifecycle.

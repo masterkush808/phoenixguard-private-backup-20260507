@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
+
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 
 _PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
@@ -12,7 +16,6 @@ PROJECT_ROOT = ensure_project_paths()
 
 import asyncio
 import logging
-import os
 from collections.abc import Callable
 from typing import cast
 
@@ -72,6 +75,12 @@ if __name__ == "__main__":
     )
     host = str(os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8793") or "8793")
+    access_log_enabled = str(os.getenv("PHOENIXGUARD_UVICORN_ACCESS_LOG", "0") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     session_id = str(os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788") or "pocket-live-8788").strip()
     base_url = f"http://{host}:{port}"
     guard = guard_from_environment(PROJECT_ROOT)
@@ -93,7 +102,14 @@ if __name__ == "__main__":
             raise SystemExit(f"PhoenixGuard runtime singleton refused API launch: {result.reason} {result.lock_path}")
         acquired_token = result.owner_token
     try:
-        uvicorn.run("phoenixguard.mobile_api.app:create_app", factory=True, host=host, port=port, reload=False)
+        uvicorn.run(
+            "phoenixguard.mobile_api.app:create_app",
+            factory=True,
+            host=host,
+            port=port,
+            reload=False,
+            access_log=access_log_enabled,
+        )
     finally:
         if acquired_token:
             guard.release(owner_token=acquired_token)

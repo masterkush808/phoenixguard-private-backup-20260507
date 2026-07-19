@@ -107,6 +107,7 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
         "trendlines",
         "market_context",
         "council",
+        "order_positioning",
         "triggers",
         "targets",
         "invalidation",
@@ -302,6 +303,27 @@ def test_dashboard_tracking_plan_and_individual_overlay_controls_are_real_filter
     assert "function episodeAllowsOverlay(overlay, payload)" in text
     assert 'data-overlay-family="market_context"' in text
     assert ">Reaction map <" in text
+
+
+def test_dashboard_has_permanent_independent_order_area_controls() -> None:
+    text = _dashboard_text()
+
+    assert 'data-overlay-family="order_positioning"' in text
+    assert ">Order areas <" in text
+    for kind in (
+        "lower_price_buy_area",
+        "higher_price_sell_area",
+        "upside_break_area",
+        "downside_break_area",
+        "plan_failure_area",
+    ):
+        assert f'data-overlay-kind-control="{kind}"' in text
+        assert f'"{kind}"' in text
+    assert 'document.querySelectorAll("[data-overlay-kind-control]")' in text
+    assert "toggleOverlayKind(button.dataset.overlayKindControl);" in text
+    assert 'live: ["current_candles", "market_context", "council", "order_positioning"]' in text
+    assert "does not slide to chase price" in text
+    assert "Evidence only; entry permission remains separate." in text
 
 
 def test_dashboard_sequence_outlook_renders_blocks_without_a_selected_path() -> None:
