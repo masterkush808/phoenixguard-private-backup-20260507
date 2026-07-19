@@ -295,13 +295,18 @@
     }
 
     .tracking-ribbon {
-      display: flex;
+      display: grid;
       min-height: 52px;
+      gap: 0;
+      padding: 8px 0 14px;
+      border-bottom: 1px solid rgba(242, 200, 102, 0.18);
+    }
+
+    .tracking-ribbon-head {
+      display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 18px;
-      padding: 8px 0 10px;
-      border-bottom: 1px solid rgba(242, 200, 102, 0.18);
     }
 
     .tracking-ribbon-copy {
@@ -417,6 +422,560 @@
     .tracking-action:disabled {
       cursor: wait;
       opacity: 0.46;
+    }
+
+    .tracking-live-board {
+      display: grid;
+      grid-template-columns: minmax(160px, 0.8fr) minmax(180px, 0.95fr) minmax(200px, 1.1fr) minmax(180px, 0.95fr);
+      gap: 0;
+      margin-top: 12px;
+      border-top: 1px solid rgba(242, 200, 102, 0.11);
+      animation: enter-up 320ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+    }
+
+    .tracking-live-fact {
+      display: grid;
+      min-width: 0;
+      gap: 4px;
+      padding: 13px 18px 11px 0;
+    }
+
+    .tracking-live-fact + .tracking-live-fact {
+      padding-left: 18px;
+      border-left: 1px solid rgba(242, 200, 102, 0.11);
+    }
+
+    .tracking-live-label {
+      color: var(--gold-deep);
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 780;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .tracking-live-fact strong {
+      min-width: 0;
+      color: var(--gold-pale);
+      font-size: 12px;
+      font-weight: 720;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tracking-live-fact small {
+      color: var(--quiet);
+      font-size: 9px;
+      line-height: 1.45;
+    }
+
+    .tracking-forecast-read[data-state="aligned"] strong {
+      color: var(--up);
+    }
+
+    .tracking-forecast-read[data-state="opposed"] strong {
+      color: var(--down);
+    }
+
+    .tracking-forecast-read[data-state="mixed"] strong {
+      color: var(--accent);
+    }
+
+    .tracking-forecast-read[data-state="path-a"] strong,
+    .tracking-forecast-read[data-state="path-b"] strong {
+      color: var(--gold-pale);
+      text-shadow: 0 0 14px rgba(242, 200, 102, 0.18);
+    }
+
+    .tracking-forecast-read[data-state="too-close"] strong {
+      color: var(--accent);
+    }
+
+    .tracking-forecast-read[data-state="no-fit"] strong {
+      color: var(--down);
+    }
+
+    .tracking-forecast-read[data-state="unavailable"] strong {
+      color: var(--muted);
+    }
+
+    .tracking-entry-read[data-state="directional"] strong {
+      color: var(--gold-pale);
+    }
+
+    .tracking-entry-read[data-state="neutral"] strong,
+    .tracking-entry-read[data-state="unavailable"] strong {
+      color: var(--muted);
+    }
+
+    .tracking-live-fact .tracking-entry-permission {
+      color: var(--gold-deep);
+    }
+
+    .tracking-watch-read[data-state="forming"] strong::before,
+    .tracking-watch-read[data-state="reacquiring"] strong::before {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 7px;
+      border-radius: 50%;
+      background: var(--up);
+      box-shadow: 0 0 9px rgba(74, 222, 128, 0.42);
+      content: "";
+      vertical-align: 1px;
+      animation: status-pulse 1.5s ease-in-out infinite;
+    }
+
+    .tracking-watch-read[data-state="reacquiring"] strong::before {
+      background: var(--accent);
+      box-shadow: 0 0 9px rgba(242, 200, 102, 0.34);
+    }
+
+    .tracking-path-comparison {
+      display: grid;
+      grid-column: 1 / -1;
+      gap: 7px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(242, 200, 102, 0.11);
+    }
+
+    .tracking-path-heading,
+    .tracking-live-rail-heading {
+      display: flex;
+      min-width: 0;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .tracking-path-heading strong,
+    .tracking-live-rail-heading strong {
+      color: var(--gold-pale);
+      font-size: 10px;
+      font-weight: 730;
+    }
+
+    .tracking-path-heading span,
+    .tracking-live-rail-heading span {
+      color: var(--quiet);
+      font-size: 8px;
+      line-height: 1.4;
+      text-align: right;
+    }
+
+    .tracking-path-rows {
+      display: grid;
+      border-top: 1px solid rgba(255, 255, 255, 0.055);
+    }
+
+    .tracking-route-plot {
+      position: relative;
+      min-width: 0;
+      min-height: 158px;
+      overflow: hidden;
+      border-top: 1px solid rgba(242, 200, 102, 0.10);
+      border-bottom: 1px solid rgba(242, 200, 102, 0.10);
+      background:
+        linear-gradient(rgba(242, 200, 102, 0.025) 1px, transparent 1px),
+        #070705;
+      background-size: 100% 32px;
+    }
+
+    .tracking-route-svg {
+      display: block;
+      width: 100%;
+      height: 158px;
+      overflow: visible;
+    }
+
+    .tracking-route-guide {
+      stroke: rgba(242, 200, 102, 0.085);
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .tracking-entry-band {
+      fill: rgba(242, 200, 102, 0.075);
+      stroke: rgba(242, 200, 102, 0.34);
+      stroke-width: 1;
+      stroke-dasharray: 4 5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .tracking-route-step-label {
+      fill: rgba(224, 216, 190, 0.45);
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.02em;
+    }
+
+    .tracking-route-line {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2.2;
+      vector-effect: non-scaling-stroke;
+      transition: opacity 180ms ease, stroke-width 180ms ease, filter 180ms ease;
+    }
+
+    .tracking-route-line.path-a {
+      stroke: var(--gold-pale);
+      filter: drop-shadow(0 0 4px rgba(242, 200, 102, 0.20));
+    }
+
+    .tracking-route-line.path-b {
+      stroke: rgba(184, 121, 40, 0.92);
+      stroke-dasharray: 6 4;
+      filter: drop-shadow(0 0 3px rgba(184, 121, 40, 0.16));
+    }
+
+    .tracking-route-line.observed {
+      stroke: rgba(238, 242, 232, 0.94);
+      stroke-width: 2.7;
+      filter:
+        drop-shadow(0 0 2px rgba(6, 6, 4, 0.98))
+        drop-shadow(0 0 5px rgba(242, 200, 102, 0.26));
+    }
+
+    .tracking-route-node {
+      fill: #070705;
+      stroke-width: 1.2;
+      vector-effect: non-scaling-stroke;
+      transition: opacity 180ms ease, r 180ms ease;
+    }
+
+    .tracking-route-node.path-a {
+      stroke: var(--gold-pale);
+    }
+
+    .tracking-route-node.path-b {
+      stroke: var(--gold-deep);
+    }
+
+    .tracking-route-node[data-fit="aligned"] {
+      fill: rgba(74, 222, 128, 0.28);
+      stroke: var(--up);
+    }
+
+    .tracking-route-node[data-fit="opposed"] {
+      fill: rgba(255, 107, 94, 0.24);
+      stroke: var(--down);
+    }
+
+    .tracking-route-node[data-fit="measured"] {
+      fill: rgba(242, 200, 102, 0.22);
+      stroke: var(--accent);
+    }
+
+    .tracking-observed-node {
+      fill: var(--gold-pale);
+      stroke: #070705;
+      stroke-width: 1.4;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .tracking-route-anchor {
+      fill: var(--accent);
+      stroke: #070705;
+      stroke-width: 2;
+      filter: drop-shadow(0 0 6px rgba(242, 200, 102, 0.34));
+      vector-effect: non-scaling-stroke;
+    }
+
+    .tracking-path-comparison[data-focused-path="PATH_A"] .tracking-route-line.path-b,
+    .tracking-path-comparison[data-focused-path="PATH_A"] .tracking-route-node.path-b,
+    .tracking-path-comparison[data-focused-path="PATH_B"] .tracking-route-line.path-a,
+    .tracking-path-comparison[data-focused-path="PATH_B"] .tracking-route-node.path-a {
+      opacity: 0.42;
+    }
+
+    .tracking-path-comparison[data-focused-path="PATH_A"] .tracking-route-line.path-a,
+    .tracking-path-comparison[data-focused-path="PATH_B"] .tracking-route-line.path-b {
+      stroke-width: 3;
+      opacity: 1;
+    }
+
+    .tracking-route-legend {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      inset: 7px 10px auto auto;
+      color: var(--quiet);
+      font-family: var(--font-mono);
+      font-size: 7px;
+      pointer-events: none;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .tracking-route-legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .tracking-route-legend i {
+      display: inline-block;
+      width: 16px;
+      height: 0;
+      border-top: 2px solid var(--gold-pale);
+    }
+
+    .tracking-route-legend .path-b i {
+      border-color: var(--gold-deep);
+      border-top-style: dashed;
+    }
+
+    .tracking-route-legend .observed i {
+      border-color: rgba(238, 242, 232, 0.94);
+      border-top-width: 3px;
+    }
+
+    .tracking-route-legend .entry-area i {
+      height: 6px;
+      border: 1px dashed rgba(242, 200, 102, 0.42);
+      background: rgba(242, 200, 102, 0.075);
+    }
+
+    .tracking-route-axis {
+      position: absolute;
+      inset: 0;
+      color: rgba(224, 216, 190, 0.45);
+      font-family: var(--font-mono);
+      font-size: 7px;
+      pointer-events: none;
+    }
+
+    .tracking-route-axis span {
+      position: absolute;
+      bottom: 5px;
+      transform: translateX(-50%);
+    }
+
+    .tracking-route-placeholder {
+      position: absolute;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      color: var(--quiet);
+      font-size: 9px;
+      text-align: center;
+      inset: 0;
+    }
+
+    .tracking-route-placeholder[hidden] {
+      display: none;
+    }
+
+    .tracking-path-row {
+      position: relative;
+      display: grid;
+      width: 100%;
+      min-width: 0;
+      min-height: 54px;
+      grid-template-columns: minmax(132px, 1fr) auto;
+      align-items: center;
+      gap: 14px;
+      padding: 8px 10px 8px 12px;
+      border: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+      border-radius: 0;
+      color: var(--muted);
+      background: transparent;
+      text-align: left;
+      opacity: 0.82;
+      transition: opacity 180ms ease, background 180ms ease, box-shadow 180ms ease;
+    }
+
+    .tracking-path-row::before {
+      position: absolute;
+      width: 2px;
+      background: transparent;
+      content: "";
+      inset: 8px auto 8px 0;
+      transition: background 180ms ease, box-shadow 180ms ease;
+    }
+
+    .tracking-path-row:hover,
+    .tracking-path-row:focus-visible,
+    .tracking-path-row[aria-pressed="true"] {
+      color: var(--gold-pale);
+      background: linear-gradient(90deg, rgba(242, 200, 102, 0.075), rgba(242, 200, 102, 0.008) 62%, transparent);
+      opacity: 1;
+    }
+
+    .tracking-path-row:focus-visible {
+      outline: 1px solid rgba(242, 200, 102, 0.68);
+      outline-offset: -1px;
+    }
+
+    .tracking-path-row[aria-pressed="true"]::before,
+    .tracking-path-row[data-state="favored"]::before {
+      background: var(--accent);
+      box-shadow: 0 0 10px rgba(242, 200, 102, 0.36);
+    }
+
+    .tracking-path-comparison[data-has-focus="true"] .tracking-path-row[aria-pressed="false"] {
+      opacity: 0.62;
+    }
+
+    .tracking-path-comparison[data-has-focus="true"] .tracking-path-row[aria-pressed="false"]:hover,
+    .tracking-path-comparison[data-has-focus="true"] .tracking-path-row[aria-pressed="false"]:focus-visible,
+    .tracking-path-comparison[data-has-focus="true"] .tracking-path-row[data-state="favored"] {
+      opacity: 0.94;
+    }
+
+    .tracking-path-copy {
+      display: grid;
+      min-width: 0;
+      gap: 3px;
+    }
+
+    .tracking-path-copy strong {
+      overflow: hidden;
+      color: currentColor;
+      font-size: 10px;
+      font-weight: 750;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tracking-path-copy small {
+      overflow: hidden;
+      color: var(--quiet);
+      font-size: 8px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tracking-path-status {
+      color: var(--quiet);
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 720;
+      letter-spacing: 0.03em;
+      text-align: right;
+    }
+
+    .tracking-path-row[data-state="favored"] .tracking-path-status {
+      color: var(--accent);
+    }
+
+    .tracking-live-rail-heading {
+      margin-top: 5px;
+    }
+
+    .tracking-continuity-guidance {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+      gap: 10px;
+      margin-top: 3px;
+      padding: 9px 0 2px;
+      border-top: 1px solid rgba(242, 200, 102, 0.13);
+      color: var(--muted);
+    }
+
+    .tracking-continuity-guidance[hidden] {
+      display: none;
+    }
+
+    .tracking-continuity-guidance strong {
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .tracking-continuity-guidance span {
+      font-size: 9px;
+      line-height: 1.45;
+    }
+
+    .tracking-event-tape {
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: repeat(12, minmax(42px, 1fr));
+      gap: 5px;
+      margin: 0;
+      padding: 5px 0 0;
+      list-style: none;
+    }
+
+    .tracking-event {
+      position: relative;
+      display: grid;
+      min-width: 0;
+      min-height: 42px;
+      align-content: center;
+      gap: 2px;
+      padding: 6px 5px 5px;
+      border-top: 2px solid rgba(255, 255, 255, 0.08);
+      color: var(--quiet);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent);
+      transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+    }
+
+    .tracking-event strong {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 760;
+      letter-spacing: 0.06em;
+    }
+
+    .tracking-event span {
+      overflow: hidden;
+      font-size: 8px;
+      line-height: 1.15;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tracking-event[data-state="aligned"] {
+      border-color: var(--up);
+      color: #b7f7cb;
+      background: linear-gradient(180deg, rgba(74, 222, 128, 0.10), transparent);
+    }
+
+    .tracking-event[data-state="opposed"] {
+      border-color: var(--down);
+      color: #ffb7ae;
+      background: linear-gradient(180deg, rgba(255, 107, 94, 0.10), transparent);
+    }
+
+    .tracking-event[data-state="recorded"] {
+      border-color: var(--accent);
+      color: var(--gold-pale);
+      background: linear-gradient(180deg, rgba(242, 200, 102, 0.09), transparent);
+    }
+
+    .tracking-event[data-state="path-a"],
+    .tracking-event[data-state="path-b"] {
+      border-color: var(--accent);
+      color: var(--gold-pale);
+      background: linear-gradient(180deg, rgba(242, 200, 102, 0.11), transparent);
+      animation: tracked-step-in 260ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+    }
+
+    @keyframes tracked-step-in {
+      from { opacity: 0.62; transform: translateY(2px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .tracking-event[data-state="forming"],
+    .tracking-event[data-state="reacquiring"] {
+      border-color: rgba(242, 200, 102, 0.72);
+      color: var(--gold-pale);
+      background: linear-gradient(180deg, rgba(242, 200, 102, 0.13), transparent);
+      animation: event-watch 1.8s ease-in-out infinite;
+    }
+
+    @keyframes event-watch {
+      0%, 100% { opacity: 0.68; }
+      50% { opacity: 1; }
     }
 
     .decision-shell {
@@ -2366,6 +2925,10 @@
       }
 
       .tracking-ribbon {
+        gap: 8px;
+      }
+
+      .tracking-ribbon-head {
         align-items: stretch;
         flex-direction: column;
         gap: 8px;
@@ -2388,6 +2951,71 @@
       .tracking-ribbon-actions,
       .tracking-action {
         width: 100%;
+      }
+
+      .tracking-live-board {
+        grid-template-columns: 1fr;
+      }
+
+      .tracking-live-fact,
+      .tracking-live-fact + .tracking-live-fact {
+        padding: 10px 0;
+        border-left: 0;
+        border-top: 1px solid rgba(242, 200, 102, 0.09);
+      }
+
+      .tracking-event-tape {
+        grid-template-columns: repeat(6, minmax(42px, 1fr));
+      }
+
+      .tracking-path-heading,
+      .tracking-live-rail-heading {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 3px;
+      }
+
+      .tracking-path-heading span,
+      .tracking-live-rail-heading span {
+        text-align: left;
+      }
+
+      .tracking-path-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 7px 12px;
+        padding: 10px 8px 10px 10px;
+      }
+
+      .tracking-route-plot {
+        min-height: 142px;
+      }
+
+      .tracking-route-svg {
+        height: 142px;
+      }
+
+      .tracking-route-legend {
+        gap: 6px 9px;
+        inset: 6px 8px auto 8px;
+        font-size: 6px;
+      }
+
+      .tracking-route-axis {
+        font-size: 6px;
+      }
+
+      .tracking-route-axis span {
+        bottom: 4px;
+      }
+
+      .tracking-path-status {
+        grid-column: 2;
+        grid-row: 1;
+      }
+
+      .tracking-continuity-guidance {
+        grid-template-columns: 1fr;
+        gap: 4px;
       }
 
       .decision-action-row h2 {
@@ -2572,17 +3200,99 @@
 
   <main class="app-main" id="main-content">
     <section class="tracking-ribbon" id="tracking-ribbon" data-state="ready" aria-label="Tracking episode">
-      <div class="tracking-ribbon-copy">
-        <strong class="tracking-ribbon-state" id="tracking-episode-state">Ready</strong>
-        <span class="tracking-ribbon-detail" id="tracking-episode-summary" aria-live="polite">Start tracking when the chart is loaded to keep one plan anchored across the full 12-step study.</span>
-        <div class="tracking-ribbon-progress" aria-label="Tracking episode progress">
-          <span class="tracking-ribbon-progress-track" aria-hidden="true"><span class="tracking-ribbon-progress-fill" id="tracking-episode-progress-fill"></span></span>
-          <span class="tracking-ribbon-progress-label" id="tracking-episode-progress">0 of 12</span>
+      <div class="tracking-ribbon-head">
+        <div class="tracking-ribbon-copy">
+          <strong class="tracking-ribbon-state" id="tracking-episode-state">Ready</strong>
+          <span class="tracking-ribbon-detail" id="tracking-episode-summary" aria-live="polite">Start tracking when the chart is loaded to keep one plan anchored across the full 12-step study.</span>
+          <div class="tracking-ribbon-progress" aria-label="Tracking episode progress">
+            <span class="tracking-ribbon-progress-track" aria-hidden="true"><span class="tracking-ribbon-progress-fill" id="tracking-episode-progress-fill"></span></span>
+            <span class="tracking-ribbon-progress-label" id="tracking-episode-progress">0 of 12</span>
+          </div>
+        </div>
+        <div class="tracking-ribbon-actions">
+          <button class="tracking-action primary" id="tracking-start" type="button" disabled>Start Tracking</button>
+          <button class="tracking-action" id="tracking-stop" type="button" hidden disabled>Stop &amp; save</button>
+          <button class="tracking-action primary" id="tracking-reset" type="button" hidden disabled title="Prepare a new 12-step study. Saved history is kept.">Reset</button>
         </div>
       </div>
-      <div class="tracking-ribbon-actions">
-        <button class="tracking-action primary" id="tracking-start" type="button" disabled>Start Tracking</button>
-        <button class="tracking-action" id="tracking-stop" type="button" hidden disabled>Stop &amp; save</button>
+      <div class="tracking-live-board" id="tracking-live-board" aria-label="Live before and after tracking evidence">
+        <div class="tracking-live-fact tracking-anchor-read">
+          <span class="tracking-live-label">Latest candle anchor</span>
+          <strong id="tracking-anchor-title">Not started</strong>
+          <small id="tracking-anchor-meta">Start Tracking to freeze the latest completed candle and both forecast routes.</small>
+        </div>
+        <div class="tracking-live-fact tracking-forecast-read" id="tracking-forecast-read" data-state="unknown">
+          <span class="tracking-live-label">Path check</span>
+          <strong id="tracking-forecast-title">Waiting for evidence</strong>
+          <small id="tracking-forecast-meta">The server has not favored either frozen route yet.</small>
+        </div>
+        <div class="tracking-live-fact tracking-watch-read" id="tracking-watch-read" data-state="idle">
+          <span class="tracking-live-label">Live observation</span>
+          <strong id="tracking-watch-title">Ready when you are</strong>
+          <small id="tracking-watch-detail">Start Tracking to begin the live comparison.</small>
+          <small id="tracking-live-updated">No live episode yet.</small>
+        </div>
+        <div class="tracking-live-fact tracking-entry-read" id="tracking-entry-read" data-state="unavailable">
+          <span class="tracking-live-label">Entry thesis</span>
+          <strong id="tracking-entry-title">Not frozen</strong>
+          <small id="tracking-entry-summary">The entry idea is saved only when tracking starts.</small>
+          <small id="tracking-entry-progress">Entry area progress is waiting for a saved start.</small>
+          <small class="tracking-entry-permission" id="tracking-entry-permission">Entry permission remains separate.</small>
+        </div>
+        <div class="tracking-path-comparison" id="tracking-path-comparison" data-state="waiting" data-has-focus="true" data-focused-path="PATH_A">
+          <div class="tracking-path-heading">
+            <strong>Two frozen forecast routes</strong>
+            <span>Focus one without hiding the other. Sequence future blocks stay separate, and neither route grants entry permission.</span>
+          </div>
+          <div class="tracking-route-plot" id="tracking-route-plot" data-state="waiting">
+            <svg class="tracking-route-svg" id="tracking-route-svg" viewBox="0 0 1200 158" preserveAspectRatio="none" role="img" aria-label="Two frozen forecast routes and confirmed observed progression">
+              <g id="tracking-route-guides" aria-hidden="true"></g>
+              <rect class="tracking-entry-band" id="tracking-entry-band" x="0" y="0" width="0" height="0" aria-label="Entry area at start" hidden></rect>
+              <polyline class="tracking-route-line path-a" id="tracking-route-path-a" points="" aria-label="Path A frozen route"></polyline>
+              <polyline class="tracking-route-line path-b" id="tracking-route-path-b" points="" aria-label="Path B frozen route"></polyline>
+              <polyline class="tracking-route-line observed" id="tracking-route-observed" points="" aria-label="No completed observed progression yet"></polyline>
+              <g id="tracking-route-nodes" aria-hidden="true"></g>
+              <g id="tracking-observed-nodes" aria-hidden="true"></g>
+              <circle class="tracking-route-anchor" id="tracking-route-anchor" cx="0" cy="0" r="4" aria-label="Shared starting candle"></circle>
+            </svg>
+            <div class="tracking-route-legend" aria-hidden="true">
+              <span class="path-a"><i></i>Path A</span>
+              <span class="path-b"><i></i>Path B</span>
+              <span class="observed"><i></i>Observed</span>
+              <span class="entry-area"><i></i>Entry area at start</span>
+            </div>
+            <div class="tracking-route-axis" id="tracking-route-axis" aria-hidden="true">
+              <span>E1</span><span>E2</span><span>E3</span><span>E4</span><span>E5</span><span>E6</span>
+              <span>E7</span><span>E8</span><span>E9</span><span>E10</span><span>E11</span><span>E12</span>
+            </div>
+            <p class="tracking-route-placeholder" id="tracking-route-placeholder">Waiting for two comparable route shapes.</p>
+          </div>
+          <div class="tracking-path-rows" id="tracking-path-rows" aria-label="Frozen forecast route comparison">
+            <button class="tracking-path-row" id="tracking-path-a" type="button" data-path-id="PATH_A" data-state="waiting" aria-pressed="true">
+              <span class="tracking-path-copy">
+                <strong id="tracking-path-a-title">Path A</strong>
+                <small id="tracking-path-a-summary">Waiting for the frozen main route.</small>
+              </span>
+              <span class="tracking-path-status" id="tracking-path-a-status">Awaiting candles</span>
+            </button>
+            <button class="tracking-path-row" id="tracking-path-b" type="button" data-path-id="PATH_B" data-state="waiting" aria-pressed="false">
+              <span class="tracking-path-copy">
+                <strong id="tracking-path-b-title">Path B</strong>
+                <small id="tracking-path-b-summary">Waiting for the frozen alternate route.</small>
+              </span>
+              <span class="tracking-path-status" id="tracking-path-b-status">Awaiting candles</span>
+            </button>
+          </div>
+          <div class="tracking-live-rail-heading">
+            <strong>Live completed candles</strong>
+            <span>Each E-step records once. Route favor is shown only when the server confirms it.</span>
+          </div>
+          <ol class="tracking-event-tape" id="tracking-event-tape" aria-label="Twelve tracked candle events"></ol>
+          <div class="tracking-continuity-guidance" id="tracking-continuity-guidance" role="status" aria-live="polite" hidden>
+            <strong>Clean restart</strong>
+            <span id="tracking-continuity-message">Continuity was lost. Stop &amp; save, then start a clean study from the latest completed candle.</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -2892,10 +3602,16 @@
 
     const SESSION_ID = __SESSION_ID_JSON__;
     const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";
+    const TRACKING_READINESS_SCHEMA_VERSION = "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1";
+    const TRACKING_PATH_COMPARISON_SCHEMA = "PG_TRACKING_PATH_COMPARISON_PUBLIC_V1";
     const FORECAST_ACTION_SCHEMA_VERSION = "PG_FORECAST_ACTION_V1";
     // Explicit actions and visibility refreshes stay immediate. This is only
     // the low-frequency HTTP fallback used while the dashboard is left open.
     const POLL_INTERVAL_MS = 30000;
+    // Tracking has its own faster safety poll. The event stream remains the
+    // primary live path, but a quiet/reconnecting stream must never leave the
+    // operator staring at an old E-number for half a minute.
+    const ACTIVE_TRACKING_POLL_INTERVAL_MS = 5000;
     const FORECAST_ACTION_ACK_TIMEOUT_MS = 10000;
     // A cold local model/bank load can take several minutes on CPU.  The API
     // owns a 420-second safety deadline; keep the dashboard polling slightly
@@ -3073,6 +3789,47 @@
       trackingEpisodeProgressFill: byId("tracking-episode-progress-fill"),
       trackingStart: byId("tracking-start"),
       trackingStop: byId("tracking-stop"),
+      trackingReset: byId("tracking-reset"),
+      trackingLiveBoard: byId("tracking-live-board"),
+      trackingAnchorTitle: byId("tracking-anchor-title"),
+      trackingAnchorMeta: byId("tracking-anchor-meta"),
+      trackingForecastRead: byId("tracking-forecast-read"),
+      trackingForecastTitle: byId("tracking-forecast-title"),
+      trackingForecastMeta: byId("tracking-forecast-meta"),
+      trackingWatchRead: byId("tracking-watch-read"),
+      trackingWatchTitle: byId("tracking-watch-title"),
+      trackingWatchDetail: byId("tracking-watch-detail"),
+      trackingLiveUpdated: byId("tracking-live-updated"),
+      trackingEntryRead: byId("tracking-entry-read"),
+      trackingEntryTitle: byId("tracking-entry-title"),
+      trackingEntrySummary: byId("tracking-entry-summary"),
+      trackingEntryProgress: byId("tracking-entry-progress"),
+      trackingEntryPermission: byId("tracking-entry-permission"),
+      trackingPathComparison: byId("tracking-path-comparison"),
+      trackingPathRows: byId("tracking-path-rows"),
+      trackingPathA: byId("tracking-path-a"),
+      trackingPathATitle: byId("tracking-path-a-title"),
+      trackingPathASummary: byId("tracking-path-a-summary"),
+      trackingPathAStatus: byId("tracking-path-a-status"),
+      trackingPathB: byId("tracking-path-b"),
+      trackingPathBTitle: byId("tracking-path-b-title"),
+      trackingPathBSummary: byId("tracking-path-b-summary"),
+      trackingPathBStatus: byId("tracking-path-b-status"),
+      trackingRoutePlot: byId("tracking-route-plot"),
+      trackingRouteSvg: byId("tracking-route-svg"),
+      trackingRouteGuides: byId("tracking-route-guides"),
+      trackingEntryBand: byId("tracking-entry-band"),
+      trackingRoutePathA: byId("tracking-route-path-a"),
+      trackingRoutePathB: byId("tracking-route-path-b"),
+      trackingRouteObserved: byId("tracking-route-observed"),
+      trackingRouteNodes: byId("tracking-route-nodes"),
+      trackingObservedNodes: byId("tracking-observed-nodes"),
+      trackingRouteAnchor: byId("tracking-route-anchor"),
+      trackingRouteAxis: byId("tracking-route-axis"),
+      trackingRoutePlaceholder: byId("tracking-route-placeholder"),
+      trackingEventTape: byId("tracking-event-tape"),
+      trackingContinuityGuidance: byId("tracking-continuity-guidance"),
+      trackingContinuityMessage: byId("tracking-continuity-message"),
       frameWindow: byId("frame-window"),
       frameChart: byId("frame-chart"),
       modeOverlay: byId("mode-overlay"),
@@ -3210,6 +3967,11 @@
       disabledKinds: readStoredDisabledKinds(),
       trackingPlanOpen: false,
       trackingEpisodeBusy: false,
+      trackingReadiness: null,
+      liveEpisode: null,
+      liveEpisodeObservedAt: 0,
+      liveTrackingClockTimer: 0,
+      trackingPathFocus: "PATH_A",
       labelMode: readStoredValue("phoenixguard.labels", "on"),
       overlayOpacity: Number(readStoredValue("phoenixguard.overlay.opacity", "88")) || 88,
       payload: null,
@@ -3404,8 +4166,44 @@
         .replace(/\b\w/g, (letter) => letter.toUpperCase());
     }
 
-    function trackingEpisode(payload) {
+    function payloadTrackingEpisode(payload) {
       return safeObject(safeObject(safeObject(payload).tracking).episode);
+    }
+
+    function trackingEpisode(payload) {
+      return safeObject(state.liveEpisode || payloadTrackingEpisode(payload));
+    }
+
+    function parsePublicEpoch(value) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric > 100000000000 ? numeric / 1000 : numeric;
+      }
+      const parsed = Date.parse(safeText(value, ""));
+      return Number.isFinite(parsed) && parsed > 0 ? parsed / 1000 : 0;
+    }
+
+    function rememberLiveTracking(payload) {
+      const operatorState = safeObject(payload);
+      const episode = payloadTrackingEpisode(operatorState);
+      if (!Object.keys(episode).length) {
+        return;
+      }
+      const currentRevision = Number(safeObject(state.liveEpisode).revision || 0);
+      const candidateRevision = Number(episode.revision || 0);
+      if (currentRevision > 0 && candidateRevision < currentRevision) {
+        return;
+      }
+      const observedAt = observedValue(operatorState);
+      if (
+        observedAt > 0
+        && state.liveEpisodeObservedAt > 0
+        && observedAt < state.liveEpisodeObservedAt
+      ) {
+        return;
+      }
+      state.liveEpisode = episode;
+      state.liveEpisodeObservedAt = Math.max(state.liveEpisodeObservedAt, observedAt);
     }
 
     function episodeProgress(episode) {
@@ -3413,17 +4211,20 @@
       const progress = safeObject(row.progress);
       const totalCandidate = Number(progress.total || row.event_horizon || row.total_steps || row.episode_total || row.episodes_total || 12);
       const total = Math.max(1, Number.isFinite(totalCandidate) ? Math.round(totalCandidate) : 12);
-      const completedCandidate = Number(
-        progress.completed
-        || progress.current
-        || row.event_cursor
-        || row.completed_steps
-        || row.current_step
-        || row.episode_index
-        || row.step
-        || 0
+      const completedCandidate = [
+        progress.completed,
+        progress.current,
+        row.event_cursor,
+        row.completed_steps,
+        row.current_step,
+        row.episode_index,
+        row.step,
+      ].map(Number).find(Number.isFinite);
+      const completed = clamp(
+        Math.max(Number.isFinite(completedCandidate) ? completedCandidate : 0, safeList(row.events).length),
+        0,
+        total,
       );
-      const completed = clamp(Number.isFinite(completedCandidate) ? completedCandidate : 0, 0, total);
       return {completed: Math.round(completed), total: total};
     }
 
@@ -3433,14 +4234,870 @@
       return ["arming", "active", "tracking", "running", "observing", "studying"].includes(status);
     }
 
+    function episodeRequiresReset(episode) {
+      const row = safeObject(episode);
+      const status = safeText(row.state || row.status, "").toLowerCase();
+      const progress = episodeProgress(row);
+      const hasRetainedEpisode = Boolean(
+        safeText(row.episode_id, "")
+        || safeList(row.events).length
+        || safeList(row.future_blocks).length
+        || progress.completed > 0
+      );
+      const reachedHorizon = progress.total > 0 && progress.completed >= progress.total;
+      const terminal = ["complete", "completed", "saved", "stopped", "invalidated", "failed", "error"].includes(status);
+      return hasRetainedEpisode && (reachedHorizon || terminal);
+    }
+
+    function trackingActionEpisode(payload) {
+      const row = safeObject(payload);
+      if (safeText(row.schema_version, "") === OPERATOR_SCHEMA_VERSION) {
+        return payloadTrackingEpisode(row);
+      }
+      const current = safeObject(row.current);
+      if (Object.keys(current).length) {
+        return current;
+      }
+      return row;
+    }
+
+    function resetResponseIsIdle(payload) {
+      const episode = trackingActionEpisode(payload);
+      const status = safeText(episode.state || episode.status, "").toLowerCase();
+      return status === "idle" && !safeText(episode.episode_id, "") && episodeProgress(episode).completed === 0;
+    }
+
+    function normalizedEpisodeEvents(episode) {
+      const byStep = new Map();
+      safeList(safeObject(episode).events).forEach(function (rawEvent, index) {
+        const event = safeObject(rawEvent);
+        const candidate = Number(event.event_index || event.step || index + 1);
+        const step = Math.max(1, Math.min(12, Number.isFinite(candidate) ? Math.round(candidate) : index + 1));
+        const explicitAgreement = event.agreement;
+        const legacyAgreement = event.direction_agreement;
+        const agreement = typeof explicitAgreement === "boolean"
+          ? explicitAgreement
+          : typeof legacyAgreement === "boolean"
+            ? legacyAgreement
+            : null;
+        const favoredPathId = ["PATH_A", "PATH_B"].includes(safeText(event.favored_path_id, "").toUpperCase())
+          ? safeText(event.favored_path_id, "").toUpperCase()
+          : "";
+        const rawPathFit = safeObject(event.path_fit_by_id);
+        const observedCloseCandidate = event.observed_close_level;
+        const observedCloseLevel = typeof observedCloseCandidate === "number"
+          && Number.isFinite(observedCloseCandidate)
+          && observedCloseCandidate >= 0
+          && observedCloseCandidate <= 1
+          ? observedCloseCandidate
+          : null;
+        const rawEntryProgress = safeObject(event.entry_location_progress);
+        const rawEntryProgressStatus = safeText(rawEntryProgress.status, "UNKNOWN").toUpperCase();
+        const pathFitById = {};
+        ["PATH_A", "PATH_B"].forEach(function (pathId) {
+          const fit = safeObject(rawPathFit[pathId]);
+          const status = safeText(fit.status, "UNKNOWN").toUpperCase();
+          pathFitById[pathId] = {
+            status: status === "MEASURED" ? "MEASURED" : "UNKNOWN",
+            directionAgreement: typeof fit.direction_agreement === "boolean"
+              ? fit.direction_agreement
+              : null,
+          };
+        });
+        byStep.set(step, {
+          step: step,
+          id: safeText(event.id || event.event_id, "episode-event-" + step),
+          actual: directionalSide(event.direction || event.actual_direction || safeObject(event.actual_block).side),
+          predicted: directionalSide(event.predicted_direction || safeObject(event.predicted_block).side),
+          agreement: agreement,
+          favoredPathId: favoredPathId,
+          pathFitById: pathFitById,
+          observedCloseLevel: observedCloseLevel,
+          entryLocationProgress: {
+            status: ["INSIDE", "APPROACHING", "MOVED_AWAY", "OUTSIDE", "CONFIRMED", "INVALIDATED", "UNKNOWN"].includes(rawEntryProgressStatus)
+              ? rawEntryProgressStatus
+              : "UNKNOWN",
+          },
+          observedAt: parsePublicEpoch(event.observed_at || event.timestamp),
+          summary: neutralPublicText(event.summary, "Completed candle E" + step + " was recorded."),
+        });
+      });
+      return Array.from(byStep.values()).sort(function (a, b) { return a.step - b.step; });
+    }
+
+    function trackingPathComparison(episode) {
+      const rawComparison = safeObject(safeObject(episode).path_comparison);
+      if (safeText(rawComparison.schema_version, "") !== TRACKING_PATH_COMPARISON_SCHEMA) {
+        return {
+          schemaValid: false,
+          available: false,
+          paths: [],
+          verdict: "WAITING",
+          favoredPathId: "",
+          verdictSummary: "Waiting for two frozen routes from the tracking service.",
+          anchor: {status: "UNAVAILABLE", label: "Latest completed candle", direction: "HOLD"},
+          formingAtStart: {status: "UNAVAILABLE", label: "Candle forming when tracking started", direction: "HOLD"},
+          forecastBias: {status: "UNAVAILABLE", label: "Forecast bias at start", summary: "", direction: "HOLD"},
+          entryThesis: {status: "UNAVAILABLE", label: "", summary: "", direction: "HOLD"},
+          entryLocation: {
+            status: "UNAVAILABLE",
+            label: "Saved entry area",
+            summary: "",
+            direction: "HOLD",
+            topLevel: null,
+            bottomLevel: null,
+            progress: {status: "UNKNOWN"},
+          },
+          tradePermission: {status: "UNAVAILABLE", label: "Entry permission at start", summary: ""},
+          continuity: {state: "WAITING", summary: ""},
+        };
+      }
+      const rawPathsById = new Map();
+      safeList(rawComparison.paths).forEach(function (rawPath) {
+        const path = safeObject(rawPath);
+        const id = safeText(path.id, "").toUpperCase();
+        if (!["PATH_A", "PATH_B"].includes(id) || rawPathsById.has(id)) {
+          return;
+        }
+        const stepsByNumber = new Map();
+        safeList(path.steps).forEach(function (rawStep, index) {
+          const pathStep = safeObject(rawStep);
+          const candidate = Number(pathStep.step || index + 1);
+          const step = Number.isFinite(candidate) ? Math.round(candidate) : index + 1;
+          if (step < 1 || step > 12 || stepsByNumber.has(step)) {
+            return;
+          }
+          stepsByNumber.set(step, {
+            step: step,
+            direction: directionalSide(pathStep.direction),
+          });
+        });
+        const rawPoints = safeList(path.points).map(function (rawPoint) {
+          const point = safeList(rawPoint).slice(0, 2);
+          return point.length === 2
+            && point.every(function (value) { return typeof value === "number" && Number.isFinite(value); })
+            && point.every(function (value) { return value >= 0 && value <= 1; })
+            ? point
+            : null;
+        });
+        const pointsMoveForward = rawPoints.every(function (point, index) {
+          return point && (index === 0 || point[0] > rawPoints[index - 1][0]);
+        });
+        const points = rawPoints.length === 13 && pointsMoveForward
+          ? rawPoints
+          : [];
+        rawPathsById.set(id, {
+          id: id,
+          label: neutralPublicText(path.label, id === "PATH_A" ? "Main forecast" : "Alternative forecast"),
+          summary: neutralPublicText(path.summary, "This frozen route is waiting for live completed candles."),
+          direction: directionalSide(path.direction),
+          stepsByNumber: stepsByNumber,
+          points: points,
+        });
+      });
+      const rawVerdict = safeText(rawComparison.verdict, "WAITING").toUpperCase();
+      const rawFavoredPathId = safeText(rawComparison.favored_path_id, "").toUpperCase();
+      const publicVerdicts = [
+        "PATH_A",
+        "PATH_B",
+        "TOO_CLOSE",
+        "PATHS_OVERLAP",
+        "NEITHER_PATH_FITS",
+        "GEOMETRY_UNAVAILABLE",
+        "WAITING",
+      ];
+      const verdictKnown = publicVerdicts.includes(rawVerdict);
+      const verdict = verdictKnown ? rawVerdict : "WAITING";
+      const favoredPathId = ["PATH_A", "PATH_B"].includes(rawFavoredPathId)
+        ? rawFavoredPathId
+        : "";
+      const verdictIsCoherent = ["PATH_A", "PATH_B"].includes(verdict)
+        ? favoredPathId === verdict
+        : favoredPathId === "";
+      const rawEntry = safeObject(rawComparison.entry_thesis);
+      const rawEntryStatus = safeText(rawEntry.status, "UNAVAILABLE").toUpperCase();
+      const rawAnchor = safeObject(rawComparison.anchor);
+      const rawAnchorStatus = safeText(rawAnchor.status, "UNAVAILABLE").toUpperCase();
+      const rawFormingAtStart = safeObject(rawComparison.forming_at_start);
+      const rawFormingStatus = safeText(rawFormingAtStart.status, "UNAVAILABLE").toUpperCase();
+      const rawForecastBias = safeObject(rawComparison.forecast_bias);
+      const rawForecastBiasStatus = safeText(rawForecastBias.status, "UNAVAILABLE").toUpperCase();
+      const rawTradePermission = safeObject(rawComparison.trade_permission);
+      const rawTradePermissionStatus = safeText(rawTradePermission.status, "UNAVAILABLE").toUpperCase();
+      const rawEntryLocation = safeObject(rawComparison.entry_location);
+      const rawEntryLocationStatus = safeText(rawEntryLocation.status, "UNAVAILABLE").toUpperCase();
+      const topLevelCandidate = rawEntryLocation.top_level;
+      const bottomLevelCandidate = rawEntryLocation.bottom_level;
+      const levelsAreValid = typeof topLevelCandidate === "number"
+        && typeof bottomLevelCandidate === "number"
+        && Number.isFinite(topLevelCandidate)
+        && Number.isFinite(bottomLevelCandidate)
+        && topLevelCandidate >= 0
+        && bottomLevelCandidate <= 1
+        && topLevelCandidate < bottomLevelCandidate;
+      const rawLocationProgress = safeObject(rawEntryLocation.progress);
+      const rawLocationProgressStatus = safeText(rawLocationProgress.status, "UNKNOWN").toUpperCase();
+      const rawContinuity = safeObject(rawComparison.continuity);
+      const rawContinuityState = safeText(rawContinuity.state, "WAITING").toUpperCase();
+      return {
+        schemaValid: true,
+        available: rawPathsById.has("PATH_A") && rawPathsById.has("PATH_B"),
+        paths: ["PATH_A", "PATH_B"].map(function (pathId) { return rawPathsById.get(pathId); }).filter(Boolean),
+        verdict: verdictIsCoherent ? verdict : "WAITING",
+        favoredPathId: verdictIsCoherent ? favoredPathId : "",
+        verdictSummary: verdictKnown && verdictIsCoherent
+          ? neutralPublicText(rawComparison.verdict_summary, "Waiting for enough completed-candle evidence.")
+          : "The path comparison is refreshing.",
+        anchor: {
+          status: rawAnchorStatus === "CONFIRMED" ? "CONFIRMED" : "UNAVAILABLE",
+          label: neutralPublicText(rawAnchor.label, "Latest completed candle"),
+          direction: directionalSide(rawAnchor.direction),
+        },
+        formingAtStart: {
+          status: rawFormingStatus === "OBSERVED" ? "OBSERVED" : "UNAVAILABLE",
+          label: neutralPublicText(rawFormingAtStart.label, "Candle forming when tracking started"),
+          direction: directionalSide(rawFormingAtStart.direction),
+        },
+        forecastBias: {
+          status: ["DIRECTIONAL", "NEUTRAL", "UNAVAILABLE"].includes(rawForecastBiasStatus)
+            ? rawForecastBiasStatus
+            : "UNAVAILABLE",
+          label: neutralPublicText(rawForecastBias.label, "Forecast bias at start"),
+          summary: neutralPublicText(rawForecastBias.summary, "No forecast bias was available when tracking started."),
+          direction: directionalSide(rawForecastBias.direction),
+        },
+        entryThesis: {
+          status: ["DIRECTIONAL", "NEUTRAL", "UNAVAILABLE"].includes(rawEntryStatus) ? rawEntryStatus : "UNAVAILABLE",
+          label: neutralPublicText(rawEntry.label, "Entry idea at start"),
+          summary: neutralPublicText(rawEntry.summary, "No entry idea is available for this saved start."),
+          direction: directionalSide(rawEntry.direction),
+        },
+        entryLocation: {
+          status: ["TRACKING", "GUIDANCE_ONLY", "UNAVAILABLE"].includes(rawEntryLocationStatus)
+            ? rawEntryLocationStatus
+            : "UNAVAILABLE",
+          label: neutralPublicText(rawEntryLocation.label, "Saved entry area"),
+          summary: neutralPublicText(rawEntryLocation.summary, "No saved entry area is available for this start."),
+          direction: directionalSide(rawEntryLocation.direction),
+          topLevel: levelsAreValid ? topLevelCandidate : null,
+          bottomLevel: levelsAreValid ? bottomLevelCandidate : null,
+          progress: {
+            status: ["INSIDE", "APPROACHING", "MOVED_AWAY", "OUTSIDE", "CONFIRMED", "INVALIDATED", "UNKNOWN"].includes(rawLocationProgressStatus)
+              ? rawLocationProgressStatus
+              : "UNKNOWN",
+          },
+        },
+        tradePermission: {
+          status: ["PERMITTED", "WAIT"].includes(rawTradePermissionStatus)
+            ? rawTradePermissionStatus
+            : "UNAVAILABLE",
+          label: neutralPublicText(rawTradePermission.label, "Entry permission at start"),
+          summary: neutralPublicText(rawTradePermission.summary, "Tracking evidence does not grant permission to trade."),
+        },
+        continuity: {
+          state: ["LIVE", "WAITING", "REACQUIRING", "STOPPED"].includes(rawContinuityState)
+            ? rawContinuityState
+            : "WAITING",
+          summary: neutralPublicText(rawContinuity.summary, "The live comparison is waiting for continuity."),
+        },
+      };
+    }
+
+    function episodePathVerdict(comparison) {
+      const verdict = safeText(safeObject(comparison).verdict, "WAITING").toUpperCase();
+      const copyByVerdict = {
+        PATH_A: {state: "path-a", title: "Path A favored"},
+        PATH_B: {state: "path-b", title: "Path B favored"},
+        TOO_CLOSE: {state: "too-close", title: "Too close"},
+        PATHS_OVERLAP: {state: "too-close", title: "Paths overlap"},
+        NEITHER_PATH_FITS: {state: "no-fit", title: "Neither path fits"},
+        GEOMETRY_UNAVAILABLE: {state: "unavailable", title: "Forecast routes unavailable"},
+        WAITING: {state: "unknown", title: "Waiting for evidence"},
+      };
+      const verdictCopy = copyByVerdict[verdict] || copyByVerdict.WAITING;
+      return {
+        state: verdictCopy.state,
+        title: verdictCopy.title,
+        meta: neutralPublicText(
+          safeObject(comparison).verdictSummary,
+          "The server has not favored either frozen route yet.",
+        ),
+      };
+    }
+
+    function pathStepFit(event, pathId) {
+      const fit = safeObject(safeObject(event).pathFitById)[pathId];
+      if (!fit || safeText(fit.status, "UNKNOWN") !== "MEASURED") {
+        return "pending";
+      }
+      if (typeof fit.directionAgreement === "boolean") {
+        return fit.directionAgreement ? "aligned" : "opposed";
+      }
+      return "measured";
+    }
+
+    function setTrackingPathFocus(pathId) {
+      const next = ["PATH_A", "PATH_B"].includes(pathId) ? pathId : "PATH_A";
+      state.trackingPathFocus = next;
+      els.trackingPathComparison.dataset.focusedPath = next;
+      els.trackingPathComparison.dataset.hasFocus = "true";
+      [els.trackingPathA, els.trackingPathB].forEach(function (button) {
+        button.setAttribute("aria-pressed", button.dataset.pathId === next ? "true" : "false");
+      });
+    }
+
+    function createTrackingSvgNode(name, attributes) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+      Object.entries(attributes || {}).forEach(function (entry) {
+        node.setAttribute(entry[0], String(entry[1]));
+      });
+      return node;
+    }
+
+    function trackingRoutePlotGeometry(comparison, events) {
+      const pathsById = new Map(safeList(safeObject(comparison).paths).map(function (path) {
+        return [path.id, path];
+      }));
+      const pathA = safeObject(pathsById.get("PATH_A"));
+      const pathB = safeObject(pathsById.get("PATH_B"));
+      const pathAPoints = safeList(pathA.points);
+      const pathBPoints = safeList(pathB.points);
+      const sharedTimeline = pathAPoints.length === 13
+        && pathBPoints.length === 13
+        && pathAPoints.every(function (point, index) {
+          return Math.abs(point[0] - pathBPoints[index][0]) <= 0.0005;
+        });
+      const sharedAnchor = sharedTimeline
+        && Math.abs(pathAPoints[0][0] - pathBPoints[0][0]) <= 0.000001
+        && Math.abs(pathAPoints[0][1] - pathBPoints[0][1]) <= 0.000001;
+      if (!sharedAnchor) {
+        return null;
+      }
+
+      const eventsByStep = new Map(events.map(function (event) { return [event.step, event]; }));
+      const observed = [];
+      for (let step = 1; step <= 12; step += 1) {
+        const event = eventsByStep.get(step);
+        if (!event || typeof event.observedCloseLevel !== "number") {
+          break;
+        }
+        observed.push({
+          step: step,
+          source: [pathAPoints[step][0], event.observedCloseLevel],
+        });
+      }
+
+      const entryLocation = safeObject(safeObject(comparison).entryLocation);
+      const hasEntryBand = ["TRACKING", "GUIDANCE_ONLY"].includes(entryLocation.status)
+        && typeof entryLocation.topLevel === "number"
+        && typeof entryLocation.bottomLevel === "number";
+      const xValues = pathAPoints.concat(pathBPoints).map(function (point) { return point[0]; });
+      const yValues = pathAPoints.concat(pathBPoints).map(function (point) { return point[1]; });
+      observed.forEach(function (point) { yValues.push(point.source[1]); });
+      if (hasEntryBand) {
+        yValues.push(entryLocation.topLevel, entryLocation.bottomLevel);
+      }
+      const xMinimum = Math.min.apply(null, xValues);
+      const xMaximum = Math.max.apply(null, xValues);
+      const yMinimum = Math.min.apply(null, yValues);
+      const yMaximum = Math.max.apply(null, yValues);
+      const xSpan = Math.max(0.01, xMaximum - xMinimum);
+      const yPadding = Math.max(0.012, (yMaximum - yMinimum) * 0.16);
+      const yLow = yMinimum - yPadding;
+      const yHigh = yMaximum + yPadding;
+      const ySpan = Math.max(0.025, yHigh - yLow);
+      const plot = {left: 22, right: 1178, top: 27, bottom: 132};
+      const project = function (point) {
+        return [
+          plot.left + ((point[0] - xMinimum) / xSpan) * (plot.right - plot.left),
+          plot.top + ((point[1] - yLow) / ySpan) * (plot.bottom - plot.top),
+        ];
+      };
+      return {
+        pathA: pathAPoints.map(project),
+        pathB: pathBPoints.map(project),
+        anchor: project(pathAPoints[0]),
+        observed: observed.map(function (point) {
+          return {step: point.step, point: project(point.source)};
+        }),
+        eventsByStep: eventsByStep,
+        entryBand: hasEntryBand
+          ? {
+              top: project([xMinimum, entryLocation.topLevel])[1],
+              bottom: project([xMinimum, entryLocation.bottomLevel])[1],
+            }
+          : null,
+        plot: plot,
+      };
+    }
+
+    function svgPointList(points) {
+      return points.map(function (point) {
+        return point[0].toFixed(2) + "," + point[1].toFixed(2);
+      }).join(" ");
+    }
+
+    function renderTrackingRoutePlot(comparison, events) {
+      const geometry = trackingRoutePlotGeometry(comparison, events);
+      els.trackingRouteGuides.replaceChildren();
+      els.trackingRouteNodes.replaceChildren();
+      els.trackingObservedNodes.replaceChildren();
+      els.trackingRoutePathA.setAttribute("points", "");
+      els.trackingRoutePathB.setAttribute("points", "");
+      els.trackingRouteObserved.setAttribute("points", "");
+      els.trackingEntryBand.toggleAttribute("hidden", true);
+      els.trackingRouteAnchor.toggleAttribute("hidden", true);
+      Array.from(els.trackingRouteAxis.children).forEach(function (label) {
+        label.style.left = "";
+      });
+      if (!geometry) {
+        els.trackingRoutePlot.dataset.state = "waiting";
+        els.trackingRoutePlaceholder.hidden = false;
+        els.trackingRouteSvg.setAttribute("aria-label", "Waiting for two comparable frozen route shapes");
+        return;
+      }
+
+      els.trackingRoutePlot.dataset.state = "ready";
+      els.trackingRoutePlaceholder.hidden = true;
+      els.trackingRoutePathA.setAttribute("points", svgPointList(geometry.pathA));
+      els.trackingRoutePathB.setAttribute("points", svgPointList(geometry.pathB));
+      Array.from(els.trackingRouteAxis.children).forEach(function (label, index) {
+        label.style.left = ((geometry.pathA[index + 1][0] / 1200) * 100).toFixed(3) + "%";
+      });
+      geometry.pathA.slice(1).forEach(function (point, index) {
+        const step = index + 1;
+        const guide = createTrackingSvgNode("line", {
+          class: "tracking-route-guide",
+          x1: point[0].toFixed(2),
+          x2: point[0].toFixed(2),
+          y1: geometry.plot.top,
+          y2: geometry.plot.bottom,
+        });
+        els.trackingRouteGuides.appendChild(guide);
+        [["PATH_A", geometry.pathA[step], "path-a"], ["PATH_B", geometry.pathB[step], "path-b"]].forEach(function (routePoint) {
+          const node = createTrackingSvgNode("circle", {
+            class: "tracking-route-node " + routePoint[2],
+            cx: routePoint[1][0].toFixed(2),
+            cy: routePoint[1][1].toFixed(2),
+            r: 2.2,
+            "data-path-id": routePoint[0],
+            "data-step": step,
+            "data-fit": pathStepFit(geometry.eventsByStep.get(step), routePoint[0]),
+          });
+          els.trackingRouteNodes.appendChild(node);
+        });
+      });
+
+      const observedPoints = geometry.observed.length
+        ? [geometry.anchor].concat(geometry.observed.map(function (row) { return row.point; }))
+        : [];
+      if (observedPoints.length >= 2) {
+        els.trackingRouteObserved.setAttribute("points", svgPointList(observedPoints));
+        els.trackingRouteObserved.setAttribute("aria-label", "Confirmed completed-candle progression from the shared anchor");
+        geometry.observed.forEach(function (row) {
+          const node = createTrackingSvgNode("circle", {
+            class: "tracking-observed-node",
+            cx: row.point[0].toFixed(2),
+            cy: row.point[1].toFixed(2),
+            r: 2.8,
+            "data-step": row.step,
+          });
+          els.trackingObservedNodes.appendChild(node);
+        });
+      } else {
+        els.trackingRouteObserved.setAttribute("aria-label", "No confirmed completed-candle progression yet");
+      }
+      els.trackingRouteAnchor.setAttribute("cx", geometry.anchor[0].toFixed(2));
+      els.trackingRouteAnchor.setAttribute("cy", geometry.anchor[1].toFixed(2));
+      els.trackingRouteAnchor.toggleAttribute("hidden", false);
+      if (geometry.entryBand) {
+        const bandTop = Math.min(geometry.entryBand.top, geometry.entryBand.bottom);
+        const bandHeight = Math.max(2, Math.abs(geometry.entryBand.bottom - geometry.entryBand.top));
+        els.trackingEntryBand.setAttribute("x", geometry.plot.left);
+        els.trackingEntryBand.setAttribute("y", bandTop.toFixed(2));
+        els.trackingEntryBand.setAttribute("width", geometry.plot.right - geometry.plot.left);
+        els.trackingEntryBand.setAttribute("height", bandHeight.toFixed(2));
+        els.trackingEntryBand.toggleAttribute("hidden", false);
+      }
+      els.trackingRouteSvg.setAttribute(
+        "aria-label",
+        geometry.observed.length
+          ? "Two frozen forecast routes with confirmed observed progression"
+          : "Two frozen forecast routes waiting for the first confirmed close",
+      );
+    }
+
+    function renderTrackingPathComparison(comparison, events, watchRead) {
+      const pathComparison = safeObject(comparison);
+      const pathsById = new Map(safeList(pathComparison.paths).map(function (path) { return [path.id, path]; }));
+      const rowById = {
+        PATH_A: {
+          button: els.trackingPathA,
+          title: els.trackingPathATitle,
+          summary: els.trackingPathASummary,
+          status: els.trackingPathAStatus,
+          fallbackLabel: "Path A",
+          fallbackSummary: "Waiting for the frozen main route.",
+        },
+        PATH_B: {
+          button: els.trackingPathB,
+          title: els.trackingPathBTitle,
+          summary: els.trackingPathBSummary,
+          status: els.trackingPathBStatus,
+          fallbackLabel: "Path B",
+          fallbackSummary: "Waiting for the frozen alternate route.",
+        },
+      };
+      ["PATH_A", "PATH_B"].forEach(function (pathId) {
+        const row = rowById[pathId];
+        const path = safeObject(pathsById.get(pathId));
+        const favored = pathComparison.favoredPathId === pathId;
+        row.button.dataset.state = favored ? "favored" : pathComparison.available ? "tracked" : "waiting";
+        setText(row.title, path.label, row.fallbackLabel);
+        setText(row.summary, path.summary, row.fallbackSummary);
+        setText(
+          row.status,
+          favored
+            ? "Favored now"
+            : pathComparison.verdict === "TOO_CLOSE"
+              ? "Too close"
+              : pathComparison.verdict === "PATHS_OVERLAP"
+                ? "Routes overlap"
+                : pathComparison.verdict === "NEITHER_PATH_FITS"
+                  ? "No route fits"
+                  : pathComparison.verdict === "GEOMETRY_UNAVAILABLE"
+                    ? "Route unavailable"
+                    : pathComparison.verdict === "WAITING"
+                      ? "Awaiting evidence"
+                      : "Still tracked",
+        );
+      });
+      renderTrackingRoutePlot(pathComparison, events);
+      els.trackingPathComparison.dataset.state = safeText(pathComparison.verdict, "WAITING").toLowerCase().replace(/_/g, "-");
+      setTrackingPathFocus(state.trackingPathFocus);
+
+      const entry = safeObject(pathComparison.entryThesis);
+      const entryStatus = safeText(entry.status, "UNAVAILABLE").toUpperCase();
+      const entryDirection = directionalSide(entry.direction);
+      const entryTitle = entryStatus === "DIRECTIONAL"
+        ? entryDirection === "BUY"
+          ? "Buy idea frozen at start"
+          : entryDirection === "SELL"
+            ? "Sell idea frozen at start"
+            : "Directional idea frozen at start"
+        : entryStatus === "NEUTRAL"
+          ? "No directional entry idea"
+          : "Entry idea unavailable";
+      els.trackingEntryRead.dataset.state = entryStatus.toLowerCase();
+      setText(els.trackingEntryTitle, entryTitle);
+      setText(els.trackingEntrySummary, entry.summary, "No entry idea is available for this saved start.");
+      const entryLocation = safeObject(pathComparison.entryLocation);
+      const latestEvent = events.length ? safeObject(events[events.length - 1]) : {};
+      const eventLocationProgress = safeObject(latestEvent.entryLocationProgress);
+      const locationProgress = safeText(
+        eventLocationProgress.status || safeObject(entryLocation.progress).status,
+        "UNKNOWN",
+      ).toUpperCase();
+      setText(
+        els.trackingEntryProgress,
+        locationProgress === "INSIDE"
+          ? "Entry area at start · the latest confirmed candle is inside it."
+          : locationProgress === "APPROACHING"
+            ? "Entry area at start · the latest confirmed candle is approaching it."
+            : locationProgress === "MOVED_AWAY"
+              ? "Entry area at start · the latest confirmed candle moved away from it."
+              : locationProgress === "CONFIRMED"
+                ? "Entry area at start · the saved entry idea is confirmed. Permission remains separate."
+                : locationProgress === "INVALIDATED"
+                  ? "Entry area at start · the saved entry idea is no longer valid."
+                  : locationProgress === "OUTSIDE"
+                    ? "Entry area at start · the latest confirmed candle remains outside it."
+                    : entryLocation.status === "UNAVAILABLE"
+                      ? "Entry area at start · unavailable for this saved start."
+                      : "Entry area at start · waiting for a confirmed close.",
+      );
+      const tradePermission = safeObject(pathComparison.tradePermission);
+      const permissionStatus = safeText(tradePermission.status, "UNAVAILABLE").toUpperCase();
+      const permissionLabel = permissionStatus === "PERMITTED"
+        ? "Open at start"
+        : permissionStatus === "WAIT"
+          ? "Closed at start"
+          : "Unavailable at start";
+      setText(
+        els.trackingEntryPermission,
+        "Entry permission · " + permissionLabel + ". "
+          + neutralPublicText(tradePermission.summary, "Tracking evidence does not grant permission to trade."),
+      );
+
+      const continuity = safeObject(pathComparison.continuity);
+      const continuityState = safeText(continuity.state, "WAITING").toUpperCase();
+      const continuityLost = continuityState === "REACQUIRING";
+      const fallbackLost = continuityState === "WAITING"
+        && safeText(safeObject(watchRead).state, "") === "reacquiring";
+      els.trackingContinuityGuidance.hidden = !(continuityLost || fallbackLost);
+      if (continuityLost || fallbackLost) {
+        const continuitySummary = continuityLost
+          ? neutralPublicText(continuity.summary, "The prior chart sequence cannot be verified continuously.")
+          : safeText(safeObject(watchRead).detail, "The prior chart sequence cannot be verified continuously.");
+        setText(
+          els.trackingContinuityMessage,
+          continuitySummary + " Stop & save, then Start tracking from the latest completed candle for a clean comparison.",
+        );
+      }
+    }
+
+    function publicDirectionWord(side) {
+      return side === "BUY" ? "up" : side === "SELL" ? "down" : "unclear";
+    }
+
+    function episodeForecastRead(events) {
+      const compared = events.filter(function (event) { return typeof event.agreement === "boolean"; });
+      const matches = compared.filter(function (event) { return event.agreement === true; }).length;
+      const opposed = compared.length - matches;
+      if (!compared.length) {
+        return {
+          state: "unknown",
+          title: events.length ? "Evidence recorded" : "Waiting for evidence",
+          meta: events.length
+            ? events.length + " completed candle" + (events.length === 1 ? " has" : "s have") + " no directional comparison yet."
+            : "No completed candle has been compared yet.",
+        };
+      }
+      if (opposed === 0) {
+        return {
+          state: "aligned",
+          title: "Following the saved forecast",
+          meta: matches + " of " + compared.length + " directional block" + (compared.length === 1 ? " matches" : "s match") + ".",
+        };
+      }
+      if (matches === 0) {
+        return {
+          state: "opposed",
+          title: "Moving against the saved forecast",
+          meta: opposed + " of " + compared.length + " directional block" + (compared.length === 1 ? " differs" : "s differ") + ".",
+        };
+      }
+      return {
+        state: "mixed",
+        title: "Mixed against the saved forecast",
+        meta: matches + " matched · " + opposed + " differed.",
+      };
+    }
+
+    function publicTimeframeSeconds(value) {
+      const token = safeText(value, "M5").toUpperCase();
+      const match = token.match(/^([MHD])(\d+)$/);
+      if (!match) {
+        return 300;
+      }
+      const unit = match[1] === "D" ? 86400 : match[1] === "H" ? 3600 : 60;
+      return Math.max(60, Math.min(86400, Number(match[2]) * unit));
+    }
+
+    function episodeWatchRead(payload, episode, events, progress) {
+      const active = episodeIsActive(episode);
+      const status = safeText(episode.state || episode.status, "idle").toLowerCase();
+      if (!active) {
+        return ["complete", "completed"].includes(status)
+          ? {state: "complete", title: "All 12 candles recorded", detail: "The before-and-after study is saved."}
+          : ["stopped", "saved", "invalidated"].includes(status)
+            ? {state: "complete", title: "Episode saved", detail: "Recorded evidence remains available."}
+            : {state: "idle", title: "Ready when you are", detail: "Start Tracking to begin at the chart you choose."};
+      }
+      const next = Math.min(progress.total, progress.completed + 1);
+      const continuity = safeObject(
+        episode.observation
+          || episode.continuity
+          || episode.live_observation
+          || episode.current_observation
+      );
+      const continuityState = safeText(continuity.state || continuity.status, "").toLowerCase();
+      const freshness = normalizeFreshness(safeObject(payload).freshness && (safeObject(payload).freshness.state || safeObject(payload).freshness.status));
+      if (freshness === "offline" || freshness === "stale") {
+        return {state: "reacquiring", title: "Reconnecting to E" + next, detail: "The saved start and completed evidence remain unchanged."};
+      }
+      const explicitReacquiring = ["reacquiring", "reacquire", "delayed", "ambiguous", "waiting_confirmation", "coverage_shift"].some(function (token) {
+        return continuityState.includes(token);
+      });
+      const referenceAt = events.length
+        ? Number(events[events.length - 1].observedAt || 0)
+        : parsePublicEpoch(episode.started_at || episode.updated_at);
+      const elapsed = referenceAt > 0 ? Math.max(0, Date.now() / 1000 - referenceAt) : 0;
+      const timeframe = safeText(safeObject(payload).market && safeObject(payload).market.timeframe, "M5");
+      const delayed = elapsed > publicTimeframeSeconds(timeframe) * 1.5 + 30;
+      if (explicitReacquiring || delayed) {
+        return {
+          state: "reacquiring",
+          title: "Reacquiring E" + next,
+          detail: delayed
+            ? "The old chart gap cannot be verified. Stop & save, then Start tracking from the live chart for a clean 12-step study."
+            : "Waiting for the next confirmed completed candle; no event is being invented.",
+        };
+      }
+      return {
+        state: "forming",
+        title: "E" + next + " is forming",
+        detail: "The live candle is moving; E" + next + " records only after it is confirmed complete.",
+      };
+    }
+
+    function renderLiveTrackingTimestamp() {
+      if (!els.trackingLiveUpdated) {
+        return;
+      }
+      const observedAt = Number(state.liveEpisodeObservedAt || 0);
+      if (!observedAt) {
+        setText(els.trackingLiveUpdated, "No live episode yet.");
+        return;
+      }
+      const frameCopy = "Updated " + formatTime(observedAt) + " · " + formatAge(observedAt);
+      setText(els.trackingLiveUpdated, frameCopy);
+    }
+
+    function renderTrackingEvidence(payload) {
+      const operatorState = safeObject(payload);
+      const episode = trackingEpisode(operatorState);
+      const progress = episodeProgress(episode);
+      const events = normalizedEpisodeEvents(episode);
+      const pathComparison = trackingPathComparison(episode);
+      const baseline = safeObject(episode.baseline);
+      const baselineSide = directionalSide(baseline.direction || safeObject(episode.plan).direction);
+      const startedAt = parsePublicEpoch(episode.started_at);
+      const hasEpisode = Boolean(safeText(episode.episode_id, "") || episodeIsActive(episode) || episodeRetainsOutlook(episode));
+      const pathAnchor = safeObject(pathComparison.anchor);
+      const formingAtStart = safeObject(pathComparison.formingAtStart);
+      const hasFormingAtStart = pathComparison.schemaValid && formingAtStart.status === "OBSERVED";
+      setText(
+        els.trackingAnchorTitle,
+        pathComparison.schemaValid
+          ? pathAnchor.label
+          : hasEpisode
+            ? baseline.title
+            : "Not started",
+        hasEpisode ? "Saved chart baseline" : "Not started",
+      );
+      setText(
+        els.trackingAnchorMeta,
+        pathComparison.schemaValid
+          ? hasFormingAtStart
+            ? "E1 is the candle that was live when Start Tracking was pressed. It records only after that candle completes."
+            : pathAnchor.status === "CONFIRMED"
+              ? (startedAt ? "Started " + formatTime(startedAt) + " · " : "")
+                + "both scene routes were frozen from this completed candle."
+              : "The latest completed-candle anchor is still being prepared."
+          : hasEpisode
+            ? (startedAt ? "Started " + formatTime(startedAt) + " · " : "")
+              + "saved outlook " + publicDirectionWord(baselineSide)
+            : "Start Tracking to freeze the latest completed candle and both forecast routes.",
+      );
+
+      const forecastRead = pathComparison.schemaValid
+        ? episodePathVerdict(pathComparison)
+        : episodeForecastRead(events);
+      els.trackingForecastRead.dataset.state = forecastRead.state;
+      setText(els.trackingForecastTitle, forecastRead.title);
+      setText(els.trackingForecastMeta, forecastRead.meta);
+
+      const watchRead = episodeWatchRead(operatorState, episode, events, progress);
+      els.trackingWatchRead.dataset.state = watchRead.state;
+      setText(els.trackingWatchTitle, watchRead.title);
+      setText(els.trackingWatchDetail, watchRead.detail);
+      els.trackingWatchTitle.title = watchRead.detail;
+      renderLiveTrackingTimestamp();
+      renderTrackingPathComparison(pathComparison, events, watchRead);
+
+      const byStep = new Map(events.map(function (event) { return [event.step, event]; }));
+      const futureByStep = new Map(safeList(episode.future_blocks).map(function (rawBlock, index) {
+        const block = safeObject(rawBlock);
+        const candidate = Number(block.step || index + 1);
+        const step = Math.max(1, Math.min(progress.total, Number.isFinite(candidate) ? Math.round(candidate) : index + 1));
+        return [step, block];
+      }));
+      const fragment = document.createDocumentFragment();
+      for (let step = 1; step <= progress.total; step += 1) {
+        const item = document.createElement("li");
+        item.className = "tracking-event";
+        const event = byStep.get(step);
+        const block = safeObject(futureByStep.get(step));
+        const label = document.createElement("strong");
+        const detail = document.createElement("span");
+        label.textContent = "E" + step;
+        if (event) {
+          if (pathComparison.schemaValid) {
+            item.dataset.state = event.favoredPathId === "PATH_A"
+              ? "path-a"
+              : event.favoredPathId === "PATH_B"
+                ? "path-b"
+                : "recorded";
+            const anyMeasured = ["PATH_A", "PATH_B"].some(function (pathId) {
+              return safeText(safeObject(event.pathFitById[pathId]).status, "UNKNOWN") === "MEASURED";
+            });
+            detail.textContent = event.favoredPathId === "PATH_A"
+              ? "Path A · " + publicDirectionWord(event.actual)
+              : event.favoredPathId === "PATH_B"
+                ? "Path B · " + publicDirectionWord(event.actual)
+                : anyMeasured
+                  ? "Compared · " + publicDirectionWord(event.actual)
+                  : "Observed · " + publicDirectionWord(event.actual);
+          } else {
+            item.dataset.state = event.agreement === true ? "aligned" : event.agreement === false ? "opposed" : "recorded";
+            detail.textContent = event.agreement === true
+              ? "Match · " + publicDirectionWord(event.actual)
+              : event.agreement === false
+                ? "Miss · " + publicDirectionWord(event.actual)
+                : "Unknown · " + publicDirectionWord(event.actual);
+          }
+          item.title = event.summary;
+          item.setAttribute("aria-label", "E" + step + ". " + event.summary);
+        } else if (episodeIsActive(episode) && step === progress.completed + 1) {
+          item.dataset.state = watchRead.state;
+          detail.textContent = watchRead.state === "reacquiring" ? "Finding close" : "Live candle";
+          item.title = watchRead.detail;
+          item.setAttribute("aria-label", "E" + step + ". " + watchRead.detail);
+        } else {
+          item.dataset.state = "pending";
+          const forecastSide = directionalSide(block.movement_side || block.direction || block.side);
+          detail.textContent = pathComparison.schemaValid
+            ? "Not observed"
+            : forecastSide === "BUY"
+              ? "Forecast up"
+              : forecastSide === "SELL"
+                ? "Forecast down"
+                : "Pending";
+          item.title = "E" + step + " has not completed yet.";
+          item.setAttribute("aria-label", "E" + step + ". Not completed yet. " + detail.textContent + ".");
+        }
+        item.append(label, detail);
+        fragment.appendChild(item);
+      }
+      els.trackingEventTape.replaceChildren(fragment);
+    }
+
+    function commitRealtimeTracking(payload) {
+      rememberLiveTracking(payload);
+      renderTrackingEpisode(payload);
+      renderHistory(payload);
+      const refreshDelay = episodeIsActive(trackingEpisode(payload))
+        ? ACTIVE_TRACKING_POLL_INTERVAL_MS
+        : POLL_INTERVAL_MS;
+      scheduleRefresh(document.hidden ? refreshDelay * 4 : refreshDelay);
+    }
+
     function renderTrackingEpisode(payload) {
       const episode = trackingEpisode(payload);
+      const readiness = safeObject(state.trackingReadiness);
+      const hasDedicatedReadiness = safeText(readiness.schema_version, "") === TRACKING_READINESS_SCHEMA_VERSION
+        && typeof readiness.ready === "boolean";
       const progress = episodeProgress(episode);
       const status = safeText(episode.state || episode.status, "ready").toLowerCase();
       const active = episodeIsActive(episode);
       const retained = ["complete", "completed", "saved", "stopped", "invalidated"].includes(status);
+      const resetRequired = episodeRequiresReset(episode);
       const hasWorkspace = safeText(safeObject(payload).schema_version, "") === OPERATOR_SCHEMA_VERSION;
-      const ready = active || episode.ready === true || (hasWorkspace && episode.ready !== false && Object.keys(episode).length > 0);
+      const ready = active
+        || (hasDedicatedReadiness
+          ? readiness.ready === true
+          : episode.ready === true || (hasWorkspace && episode.ready !== false && Object.keys(episode).length > 0));
       const publicState = active
         ? "Tracking"
         : retained
@@ -3458,17 +5115,23 @@
           ? safeText(episode.summary || episode.status_summary, "The tracking episode is saved in session history.")
           : ready
             ? safeText(episode.summary || episode.status_summary, "Start tracking to keep one plan anchored across the full 12-step study.")
-            : "Loading the chart, latest completed candle, and 12-step outlook. Start Tracking unlocks when they are ready.";
+            : safeText(
+              readiness.message,
+              "Loading the chart, latest completed candle, and 12-step outlook. Start Tracking unlocks when they are ready.",
+            );
       els.trackingRibbon.dataset.state = active ? "active" : retained ? "complete" : ready ? "ready" : "loading";
       setText(els.trackingEpisodeState, state.trackingEpisodeBusy ? "Updating" : publicState);
       setText(els.trackingEpisodeSummary, summary);
       setText(els.trackingEpisodeProgress, progress.completed + " of " + progress.total);
       els.trackingEpisodeProgressFill.style.width = Math.round((progress.completed / progress.total) * 100) + "%";
-      els.trackingStart.hidden = active;
+      els.trackingStart.hidden = active || resetRequired;
       els.trackingStop.hidden = !active;
-      els.trackingStart.disabled = state.trackingEpisodeBusy || !ready;
+      els.trackingReset.hidden = !resetRequired;
+      els.trackingStart.disabled = state.trackingEpisodeBusy || !ready || resetRequired;
       els.trackingStop.disabled = state.trackingEpisodeBusy || !active;
+      els.trackingReset.disabled = state.trackingEpisodeBusy || !resetRequired;
       renderForecastGate(payload);
+      renderTrackingEvidence(payload);
     }
 
     function episodeRetainsOutlook(episode) {
@@ -3505,7 +5168,7 @@
         setText(
           els.forecastActionStatus,
           retained
-            ? "This episode outlook is frozen and remains available. Start Tracking to publish a new 12-step outlook."
+            ? "This episode outlook is frozen and remains available. Reset when you are ready to prepare a new 12-step study."
             : "Start Tracking to publish a 12-step outlook"
         );
       } else if (active && els.forecastActionStatus.dataset.state === "gated") {
@@ -3523,10 +5186,16 @@
     }
 
     async function runTrackingEpisodeAction(action) {
+      const normalizedAction = safeText(action, "").toLowerCase();
+      const episode = trackingEpisode(state.payload || {});
+      const active = episodeIsActive(episode);
+      const resetRequired = episodeRequiresReset(episode);
       if (
         state.trackingEpisodeBusy
-        || (action !== "stop" && els.trackingStart.disabled)
-        || (action === "stop" && !episodeIsActive(trackingEpisode(state.payload || {})))
+        || !["start", "stop", "reset"].includes(normalizedAction)
+        || (normalizedAction === "start" && (active || resetRequired || els.trackingStart.disabled))
+        || (normalizedAction === "stop" && !active)
+        || (normalizedAction === "reset" && (!resetRequired || els.trackingReset.disabled))
       ) {
         return;
       }
@@ -3534,11 +5203,29 @@
       renderTrackingEpisode(state.payload || {});
       setText(
         els.trackingEpisodeSummary,
-        action === "stop" ? "Saving this episode without deleting its history…" : "Anchoring the current chart and plan…"
+        normalizedAction === "stop"
+          ? "Saving this episode without deleting its history…"
+          : normalizedAction === "reset"
+            ? "Preparing a fresh 12-step study. Saved history will remain available…"
+            : "Anchoring the current chart and plan…"
       );
       let failed = false;
+      let errorMessage = "";
       try {
-        const payload = await postTrackingEpisodeAction(action);
+        const payload = await postTrackingEpisodeAction(normalizedAction);
+        if (normalizedAction === "reset" && resetResponseIsIdle(payload)) {
+          state.liveEpisode = null;
+          state.liveEpisodeObservedAt = 0;
+        } else {
+          const actionEpisode = trackingActionEpisode(payload);
+          if (Object.keys(actionEpisode).length) {
+            state.liveEpisode = actionEpisode;
+            state.liveEpisodeObservedAt = Math.max(
+              state.liveEpisodeObservedAt,
+              parsePublicEpoch(actionEpisode.updated_at || actionEpisode.started_at),
+            );
+          }
+        }
         if (safeText(payload.schema_version, "") === OPERATOR_SCHEMA_VERSION) {
           renderOperatorState(payload);
         } else {
@@ -3546,15 +5233,13 @@
         }
       } catch (error) {
         failed = true;
-        setText(els.trackingEpisodeState, "Needs attention");
-        setText(els.trackingEpisodeSummary, safeText(error && error.message, "Tracking could not be updated. Try again."));
+        errorMessage = safeText(error && error.message, "Tracking could not be updated. Try again.");
       } finally {
         state.trackingEpisodeBusy = false;
-        if (!failed) {
-          renderTrackingEpisode(state.payload || {});
-        } else {
-          els.trackingStart.disabled = false;
-          els.trackingStop.disabled = !episodeIsActive(trackingEpisode(state.payload || {}));
+        renderTrackingEpisode(state.payload || {});
+        if (failed) {
+          setText(els.trackingEpisodeState, "Needs attention");
+          setText(els.trackingEpisodeSummary, errorMessage);
         }
       }
     }
@@ -3749,6 +5434,27 @@
         + "/events";
     }
 
+    function trackingEpisodeReadinessUrl() {
+      return "/v1/mobile/window-tracker/sessions/"
+        + encodeURIComponent(SESSION_ID)
+        + "/tracking-episodes/readiness";
+    }
+
+    async function requestTrackingEpisodeReadiness() {
+      const response = await fetch(trackingEpisodeReadinessUrl(), {
+        cache: "no-store",
+        headers: {"Accept": "application/json"},
+      });
+      if (!response.ok) {
+        throw new Error("Tracking readiness is temporarily unavailable.");
+      }
+      const payload = await response.json();
+      if (safeText(payload && payload.schema_version, "") !== TRACKING_READINESS_SCHEMA_VERSION) {
+        throw new Error("Tracking readiness returned an unsupported format.");
+      }
+      return safeObject(payload);
+    }
+
     async function requestJson(url) {
       const response = await fetch(url, {
         cache: "no-store",
@@ -3770,7 +5476,14 @@
     }
 
     function trackingEpisodeActionUrl(action) {
-      const endpoint = action === "stop" ? "stop" : "start";
+      const endpoint = {
+        start: "start",
+        stop: "stop",
+        reset: "reset",
+      }[safeText(action, "").toLowerCase()];
+      if (!endpoint) {
+        throw new Error("Unsupported tracking action.");
+      }
       return "/v1/mobile/window-tracker/sessions/"
         + encodeURIComponent(SESSION_ID)
         + "/tracking-episodes/"
@@ -3794,7 +5507,7 @@
       if (!response.ok) {
         const detail = safeObject(safeObject(payload).detail);
         throw new Error(
-          response.status === 409
+          response.status === 409 && safeText(action, "").toLowerCase() === "start"
             ? "The chart is still preparing. Start Tracking will unlock as soon as the current candle and outlook are ready."
             : neutralPublicText(detail.message, "Tracking could not be updated. Try again.")
         );
@@ -4109,9 +5822,14 @@
         setConnectionState("updating", "Connecting");
       }
       try {
+        const readinessRequest = requestTrackingEpisodeReadiness().catch(function () { return null; });
         const payload = await requestJson(operatorStateUrl(requestedView));
+        const readiness = await readinessRequest;
         if (sequence !== state.requestSequence) {
           return;
+        }
+        if (readiness) {
+          state.trackingReadiness = readiness;
         }
         if (!acceptsObservation(payload, requestedView)) {
           return;
@@ -4193,6 +5911,15 @@
         state.streamConnected = true;
         scheduleStreamRefresh(40);
       });
+      ["TRACKING_UPDATE", "TRACKING_EPISODE_UPDATE"].forEach(function (eventName) {
+        source.addEventListener(eventName, function () {
+          if (state.eventSource !== source) {
+            return;
+          }
+          state.streamConnected = true;
+          scheduleStreamRefresh(40);
+        });
+      });
       source.addEventListener("SESSION_ERROR", function () {
         if (state.eventSource === source) {
           closeSessionStream();
@@ -4206,7 +5933,10 @@
       }
       state.pollTimer = window.setTimeout(async function () {
         await refreshOperatorState();
-        scheduleRefresh(document.hidden ? POLL_INTERVAL_MS * 4 : POLL_INTERVAL_MS);
+        const activeDelay = episodeIsActive(trackingEpisode(state.payload || {}))
+          ? ACTIVE_TRACKING_POLL_INTERVAL_MS
+          : POLL_INTERVAL_MS;
+        scheduleRefresh(document.hidden ? activeDelay * 4 : activeDelay);
       }, Math.max(500, Number(delay) || POLL_INTERVAL_MS));
     }
 
@@ -7047,6 +8777,10 @@
         renderUnavailableState(new Error("Live analysis returned an unsupported workspace format."));
         return;
       }
+      // Episode evidence is non-visual state. Publish it immediately instead
+      // of making E1-E12 wait behind a larger broker PNG decode. The chart and
+      // overlay geometry still commit atomically in loadSurface.
+      commitRealtimeTracking(operatorState);
       loadSurface(operatorState);
     }
 
@@ -7096,6 +8830,15 @@
     });
     els.trackingStop.addEventListener("click", function () {
       runTrackingEpisodeAction("stop");
+    });
+    els.trackingReset.addEventListener("click", function () {
+      runTrackingEpisodeAction("reset");
+    });
+    els.trackingPathRows.addEventListener("click", function (event) {
+      const button = event.target.closest("[data-path-id]");
+      if (button) {
+        setTrackingPathFocus(button.dataset.pathId);
+      }
     });
     els.trackingPlanToggle.addEventListener("click", function () {
       setTrackingPlanOpen(!state.trackingPlanOpen);
@@ -7224,7 +8967,13 @@
         resolveLabelCollisions(els.hotspotLayer);
       });
     });
-    window.addEventListener("pagehide", closeSessionStream);
+    window.addEventListener("pagehide", function () {
+      closeSessionStream();
+      if (state.liveTrackingClockTimer) {
+        window.clearInterval(state.liveTrackingClockTimer);
+        state.liveTrackingClockTimer = 0;
+      }
+    });
 
     applyExperienceMode(state.experienceMode, false);
     setFrameMode(state.frameMode, false);
@@ -7233,6 +8982,7 @@
     document.documentElement.style.setProperty("--overlay-opacity", String(state.overlayOpacity / 100));
     setOverlayView(state.overlayView, {fetch: false, persist: false});
     renderTrackingEpisode({});
+    state.liveTrackingClockTimer = window.setInterval(renderLiveTrackingTimestamp, 1000);
     refreshOperatorState({force: true});
     connectSessionStream();
     scheduleRefresh(POLL_INTERVAL_MS);

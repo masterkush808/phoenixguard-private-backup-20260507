@@ -4,6 +4,11 @@ PhoenixGuard documentation is grouped by operating surface. Deep technical refer
 
 Operator-facing summaries live here; archived deep dives are in `docs/archive/`.
 
+Current live-runtime source of truth:
+
+- `architecture/PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md` - launcher-to-dashboard flow, 12-candle
+  tracking episodes, persistence, APIs, failure diagnosis, and live acceptance checks
+
 Top-level doc groups:
 
 - `architecture/` - system maps and blueprints (summary here, deep content archived)

@@ -27,12 +27,19 @@ Defined in `Backend/src/phoenixguard/mobile_api/app.py`.
 | `POST /v1/mobile/window-tracker/sessions` | Create tracker session | State producer |
 | `GET /v1/mobile/window-tracker/sessions/{session_id}` | Read tracker session/latest signal | Diagnostic/current state |
 | `PUT/DELETE /v1/mobile/window-tracker/sessions/{session_id}/focus-region` | Manage capture focus | Runtime setup |
+| `GET /v1/mobile/operator/state/v1/{session_id}` | Privacy-safe exact-frame operator workspace | Public operator truth |
+| `GET /v1/mobile/window-tracker/sessions/{session_id}/events` | Server-sent session updates | Public state delivery |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/start` | Start continuous tracker | Capture producer |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/stop` | Stop tracker | Runtime control |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/emergency-stop` | Stop tracker immediately | Runtime control |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/capture-once` | Single capture | Capture producer |
+| `GET /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/readiness` | Validate the fixed 12-event baseline inputs | Episode readiness |
+| `GET /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/current` | Read current/retained episode progress | Episode state |
+| `POST /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/start` | Freeze and start one 12-closed-candle episode | Episode control |
+| `POST /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/stop` | Stop only the episode and retain its record | Episode control |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/predict` | Tracker prediction action | Diagnostic/analysis |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/show-future` | Future projection action | Diagnostic |
+| `GET /v1/mobile/window-tracker/sessions/{session_id}/forecast-actions/{request_id}` | Poll an immutable forecast action | Diagnostic/analysis |
 | `PATCH /v1/mobile/window-tracker/sessions/{session_id}/controls` | Update tracker controls | Runtime setup |
 | `GET /v3/mobile/window-tracker/dashboard[/<session_id>]` | Canonical V3 HTML dashboard; `/v1/...` remains a compatibility alias | Diagnostic |
 

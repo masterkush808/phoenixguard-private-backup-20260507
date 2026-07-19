@@ -271,7 +271,7 @@ controls:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
 ```
 
-# PhoenixGuard V3
+##
 
 PhoenixGuard V3 is a `FINAL_LIVE` chart-intelligence workstation. The live path is strictly:
 

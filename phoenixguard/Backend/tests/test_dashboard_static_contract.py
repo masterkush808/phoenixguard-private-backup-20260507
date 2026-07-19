@@ -139,7 +139,7 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert "refreshOperatorState({force: true});" in text
 
 
-def test_dashboard_explains_forecast_ranges_and_uses_a_30_second_fallback_poll() -> None:
+def test_dashboard_explains_forecast_ranges_and_uses_adaptive_fallback_polling() -> None:
     text = _dashboard_text()
 
     assert 'id="forecast-path-legend" role="list" aria-label="Forecast path legend"' in text
@@ -149,14 +149,16 @@ def test_dashboard_explains_forecast_ranges_and_uses_a_30_second_fallback_poll()
     assert "Green and red are alternative studied routes, not odds." in text
     assert "Wider route separation means less agreement" in text
     assert 'const POLL_INTERVAL_MS = 30000;' in text
+    assert 'const ACTIVE_TRACKING_POLL_INTERVAL_MS = 5000;' in text
     assert 'scheduleRefresh(POLL_INTERVAL_MS);' in text
-    assert 'document.hidden ? POLL_INTERVAL_MS * 4 : POLL_INTERVAL_MS' in text
+    assert 'document.hidden ? activeDelay * 4 : activeDelay' in text
     assert 'const POLL_INTERVAL_MS = 3000;' not in text
     assert 'new window.EventSource(sessionStreamUrl())' in text
     assert '+ "/events";' in text
     assert 'source.addEventListener("SESSION_UPDATE"' in text
     assert "scheduleStreamRefresh(40);" in text
-    assert 'window.addEventListener("pagehide", closeSessionStream);' in text
+    assert 'window.addEventListener("pagehide", function () {' in text
+    assert "closeSessionStream();" in text
 
 
 def test_dashboard_keeps_current_movement_forecast_and_permission_separate() -> None:
@@ -178,14 +180,37 @@ def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -
 
     assert 'id="tracking-start" type="button" disabled>Start Tracking</button>' in text
     assert 'id="tracking-stop" type="button" hidden disabled>Stop &amp; save</button>' in text
+    assert 'id="tracking-reset" type="button" hidden disabled' in text
     assert '+ "/tracking-episodes/"' in text
-    assert 'const endpoint = action === "stop" ? "stop" : "start";' in text
+    assert 'const TRACKING_READINESS_SCHEMA_VERSION = "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1";' in text
+    assert '+ "/tracking-episodes/readiness";' in text
+    assert "requestTrackingEpisodeReadiness()" in text
+    assert "state.trackingReadiness = readiness;" in text
+    assert 'reset: "reset"' in text
+    assert 'runTrackingEpisodeAction("reset")' in text
     assert "row.event_horizon" in text
     assert "row.event_cursor" in text
     assert "safeObject(episode.baseline)" in text
     assert "safeObject(episode.current)" in text
     assert "safeObject(episode.plan)" in text
     assert "safeList(trackingEpisode(payload).events)" in text
+    assert 'id="tracking-anchor-title"' in text
+    assert 'id="tracking-forecast-title"' in text
+    assert 'id="tracking-watch-title"' in text
+    assert 'id="tracking-live-updated"' in text
+    assert 'id="tracking-event-tape"' in text
+    assert "safeList(safeObject(episode).events)" in text
+    assert "safeList(episode.future_blocks)" in text
+    assert '"Match · " + publicDirectionWord(event.actual)' in text
+    assert '"Miss · " + publicDirectionWord(event.actual)' in text
+    assert '"Unknown · " + publicDirectionWord(event.actual)' in text
+    assert 'title: "Reacquiring E" + next' in text
+    assert "commitRealtimeTracking(operatorState);" in text
+    assert text.index("commitRealtimeTracking(operatorState);") < text.index(
+        "loadSurface(operatorState);"
+    )
+    assert "const ACTIVE_TRACKING_POLL_INTERVAL_MS = 5000;" in text
+    assert "? ACTIVE_TRACKING_POLL_INTERVAL_MS" in text
     assert "Start Tracking to publish a 12-step outlook" in text
     assert "capture-worker" not in text
     for private_fallback in (
@@ -197,6 +222,67 @@ def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -
         "current_snapshot",
     ):
         assert private_fallback not in text
+
+
+def test_dashboard_compares_exactly_two_public_frozen_paths_without_hiding_either() -> None:
+    text = _dashboard_text()
+
+    assert 'const TRACKING_PATH_COMPARISON_SCHEMA = "PG_TRACKING_PATH_COMPARISON_PUBLIC_V1";' in text
+    assert 'id="tracking-path-comparison"' in text
+    assert 'id="tracking-path-a" type="button" data-path-id="PATH_A"' in text
+    assert 'id="tracking-path-b" type="button" data-path-id="PATH_B"' in text
+    assert 'id="tracking-route-svg"' in text
+    assert ">Two frozen forecast routes<" in text
+    assert ">Two frozen scene routes<" not in text
+    assert 'id="tracking-route-path-a"' in text
+    assert 'id="tracking-route-path-b"' in text
+    assert 'id="tracking-route-observed"' in text
+    assert 'id="tracking-entry-band"' in text
+    assert "safeObject(safeObject(episode).path_comparison)" in text
+    assert 'safeObject(event.path_fit_by_id)' in text
+    assert "event.observed_close_level" in text
+    assert "safeList(path.points)" in text
+    assert "function trackingRoutePlotGeometry(comparison, events)" in text
+    assert "function renderTrackingRoutePlot(comparison, events)" in text
+    assert "svgPointList(geometry.pathA)" in text
+    assert "svgPointList(geometry.pathB)" in text
+    assert "[geometry.anchor].concat" in text
+    assert 'safeText(event.favored_path_id, "").toUpperCase()' in text
+    assert 'PATH_A: {state: "path-a", title: "Path A favored"}' in text
+    assert 'PATH_B: {state: "path-b", title: "Path B favored"}' in text
+    assert 'TOO_CLOSE: {state: "too-close", title: "Too close"}' in text
+    assert 'PATHS_OVERLAP: {state: "too-close", title: "Paths overlap"}' in text
+    assert 'NEITHER_PATH_FITS: {state: "no-fit", title: "Neither path fits"}' in text
+    assert 'GEOMETRY_UNAVAILABLE: {state: "unavailable", title: "Forecast routes unavailable"}' in text
+    assert 'WAITING: {state: "unknown", title: "Waiting for evidence"}' in text
+    assert 'id="tracking-entry-title"' in text
+    assert 'id="tracking-entry-permission"' in text
+    assert 'id="tracking-continuity-guidance"' in text
+    assert "safeObject(rawComparison.anchor)" in text
+    assert "safeObject(rawComparison.forming_at_start)" in text
+    assert 'rawAnchorStatus === "CONFIRMED"' in text
+    assert 'rawFormingStatus === "OBSERVED"' in text
+    assert '"E1 is the candle that was live when Start Tracking was pressed.' in text
+    assert "safeObject(rawComparison.trade_permission)" in text
+    assert '["PERMITTED", "WAIT"].includes(rawTradePermissionStatus)' in text
+    assert "safeObject(rawComparison.entry_location)" in text
+    assert 'id="tracking-entry-progress"' in text
+    assert "event.entry_location_progress" in text
+    for progress_state in (
+        "INSIDE",
+        "APPROACHING",
+        "MOVED_AWAY",
+        "OUTSIDE",
+        "CONFIRMED",
+        "INVALIDATED",
+        "UNKNOWN",
+    ):
+        assert f'"{progress_state}"' in text
+    assert "setTrackingPathFocus(button.dataset.pathId);" in text
+    assert '.tracking-path-comparison[data-has-focus="true"] .tracking-path-row[aria-pressed="false"]' in text
+    assert "fit.number" not in text
+    assert "fit.error" not in text
+    assert "tracking-path-step" not in text
 
 
 def test_dashboard_tracking_plan_and_individual_overlay_controls_are_real_filters() -> None:

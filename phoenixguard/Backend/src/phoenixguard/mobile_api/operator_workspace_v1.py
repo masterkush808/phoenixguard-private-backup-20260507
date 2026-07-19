@@ -3469,23 +3469,73 @@ def _episode_event_contract(
     step = max(1, min(12, _integer(event.get("step") or event.get("event_index"))))
     predicted = _mapping(event.get("predicted_block"))
     actual = _mapping(event.get("actual_block"))
+    observation_kind = _text(
+        event.get("observation_kind"),
+        "LIVE_CLOSE",
+        limit=32,
+    ).upper()
     predicted_side = _side(predicted.get("side"))
     actual_side = _side(actual.get("side"))
     agreement = event.get("direction_agreement")
     if not isinstance(agreement, bool):
-        agreement = (
-            predicted_side == actual_side
-            if predicted_side in _DIRECTIONAL_SIDES and actual_side in _DIRECTIONAL_SIDES
-            else None
-        )
+        agreement = None
+    result_available = event.get("result_available")
+    if not isinstance(result_available, bool):
+        result_available = observation_kind != "UNKNOWN_GAP"
     movement_word = "up" if actual_side == "BUY" else "down" if actual_side == "SELL" else "without a confirmed direction"
-    if agreement is True:
+    if result_available is False:
+        agreement = None
+        summary = (
+            f"E{step}: the chart observation was unavailable; the saved "
+            "future block remains recorded but this result is unscored."
+        )
+    elif agreement is True:
         summary = f"E{step}: price moved {movement_word} and matched the saved future block."
     elif agreement is False:
         summary = f"E{step}: price moved {movement_word} and differed from the saved future block."
     else:
         summary = f"E{step}: the completed candle was recorded for the before-and-after study."
-    after = _mapping(event.get("after_reference"))
+    raw_path_fit = _mapping(event.get("path_fit_by_id"))
+    path_fit_by_id: dict[str, object] = {}
+    for path_id in ("PATH_A", "PATH_B"):
+        raw_fit = _mapping(raw_path_fit.get(path_id))
+        status = _text(raw_fit.get("status"), "UNKNOWN", limit=16).upper()
+        direction_match = raw_fit.get("direction_agreement")
+        measured = status == "MEASURED"
+        path_fit_by_id[path_id] = {
+            "status": "MEASURED" if measured else "UNKNOWN",
+            "direction_agreement": (
+                direction_match if isinstance(direction_match, bool) and measured else None
+            ),
+        }
+    raw_favored_path_id = _text(event.get("favored_path_id"), "", limit=12).upper()
+    favored_path_id = (
+        raw_favored_path_id
+        if raw_favored_path_id in {"PATH_A", "PATH_B"}
+        else ""
+    )
+    observed_close = _number(event.get("observed_close_level"))
+    observed_close_level = (
+        round(observed_close, 6)
+        if observed_close is not None and 0.0 <= observed_close <= 1.0
+        else None
+    )
+    raw_entry_progress = _mapping(event.get("entry_location_progress"))
+    entry_progress_status = _text(
+        raw_entry_progress.get("status"),
+        "UNKNOWN",
+        limit=16,
+    ).upper()
+    if entry_progress_status not in {
+        "INSIDE",
+        "APPROACHING",
+        "MOVED_AWAY",
+        "OUTSIDE",
+        "CONFIRMED",
+        "INVALIDATED",
+        "UNKNOWN",
+    }:
+        entry_progress_status = "UNKNOWN"
     return {
         "id": _safe_identifier(
             event.get("event_id"),
@@ -3497,9 +3547,296 @@ def _episode_event_contract(
         "direction": actual_side,
         "predicted_direction": predicted_side,
         "agreement": agreement,
+        "result_available": result_available,
+        "path_fit_by_id": path_fit_by_id,
+        "favored_path_id": favored_path_id,
+        "observed_close_level": observed_close_level,
+        "entry_location_progress": {
+            "status": entry_progress_status,
+        },
         "state": "HISTORICAL",
         "summary": summary,
-        "frame_id": _frame_id(after.get("frame_id"), event.get("frame_id")),
+    }
+
+
+def _episode_observation_contract(episode: Mapping[str, Any]) -> dict[str, object]:
+    observation = _mapping(episode.get("observation_state"))
+    status = _text(observation.get("status"), "WAITING_FOR_BASELINE", limit=32).upper()
+    if status not in {
+        "WAITING_FOR_BASELINE",
+        "WAITING_FOR_CLOSE",
+        "LIVE",
+        "REACQUIRING",
+        "STOPPED",
+    }:
+        status = "REACQUIRING"
+    unresolved_gap = _explicit_bool(observation.get("unresolved_gap")) is True
+    if status == "REACQUIRING":
+        message = (
+            "Live capture is continuing, but candle continuity is being "
+            "re-established before another result is counted."
+        )
+    elif status == "WAITING_FOR_CLOSE":
+        message = "Live tracking is current and waiting for the next completed candle."
+    elif status == "LIVE":
+        message = "Live tracking is current; the latest completed candle was recorded."
+    elif status == "STOPPED":
+        message = "This tracking episode is no longer collecting new candles."
+    else:
+        message = "Start tracking after the chart baseline is ready."
+    return {
+        "schema_version": "PG_TRACKING_EPISODE_OBSERVATION_PUBLIC_V1",
+        "status": status,
+        "message": message,
+        "unresolved_gap": unresolved_gap,
+    }
+
+
+def _episode_path_comparison_contract(
+    episode: Mapping[str, Any],
+    observation: Mapping[str, object],
+) -> dict[str, object]:
+    raw_comparison = _mapping(episode.get("path_comparison"))
+    public_paths: list[dict[str, object]] = []
+    for expected_id, raw_path in zip(
+        ("PATH_A", "PATH_B"),
+        _rows(raw_comparison.get("paths"))[:2],
+        strict=False,
+    ):
+        path_id = _text(raw_path.get("id"), "", limit=12).upper()
+        if path_id != expected_id:
+            return {}
+        steps: list[dict[str, object]] = []
+        for index, raw_step in enumerate(_rows(raw_path.get("steps"))[:12], start=1):
+            step = _integer(raw_step.get("step"))
+            open_level = _number(raw_step.get("open_level"))
+            close_level = _number(raw_step.get("close_level"))
+            if (
+                step != index
+                or open_level is None
+                or close_level is None
+                or not 0.0 <= open_level <= 1.0
+                or not 0.0 <= close_level <= 1.0
+            ):
+                return {}
+            steps.append(
+                {
+                    "step": step,
+                    "open_level": round(open_level, 6),
+                    "close_level": round(close_level, 6),
+                    "direction": _side(raw_step.get("direction")),
+                }
+            )
+        if len(steps) != 12:
+            return {}
+        raw_points = _point_pairs(raw_path.get("points"), limit=13)
+        points = (
+            raw_points
+            if len(raw_points) == 13
+            and all(0.0 <= point[0] <= 1.0 and 0.0 <= point[1] <= 1.0 for point in raw_points)
+            else []
+        )
+        public_paths.append(
+            {
+                "id": path_id,
+                "label": _safe_public_text(
+                    raw_path.get("label"),
+                    "Main forecast" if path_id == "PATH_A" else "Alternative forecast",
+                    limit=40,
+                ),
+                "direction": _side(raw_path.get("direction")),
+                "summary": _safe_public_text(
+                    raw_path.get("summary"),
+                    "Saved progression from the starting candle.",
+                    limit=160,
+                ),
+                "points": points,
+                "steps": steps,
+            }
+        )
+    if len(public_paths) != 2:
+        return {}
+    verdict = _text(raw_comparison.get("verdict"), "WAITING", limit=32).upper()
+    if verdict not in {
+        "PATH_A",
+        "PATH_B",
+        "TOO_CLOSE",
+        "WAITING",
+        "NEITHER_PATH_FITS",
+        "GEOMETRY_UNAVAILABLE",
+        "PATHS_OVERLAP",
+    }:
+        verdict = "WAITING"
+    raw_favored = _text(raw_comparison.get("favored_path_id"), "", limit=12).upper()
+    favored_path_id = raw_favored if raw_favored == verdict and verdict in {"PATH_A", "PATH_B"} else ""
+    thesis = _mapping(raw_comparison.get("entry_thesis"))
+    thesis_status = _text(thesis.get("status"), "UNAVAILABLE", limit=16).upper()
+    if thesis_status not in {"DIRECTIONAL", "NEUTRAL", "UNAVAILABLE"}:
+        thesis_status = "UNAVAILABLE"
+    observation_status = _text(observation.get("status"), "WAITING", limit=32).upper()
+    continuity_state = (
+        "LIVE"
+        if observation_status == "LIVE"
+        else "REACQUIRING"
+        if observation_status == "REACQUIRING"
+        else "STOPPED"
+        if observation_status == "STOPPED"
+        else "WAITING"
+    )
+    anchor = _mapping(raw_comparison.get("anchor"))
+    anchor_close = _number(anchor.get("close_level"))
+    forming = _mapping(raw_comparison.get("forming_at_start"))
+    forming_open = _number(forming.get("open_level"))
+    forming_current = _number(forming.get("current_level"))
+    bias = _mapping(raw_comparison.get("forecast_bias"))
+    bias_status = _text(bias.get("status"), "UNAVAILABLE", limit=16).upper()
+    if bias_status not in {"DIRECTIONAL", "NEUTRAL", "UNAVAILABLE"}:
+        bias_status = "UNAVAILABLE"
+    permission = _mapping(raw_comparison.get("trade_permission"))
+    permission_status = _text(permission.get("status"), "WAIT", limit=16).upper()
+    if permission_status not in {"PERMITTED", "WAIT"}:
+        permission_status = "WAIT"
+    entry_location = _mapping(raw_comparison.get("entry_location"))
+    entry_status = _text(
+        entry_location.get("status"),
+        "UNAVAILABLE",
+        limit=20,
+    ).upper()
+    if entry_status not in {"TRACKING", "GUIDANCE_ONLY", "UNAVAILABLE"}:
+        entry_status = "UNAVAILABLE"
+    top_level = _number(entry_location.get("top_level"))
+    bottom_level = _number(entry_location.get("bottom_level"))
+    raw_progress = _mapping(entry_location.get("progress"))
+    progress_status = _text(
+        raw_progress.get("status"),
+        "UNKNOWN",
+        limit=16,
+    ).upper()
+    if progress_status not in {
+        "INSIDE",
+        "APPROACHING",
+        "MOVED_AWAY",
+        "OUTSIDE",
+        "CONFIRMED",
+        "INVALIDATED",
+        "UNKNOWN",
+    }:
+        progress_status = "UNKNOWN"
+    transform = _mapping(raw_comparison.get("transform_contract"))
+    geometry_status = (
+        "STABLE"
+        if transform.get("status") == "LOCKED"
+        and verdict != "GEOMETRY_UNAVAILABLE"
+        else "UNAVAILABLE"
+    )
+    return {
+        "schema_version": "PG_TRACKING_PATH_COMPARISON_PUBLIC_V1",
+        "paths": public_paths,
+        "verdict": verdict,
+        "favored_path_id": favored_path_id,
+        "verdict_summary": _safe_public_text(
+            raw_comparison.get("verdict_summary"),
+            "Waiting for confirmed candles to compare the two saved forecasts.",
+            limit=200,
+        ),
+        "anchor": {
+            "status": "CONFIRMED" if anchor.get("status") == "CONFIRMED" else "UNAVAILABLE",
+            "label": "Latest completed candle",
+            "direction": _side(anchor.get("direction")),
+            "close_level": (
+                round(anchor_close, 6)
+                if anchor_close is not None and 0.0 <= anchor_close <= 1.0
+                else None
+            ),
+        },
+        "forming_at_start": {
+            "status": "OBSERVED" if forming.get("status") == "OBSERVED" else "UNAVAILABLE",
+            "label": "Candle forming when tracking started",
+            "direction": _side(forming.get("direction")),
+            "open_level": (
+                round(forming_open, 6)
+                if forming_open is not None and 0.0 <= forming_open <= 1.0
+                else None
+            ),
+            "current_level": (
+                round(forming_current, 6)
+                if forming_current is not None and 0.0 <= forming_current <= 1.0
+                else None
+            ),
+        },
+        "forecast_bias": {
+            "status": bias_status,
+            "label": "Forecast bias at start",
+            "summary": _safe_public_text(
+                bias.get("summary"),
+                "No forecast bias was available when tracking started.",
+                limit=200,
+            ),
+            "direction": _side(bias.get("direction")),
+        },
+        "entry_thesis": {
+            "status": thesis_status,
+            "label": "Entry idea at start",
+            "summary": _safe_public_text(
+                thesis.get("summary"),
+                "No entry idea was available when tracking started.",
+                limit=200,
+            ),
+            "direction": _side(thesis.get("direction")),
+        },
+        "trade_permission": {
+            "status": permission_status,
+            "label": "Entry permission at start",
+            "summary": _safe_public_text(
+                permission.get("summary"),
+                "Entry was not permitted when tracking started.",
+                limit=200,
+            ),
+        },
+        "entry_location": {
+            "status": entry_status,
+            "label": "Saved entry area",
+            "summary": _safe_public_text(
+                entry_location.get("summary"),
+                "No verified entry area was available when tracking started.",
+                limit=220,
+            ),
+            "direction": _side(entry_location.get("direction")),
+            "preferred_location": _safe_public_text(
+                entry_location.get("preferred_location"),
+                "",
+                limit=48,
+            ),
+            "top_level": (
+                round(top_level, 6)
+                if top_level is not None and 0.0 <= top_level <= 1.0
+                else None
+            ),
+            "bottom_level": (
+                round(bottom_level, 6)
+                if bottom_level is not None and 0.0 <= bottom_level <= 1.0
+                else None
+            ),
+            "progress": {
+                "status": progress_status,
+            },
+        },
+        "geometry": {
+            "status": geometry_status,
+            "summary": (
+                "Normalized chart geometry is stable for path comparison."
+                if geometry_status == "STABLE"
+                else "Path comparison is waiting for stable normalized chart geometry."
+            ),
+        },
+        "continuity": {
+            "state": continuity_state,
+            "summary": _safe_public_text(
+                observation.get("message"),
+                "Waiting for the next confirmed candle.",
+                limit=200,
+            ),
+        },
     }
 
 
@@ -3520,6 +3857,8 @@ def _neutral_tracking_readiness_reason(value: object) -> str:
         return "Wait for one completed candle before starting tracking."
     if "12-event" in normalized or "forecast baseline" in normalized:
         return "Wait until all 12 future blocks are ready."
+    if "scene path" in normalized or "selected scene" in normalized:
+        return "Wait until both forecast paths are ready."
     if "frame" in normalized or "bundle" in normalized or "publishing" in normalized:
         return "Wait for the current chart update to finish."
     return "The chart is still preparing the tracking baseline."
@@ -3545,12 +3884,17 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
     market_label = " · ".join(part for part in (pair, timeframe) if part)
     plan_word = "up" if plan_side == "BUY" else "down" if plan_side == "SELL" else "wait"
     latest_event = events[-1] if events else {}
+    observation = _episode_observation_contract(episode)
     if latest_event:
         current_title = f"Event {latest_event['event_index']} recorded"
         current_summary = str(latest_event["summary"])
     else:
-        current_title = "Waiting for E1"
-        current_summary = "The saved baseline remains unchanged while the next completed candle is observed."
+        current_title = (
+            "Re-establishing candle continuity"
+            if observation["status"] == "REACQUIRING"
+            else "Waiting for E1"
+        )
+        current_summary = str(observation["message"])
     terminal_reason = _text(episode.get("terminal_reason"), "", limit=80).upper()
     if state == "ACTIVE":
         summary = f"Tracking E{cursor} of {horizon}; the original plan remains anchored."
@@ -3578,6 +3922,11 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
         readiness.get("reasons"), (str, bytes, bytearray)
     ) else []
     has_episode = bool(episode_id and state != "IDLE")
+    path_comparison = (
+        _episode_path_comparison_contract(episode, observation)
+        if has_episode
+        else {}
+    )
     return {
         "schema_version": "PG_TRACKING_EPISODE_PUBLIC_V1",
         "episode_id": episode_id,
@@ -3586,6 +3935,8 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
         "event_horizon": horizon,
         "event_cursor": cursor,
         "progress": {"completed": cursor, "total": horizon},
+        "observation": observation,
+        "path_comparison": path_comparison,
         "started_at": _safe_public_text(episode.get("started_at"), "", limit=48),
         "updated_at": _safe_public_text(episode.get("updated_at"), "", limit=48),
         "completed_at": _safe_public_text(

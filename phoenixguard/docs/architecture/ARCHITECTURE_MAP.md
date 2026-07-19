@@ -1,11 +1,15 @@
 # PhoenixGuard One-Page Architecture Map
 
+> For the canonical launcher-to-dashboard runtime, including 12-candle tracking episodes, see
+> [PhoenixGuard Live Tracking Blueprint](PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md).
+
 ## 1) Input
 
 - User provides image/file (chart screenshot or equivalent).
 - Entry path: `run_inference(...)` in `main.py`. Live tracker path: `ContinuousWindowTrackerService`
   in `Backend/src/phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a
-  one-second capture loop.
+  completion-scheduled loop. The canonical launcher default is 30 seconds, with bounded adaptive
+  scheduling allowed; episode progress remains closed-candle-event based.
 - It collects frames for the dashboard.
 - The service serves the dashboard through the mobile API.
 

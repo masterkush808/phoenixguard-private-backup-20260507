@@ -533,7 +533,10 @@ def _dashboard_page(
         window.__TRACKING_EPISODE_RESPONSES = {{
           start: {{status: 202, body: {{state: "STARTING"}}}},
           stop: {{status: 202, body: {{state: "STOPPING"}}}},
+          reset: {{status: 202, body: {{state: "RESETTING"}}}},
         }};
+        window.__TRACKING_READINESS_RESPONSE = null;
+        window.__TRACKING_EPISODE_DELAY_MS = 0;
         {event_source_bootstrap}
         Object.defineProperty(window, "Worker", {{value: undefined, configurable: true}});
         const nativeSetTimeout = window.setTimeout.bind(window);
@@ -563,17 +566,32 @@ def _dashboard_page(
               headers: {{"Content-Type": "application/json"}},
             }}));
           }}
+          if (href.endsWith("/tracking-episodes/readiness")) {{
+            const readiness = window.__TRACKING_READINESS_RESPONSE;
+            const status = readiness ? Number(readiness.status || 200) : 404;
+            const body = readiness ? readiness.body : {{detail: "not found"}};
+            return Promise.resolve(new Response(JSON.stringify(body), {{
+              status,
+              headers: {{"Content-Type": "application/json"}},
+            }}));
+          }}
           const episodeAction = href.endsWith("/tracking-episodes/start")
             ? "start"
             : href.endsWith("/tracking-episodes/stop")
               ? "stop"
-              : "";
+              : href.endsWith("/tracking-episodes/reset")
+                ? "reset"
+                : "";
           if (episodeAction) {{
             const action = window.__TRACKING_EPISODE_RESPONSES[episodeAction];
-            return Promise.resolve(new Response(JSON.stringify(action.body), {{
-              status: Number(action.status || 200),
-              headers: {{"Content-Type": "application/json"}},
-            }}));
+            const respond = () => new Response(JSON.stringify(action.body), {{
+                status: Number(action.status || 200),
+                headers: {{"Content-Type": "application/json"}},
+              }});
+            const delay = Number(window.__TRACKING_EPISODE_DELAY_MS || 0);
+            return delay > 0
+              ? new Promise(resolve => nativeSetTimeout(() => resolve(respond()), delay))
+              : Promise.resolve(respond());
           }}
           const isOperatorState = href.includes("/v1/mobile/operator/state/v1/");
           const body = isOperatorState
@@ -687,9 +705,11 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             "layers-clear",
             "run-forecast",
             "show-future-path",
-            "tracking-start",
-            "tracking-stop",
-            "tracking-plan-toggle",
+                "tracking-start",
+                "tracking-stop",
+                "tracking-path-a",
+                "tracking-path-b",
+                "tracking-plan-toggle",
             "zoom-out",
             "zoom-fit",
             "zoom-actual",
@@ -914,12 +934,15 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
     active = copy.deepcopy(initial)
     active["revision"] = 43
     active["tracking"]["episode"] = {
+        "episode_id": "episode-live-presentation",
         "state": "ACTIVE",
         "event_horizon": 12,
         "event_cursor": 4,
+        "started_at": 4_102_444_400.0,
         "baseline": {
             "title": "Starting climb",
             "summary": "The episode began while price was climbing.",
+            "direction": "BUY",
         },
         "current": {
             "title": "Current pause",
@@ -933,21 +956,48 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
         "events": [
             {
                 "event_id": "episode-event-1",
+                "event_index": 1,
                 "observed_at": 4_102_444_510.0,
                 "direction": "BUY",
+                "predicted_direction": "BUY",
+                "agreement": True,
                 "state": "historical",
                 "title": "Move strengthened",
                 "summary": "Price extended from the starting chart.",
             },
             {
                 "event_id": "episode-event-2",
+                "event_index": 2,
                 "observed_at": 4_102_444_520.0,
+                "direction": "SELL",
+                "predicted_direction": "BUY",
+                "agreement": False,
+                "state": "historical",
+                "summary": "Price moved down and differed from the saved block.",
+            },
+            {
+                "event_id": "episode-event-3",
+                "event_index": 3,
+                "observed_at": 4_102_444_530.0,
                 "direction": "HOLD",
+                "predicted_direction": "BUY",
+                "agreement": None,
+                "state": "historical",
+                "summary": "The candle was recorded without a directional comparison.",
+            },
+            {
+                "event_id": "episode-event-4",
+                "event_index": 4,
+                "observed_at": 4_102_444_540.0,
+                "direction": "BUY",
+                "predicted_direction": "BUY",
+                "agreement": True,
                 "state": "current",
                 "title": "Current pause",
                 "summary": "The move is pausing while the original plan remains anchored.",
             },
         ],
+        "future_blocks": copy.deepcopy(_composite_forecast_geometry()[1]),
     }
     completed = copy.deepcopy(active)
     completed["revision"] = 44
@@ -977,15 +1027,27 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
             "() => document.querySelector('#tracking-ribbon')?.dataset.state === 'active'"
         )
         assert page.locator("#tracking-episode-progress").inner_text() == "4 of 12"
+        assert page.locator("#tracking-anchor-title").inner_text() == "Starting climb"
+        assert page.locator("#tracking-forecast-title").inner_text() == "Mixed against the saved forecast"
+        assert page.locator("#tracking-event-tape .tracking-event").count() == 12
+        assert page.locator("#tracking-event-tape .tracking-event").nth(0).get_attribute("data-state") == "aligned"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(0).locator("span").inner_text() == "Match · up"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(1).get_attribute("data-state") == "opposed"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(1).locator("span").inner_text() == "Miss · down"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(2).get_attribute("data-state") == "recorded"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(2).locator("span").inner_text() == "Unknown · unclear"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(4).get_attribute("data-state") == "forming"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(5).locator("span").inner_text() == "Forecast up"
         assert page.locator("#story-step-one-label").inner_text() == "BEFORE"
         assert page.locator("#story-step-two-label").inner_text() == "NOW"
         assert page.locator("#story-step-three-label").inner_text() == "TRACKING PLAN"
         assert page.locator("#current-move-title").inner_text() == "Starting climb"
         assert page.locator("#forecast-title").inner_text() == "Current pause"
         assert page.locator("#permission-title").inner_text() == "Hold the original plan"
-        assert page.locator("#history-count").inner_text() == "2 observations"
+        assert page.locator("#history-count").inner_text() == "4 observations"
         assert not page.locator("#run-forecast").is_disabled()
         assert page.locator("#tracking-stop").is_visible()
+        assert page.locator("#tracking-reset").is_hidden()
 
         page.evaluate(
             "payload => window.__TRACKING_EPISODE_RESPONSES.stop.body = payload",
@@ -995,12 +1057,14 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
         page.wait_for_function(
             "() => document.querySelector('#tracking-ribbon')?.dataset.state === 'complete'"
         )
-        assert page.locator("#tracking-start").is_visible()
+        assert page.locator("#tracking-start").is_hidden()
+        assert page.locator("#tracking-reset").is_visible()
+        assert not page.locator("#tracking-reset").is_disabled()
         assert page.locator("#run-forecast").is_disabled()
         assert "frozen and remains available" in page.locator(
             "#forecast-action-status"
         ).inner_text()
-        assert page.locator("#history-count").inner_text() == "2 observations"
+        assert page.locator("#history-count").inner_text() == "4 observations"
         requests = page.evaluate("window.__FETCH_REQUESTS.slice()")
         assert any(
             row["method"] == "POST"
@@ -1012,6 +1076,690 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
             and row["href"].endswith("/tracking-episodes/stop")
             for row in requests
         )
+
+
+def test_tracking_start_uses_dedicated_readiness_and_applies_action_response(
+    chromium_browser: Browser,
+) -> None:
+    stale_operator = _operator_payload()
+    stale_operator["tracking"]["episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_PUBLIC_V1",
+        "episode_id": "",
+        "state": "IDLE",
+        "revision": 0,
+        "ready": False,
+        "event_horizon": 12,
+        "event_cursor": 0,
+    }
+    active_episode = {
+        "schema_version": "PG_TRACKING_EPISODE_PUBLIC_V1",
+        "episode_id": "episode-readiness-authority",
+        "state": "ACTIVE",
+        "revision": 1,
+        "ready": True,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "started_at": 4_102_444_400.0,
+        "updated_at": 4_102_444_400.0,
+        "summary": "The baseline is frozen and E1 is now being observed.",
+    }
+
+    with _dashboard_page(chromium_browser, stale_operator) as page:
+        start = page.locator("#tracking-start")
+        assert start.is_visible()
+        assert start.is_disabled()
+
+        page.evaluate(
+            """
+            () => {
+              window.__TRACKING_READINESS_RESPONSE = {
+                status: 200,
+                body: {
+                  schema_version: "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1",
+                  ready: true,
+                  message: "The chart is ready. Start Tracking when you want to anchor the 12-event study.",
+                  reasons: [],
+                  event_horizon: 12,
+                  current: {state: "IDLE", event_cursor: 0, event_horizon: 12},
+                },
+              };
+              return window.PhoenixGuardDashboard.refresh();
+            }
+            """
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-start')?.disabled === false"
+        )
+        page.evaluate(
+            "payload => window.__TRACKING_EPISODE_RESPONSES.start.body = payload",
+            active_episode,
+        )
+        start.click()
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-stop')?.hidden === false"
+        )
+
+        assert start.is_hidden()
+        assert page.locator("#tracking-stop").is_visible()
+        assert page.locator("#tracking-reset").is_hidden()
+        assert page.locator("#tracking-episode-progress").inner_text() == "0 of 12"
+        assert page.locator("#tracking-episode-state").inner_text() == "TRACKING"
+        requests = page.evaluate("window.__FETCH_REQUESTS.slice()")
+        assert any(
+            row["method"] == "GET"
+            and row["href"].endswith("/tracking-episodes/readiness")
+            for row in requests
+        )
+        assert any(
+            row["method"] == "POST"
+            and row["href"].endswith("/tracking-episodes/start")
+            for row in requests
+        )
+
+
+def test_completed_tracking_episode_resets_once_before_a_new_start(
+    chromium_browser: Browser,
+) -> None:
+    completed = _operator_payload()
+    events = [
+        {
+            "event_id": f"completed-reset-e{step}",
+            "event_index": step,
+            "observed_at": 4_102_444_500.0 + step,
+            "direction": "BUY" if step % 2 else "SELL",
+            "predicted_direction": "BUY",
+            "agreement": bool(step % 2),
+            "state": "historical",
+            "summary": f"E{step} remained saved in the completed study.",
+        }
+        for step in range(1, 13)
+    ]
+    completed["history"] = copy.deepcopy(events)
+    completed["tracking"]["episode"] = {
+        "episode_id": "episode-completed-reset",
+        "state": "COMPLETED",
+        "ready": False,
+        "event_horizon": 12,
+        "event_cursor": 12,
+        "progress": {"completed": 12, "total": 12},
+        "events": copy.deepcopy(events),
+        "future_blocks": copy.deepcopy(_composite_forecast_geometry()[1]),
+        "summary": "All 12 events are complete and the study is saved.",
+    }
+
+    reset = copy.deepcopy(completed)
+    reset["revision"] = 43
+    reset["freshness"]["observed_at"] += 1
+    reset["tracking"]["episode"] = {
+        "episode_id": "",
+        "state": "IDLE",
+        "ready": False,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "progress": {"completed": 0, "total": 12},
+        "events": [],
+        "future_blocks": [],
+        "summary": "Preparing the latest completed candle for a new study.",
+    }
+    ready = copy.deepcopy(reset)
+    ready["revision"] = 44
+    ready["freshness"]["observed_at"] += 1
+    ready["tracking"]["episode"]["ready"] = True
+
+    with _dashboard_page(chromium_browser, completed) as page:
+        reset_button = page.locator("#tracking-reset")
+        start_button = page.locator("#tracking-start")
+        assert reset_button.is_visible()
+        assert not reset_button.is_disabled()
+        assert start_button.is_hidden()
+        assert page.locator("#tracking-stop").is_hidden()
+        assert page.locator("#tracking-episode-progress").inner_text() == "12 of 12"
+        history_before = page.locator("#history-count").inner_text()
+        assert history_before == "12 observations"
+
+        page.evaluate(
+            """
+            payload => {
+              window.__TRACKING_EPISODE_RESPONSES.reset.body = payload;
+              window.__TRACKING_EPISODE_DELAY_MS = 150;
+              const button = document.querySelector('#tracking-reset');
+              button.click();
+              button.click();
+            }
+            """,
+            reset,
+        )
+        assert reset_button.is_visible()
+        assert reset_button.is_disabled()
+        assert page.locator("#tracking-episode-progress").inner_text() == "12 of 12"
+        assert page.locator("#history-count").inner_text() == history_before
+
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-episode-progress')?.textContent === '0 of 12'"
+        )
+        assert reset_button.is_hidden()
+        assert start_button.is_visible()
+        assert start_button.is_disabled()
+        assert page.locator("#tracking-episode-state").inner_text() == "PREPARING"
+        assert page.locator("#history-count").inner_text() == history_before
+
+        reset_requests = [
+            row
+            for row in page.evaluate("window.__FETCH_REQUESTS.slice()")
+            if row["method"] == "POST"
+            and row["href"].endswith("/tracking-episodes/reset")
+        ]
+        assert len(reset_requests) == 1
+
+        page.evaluate("payload => window.renderOperatorState(payload)", ready)
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-start')?.disabled === false"
+        )
+        assert start_button.is_visible()
+        assert reset_button.is_hidden()
+        assert page.locator("#history-count").inner_text() == history_before
+
+        for offset, terminal_state in enumerate(
+            ("STOPPED", "INVALIDATED", "FAILED"), start=3
+        ):
+            retained = copy.deepcopy(completed)
+            retained["revision"] = 42 + offset
+            retained["freshness"]["observed_at"] += offset
+            retained["tracking"]["episode"]["state"] = terminal_state
+            retained["tracking"]["episode"]["event_cursor"] = 4
+            retained["tracking"]["episode"]["progress"] = {
+                "completed": 4,
+                "total": 12,
+            }
+            retained["tracking"]["episode"]["events"] = copy.deepcopy(events[:4])
+            page.evaluate("payload => window.renderOperatorState(payload)", retained)
+            assert reset_button.is_visible(), terminal_state
+            assert not reset_button.is_disabled(), terminal_state
+            assert start_button.is_hidden(), terminal_state
+
+
+def test_tracking_episode_chrome_updates_before_the_next_broker_image_decodes(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    initial["tracking"]["episode"] = {
+        "state": "IDLE",
+        "ready": True,
+        "event_horizon": 12,
+        "event_cursor": 0,
+    }
+    active = copy.deepcopy(initial)
+    active["revision"] = 43
+    active["freshness"]["observed_at"] += 1
+    active["surface"].update(
+        {
+            "frame_id": 43,
+            "primary_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=43",
+            "fallback_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+            "focus_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+        }
+    )
+    active["tracking"]["episode"] = {
+        "episode_id": "episode-image-race",
+        "state": "ACTIVE",
+        "ready": True,
+        "event_horizon": 12,
+        "event_cursor": 1,
+        "started_at": 4_102_444_500.0,
+        "updated_at": 4_102_444_501.0,
+        "baseline": {"title": "Chosen buy entry", "direction": "BUY"},
+        "future_blocks": copy.deepcopy(_composite_forecast_geometry()[1]),
+        "events": [
+            {
+                "id": "episode-image-race-e1",
+                "event_index": 1,
+                "observed_at": 4_102_444_501.0,
+                "direction": "BUY",
+                "predicted_direction": "BUY",
+                "agreement": True,
+                "summary": "E1 moved up and matched the saved future block.",
+            }
+        ],
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        initial,
+        delayed_artifact_frames={43: 0.25},
+    ) as page:
+        page.evaluate(
+            "payload => window.__TRACKING_EPISODE_RESPONSES.start.body = payload",
+            active,
+        )
+        page.locator("#tracking-start").click()
+        page.wait_for_function(
+            "() => document.querySelector('#tracking-episode-progress')?.textContent === '1 of 12'"
+        )
+        assert page.locator("#tracking-anchor-title").inner_text() == "Chosen buy entry"
+        assert page.locator("#tracking-forecast-title").inner_text() == (
+            "Following the saved forecast"
+        )
+        assert page.locator("#tracking-event-tape .tracking-event").nth(0).get_attribute(
+            "data-state"
+        ) == "aligned"
+
+
+@pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
+def test_tracking_episode_compares_two_frozen_paths_without_hiding_the_alternate(
+    chromium_browser: Browser,
+    viewport: tuple[int, int],
+) -> None:
+    payload = _operator_payload()
+    path_x = [round(0.20 + step * 0.052, 4) for step in range(13)]
+    path_a_points = [
+        [x_value, round(0.58 - step * 0.008, 4)]
+        for step, x_value in enumerate(path_x)
+    ]
+    path_b_points = [
+        [
+            x_value,
+            round(0.58 + (0.012 * step if step <= 3 else 0.036 - 0.010 * (step - 3)), 4),
+        ]
+        for step, x_value in enumerate(path_x)
+    ]
+    payload["tracking"]["episode"] = {
+        "episode_id": "episode-two-path-live",
+        "state": "ACTIVE",
+        "ready": True,
+        "event_horizon": 12,
+        "event_cursor": 3,
+        "started_at": 4_102_444_400.0,
+        "baseline": {"title": "Latest completed candle", "direction": "BUY"},
+        "path_comparison": {
+            "schema_version": "PG_TRACKING_PATH_COMPARISON_PUBLIC_V1",
+            "paths": [
+                {
+                    "id": "PATH_A",
+                    "label": "Main forecast",
+                    "direction": "BUY",
+                    "summary": "A steady climb with a shallow middle pause.",
+                    "points": path_a_points,
+                    "steps": [
+                        {"step": step, "direction": "BUY"}
+                        for step in range(1, 13)
+                    ],
+                },
+                {
+                    "id": "PATH_B",
+                    "label": "Alternative forecast",
+                    "direction": "BUY",
+                    "summary": "A deeper pullback before the climb resumes.",
+                    "points": path_b_points,
+                    "steps": [
+                        {"step": step, "direction": "BUY"}
+                        for step in range(1, 13)
+                    ],
+                },
+            ],
+            "verdict": "PATH_A",
+            "favored_path_id": "PATH_A",
+            "verdict_summary": "The completed candles currently fit the main route more closely.",
+            "anchor": {
+                "status": "CONFIRMED",
+                "label": "Latest completed candle",
+                "direction": "BUY",
+            },
+            "forming_at_start": {
+                "status": "OBSERVED",
+                "label": "Candle forming when tracking started",
+                "direction": "BUY",
+            },
+            "forecast_bias": {
+                "status": "DIRECTIONAL",
+                "label": "Forecast bias at start",
+                "summary": "The saved scene outlook leaned upward.",
+                "direction": "BUY",
+            },
+            "entry_thesis": {
+                "status": "DIRECTIONAL",
+                "label": "Entry idea at start",
+                "summary": "The saved idea was to wait for a lower buy entry.",
+                "direction": "BUY",
+            },
+            "entry_location": {
+                "status": "TRACKING",
+                "label": "Saved entry area",
+                "summary": "The saved buy area remains below the starting close.",
+                "direction": "BUY",
+                "preferred_location": "lower price",
+                "top_level": 0.548,
+                "bottom_level": 0.566,
+                "progress": {"status": "INSIDE", "distance": 0.0},
+            },
+            "trade_permission": {
+                "status": "WAIT",
+                "label": "Entry permission at start",
+                "summary": "The starting chart did not permit a trade.",
+            },
+            "continuity": {
+                "state": "LIVE",
+                "summary": "The live candle sequence remains continuous.",
+            },
+        },
+        "events": [
+            {
+                "event_id": "two-path-e1",
+                "event_index": 1,
+                "direction": "BUY",
+                "observed_at": 4_102_444_510.0,
+                "observed_close_level": 0.566,
+                "favored_path_id": "PATH_A",
+                "entry_location_progress": {"status": "INSIDE", "distance": 0.0},
+                "path_fit_by_id": {
+                    "PATH_A": {"status": "MEASURED", "direction_agreement": True},
+                    "PATH_B": {"status": "MEASURED", "direction_agreement": True},
+                },
+                "summary": "E1 closed upward and currently favors Path A.",
+            },
+            {
+                "event_id": "two-path-e2",
+                "event_index": 2,
+                "direction": "BUY",
+                "observed_at": 4_102_444_520.0,
+                "observed_close_level": 0.558,
+                "favored_path_id": "PATH_A",
+                "entry_location_progress": {"status": "INSIDE", "distance": 0.0},
+                "path_fit_by_id": {
+                    "PATH_A": {"status": "MEASURED", "direction_agreement": True},
+                    "PATH_B": {"status": "MEASURED", "direction_agreement": False},
+                },
+                "summary": "E2 closed upward and currently favors Path A.",
+            },
+            {
+                "event_id": "two-path-e3",
+                "event_index": 3,
+                "direction": "SELL",
+                "observed_at": 4_102_444_530.0,
+                "observed_close_level": 0.562,
+                "favored_path_id": "",
+                "entry_location_progress": {"status": "INSIDE", "distance": 0.0},
+                "path_fit_by_id": {
+                    "PATH_A": {"status": "MEASURED", "direction_agreement": False},
+                    "PATH_B": {"status": "MEASURED", "direction_agreement": True},
+                },
+                "summary": "E3 closed downward; the full route verdict remains Path A.",
+            },
+        ],
+    }
+
+    with _dashboard_page(chromium_browser, payload, viewport=viewport) as page:
+        path_a = page.locator("#tracking-path-a")
+        path_b = page.locator("#tracking-path-b")
+        assert path_a.is_visible()
+        assert path_b.is_visible()
+        assert page.locator("#tracking-forecast-title").inner_text() == "Path A favored"
+        assert page.locator("#tracking-path-a-title").inner_text() == "Main forecast"
+        assert page.locator("#tracking-path-b-title").inner_text() == "Alternative forecast"
+        rendered_path_a = page.locator("#tracking-route-path-a").get_attribute("points") or ""
+        rendered_path_b = page.locator("#tracking-route-path-b").get_attribute("points") or ""
+        assert len(rendered_path_a.split()) == 13
+        assert len(rendered_path_b.split()) == 13
+        assert rendered_path_a != rendered_path_b
+        assert rendered_path_a.split()[0] == rendered_path_b.split()[0]
+        anchor_point = rendered_path_a.split()[0].split(",")
+        assert page.locator("#tracking-route-anchor").get_attribute("cx") == anchor_point[0]
+        assert page.locator("#tracking-route-anchor").get_attribute("cy") == anchor_point[1]
+        assert page.locator("#tracking-route-axis span").count() == 12
+        assert all(
+            page.locator("#tracking-route-axis span").nth(index).get_attribute("style")
+            for index in range(12)
+        )
+        assert page.locator('#tracking-route-nodes [data-path-id="PATH_A"]').count() == 12
+        assert page.locator('#tracking-route-nodes [data-path-id="PATH_B"]').count() == 12
+        observed_before = page.locator("#tracking-route-observed").get_attribute("points") or ""
+        assert len(observed_before.split()) == 4
+        assert page.locator("#tracking-observed-nodes .tracking-observed-node").count() == 3
+        assert page.locator("#tracking-entry-band").is_visible()
+        assert page.locator("#tracking-path-a-status").inner_text() == "Favored now"
+        assert page.locator("#tracking-path-b-status").inner_text() == "Still tracked"
+        assert page.locator("#tracking-entry-title").inner_text() == "Buy idea frozen at start"
+        assert "E1 is the candle that was live when Start Tracking was pressed" in page.locator(
+            "#tracking-anchor-meta"
+        ).inner_text()
+        assert "Entry permission · Closed at start" in page.locator(
+            "#tracking-entry-permission"
+        ).inner_text()
+        assert "latest confirmed candle is inside it" in page.locator(
+            "#tracking-entry-progress"
+        ).inner_text()
+        assert page.locator("#tracking-event-tape .tracking-event").nth(0).locator("span").inner_text() == "Path A · up"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(2).locator("span").inner_text() == "Compared · down"
+        assert page.locator(
+            '#tracking-route-nodes [data-path-id="PATH_A"][data-step="2"]'
+        ).get_attribute("data-fit") == "aligned"
+        assert page.locator(
+            '#tracking-route-nodes [data-path-id="PATH_B"][data-step="2"]'
+        ).get_attribute("data-fit") == "opposed"
+
+        path_b.click()
+        assert path_a.is_visible()
+        assert path_b.is_visible()
+        assert path_a.get_attribute("aria-pressed") == "false"
+        assert path_b.get_attribute("aria-pressed") == "true"
+        assert page.locator("#tracking-path-comparison").get_attribute("data-focused-path") == "PATH_B"
+        page.wait_for_function(
+            """
+            () => Number(getComputedStyle(document.querySelector('#tracking-route-path-b')).opacity)
+              > Number(getComputedStyle(document.querySelector('#tracking-route-path-a')).opacity)
+            """
+        )
+        route_opacity = page.evaluate(
+            """
+            () => ({
+              pathA: getComputedStyle(document.querySelector('#tracking-route-path-a')).opacity,
+              pathB: getComputedStyle(document.querySelector('#tracking-route-path-b')).opacity,
+            })
+            """
+        )
+        assert float(route_opacity["pathA"]) > 0
+        assert float(route_opacity["pathB"]) > 0
+        assert float(route_opacity["pathB"]) > float(route_opacity["pathA"])
+
+        advanced = copy.deepcopy(payload)
+        advanced["revision"] = 43
+        advanced["tracking"]["episode"]["event_cursor"] = 4
+        advanced["tracking"]["episode"]["events"].append(
+            {
+                "event_id": "two-path-e4",
+                "event_index": 4,
+                "direction": "BUY",
+                "observed_at": 4_102_444_540.0,
+                "observed_close_level": 0.551,
+                "favored_path_id": "PATH_A",
+                "entry_location_progress": {"status": "INSIDE", "distance": 0.0},
+                "path_fit_by_id": {
+                    "PATH_A": {"status": "MEASURED", "direction_agreement": True},
+                    "PATH_B": {"status": "MEASURED", "direction_agreement": False},
+                },
+                "summary": "E4 added one confirmed point to the observed progression.",
+            }
+        )
+        page.evaluate("value => window.renderOperatorState(value)", advanced)
+        observed_after = page.locator("#tracking-route-observed").get_attribute("points") or ""
+        assert len(observed_after.split()) == 5
+        assert len(observed_after.split()) > len(observed_before.split())
+
+        untrusted = copy.deepcopy(advanced)
+        untrusted["revision"] = 44
+        untrusted["tracking"]["episode"]["event_cursor"] = 5
+        untrusted["tracking"]["episode"]["events"].append(
+            {
+                "event_id": "two-path-e5-untrusted",
+                "event_index": 5,
+                "direction": "BUY",
+                "observed_at": 4_102_444_550.0,
+                "observed_close_level": None,
+                "favored_path_id": "",
+                "entry_location_progress": {"status": "UNKNOWN", "distance": None},
+                "path_fit_by_id": {
+                    "PATH_A": {"status": "UNKNOWN", "direction_agreement": None},
+                    "PATH_B": {"status": "UNKNOWN", "direction_agreement": None},
+                },
+                "summary": "E5 has no trusted transform, so no observed point is published.",
+            }
+        )
+        page.evaluate("value => window.renderOperatorState(value)", untrusted)
+        observed_untrusted = page.locator("#tracking-route-observed").get_attribute("points") or ""
+        assert len(observed_untrusted.split()) == 5
+        assert page.locator('#tracking-observed-nodes [data-step="5"]').count() == 0
+        layout = page.evaluate(
+            """
+            () => ({
+              documentWidth: document.documentElement.scrollWidth,
+              viewportWidth: window.innerWidth,
+              pathARight: document.querySelector('#tracking-path-a').getBoundingClientRect().right,
+              pathBRight: document.querySelector('#tracking-path-b').getBoundingClientRect().right,
+            })
+            """
+        )
+        assert layout["documentWidth"] <= layout["viewportWidth"] + 1, (viewport, layout)
+        assert layout["pathARight"] <= layout["viewportWidth"] + 1, (viewport, layout)
+        assert layout["pathBRight"] <= layout["viewportWidth"] + 1, (viewport, layout)
+
+
+def test_tracking_episode_shows_server_too_close_and_clean_restart_states(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["tracking"]["episode"] = {
+        "episode_id": "episode-two-path-reacquiring",
+        "state": "ACTIVE",
+        "ready": True,
+        "event_horizon": 12,
+        "event_cursor": 1,
+        "started_at": time.time() - 300,
+        "baseline": {"title": "Latest completed candle", "direction": "SELL"},
+        "path_comparison": {
+            "schema_version": "PG_TRACKING_PATH_COMPARISON_PUBLIC_V1",
+            "paths": [
+                {
+                    "id": path_id,
+                    "label": label,
+                    "direction": "SELL",
+                    "summary": summary,
+                    "steps": [
+                        {"step": step, "direction": "SELL" if step < 7 else "BUY"}
+                        for step in range(1, 13)
+                    ],
+                }
+                for path_id, label, summary in (
+                    ("PATH_A", "Main forecast", "A direct downward route."),
+                    ("PATH_B", "Alternative forecast", "A pullback before moving down."),
+                )
+            ],
+            "verdict": "TOO_CLOSE",
+            "favored_path_id": "",
+            "verdict_summary": "Neither frozen route has a clear fit advantage yet.",
+            "entry_thesis": {
+                "status": "NEUTRAL",
+                "label": "Entry idea at start",
+                "summary": "The starting candle did not permit a directional entry.",
+                "direction": "NEUTRAL",
+            },
+            "continuity": {
+                "state": "REACQUIRING",
+                "summary": "The completed-candle sequence cannot be verified continuously.",
+            },
+        },
+        "events": [
+            {
+                "event_id": "two-path-reacquiring-e1",
+                "event_index": 1,
+                "direction": "SELL",
+                "observed_at": time.time() - 280,
+                "favored_path_id": "",
+                "path_fit_by_id": {
+                    "PATH_A": {"status": "MEASURED", "direction_agreement": True},
+                    "PATH_B": {"status": "MEASURED", "direction_agreement": True},
+                },
+                "summary": "E1 was measured without a favored route.",
+            }
+        ],
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#tracking-forecast-title").inner_text() == "Too close"
+        assert page.locator("#tracking-path-a-status").inner_text() == "Too close"
+        assert page.locator("#tracking-path-b-status").inner_text() == "Too close"
+        assert page.locator("#tracking-entry-title").inner_text() == "No directional entry idea"
+        guidance = page.locator("#tracking-continuity-guidance")
+        assert guidance.is_visible()
+        assert "Start tracking from the latest completed candle" in guidance.inner_text()
+        assert page.locator("#tracking-path-a").is_visible()
+        assert page.locator("#tracking-path-b").is_visible()
+
+        for revision, verdict, expected_title in (
+            (43, "PATHS_OVERLAP", "Paths overlap"),
+            (44, "NEITHER_PATH_FITS", "Neither path fits"),
+            (45, "GEOMETRY_UNAVAILABLE", "Forecast routes unavailable"),
+        ):
+            updated = copy.deepcopy(payload)
+            updated["revision"] = revision
+            updated["tracking"]["episode"]["path_comparison"].update(
+                {
+                    "verdict": verdict,
+                    "favored_path_id": "",
+                    "verdict_summary": "The server published an explicit non-favored route state.",
+                    "continuity": {
+                        "state": "LIVE",
+                        "summary": "The live sequence remains continuous.",
+                    },
+                }
+            )
+            page.evaluate("value => window.renderOperatorState(value)", updated)
+            assert page.locator("#tracking-forecast-title").inner_text() == expected_title
+            assert page.locator("#tracking-path-a").is_visible()
+            assert page.locator("#tracking-path-b").is_visible()
+
+        unknown = copy.deepcopy(payload)
+        unknown["revision"] = 46
+        unknown["tracking"]["episode"]["path_comparison"].update(
+            {
+                "verdict": "INTERNAL_EXPERIMENT",
+                "favored_path_id": "PATH_A",
+                "verdict_summary": "This value is not part of the public verdict vocabulary.",
+            }
+        )
+        page.evaluate("value => window.renderOperatorState(value)", unknown)
+        assert page.locator("#tracking-forecast-title").inner_text() == "Waiting for evidence"
+        assert page.locator("#tracking-path-a").get_attribute("data-state") != "favored"
+        assert page.locator("#tracking-path-b").get_attribute("data-state") != "favored"
+
+
+def test_tracking_episode_exposes_reacquiring_without_inventing_completed_events(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["freshness"]["observed_at"] = time.time()
+    payload["tracking"]["episode"] = {
+        "episode_id": "episode-reacquiring",
+        "state": "ACTIVE",
+        "ready": True,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "started_at": time.time() - 900,
+        "updated_at": time.time() - 900,
+        "baseline": {"title": "Chosen buy entry", "direction": "BUY"},
+        "future_blocks": copy.deepcopy(_composite_forecast_geometry()[1]),
+        "events": [],
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#tracking-watch-title").inner_text() == "Reacquiring E1"
+        assert page.locator("#tracking-watch-read").get_attribute("data-state") == (
+            "reacquiring"
+        )
+        slots = page.locator("#tracking-event-tape .tracking-event")
+        assert slots.count() == 12
+        assert slots.nth(0).get_attribute("data-state") == "reacquiring"
+        assert slots.nth(0).locator("span").inner_text() == "Finding close"
+        assert slots.nth(1).get_attribute("data-state") == "pending"
+        assert page.locator("#tracking-episode-progress").inner_text() == "0 of 12"
 
 
 def test_tracking_plan_individual_controls_and_sequence_blocks_render_without_diagnostics(

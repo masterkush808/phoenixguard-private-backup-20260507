@@ -799,6 +799,19 @@ def _ensure_session(
         return session
     if tracker_session_is_running(session) and _session_needs_worker_restart(session, capture_interval_sec):
         session = _restart_tracker_worker(base_url, session_id, capture_interval_sec)
+    elif tracker_session_is_running(session):
+        # A running session is persisted, but its capture worker belongs to
+        # the API process.  Reconcile through the idempotent Start endpoint on
+        # every launcher/API rendezvous so a freshly recycled API cannot trust
+        # stale process-local ownership that no longer exists.
+        session = _request_json(
+            base_url,
+            f"/v1/mobile/window-tracker/sessions/{session_id}/start",
+            method="POST",
+            timeout=30,
+        )
+        if not tracker_session_is_running(session):
+            session = _wait_for_started_session(base_url, session_id, capture_interval_sec)
     elif not tracker_session_is_running(session):
         _request_json(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}/start", method="POST", timeout=30)
         session = _wait_for_started_session(base_url, session_id, capture_interval_sec)

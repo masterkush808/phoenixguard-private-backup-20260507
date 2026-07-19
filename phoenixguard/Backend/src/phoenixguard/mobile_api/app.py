@@ -44,7 +44,10 @@ from phoenixguard.runtime.realtime_performance_v3 import (
 from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
 from phoenixguard.runtime.tracker_bootstrap import tracker_session_runtime_state
 from phoenixguard.tracing import configure_tracing, instrument_fastapi_app
-from phoenixguard.tracking.tracking_episode_v3 import TrackingEpisodeReadinessError
+from phoenixguard.tracking.tracking_episode_v3 import (
+    TrackingEpisodeReadinessError,
+    TrackingEpisodeStateError,
+)
 from phoenixguard.voice.control import (
     apply_voice_preferences,
     execute_voice_command,
@@ -3735,6 +3738,140 @@ def _bounded_operator_projection_context(
             if (row := bounded_scalar_fields(item, keys))
         ]
 
+    def bounded_point_pairs(value: object, *, limit: int = 13) -> list[list[float]]:
+        if not isinstance(value, Sequence) or isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            return []
+        points: list[list[float]] = []
+        for raw_point in list(cast(Sequence[object], value))[:limit]:
+            if not isinstance(raw_point, Sequence) or isinstance(
+                raw_point,
+                (str, bytes, bytearray),
+            ):
+                return []
+            pair = list(cast(Sequence[object], raw_point))
+            if len(pair) < 2:
+                return []
+            x_value, y_value = pair[:2]
+            if (
+                isinstance(x_value, bool)
+                or isinstance(y_value, bool)
+                or not isinstance(x_value, (int, float))
+                or not isinstance(y_value, (int, float))
+            ):
+                return []
+            points.append([float(x_value), float(y_value)])
+        return points
+
+    def bounded_path_comparison(value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        source = cast(Mapping[str, object], value)
+        output = bounded_scalar_fields(
+            source,
+            (
+                "schema_version",
+                "verdict",
+                "favored_path_id",
+                "verdict_summary",
+            ),
+        )
+        raw_paths = source.get("paths")
+        paths: list[dict[str, object]] = []
+        if isinstance(raw_paths, Sequence) and not isinstance(
+            raw_paths,
+            (str, bytes, bytearray),
+        ):
+            for raw_path in list(cast(Sequence[object], raw_paths))[:2]:
+                path = bounded_scalar_fields(
+                    raw_path,
+                    ("id", "label", "direction", "summary"),
+                )
+                if not isinstance(raw_path, Mapping):
+                    continue
+                raw_path_mapping = cast(Mapping[str, object], raw_path)
+                points = bounded_point_pairs(raw_path_mapping.get("points"))
+                steps = bounded_episode_rows(
+                    raw_path_mapping.get("steps"),
+                    ("step", "open_level", "close_level", "direction"),
+                )
+                if points:
+                    path["points"] = points
+                if steps:
+                    path["steps"] = steps
+                if path:
+                    paths.append(path)
+        if paths:
+            output["paths"] = paths
+
+        for key, fields in (
+            (
+                "anchor",
+                ("status", "label", "direction", "close_level"),
+            ),
+            (
+                "forming_at_start",
+                (
+                    "status",
+                    "label",
+                    "direction",
+                    "open_level",
+                    "current_level",
+                ),
+            ),
+            (
+                "forecast_bias",
+                ("status", "label", "summary", "direction"),
+            ),
+            (
+                "entry_thesis",
+                ("status", "label", "summary", "direction"),
+            ),
+            (
+                "trade_permission",
+                ("status", "label", "summary"),
+            ),
+        ):
+            selected = bounded_scalar_fields(source.get(key), fields)
+            if selected:
+                output[key] = selected
+
+        entry_location = bounded_scalar_fields(
+            source.get("entry_location"),
+            (
+                "status",
+                "label",
+                "summary",
+                "direction",
+                "preferred_location",
+                "top_level",
+                "bottom_level",
+            ),
+        )
+        if isinstance(source.get("entry_location"), Mapping):
+            raw_entry_location = cast(
+                Mapping[str, object],
+                source["entry_location"],
+            )
+            progress = bounded_scalar_fields(
+                raw_entry_location.get("progress"),
+                ("status",),
+            )
+            if progress:
+                entry_location["progress"] = progress
+        if entry_location:
+            output["entry_location"] = entry_location
+
+        transform = bounded_scalar_fields(
+            source.get("transform_contract"),
+            ("status",),
+        )
+        if transform:
+            output["transform_contract"] = transform
+        return output
+
     def bounded_tracking_episode(value: object) -> dict[str, object]:
         if not isinstance(value, Mapping):
             return {}
@@ -3837,6 +3974,20 @@ def _bounded_operator_projection_context(
             if baseline:
                 output["baseline_forecasts"] = baseline
 
+        observation_state = bounded_scalar_fields(
+            episode.get("observation_state"),
+            (
+                "status",
+                "unresolved_gap",
+            ),
+        )
+        if observation_state:
+            output["observation_state"] = observation_state
+
+        path_comparison = bounded_path_comparison(episode.get("path_comparison"))
+        if path_comparison:
+            output["path_comparison"] = path_comparison
+
         events: list[dict[str, object]] = []
         raw_events = episode.get("events")
         if isinstance(raw_events, Sequence) and not isinstance(
@@ -3853,7 +4004,9 @@ def _bounded_operator_projection_context(
                         "event_index",
                         "observed_at",
                         "direction_agreement",
-                        "frame_id",
+                        "result_available",
+                        "favored_path_id",
+                        "observed_close_level",
                     ),
                 )
                 if not isinstance(raw_event, Mapping):
@@ -3865,18 +4018,34 @@ def _bounded_operator_projection_context(
                 )
                 actual = bounded_scalar_fields(
                     raw_event_mapping.get("actual_block"),
-                    ("side",),
-                )
-                after = bounded_scalar_fields(
-                    raw_event_mapping.get("after_reference"),
-                    ("frame_id",),
+                    ("side", "status", "reason"),
                 )
                 if predicted:
                     event["predicted_block"] = predicted
                 if actual:
                     event["actual_block"] = actual
-                if after:
-                    event["after_reference"] = after
+                raw_path_fit = raw_event_mapping.get("path_fit_by_id")
+                if isinstance(raw_path_fit, Mapping):
+                    path_fit: dict[str, object] = {}
+                    raw_path_fit_mapping = cast(
+                        Mapping[str, object],
+                        raw_path_fit,
+                    )
+                    for path_id in ("PATH_A", "PATH_B"):
+                        fit = bounded_scalar_fields(
+                            raw_path_fit_mapping.get(path_id),
+                            ("status", "direction_agreement"),
+                        )
+                        if fit:
+                            path_fit[path_id] = fit
+                    if path_fit:
+                        event["path_fit_by_id"] = path_fit
+                entry_progress = bounded_scalar_fields(
+                    raw_event_mapping.get("entry_location_progress"),
+                    ("status",),
+                )
+                if entry_progress:
+                    event["entry_location_progress"] = entry_progress
                 if event:
                     events.append(event)
         if events:
@@ -9098,6 +9267,37 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Window tracker session not found.",
+            ) from exc
+
+    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/reset")
+    def reset_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> dict[str, object]:
+        try:
+            tracker = get_window_tracker_service()
+            episode = cast(
+                Mapping[str, object],
+                tracker.reset_tracking_episode(session_id),
+            )
+            invalidate_operator_projection_cache(session_id)
+            readiness = cast(
+                Mapping[str, object],
+                tracker.get_tracking_episode_readiness(session_id),
+            )
+            return _public_tracking_episode_response(episode, readiness)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+        except TrackingEpisodeStateError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "TRACKING_EPISODE_RESET_NOT_ALLOWED",
+                    "message": str(exc),
+                    "state": exc.state,
+                },
             ) from exc
 
     @app.post("/v1/mobile/window-tracker/sessions/{session_id}/start")

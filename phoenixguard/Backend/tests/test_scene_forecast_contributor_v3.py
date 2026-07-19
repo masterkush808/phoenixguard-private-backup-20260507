@@ -379,6 +379,161 @@ def test_stateful_identity_advances_when_prior_forming_candle_becomes_closed() -
     assert rollover["same_event_cache_rebuild_required"] is False
 
 
+def _roll_forward_candles(
+    candles: list[dict[str, Any]],
+    *,
+    completed_after_anchor: int,
+) -> list[dict[str, Any]]:
+    rows = [dict(row) for row in candles]
+    rows[-1]["is_closed"] = True
+    close_y = float(rows[-1]["close_y_px"])
+    center_x = float(rows[-1]["center_x"])
+    for offset in range(1, completed_after_anchor + 1):
+        direction = "BUY" if offset % 2 else "SELL"
+        open_y = close_y
+        close_y += -4.0 if direction == "BUY" else 3.0
+        center_x += 10.0
+        rows.append(
+            {
+                "track_id": 29 + offset,
+                "direction": direction,
+                "center_x": center_x,
+                "open_y_px": open_y,
+                "close_y_px": close_y,
+                "wick_top_px": min(open_y, close_y) - 2.0,
+                "wick_bottom_px": max(open_y, close_y) + 2.0,
+                "price_proxy": 1.0 - close_y / 300.0,
+                "bbox": [
+                    center_x - 3.0,
+                    min(open_y, close_y) - 2.0,
+                    center_x + 3.0,
+                    max(open_y, close_y) + 2.0,
+                ],
+                "parse_confidence": 0.94,
+                "is_closed": offset < completed_after_anchor,
+            }
+        )
+    return rows
+
+
+def test_stateful_identity_reacquires_each_visible_missed_closed_candle() -> None:
+    initial_rows = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+    )
+    advanced_rows = _roll_forward_candles(
+        initial_rows,
+        completed_after_anchor=3,
+    )
+
+    recovered = resolve_closed_candle_identity_v3(
+        advanced_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    assert recovered["transition_observed"] is True
+    assert recovered["transition_reason"] == "VISUAL_CLOSED_CANDLE_GAP_REACQUIRED"
+    assert recovered["transition_count"] == 3
+    assert recovered["closed_candle_sequence"] == 3
+    batch = recovered["state"]["confirmed_event_batch"]
+    assert [row["closed_candle_sequence"] for row in batch] == [1, 2, 3]
+    assert [row["observation"]["track_id"] for row in batch] == ["29", "30", "31"]
+    assert len({row["closed_candle_key"] for row in batch}) == 3
+    assert recovered["state"]["reacquisition"]["status"] == "CONFIRMED"
+
+
+def test_stateful_identity_retains_twenty_four_visible_closed_events() -> None:
+    initial_rows = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+    )
+    advanced_rows = _roll_forward_candles(
+        initial_rows,
+        completed_after_anchor=24,
+    )
+
+    recovered = resolve_closed_candle_identity_v3(
+        advanced_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    # The detector retains the full bounded history even when repeated visual
+    # shapes make the old forming candle ambiguous. Retention and confirmation
+    # are intentionally separate: ambiguity must not manufacture 24 events.
+    assert recovered["transition_observed"] is False
+    assert recovered["transition_count"] == 0
+    assert recovered["closed_candle_sequence"] == 0
+    assert len(recovered["state"]["closed_tail"]) == 24
+    assert recovered["state"]["confirmed_event_batch"] == []
+
+
+def test_stateful_identity_does_not_invent_a_gap_when_visible_chain_is_broken() -> None:
+    initial_rows = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+    )
+    advanced_rows = _roll_forward_candles(
+        initial_rows,
+        completed_after_anchor=3,
+    )
+    del advanced_rows[-3]
+
+    unresolved = resolve_closed_candle_identity_v3(
+        advanced_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    assert unresolved["transition_observed"] is False
+    assert unresolved["closed_candle_sequence"] == 0
+    assert unresolved["state"]["confirmed_event_batch"] == []
+    assert unresolved["state"]["reacquisition"]["status"] == "NOT_CONFIRMED"
+    assert (
+        unresolved["state"]["reacquisition"]["reason"]
+        == "REACQUISITION_CHAIN_NOT_CONTIGUOUS"
+    )
+
+
+def test_screenshot_rollover_does_not_use_legacy_match_when_reacquisition_is_ambiguous() -> None:
+    initial_rows = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+    )
+    ambiguous_rows = _roll_forward_candles(
+        initial_rows,
+        completed_after_anchor=1,
+    )
+    duplicate_anchor = dict(initial_rows[-1])
+    duplicate_anchor["is_closed"] = True
+    ambiguous_rows.insert(-2, duplicate_anchor)
+
+    unresolved = resolve_closed_candle_identity_v3(
+        ambiguous_rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    assert unresolved["match_scores"]["forming_became_closed"] >= 0.62
+    assert unresolved["state"]["reacquisition"]["status"] == "NOT_CONFIRMED"
+    assert unresolved["transition_observed"] is False
+    assert unresolved["closed_candle_sequence"] == 0
+    assert unresolved["state"]["confirmed_event_batch"] == []
+
+
 def test_source_rollover_wins_over_simultaneous_detector_coverage_expansion() -> None:
     initial_rows = _coverage_candles(39)
     initial_rows[-2]["bar_open_time"] = 1_783_755_200

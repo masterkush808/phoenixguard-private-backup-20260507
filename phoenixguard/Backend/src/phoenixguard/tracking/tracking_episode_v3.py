@@ -8,8 +8,16 @@ from typing import Any, Final, Literal, cast
 TRACKING_EPISODE_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_V1"
 TRACKING_EPISODE_EVENT_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_EVENT_V1"
 TRACKING_EPISODE_HISTORY_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1"
+TRACKING_EPISODE_OBSERVATION_SCHEMA_VERSION: Final = (
+    "PG_TRACKING_EPISODE_OBSERVATION_V1"
+)
 TRACKING_EPISODE_HORIZON: Final = 12
 TRACKING_EPISODE_HISTORY_LIMIT: Final = 24
+TRACKING_PATH_COMPARISON_SCHEMA_VERSION: Final = "PG_TRACKING_PATH_COMPARISON_V1"
+_PATH_FAVOR_MIN_EVENTS: Final = 3
+_PATH_EVENT_MIN_MARGIN: Final = 0.004
+_PATH_EPISODE_MIN_MARGIN: Final = 0.008
+_PATH_RELATIVE_MARGIN: Final = 0.15
 
 TrackingEpisodeState = Literal[
     "IDLE",
@@ -61,6 +69,14 @@ class TrackingEpisodeReadinessError(ValueError):
         normalized = tuple(str(reason or "").strip() for reason in reasons if str(reason or "").strip())
         self.reasons = normalized or ("Tracking episode is not ready.",)
         super().__init__(" ".join(self.reasons))
+
+
+class TrackingEpisodeStateError(ValueError):
+    """Raised when an episode control is invalid for the current lifecycle state."""
+
+    def __init__(self, state: str, message: str) -> None:
+        self.state = str(state or "IDLE").strip().upper() or "IDLE"
+        super().__init__(str(message or "Tracking episode state does not allow this action."))
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -189,6 +205,120 @@ def _episode_permission(*, active: bool, reason: str, entry_state: str = "WAIT")
     }
 
 
+def _default_observation_state() -> dict[str, Any]:
+    return {
+        "schema_version": TRACKING_EPISODE_OBSERVATION_SCHEMA_VERSION,
+        "status": "WAITING_FOR_BASELINE",
+        "reason": "NO_ACTIVE_BASELINE",
+        "last_trusted_frame_id": 0,
+        "last_trusted_at": "",
+        "current_frame_id": 0,
+        "current_at": "",
+        "confirmed_event_count": 0,
+        "recoverable_event_count": 0,
+        "unresolved_gap": False,
+        "coverage_status": "UNKNOWN",
+    }
+
+
+def _default_path_comparison() -> dict[str, Any]:
+    return {
+        "schema_version": TRACKING_PATH_COMPARISON_SCHEMA_VERSION,
+        "paths": [],
+        "verdict": "GEOMETRY_UNAVAILABLE",
+        "favored_path_id": "",
+        "verdict_summary": "Two comparable forecast paths are not available yet.",
+        "anchor": {
+            "status": "UNAVAILABLE",
+            "label": "Latest completed candle",
+            "direction": "HOLD",
+        },
+        "forming_at_start": {
+            "status": "UNAVAILABLE",
+            "label": "Candle forming when tracking started",
+            "direction": "HOLD",
+        },
+        "forecast_bias": {
+            "status": "UNAVAILABLE",
+            "label": "Forecast bias at start",
+            "summary": "No forecast bias was available when tracking started.",
+            "direction": "HOLD",
+        },
+        "entry_thesis": {
+            "status": "UNAVAILABLE",
+            "label": "Entry idea at start",
+            "summary": "No entry idea was available when tracking started.",
+            "direction": "HOLD",
+        },
+        "trade_permission": {
+            "status": "WAIT",
+            "label": "Entry permission at start",
+            "summary": "Tracking evidence does not grant permission to trade.",
+        },
+        "entry_location": {
+            "status": "UNAVAILABLE",
+            "label": "Saved entry area",
+            "summary": "No verified entry area was available when tracking started.",
+            "direction": "HOLD",
+            "preferred_location": "",
+            "top_level": None,
+            "bottom_level": None,
+            "progress": {"status": "UNKNOWN", "distance": None},
+        },
+        "transform_contract": {
+            "status": "UNAVAILABLE",
+            "reason": "NORMALIZED_CHART_TRANSFORM_NOT_PROVEN",
+        },
+    }
+
+
+def _normalize_observation_state(value: Any) -> dict[str, Any]:
+    source = _mapping(value)
+    normalized = _default_observation_state()
+    status = _text(source.get("status"), normalized["status"]).upper()
+    if status not in {
+        "WAITING_FOR_BASELINE",
+        "WAITING_FOR_CLOSE",
+        "LIVE",
+        "REACQUIRING",
+        "STOPPED",
+    }:
+        status = "REACQUIRING"
+    coverage = _text(source.get("coverage_status"), "UNKNOWN").upper()
+    if coverage not in {"STABLE", "DEGRADED", "UNKNOWN"}:
+        coverage = "UNKNOWN"
+    normalized.update(
+        {
+            "status": status,
+            "reason": _text(source.get("reason"), normalized["reason"])[:96],
+            "last_trusted_frame_id": max(
+                0,
+                _integer(source.get("last_trusted_frame_id")),
+            ),
+            "last_trusted_at": _text(source.get("last_trusted_at"))[:48],
+            "current_frame_id": max(0, _integer(source.get("current_frame_id"))),
+            "current_at": _text(source.get("current_at"))[:48],
+            "confirmed_event_count": max(
+                0,
+                min(
+                    TRACKING_EPISODE_HORIZON,
+                    _integer(source.get("confirmed_event_count")),
+                ),
+            ),
+            "recoverable_event_count": max(
+                0,
+                min(
+                    TRACKING_EPISODE_HORIZON,
+                    _integer(source.get("recoverable_event_count")),
+                ),
+            ),
+            "unresolved_gap": source.get("unresolved_gap") is True,
+            "coverage_status": coverage,
+        }
+    )
+    return normalized
+
+
 def default_tracking_episode_v1(*, session_id: str = "") -> dict[str, Any]:
     """Build the persisted no-episode state without starting or stopping a worker."""
 
@@ -215,6 +345,8 @@ def default_tracking_episode_v1(*, session_id: str = "") -> dict[str, Any]:
         "processed_closed_candle_keys": [],
         "last_processed_closed_candle_key": "",
         "last_processed_closed_candle_sequence": 0,
+        "observation_state": _default_observation_state(),
+        "path_comparison": _default_path_comparison(),
         "permission": _episode_permission(
             active=False,
             reason="Start Tracking to freeze a 12-event baseline.",
@@ -270,6 +402,16 @@ def normalize_tracking_episode_v1(
     )
     for key in ("anchor", "committed_plan", "candidate_revision"):
         normalized[key] = _safe_mapping(source.get(key))
+    normalized["observation_state"] = _normalize_observation_state(
+        source.get("observation_state")
+    )
+    path_comparison = _safe_mapping(source.get("path_comparison"))
+    normalized["path_comparison"] = (
+        path_comparison
+        if path_comparison.get("schema_version")
+        == TRACKING_PATH_COMPARISON_SCHEMA_VERSION
+        else _default_path_comparison()
+    )
     forecasts = _mapping(source.get("baseline_forecasts"))
     normalized["baseline_forecasts"] = {
         "scene": _safe_mapping(forecasts.get("scene")),
@@ -355,6 +497,12 @@ def _identity(session: Mapping[str, Any]) -> dict[str, Any]:
             )
         ),
     )
+    confirmed_event_batch = _rows(
+        identity_state.get("confirmed_event_batch"),
+        limit=24,
+    )
+    match_scores = _mapping(scene.get("closed_candle_match_scores"))
+    reacquisition = _mapping(identity_state.get("reacquisition"))
     market_confirmed = _explicit_bool(
         (
             snapshot.get("market_identity_confirmed"),
@@ -376,6 +524,18 @@ def _identity(session: Mapping[str, Any]) -> dict[str, Any]:
         "timeframe_identity_confirmed": timeframe_confirmed,
         "closed_candle_key": closed_key,
         "closed_candle_sequence": closed_sequence,
+        "confirmed_event_batch": confirmed_event_batch,
+        "transition_reason": _text(
+            scene.get("closed_candle_transition_reason"),
+            reacquisition.get("reason"),
+        ),
+        "transition_count": max(
+            0,
+            _integer(identity_state.get("transition_count")),
+        ),
+        "match_scores": match_scores,
+        "reacquisition": reacquisition,
+        "closed_candle_identity_state": _safe_mapping(identity_state),
     }
 
 
@@ -400,6 +560,8 @@ def tracking_episode_readiness_v1(session: Mapping[str, Any]) -> dict[str, Any]:
     if not scene_steps:
         scene_steps = _rows(scene.get("forecast_path"), limit=TRACKING_EPISODE_HORIZON)
     lstm_steps = _rows(lstm.get("forecast_path"), limit=TRACKING_EPISODE_HORIZON)
+    path_comparison = _freeze_two_path_comparison(session)
+    transform = _transform_contract(session)
     reasons: list[str] = []
     if session.get("tracking_enabled") is False:
         reasons.append("Wait for live chart tracking to be running.")
@@ -417,6 +579,14 @@ def tracking_episode_readiness_v1(session: Mapping[str, Any]) -> dict[str, Any]:
         reasons.append("Wait for a confirmed closed-candle event.")
     if len(scene_steps) != TRACKING_EPISODE_HORIZON and len(lstm_steps) != TRACKING_EPISODE_HORIZON:
         reasons.append("Wait for a complete 12-event Scene or LSTM forecast baseline.")
+    if len(_rows(path_comparison.get("paths"), limit=2)) != 2:
+        reasons.append(
+            "Wait for Scene forecast paths with distinct geometry."
+            if path_comparison.get("verdict") == "PATHS_OVERLAP"
+            else "Wait for one selected Scene path and a complete alternative."
+        )
+    if transform.get("status") != "LOCKED":
+        reasons.append("Wait for stable normalized chart geometry before starting tracking.")
     return {
         "ready": not reasons,
         "reasons": reasons,
@@ -424,11 +594,13 @@ def tracking_episode_readiness_v1(session: Mapping[str, Any]) -> dict[str, Any]:
         "frame_id": frame_id,
         "scene_horizon": len(scene_steps),
         "lstm_horizon": len(lstm_steps),
+        "path_count": len(_rows(path_comparison.get("paths"), limit=2)),
     }
 
 
 def _committed_plan(session: Mapping[str, Any]) -> dict[str, Any]:
     latest = _mapping(session.get("latest_signal"))
+    tracking = _mapping(session.get("tracking_summary"))
     result = _mapping(session.get("model_council_result"))
     council = _mapping(result.get("model_council")) or _mapping(session.get("model_council"))
     professional_plan = (
@@ -453,9 +625,14 @@ def _committed_plan(session: Mapping[str, Any]) -> dict[str, Any]:
         )
         if latest.get(key) not in (None, "", [], {})
     }
+    signal_thesis = (
+        _mapping(session.get("signal_thesis_v3"))
+        or _mapping(latest.get("signal_thesis_v3"))
+        or _mapping(tracking.get("signal_thesis_v3"))
+    )
     return {
         "decision": _safe_mapping(decision),
-        "signal_thesis": _safe_mapping(session.get("signal_thesis_v3")),
+        "signal_thesis": _safe_mapping(signal_thesis),
         "opportunity_window": _safe_mapping(session.get("execution_opportunity_window_v3")),
         "professional_trade_plan": _safe_mapping(professional_plan),
         "model_council": _safe_mapping(
@@ -488,6 +665,734 @@ def _baseline_forecasts(session: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _point_pairs(value: Any, *, limit: int = 13) -> list[list[float]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    output: list[list[float]] = []
+    for item in cast(Sequence[Any], value)[:limit]:
+        if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
+            return []
+        pair = cast(Sequence[Any], item)
+        if len(pair) < 2:
+            return []
+        x_value = _number(pair[0])
+        y_value = _number(pair[1])
+        if (
+            x_value is None
+            or y_value is None
+            or not 0.0 <= x_value <= 1.0
+            or not 0.0 <= y_value <= 1.0
+        ):
+            return []
+        output.append([round(x_value, 6), round(y_value, 6)])
+    if any(
+        output[index][0] <= output[index - 1][0]
+        for index in range(1, len(output))
+    ):
+        return []
+    return output
+
+
+def _chart_level(value: Any, *, price_axis: bool) -> float | None:
+    number = _number(value)
+    if number is None or not 0.0 <= number <= 1.0:
+        return None
+    return round(1.0 - number if price_axis else number, 6)
+
+
+def _forecast_steps(value: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[list[float]]]:
+    """Return only real 12-step normalized geometry from one forecast artifact."""
+
+    points = _point_pairs(value.get("line_points"), limit=13)
+    candle_rows = _rows(value.get("forecast_candles"), limit=TRACKING_EPISODE_HORIZON)
+    if not candle_rows:
+        candle_rows = _rows(value.get("forecast_path"), limit=TRACKING_EPISODE_HORIZON)
+    steps: list[dict[str, Any]] = []
+    if len(candle_rows) == TRACKING_EPISODE_HORIZON:
+        for index, row in enumerate(candle_rows, start=1):
+            open_level = _chart_level(row.get("open_y_norm"), price_axis=False)
+            close_level = _chart_level(row.get("close_y_norm"), price_axis=False)
+            if open_level is None:
+                open_level = _chart_level(
+                    row.get("expected_open_norm", row.get("open_norm")),
+                    price_axis=True,
+                )
+            if close_level is None:
+                close_level = _chart_level(
+                    row.get(
+                        "expected_close_norm",
+                        row.get("close_norm", row.get("relative_close")),
+                    ),
+                    price_axis=True,
+                )
+            if open_level is None and len(points) == 13:
+                open_level = points[index - 1][1]
+            if close_level is None and len(points) == 13:
+                close_level = points[index][1]
+            if open_level is None or close_level is None:
+                return [], []
+            steps.append(
+                {
+                    "step": index,
+                    "open_level": open_level,
+                    "close_level": close_level,
+                    "body_size": round(abs(close_level - open_level), 6),
+                    "direction": _direction(
+                        row.get("movement_side"),
+                        row.get("movement_direction"),
+                        row.get("body_bias"),
+                        row.get("candle_body_direction"),
+                        value.get("side"),
+                    ),
+                }
+            )
+    elif len(points) == 13:
+        for index in range(1, TRACKING_EPISODE_HORIZON + 1):
+            open_level = points[index - 1][1]
+            close_level = points[index][1]
+            steps.append(
+                {
+                    "step": index,
+                    "open_level": open_level,
+                    "close_level": close_level,
+                    "body_size": round(abs(close_level - open_level), 6),
+                    "direction": _direction(
+                        value.get("side"),
+                        "BUY" if close_level < open_level else "SELL" if close_level > open_level else "HOLD",
+                    ),
+                }
+            )
+    if len(steps) != TRACKING_EPISODE_HORIZON:
+        return [], []
+    return steps, points if len(points) == 13 else []
+
+
+def _path_geometry_distance(left: Mapping[str, Any], right: Mapping[str, Any]) -> float | None:
+    left_points = _point_pairs(left.get("points"), limit=13)
+    right_points = _point_pairs(right.get("points"), limit=13)
+    if len(left_points) != 13 or len(right_points) != 13:
+        return None
+    if (
+        abs(left_points[0][0] - right_points[0][0]) > 1e-6
+        or abs(left_points[0][1] - right_points[0][1]) > 1e-6
+        or any(
+            abs(left_point[0] - right_point[0]) > 1e-6
+            for left_point, right_point in zip(
+                left_points,
+                right_points,
+                strict=True,
+            )
+        )
+    ):
+        return None
+    left_steps = _rows(left.get("steps"), limit=TRACKING_EPISODE_HORIZON)
+    right_steps = _rows(right.get("steps"), limit=TRACKING_EPISODE_HORIZON)
+    if len(left_steps) != TRACKING_EPISODE_HORIZON or len(right_steps) != TRACKING_EPISODE_HORIZON:
+        return None
+    differences: list[float] = []
+    for left_step, right_step in zip(left_steps, right_steps, strict=True):
+        left_value = _number(left_step.get("close_level"))
+        right_value = _number(right_step.get("close_level"))
+        if left_value is None or right_value is None:
+            return None
+        differences.append(abs(left_value - right_value))
+    return round(
+        (sum(difference**2 for difference in differences) / len(differences)) ** 0.5,
+        6,
+    )
+
+
+def _path_separated_step_count(left: Mapping[str, Any], right: Mapping[str, Any]) -> int:
+    left_steps = _rows(left.get("steps"), limit=TRACKING_EPISODE_HORIZON)
+    right_steps = _rows(right.get("steps"), limit=TRACKING_EPISODE_HORIZON)
+    if len(left_steps) != TRACKING_EPISODE_HORIZON or len(right_steps) != TRACKING_EPISODE_HORIZON:
+        return 0
+    return sum(
+        1
+        for left_step, right_step in zip(left_steps, right_steps, strict=True)
+        if (
+            (left_close := _number(left_step.get("close_level"))) is not None
+            and (right_close := _number(right_step.get("close_level"))) is not None
+            and abs(left_close - right_close) >= 0.008
+        )
+    )
+
+
+def _selected_scene_geometry(
+    scene: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[list[float]]]:
+    """Return geometry only when exactly one complete Scene scenario is selected."""
+
+    selected = [
+        scenario
+        for scenario in _rows(scene.get("forecast_scenarios"), limit=8)
+        if scenario.get("selected") is True
+    ]
+    if len(selected) != 1:
+        return [], []
+    steps, points = _forecast_steps(selected[0])
+    if len(steps) != TRACKING_EPISODE_HORIZON or len(points) != 13:
+        return [], []
+    return steps, points
+
+
+def _median_positive(values: Sequence[float]) -> float | None:
+    usable = sorted(value for value in values if 0.0 < value <= 1.0)
+    if not usable:
+        return None
+    midpoint = len(usable) // 2
+    if len(usable) % 2:
+        return usable[midpoint]
+    return (usable[midpoint - 1] + usable[midpoint]) / 2.0
+
+
+def _derived_scene_event_step_x(scene: Mapping[str, Any]) -> float | None:
+    _, points = _selected_scene_geometry(scene)
+    if len(points) != 13:
+        return None
+    deltas = [
+        points[index][0] - points[index - 1][0]
+        for index in range(1, len(points))
+    ]
+    event_step = _median_positive(deltas)
+    if event_step is None or len(deltas) != TRACKING_EPISODE_HORIZON:
+        return None
+    alignment_tolerance = max(1e-6, event_step * 0.02)
+    if any(
+        delta <= 0.0 or abs(delta - event_step) > alignment_tolerance
+        for delta in deltas
+    ):
+        return None
+    return round(event_step, 6)
+
+
+def _derived_scene_vertical_scale(scene: Mapping[str, Any]) -> float | None:
+    steps, _ = _selected_scene_geometry(scene)
+    if len(steps) != TRACKING_EPISODE_HORIZON:
+        return None
+    bodies = [
+        abs(close_level - open_level)
+        for step in steps
+        if (open_level := _number(step.get("open_level"))) is not None
+        and (close_level := _number(step.get("close_level"))) is not None
+        and abs(close_level - open_level) > 1e-6
+    ]
+    if len(bodies) < 4:
+        return None
+    scale = _median_positive(bodies)
+    return round(scale, 6) if scale is not None else None
+
+
+def _source_image_height(scene: Mapping[str, Any]) -> float | None:
+    identity_state = _mapping(scene.get("closed_candle_identity_state"))
+    for value in (
+        scene.get("source_image_size"),
+        identity_state.get("source_image_size"),
+    ):
+        if isinstance(value, Mapping):
+            height = _number(_mapping(value).get("height"))
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            size = cast(Sequence[Any], value)
+            height = _number(size[1]) if len(size) >= 2 else None
+        else:
+            height = None
+        if height is not None and height > 0.0:
+            return height
+    return None
+
+
+def _normalized_observation_geometry(
+    candle: Mapping[str, Any],
+    scene: Mapping[str, Any],
+) -> dict[str, Any]:
+    height = _source_image_height(scene)
+
+    def chart_y(normalized_key: str, pixel_key: str) -> float | None:
+        normalized = _chart_level(candle.get(normalized_key), price_axis=False)
+        if normalized is not None:
+            return normalized
+        pixels = _number(candle.get(pixel_key))
+        if pixels is None or height is None or not 0.0 <= pixels <= height:
+            return None
+        return round(pixels / height, 6)
+
+    open_level = chart_y("open_y_norm", "open_y")
+    close_level = chart_y("close_y_norm", "close_y")
+    top_level = chart_y("top_y_norm", "top_y")
+    bottom_level = chart_y("bottom_y_norm", "bottom_y")
+    if close_level is None:
+        # price_proxy is explicitly defined by the scene contributor as the
+        # vertical inverse of normalized chart Y. Arbitrary close_norm values
+        # have no such contract and are intentionally not transformed.
+        close_level = _chart_level(candle.get("price_proxy"), price_axis=True)
+    return {
+        "chart_open_norm": open_level,
+        "chart_close_norm": close_level,
+        "chart_top_norm": top_level,
+        "chart_bottom_norm": bottom_level,
+        "chart_body_norm": (
+            round(abs(close_level - open_level), 6)
+            if open_level is not None and close_level is not None
+            else None
+        ),
+    }
+
+
+def _entry_thesis(session: Mapping[str, Any]) -> dict[str, Any]:
+    latest = _mapping(session.get("latest_signal"))
+    tracking = _mapping(session.get("tracking_summary"))
+    thesis = (
+        _mapping(session.get("signal_thesis_v3"))
+        or _mapping(latest.get("signal_thesis_v3"))
+        or _mapping(tracking.get("signal_thesis_v3"))
+    )
+    direction = _direction(
+        thesis.get("side"),
+        thesis.get("direction"),
+    )
+    if direction in {"BUY", "SELL"}:
+        status = "DIRECTIONAL"
+        direction_word = "buy" if direction == "BUY" else "sell"
+        fallback = f"The saved idea was to watch for a {direction_word} entry while live permission remained separate."
+    elif thesis:
+        status = "NEUTRAL"
+        fallback = "The saved idea was to wait for clearer direction; it did not grant permission to trade."
+    else:
+        status = "UNAVAILABLE"
+        fallback = "No entry idea was available when tracking started."
+    return {
+        "status": status,
+        "label": "Entry idea at start",
+        "summary": _text(thesis.get("summary"), thesis.get("thesis"), fallback)[:240],
+        "direction": direction,
+    }
+
+
+def _forming_candle_at_start(session: Mapping[str, Any]) -> dict[str, Any]:
+    tracking = _mapping(session.get("tracking_summary"))
+    scene = _scene_forecast(session)
+    identity_state = _mapping(scene.get("closed_candle_identity_state"))
+    tracked = _rows(tracking.get("tracked_candles"), limit=128)
+    forming_candidate = next(
+        (row for row in reversed(tracked) if row.get("is_closed") is False),
+        None,
+    )
+    forming: dict[str, Any] = forming_candidate or _mapping(
+        identity_state.get("forming")
+    )
+    if not forming:
+        return {
+            "status": "UNAVAILABLE",
+            "label": "Candle forming when tracking started",
+            "direction": "HOLD",
+        }
+    geometry = _normalized_observation_geometry(forming, scene)
+    return {
+        "status": "OBSERVED",
+        "label": "Candle forming when tracking started",
+        "direction": _direction(forming.get("side"), forming.get("direction")),
+        "open_level": geometry.get("chart_open_norm"),
+        "current_level": geometry.get("chart_close_norm"),
+    }
+
+
+def _transform_contract(session: Mapping[str, Any]) -> dict[str, Any]:
+    scene = _scene_forecast(session)
+    identity_state = _mapping(scene.get("closed_candle_identity_state"))
+    anchor = _mapping(scene.get("forecast_anchor"))
+    image_size = scene.get("source_image_size")
+    if not isinstance(image_size, Sequence) or isinstance(
+        image_size,
+        (str, bytes, bytearray),
+    ):
+        return {"status": "UNAVAILABLE", "reason": "SOURCE_DIMENSIONS_UNAVAILABLE"}
+    values = cast(Sequence[Any], image_size)
+    width = _number(values[0]) if len(values) >= 2 else None
+    height = _number(values[1]) if len(values) >= 2 else None
+    focus = _mapping(session.get("manual_focus_region"))
+    raw_bbox = focus.get("normalized_bbox")
+    bbox = (
+        [
+            _number(value)
+            for value in cast(Sequence[Any], raw_bbox)[:4]
+        ]
+        if isinstance(raw_bbox, Sequence)
+        and not isinstance(raw_bbox, (str, bytes, bytearray))
+        else []
+    )
+    median_range = _number(identity_state.get("median_range"))
+    normalized_range = (
+        round(median_range / height, 6)
+        if median_range is not None
+        and height is not None
+        and 0.0 < median_range <= height
+        else None
+    )
+    target_scale = _number(anchor.get("target_scale_norm"))
+    target_scale_source = "ANCHOR_METADATA"
+    if target_scale is None:
+        target_scale = normalized_range or _derived_scene_vertical_scale(scene)
+        target_scale_source = (
+            "MEDIAN_CANDLE_RANGE"
+            if normalized_range is not None
+            else "SELECTED_PATH_GEOMETRY"
+        )
+    event_step_x = _number(anchor.get("event_step_x_norm"))
+    event_step_x_source = "ANCHOR_METADATA"
+    if event_step_x is None:
+        event_step_x = _derived_scene_event_step_x(scene)
+        event_step_x_source = "SELECTED_PATH_GEOMETRY"
+    comparison_scale = normalized_range or target_scale
+    if (
+        width is None
+        or height is None
+        or width <= 0.0
+        or height <= 0.0
+        or focus.get("enabled") is not True
+        or len(bbox) != 4
+        or any(value is None or not 0.0 <= value <= 1.0 for value in bbox)
+        or comparison_scale is None
+        or comparison_scale <= 0.0
+        or comparison_scale > 1.0
+        or target_scale is None
+        or target_scale <= 0.0
+        or target_scale > 1.0
+        or event_step_x is None
+        or event_step_x <= 0.0
+        or event_step_x > 1.0
+    ):
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "NORMALIZED_CHART_TRANSFORM_NOT_PROVEN",
+        }
+    normalized_bbox = [round(cast(float, value), 6) for value in bbox]
+    identity_seed = "|".join(
+        str(value)
+        for value in (
+            int(width),
+            int(height),
+            *normalized_bbox,
+        )
+    )
+    transform_id = sha256(identity_seed.encode("utf-8")).hexdigest()[:20]
+    close_tolerance = round(
+        max(3.0 / height, min(0.02, comparison_scale * 0.35)),
+        6,
+    )
+    return {
+        "status": "LOCKED",
+        "reason": "NORMALIZED_CHART_TRANSFORM_LOCKED",
+        "source_width": int(width),
+        "source_height": int(height),
+        "surface_transform_identity": transform_id,
+        "chart_transform_identity": transform_id,
+        "normalized_focus_bounds": normalized_bbox,
+        "median_range_norm": round(comparison_scale, 6),
+        "target_scale_norm": round(target_scale, 6),
+        "target_scale_source": target_scale_source,
+        "event_step_x_norm": round(event_step_x, 6),
+        "event_step_x_source": event_step_x_source,
+        "close_tolerance": close_tolerance,
+        "body_tolerance": close_tolerance,
+    }
+
+
+def _relative_change(left: Any, right: Any) -> float | None:
+    left_number = _number(left)
+    right_number = _number(right)
+    if left_number is None or right_number is None or left_number <= 0.0:
+        return None
+    return abs(right_number - left_number) / left_number
+
+
+def _transform_continuity_proven(
+    frozen_value: Any,
+    session: Mapping[str, Any],
+) -> bool:
+    frozen = _mapping(frozen_value)
+    current = _transform_contract(session)
+    if frozen.get("status") != "LOCKED" or current.get("status") != "LOCKED":
+        return False
+    if (
+        _integer(frozen.get("source_width")) != _integer(current.get("source_width"))
+        or _integer(frozen.get("source_height")) != _integer(current.get("source_height"))
+        or _text(frozen.get("surface_transform_identity"))
+        != _text(current.get("surface_transform_identity"))
+        or _text(frozen.get("chart_transform_identity"))
+        != _text(current.get("chart_transform_identity"))
+    ):
+        return False
+    for key, tolerance in (
+        ("median_range_norm", 0.35),
+        ("target_scale_norm", 0.35),
+        ("event_step_x_norm", 0.20),
+    ):
+        change = _relative_change(frozen.get(key), current.get(key))
+        if change is None or change > tolerance:
+            return False
+    return True
+
+
+def _trade_permission_at_start(session: Mapping[str, Any]) -> dict[str, Any]:
+    latest = _mapping(session.get("latest_signal"))
+    canonical_permission = _text(latest.get("execution_permission")).upper()
+    packet = (
+        _mapping(session.get("execution_packet"))
+        or _mapping(session.get("latest_execution_packet"))
+        or _mapping(latest.get("execution_packet"))
+        or _mapping(latest.get("latest_execution_packet"))
+    )
+    validation = _mapping(packet.get("packet_validation"))
+    validation_status = _text(validation.get("status")).upper()
+    packet_valid = bool(
+        validation.get("valid") is True
+        or validation.get("passed") is True
+        or validation_status in {"VALID", "PASSED", "AUTHORIZED"}
+    )
+    allowance = _mapping(packet.get("allowance_package"))
+    allowance_status = _text(
+        allowance.get("status"),
+        allowance.get("state"),
+        allowance.get("mode"),
+    ).upper()
+    allowance_valid = bool(
+        allowance.get("allowed") is True
+        or allowance.get("execution_allowed") is True
+        or allowance_status in {"ALLOWED", "AUTHORIZED", "PERMITTED"}
+    )
+    permission_valid = canonical_permission in {
+        "ENTER",
+        "ENTER_NOW",
+        "ALLOWED",
+        "AUTHORIZED",
+        "PERMITTED",
+    }
+    permitted = bool(permission_valid and packet_valid and allowance_valid)
+    return {
+        "status": "PERMITTED" if permitted else "WAIT",
+        "label": "Entry permission at start",
+        "summary": (
+            "Entry permission and its validated allowance were present when tracking started."
+            if permitted
+            else "Entry was not permitted by a validated execution allowance when tracking started."
+        ),
+    }
+
+
+def _entry_location_at_start(
+    session: Mapping[str, Any],
+    transform: Mapping[str, Any],
+) -> dict[str, Any]:
+    latest = _mapping(session.get("latest_signal"))
+    tracking = _mapping(session.get("tracking_summary"))
+    thesis = (
+        _mapping(session.get("signal_thesis_v3"))
+        or _mapping(latest.get("signal_thesis_v3"))
+        or _mapping(tracking.get("signal_thesis_v3"))
+    )
+    thesis_side = _direction(thesis.get("side"), thesis.get("effective_side"))
+    identity = _identity(session)
+    window = (
+        _mapping(session.get("execution_opportunity_window_v3"))
+        or _mapping(latest.get("execution_opportunity_window_v3"))
+    )
+    raw_guidance = _mapping(window.get("entry_location_guidance_v3"))
+    current_epoch = _number(
+        session.get("model_capture_epoch", session.get("last_capture_epoch"))
+    )
+    valid_until = _number(
+        window.get("valid_until_epoch", window.get("valid_until_epoch_sec"))
+    )
+    window_side = _direction(window.get("side"), raw_guidance.get("side"))
+    window_pair = _text(window.get("symbol"), window.get("pair")).upper()
+    window_timeframe = _text(window.get("timeframe")).upper()
+    guidance_matches = bool(
+        raw_guidance
+        and thesis_side in {"BUY", "SELL"}
+        and window_side == thesis_side
+        and (not window_pair or window_pair == _text(identity.get("pair")).upper())
+        and (
+            not window_timeframe
+            or window_timeframe == _text(identity.get("timeframe")).upper()
+        )
+        and window.get("integrity_valid") is True
+        and window.get("lineage_rejected") is not True
+        and _text(window.get("state")).upper() in {"OPEN", "ACTIVE"}
+        and current_epoch is not None
+        and valid_until is not None
+        and valid_until >= current_epoch
+    )
+    guidance = raw_guidance if guidance_matches else {}
+    timing = _mapping(latest.get("execution_timing")) or _mapping(
+        tracking.get("execution_timing")
+    )
+    timing_side = _direction(timing.get("side"))
+    zone = _mapping(thesis.get("entry_zone")) or (
+        _mapping(timing.get("entry_area_zone"))
+        if timing_side == thesis_side
+        else {}
+    )
+    band = _mapping(zone.get("anchor_price_band"))
+    height = _number(transform.get("source_height"))
+    thesis_height = _number(thesis.get("chart_height_proxy"))
+    height_matches = bool(
+        height is not None
+        and thesis_height is not None
+        and abs(height - thesis_height) <= 1.0
+    )
+    top_pixels = _number(band.get("top_y"))
+    if top_pixels is None:
+        top_pixels = _number(zone.get("top_y"))
+    bottom_pixels = _number(band.get("bottom_y"))
+    if bottom_pixels is None:
+        bottom_pixels = _number(zone.get("bottom_y"))
+    top_level = (
+        round(top_pixels / height, 6)
+        if top_pixels is not None and height is not None and 0.0 <= top_pixels <= height
+        else None
+    )
+    bottom_level = (
+        round(bottom_pixels / height, 6)
+        if bottom_pixels is not None and height is not None and 0.0 <= bottom_pixels <= height
+        else None
+    )
+    if top_level is not None and bottom_level is not None and top_level > bottom_level:
+        top_level, bottom_level = bottom_level, top_level
+    if guidance:
+        preferred_location = _text(guidance.get("preferred_price_location"))[:48]
+        summary = _text(guidance.get("message"), guidance.get("short_label"))[:240]
+    elif thesis_side == "BUY":
+        preferred_location = "LOWER_PRICE"
+        summary = "Watch for a lower-price buy inside the saved entry area; this does not authorize a trade."
+    elif thesis_side == "SELL":
+        preferred_location = "HIGHER_PRICE"
+        summary = "Watch for a higher-price sell inside the saved entry area; this does not authorize a trade."
+    else:
+        preferred_location = ""
+        summary = ""
+    direction = thesis_side
+    geometry_available = bool(
+        transform.get("status") == "LOCKED"
+        and height_matches
+        and top_level is not None
+        and bottom_level is not None
+        and bottom_level > top_level
+    )
+    status = (
+        "TRACKING"
+        if geometry_available
+        else "GUIDANCE_ONLY"
+        if thesis_side in {"BUY", "SELL"}
+        else "UNAVAILABLE"
+    )
+    return {
+        "status": status,
+        "label": "Saved entry area",
+        "summary": summary
+        or (
+            "The verified entry area is tracked as evidence and does not authorize a trade."
+            if geometry_available
+            else "No verified entry area was available when tracking started."
+        ),
+        "direction": direction,
+        "preferred_location": preferred_location,
+        "top_level": top_level if geometry_available else None,
+        "bottom_level": bottom_level if geometry_available else None,
+        "progress": {"status": "UNKNOWN", "distance": None},
+        "zone_key": _text(zone.get("key"))[:80],
+        "source_thesis_id": _text(thesis.get("thesis_id"))[:80],
+    }
+
+
+def _freeze_two_path_comparison(session: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze the selected Scene path and its farthest valid Scene alternative."""
+
+    scene = _scene_forecast(session)
+    candidates: list[dict[str, Any]] = []
+    for scenario in _rows(scene.get("forecast_scenarios"), limit=8):
+        steps, points = _forecast_steps(scenario)
+        if len(steps) != TRACKING_EPISODE_HORIZON or len(points) != 13:
+            continue
+        candidates.append(
+            {
+                "selected": scenario.get("selected") is True,
+                "direction": _direction(scenario.get("side")),
+                "steps": steps,
+                "points": points,
+            }
+        )
+    selected = [candidate for candidate in candidates if candidate.get("selected") is True]
+    if len(selected) != 1:
+        return _default_path_comparison()
+    primary = selected[0]
+    alternatives = [candidate for candidate in candidates if candidate is not primary]
+    distances = [
+        (distance, _path_separated_step_count(primary, candidate), candidate)
+        for candidate in alternatives
+        if (distance := _path_geometry_distance(primary, candidate)) is not None
+    ]
+    if not distances:
+        return _default_path_comparison()
+    valid_distances = [row for row in distances if row[1] >= 4]
+    if not valid_distances:
+        unavailable = _default_path_comparison()
+        unavailable["verdict"] = "PATHS_OVERLAP"
+        unavailable["verdict_summary"] = "The available forecast paths overlap too closely to compare safely."
+        return unavailable
+    distance, _, alternative = max(valid_distances, key=lambda row: row[0])
+    if distance < 0.01:
+        unavailable = _default_path_comparison()
+        unavailable["verdict"] = "PATHS_OVERLAP"
+        unavailable["verdict_summary"] = "The available forecast paths overlap too closely to compare safely."
+        return unavailable
+
+    def frozen_path(candidate: Mapping[str, Any], *, path_id: str, label: str) -> dict[str, Any]:
+        direction = _direction(candidate.get("direction"))
+        direction_word = "upward" if direction == "BUY" else "downward" if direction == "SELL" else "sideways"
+        return {
+            "id": path_id,
+            "label": label,
+            "direction": direction,
+            "summary": f"Saved {direction_word} progression from the starting candle.",
+            "points": candidate.get("points", []),
+            "steps": candidate.get("steps", []),
+        }
+
+    latest_closed = _actual_closed_candle(session, _identity(session))
+    latest_close = _number(latest_closed.get("chart_close_norm"))
+    latest_direction = _direction(latest_closed.get("side"))
+    transform = _transform_contract(session)
+    trade_permission = _trade_permission_at_start(session)
+    primary_direction = _direction(primary.get("direction"))
+    return {
+        "schema_version": TRACKING_PATH_COMPARISON_SCHEMA_VERSION,
+        "paths": [
+            frozen_path(primary, path_id="PATH_A", label="Main forecast"),
+            frozen_path(alternative, path_id="PATH_B", label="Alternative forecast"),
+        ],
+        "verdict": "WAITING",
+        "favored_path_id": "",
+        "verdict_summary": "Waiting for confirmed candles to compare the two saved forecasts.",
+        "anchor": {
+            "status": "CONFIRMED",
+            "label": "Latest completed candle",
+            "direction": latest_direction,
+            "close_level": latest_close,
+        },
+        "forming_at_start": _forming_candle_at_start(session),
+        "forecast_bias": {
+            "status": "DIRECTIONAL" if primary_direction in {"BUY", "SELL"} else "NEUTRAL",
+            "label": "Forecast bias at start",
+            "summary": "This is the saved forecast direction, not permission to trade.",
+            "direction": primary_direction,
+        },
+        "entry_thesis": _entry_thesis(session),
+        "trade_permission": trade_permission,
+        "entry_location": _entry_location_at_start(session, transform),
+        "transform_contract": transform,
+    }
+
+
 def start_tracking_episode_v1(
     current: Any,
     session: Mapping[str, Any],
@@ -509,6 +1414,7 @@ def start_tracking_episode_v1(
             cast(Sequence[str], readiness["reasons"])
         )
     identity = cast(dict[str, Any], readiness["identity"])
+    path_comparison = _freeze_two_path_comparison(session)
     normalized_episode_id = str(episode_id or "").strip()
     if not normalized_episode_id:
         seed = "|".join(
@@ -522,8 +1428,7 @@ def start_tracking_episode_v1(
         normalized_episode_id = f"episode-{sha256(seed.encode('utf-8')).hexdigest()[:20]}"
     latest = _mapping(session.get("latest_signal"))
     entry_state = _text(
-        latest.get("execution_permission"),
-        latest.get("entry_state"),
+        _mapping(path_comparison.get("trade_permission")).get("status"),
         "WAIT",
     )
     anchor = {
@@ -542,7 +1447,20 @@ def start_tracking_episode_v1(
             session.get("last_study_surface_signature"),
             session.get("last_display_surface_signature"),
         ),
-        **identity,
+        "pair": str(identity["pair"]),
+        "timeframe": str(identity["timeframe"]),
+        "market_identity_confirmed": bool(
+            identity["market_identity_confirmed"]
+        ),
+        "timeframe_identity_confirmed": bool(
+            identity["timeframe_identity_confirmed"]
+        ),
+        "closed_candle_key": str(identity["closed_candle_key"]),
+        "closed_candle_sequence": int(identity["closed_candle_sequence"]),
+        "closed_candle_identity_state": _safe_mapping(
+            identity.get("closed_candle_identity_state")
+        ),
+        "starting_candle": _actual_closed_candle(session, identity),
     }
     started = {
         "schema_version": TRACKING_EPISODE_SCHEMA_VERSION,
@@ -567,6 +1485,23 @@ def start_tracking_episode_v1(
         "processed_closed_candle_keys": [str(identity["closed_candle_key"])],
         "last_processed_closed_candle_key": str(identity["closed_candle_key"]),
         "last_processed_closed_candle_sequence": int(identity["closed_candle_sequence"]),
+        "observation_state": {
+            "schema_version": TRACKING_EPISODE_OBSERVATION_SCHEMA_VERSION,
+            "status": "LIVE",
+            "reason": "BASELINE_LOCKED_WAITING_FOR_NEXT_CLOSE",
+            "last_trusted_frame_id": int(readiness["frame_id"]),
+            "last_trusted_at": _text(
+                session.get("last_capture_at"),
+                now_iso,
+            ),
+            "current_frame_id": int(readiness["frame_id"]),
+            "current_at": _text(session.get("last_capture_at"), now_iso),
+            "confirmed_event_count": 0,
+            "recoverable_event_count": 0,
+            "unresolved_gap": False,
+            "coverage_status": "STABLE",
+        },
+        "path_comparison": path_comparison,
         "permission": _episode_permission(
             active=True,
             reason="Episode is active; entry still depends on the committed plan and live safety gates.",
@@ -602,6 +1537,12 @@ def stop_tracking_episode_v1(
     normalized["updated_at"] = str(now_iso)
     normalized["stopped_at"] = str(now_iso)
     normalized["terminal_reason"] = str(reason or "manual_stop").strip() or "manual_stop"
+    observation_state = _normalize_observation_state(
+        normalized.get("observation_state")
+    )
+    observation_state["status"] = "STOPPED"
+    observation_state["reason"] = "EPISODE_STOPPED"
+    normalized["observation_state"] = observation_state
     normalized["permission"] = _episode_permission(
         active=False,
         reason="Tracking episode stopped; capture and models remain warm.",
@@ -609,20 +1550,69 @@ def stop_tracking_episode_v1(
     return normalized
 
 
-def _actual_closed_candle(session: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, Any]:
+def reset_tracking_episode_v1(
+    current: Any,
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    """Clear only the current terminal episode pointer while preserving its archive."""
+
+    source = _mapping(current)
+    if (
+        source.get("schema_version") == TRACKING_EPISODE_SCHEMA_VERSION
+        and str(source.get("state", "") or "").strip().upper() == "IDLE"
+        and not _text(source.get("episode_id"))
+    ):
+        return default_tracking_episode_v1(session_id=session_id)
+    normalized = normalize_tracking_episode_v1(current, session_id=session_id)
+    state = str(normalized["state"])
+    if state in _ACTIVE_STATES:
+        raise TrackingEpisodeStateError(
+            state,
+            "Stop and save the active tracking episode before resetting it.",
+        )
+    if state == "IDLE":
+        return normalized
+    if state not in _TERMINAL_STATES:
+        raise TrackingEpisodeStateError(
+            state,
+            "This tracking episode cannot be reset from its current state.",
+        )
+    return default_tracking_episode_v1(session_id=session_id)
+
+
+def _actual_closed_candle(
+    session: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    event_observation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     scene = _scene_forecast(session)
     identity_state = _mapping(scene.get("closed_candle_identity_state"))
     latest_closed = _mapping(identity_state.get("latest_closed"))
     tracking = _mapping(session.get("tracking_summary"))
     latest = _mapping(session.get("latest_signal"))
     tracked = _rows(tracking.get("tracked_candles"), limit=128)
-    closed_rows = [row for row in tracked if row.get("is_closed") is not False]
-    candle = closed_rows[-1] if closed_rows else (tracked[-1] if tracked else latest_closed)
+    closed_rows = [row for row in tracked if row.get("is_closed") is True]
+    latest_track_id = _text(latest_closed.get("track_id"))
+    identity_match = next(
+        (
+            row
+            for row in reversed(tracked)
+            if latest_track_id and _text(row.get("track_id")) == latest_track_id
+        ),
+        None,
+    )
+    explicit_observation = _mapping(event_observation)
+    candle = (
+        explicit_observation
+        or identity_match
+        or (closed_rows[-1] if closed_rows else latest_closed)
+    )
     side = _direction(
-        latest_closed.get("side"),
-        latest_closed.get("direction"),
         candle.get("side"),
         candle.get("direction"),
+        latest_closed.get("side"),
+        latest_closed.get("direction"),
         latest.get("action"),
         tracking.get("local_direction"),
     )
@@ -638,6 +1628,7 @@ def _actual_closed_candle(session: Mapping[str, Any], identity: Mapping[str, Any
         if close_norm is not None:
             close_space = space
             break
+    chart_geometry = _normalized_observation_geometry(candle, scene)
     return _safe_mapping(
         {
             "closed_candle_key": identity.get("closed_candle_key"),
@@ -646,6 +1637,7 @@ def _actual_closed_candle(session: Mapping[str, Any], identity: Mapping[str, Any
             "close_norm": close_norm,
             "coordinate_space": close_space,
             "track_id": _text(candle.get("track_id"), latest_closed.get("track_id")),
+            **chart_geometry,
         }
     )
 
@@ -701,6 +1693,254 @@ def _predicted_block(episode: Mapping[str, Any], step: int) -> dict[str, Any]:
     )
 
 
+def _path_fit_for_event(
+    path: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    step: int,
+    unknown: bool,
+    close_tolerance: float,
+    body_tolerance: float,
+) -> dict[str, Any]:
+    path_steps = _rows(path.get("steps"), limit=TRACKING_EPISODE_HORIZON)
+    expected = path_steps[step - 1] if len(path_steps) >= step else {}
+    expected_close = _number(expected.get("close_level"))
+    expected_open = _number(expected.get("open_level"))
+    actual_close = _number(actual.get("chart_close_norm"))
+    actual_open = _number(actual.get("chart_open_norm"))
+    if unknown or expected_close is None or actual_close is None:
+        return {
+            "status": "UNKNOWN",
+            "fit": None,
+            "error": None,
+            "direction_agreement": None,
+        }
+    close_error = abs(expected_close - actual_close)
+    if expected_open is not None and actual_open is not None:
+        expected_body = expected_close - expected_open
+        actual_body = actual_close - actual_open
+        body_error = abs(expected_body - actual_body)
+        error = 0.7 * close_error + 0.3 * body_error
+        fit_denominator = 4.0 * (
+            0.7 * close_tolerance + 0.3 * body_tolerance
+        )
+    else:
+        error = close_error
+        fit_denominator = 4.0 * close_tolerance
+    expected_side = _direction(expected.get("direction"), path.get("direction"))
+    actual_side = _direction(actual.get("side"))
+    return {
+        "status": "MEASURED",
+        "fit": round(
+            max(0.0, min(1.0, 1.0 - error / max(fit_denominator, 1e-6))),
+            6,
+        ),
+        "error": round(error, 6),
+        "direction_agreement": (
+            expected_side == actual_side
+            if expected_side in {"BUY", "SELL"} and actual_side in {"BUY", "SELL"}
+            else None
+        ),
+    }
+
+
+def _event_path_evidence(
+    episode: Mapping[str, Any],
+    session: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    step: int,
+    unknown: bool,
+) -> tuple[dict[str, Any], str]:
+    comparison = _mapping(episode.get("path_comparison"))
+    paths = _rows(comparison.get("paths"), limit=2)
+    if len(paths) != 2:
+        return {}, ""
+    transform = _mapping(comparison.get("transform_contract"))
+    continuity_proven = _transform_continuity_proven(transform, session)
+    close_tolerance = _number(transform.get("close_tolerance")) or 0.01
+    body_tolerance = _number(transform.get("body_tolerance")) or close_tolerance
+    evidence_unknown = bool(unknown or not continuity_proven)
+    evidence = {
+        _text(path.get("id")): _path_fit_for_event(
+            path,
+            actual,
+            step=step,
+            unknown=evidence_unknown,
+            close_tolerance=close_tolerance,
+            body_tolerance=body_tolerance,
+        )
+        for path in paths
+        if _text(path.get("id")) in {"PATH_A", "PATH_B"}
+    }
+    if set(evidence) != {"PATH_A", "PATH_B"}:
+        return {}, ""
+    left_error = _number(_mapping(evidence["PATH_A"]).get("error"))
+    right_error = _number(_mapping(evidence["PATH_B"]).get("error"))
+    if left_error is None or right_error is None:
+        return evidence, ""
+    margin = abs(left_error - right_error)
+    threshold = max(
+        _PATH_EVENT_MIN_MARGIN,
+        close_tolerance * 0.5,
+        max(left_error, right_error) * _PATH_RELATIVE_MARGIN,
+    )
+    if min(left_error, right_error) > close_tolerance * 4.0:
+        return evidence, ""
+    favored = (
+        "PATH_A"
+        if margin >= threshold and left_error < right_error
+        else "PATH_B"
+        if margin >= threshold and right_error < left_error
+        else ""
+    )
+    return evidence, favored
+
+
+def _entry_location_progress(
+    comparison: Mapping[str, Any],
+    session: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    observed_close_level: float | None,
+    previous_distance: float | None,
+) -> dict[str, Any]:
+    location = _mapping(comparison.get("entry_location"))
+    top_level = _number(location.get("top_level"))
+    bottom_level = _number(location.get("bottom_level"))
+    if (
+        location.get("status") != "TRACKING"
+        or observed_close_level is None
+        or top_level is None
+        or bottom_level is None
+        or bottom_level <= top_level
+    ):
+        return {"status": "UNKNOWN", "distance": None}
+    latest = _mapping(session.get("latest_signal"))
+    tracking = _mapping(session.get("tracking_summary"))
+    current_thesis = (
+        _mapping(session.get("signal_thesis_v3"))
+        or _mapping(latest.get("signal_thesis_v3"))
+        or _mapping(tracking.get("signal_thesis_v3"))
+    )
+    current_zone = _mapping(current_thesis.get("entry_zone"))
+    explicit_match = bool(
+        _text(location.get("source_thesis_id"))
+        and _text(location.get("source_thesis_id"))
+        == _text(current_thesis.get("thesis_id"))
+        and _text(location.get("zone_key"))
+        and _text(location.get("zone_key")) == _text(current_zone.get("key"))
+        and _direction(location.get("direction"))
+        == _direction(current_thesis.get("side"), current_thesis.get("effective_side"))
+    )
+    if explicit_match and current_thesis.get("invalidated") is True:
+        return {"status": "INVALIDATED", "distance": None}
+    if explicit_match and (
+        current_thesis.get("entry_reached") is True
+        or current_thesis.get("entry_confirmed") is True
+    ):
+        return {"status": "CONFIRMED", "distance": 0.0}
+    candle_top = _number(actual.get("chart_top_norm"))
+    candle_bottom = _number(actual.get("chart_bottom_norm"))
+    intersects = bool(
+        candle_top is not None
+        and candle_bottom is not None
+        and max(candle_top, top_level) <= min(candle_bottom, bottom_level)
+    )
+    if intersects or top_level <= observed_close_level <= bottom_level:
+        return {"status": "INSIDE", "distance": 0.0}
+    distance = min(
+        abs(observed_close_level - top_level),
+        abs(observed_close_level - bottom_level),
+    )
+    tolerance = _number(
+        _mapping(comparison.get("transform_contract")).get("close_tolerance")
+    ) or 0.005
+    if previous_distance is not None and distance < previous_distance - tolerance * 0.25:
+        status = "APPROACHING"
+    elif previous_distance is not None and distance > previous_distance + tolerance * 0.25:
+        status = "MOVED_AWAY"
+    else:
+        status = "OUTSIDE"
+    return {"status": status, "distance": round(distance, 6)}
+
+
+def _updated_path_comparison(
+    comparison_value: Any,
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    comparison = _safe_mapping(comparison_value)
+    if comparison.get("schema_version") != TRACKING_PATH_COMPARISON_SCHEMA_VERSION:
+        return _default_path_comparison()
+    common_errors: dict[str, list[float]] = {"PATH_A": [], "PATH_B": []}
+    for event in events:
+        evidence = _mapping(event.get("path_fit_by_id"))
+        left_error = _number(_mapping(evidence.get("PATH_A")).get("error"))
+        right_error = _number(_mapping(evidence.get("PATH_B")).get("error"))
+        if left_error is None or right_error is None:
+            continue
+        common_errors["PATH_A"].append(left_error)
+        common_errors["PATH_B"].append(right_error)
+    count = len(common_errors["PATH_A"])
+    comparison["favored_path_id"] = ""
+    if events and _text(events[-1].get("geometry_status")).upper() != "AVAILABLE":
+        comparison["verdict"] = "GEOMETRY_UNAVAILABLE"
+        comparison["verdict_summary"] = (
+            "The latest completed candle cannot be compared until normalized chart geometry is proven again."
+        )
+        return comparison
+    if count < _PATH_FAVOR_MIN_EVENTS:
+        observed_count = sum(
+            1
+            for event in events
+            if event.get("result_available") is not False
+        )
+        if observed_count >= _PATH_FAVOR_MIN_EVENTS:
+            comparison["verdict"] = "GEOMETRY_UNAVAILABLE"
+            comparison["verdict_summary"] = (
+                "Confirmed candles were recorded, but comparable normalized geometry was unavailable."
+            )
+        else:
+            comparison["verdict"] = "WAITING"
+            comparison["verdict_summary"] = (
+                f"Waiting for {(_PATH_FAVOR_MIN_EVENTS - count)} more confirmed candle"
+                f"{'s' if _PATH_FAVOR_MIN_EVENTS - count != 1 else ''} before favoring either path."
+            )
+        return comparison
+    means = {
+        path_id: sum(errors) / len(errors)
+        for path_id, errors in common_errors.items()
+    }
+    best_id = min(means, key=means.__getitem__)
+    other_id = "PATH_B" if best_id == "PATH_A" else "PATH_A"
+    transform = _mapping(comparison.get("transform_contract"))
+    close_tolerance = _number(transform.get("close_tolerance")) or 0.01
+    if means[best_id] > close_tolerance * 4.0:
+        comparison["verdict"] = "NEITHER_PATH_FITS"
+        comparison["verdict_summary"] = (
+            f"After {count} confirmed candles, the market is not following either saved path closely enough."
+        )
+        return comparison
+    margin = means[other_id] - means[best_id]
+    threshold = max(
+        _PATH_EPISODE_MIN_MARGIN,
+        close_tolerance * 0.75,
+        means[other_id] * _PATH_RELATIVE_MARGIN,
+    )
+    if margin < threshold:
+        comparison["verdict"] = "TOO_CLOSE"
+        comparison["verdict_summary"] = (
+            f"After {count} confirmed candles, both saved paths remain too close to call."
+        )
+        return comparison
+    comparison["verdict"] = best_id
+    comparison["favored_path_id"] = best_id
+    label = "Main forecast" if best_id == "PATH_A" else "Alternative forecast"
+    comparison["verdict_summary"] = (
+        f"After {count} confirmed candles, the market is following the {label.lower()} more closely."
+    )
+    return comparison
+
+
 def _candidate_revision(session: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, Any]:
     scene = _scene_forecast(session)
     lstm = _lstm_forecast(session)
@@ -746,13 +1986,207 @@ def _progress_snapshot(session: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _episode_observation_state(
+    episode: Mapping[str, Any],
+    session: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    *,
+    now_iso: str,
+    newly_confirmed: int = 0,
+) -> dict[str, Any]:
+    """Build the bounded operator-safe continuity state for this capture."""
+
+    previous = _normalize_observation_state(episode.get("observation_state"))
+    frame_id = max(
+        0,
+        _integer(session.get("model_vote_frame_id", session.get("frame_index", 0))),
+    )
+    captured_at = _text(session.get("last_capture_at"), now_iso)
+    match_scores = _mapping(identity.get("match_scores"))
+    reacquisition = _mapping(identity.get("reacquisition"))
+    transition_reason = _text(identity.get("transition_reason")).upper()
+    event_batch = _rows(
+        identity.get("confirmed_event_batch"),
+        limit=TRACKING_EPISODE_HORIZON,
+    )
+    coverage_degraded = match_scores.get("coverage_degradation_observed") is True
+    last_sequence = max(
+        0,
+        _integer(episode.get("last_processed_closed_candle_sequence")),
+    )
+    current_sequence = max(0, _integer(identity.get("closed_candle_sequence")))
+    sequence_gap_without_rows = bool(
+        current_sequence > last_sequence + 1 and not event_batch
+    )
+    unresolved_gap = bool(
+        sequence_gap_without_rows
+        or (
+            coverage_degraded
+            and transition_reason
+            in {
+                "AMBIGUOUS_SCREENSHOT_REUSES_EVENT",
+                "DETECTOR_COVERAGE_REBASE",
+            }
+        )
+        or (
+            reacquisition.get("status") == "NOT_CONFIRMED"
+            and transition_reason == "AMBIGUOUS_SCREENSHOT_REUSES_EVENT"
+        )
+    )
+    if newly_confirmed > 0:
+        status = "LIVE"
+        reason = (
+            "MISSED_CANDLES_REACQUIRED"
+            if newly_confirmed > 1
+            else "CLOSED_CANDLE_CONFIRMED"
+        )
+        last_trusted_frame_id = frame_id
+        last_trusted_at = captured_at
+    elif unresolved_gap:
+        status = "REACQUIRING"
+        reason = "OBSERVATION_GAP_REACQUIRING"
+        last_trusted_frame_id = int(previous["last_trusted_frame_id"])
+        last_trusted_at = str(previous["last_trusted_at"])
+    else:
+        status = "WAITING_FOR_CLOSE"
+        reason = "FORMING_CANDLE_IN_PROGRESS"
+        last_trusted_frame_id = frame_id
+        last_trusted_at = captured_at
+    return _normalize_observation_state(
+        {
+            "status": status,
+            "reason": reason,
+            "last_trusted_frame_id": last_trusted_frame_id,
+            "last_trusted_at": last_trusted_at,
+            "current_frame_id": frame_id,
+            "current_at": captured_at,
+            "confirmed_event_count": min(
+                TRACKING_EPISODE_HORIZON,
+                _integer(episode.get("event_cursor")),
+            ),
+            "recoverable_event_count": len(event_batch),
+            "unresolved_gap": unresolved_gap,
+            "coverage_status": "DEGRADED" if coverage_degraded else "STABLE",
+        }
+    )
+
+
+def _confirmed_episode_events(
+    episode: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return a contiguous, identity-proven batch or an explicit unknown gap.
+
+    Historical observations are scored only when the resolver supplied the
+    corresponding candle row.  If an authoritative monotonic sequence jumps
+    without those rows, the absent steps become UNKNOWN_GAP records and only
+    the currently confirmed candle is eligible for scoring.
+    """
+
+    last_sequence = max(
+        0,
+        _integer(episode.get("last_processed_closed_candle_sequence")),
+    )
+    current_sequence = max(0, _integer(identity.get("closed_candle_sequence")))
+    current_key = _text(identity.get("closed_candle_key"))
+    if not current_key or current_sequence <= last_sequence:
+        return []
+
+    raw_batch = _rows(
+        identity.get("confirmed_event_batch"),
+        limit=24,
+    )
+    if raw_batch:
+        normalized_batch: list[dict[str, Any]] = []
+        for row in raw_batch:
+            key = _text(row.get("closed_candle_key"))
+            sequence = max(0, _integer(row.get("closed_candle_sequence")))
+            if not key or sequence <= 0:
+                return []
+            normalized_batch.append(
+                {
+                    "closed_candle_key": key,
+                    "closed_candle_sequence": sequence,
+                    "observation": _mapping(row.get("observation")),
+                    "confirmation_reason": _text(
+                        row.get("confirmation_reason"),
+                        identity.get("transition_reason"),
+                    ),
+                    "reacquired": row.get("reacquired") is True,
+                    "unknown_gap": False,
+                }
+            )
+        if (
+            normalized_batch[-1]["closed_candle_key"] != current_key
+            or normalized_batch[-1]["closed_candle_sequence"] != current_sequence
+        ):
+            return []
+        pending = [
+            row
+            for row in normalized_batch
+            if int(row["closed_candle_sequence"]) > last_sequence
+        ]
+        expected = list(
+            range(last_sequence + 1, last_sequence + 1 + len(pending))
+        )
+        if [int(row["closed_candle_sequence"]) for row in pending] != expected:
+            return []
+        if len({str(row["closed_candle_key"]) for row in pending}) != len(pending):
+            return []
+        return pending
+
+    delta = current_sequence - last_sequence
+    if delta == 1:
+        return [
+            {
+                "closed_candle_key": current_key,
+                "closed_candle_sequence": current_sequence,
+                "observation": {},
+                "confirmation_reason": _text(identity.get("transition_reason")),
+                "reacquired": False,
+                "unknown_gap": False,
+            }
+        ]
+
+    # A monotonic source sequence proves how many closes were skipped, but it
+    # does not prove their OHLC or direction.  Persist explicit unknown rows;
+    # never reuse the current candle as their actual result.
+    episode_id = _text(episode.get("episode_id"), "episode")
+    output: list[dict[str, Any]] = []
+    for sequence in range(last_sequence + 1, current_sequence):
+        seed = (
+            f"{episode_id}|UNKNOWN_CLOSED_CANDLE_GAP|{sequence}|{current_key}"
+        )
+        output.append(
+            {
+                "closed_candle_key": f"gap-{sha256(seed.encode('utf-8')).hexdigest()[:20]}",
+                "closed_candle_sequence": sequence,
+                "observation": {},
+                "confirmation_reason": "AUTHORITATIVE_SEQUENCE_GAP",
+                "reacquired": False,
+                "unknown_gap": True,
+            }
+        )
+    output.append(
+        {
+            "closed_candle_key": current_key,
+            "closed_candle_sequence": current_sequence,
+            "observation": {},
+            "confirmation_reason": _text(identity.get("transition_reason")),
+            "reacquired": False,
+            "unknown_gap": False,
+        }
+    )
+    return output
+
+
 def advance_tracking_episode_v1(
     current: Any,
     session: Mapping[str, Any],
     *,
     now_iso: str,
 ) -> dict[str, Any]:
-    """Consume at most one new confirmed closed-candle event from a capture."""
+    """Consume each identity-proven close once while keeping the baseline frozen."""
 
     normalized = normalize_tracking_episode_v1(
         current,
@@ -776,97 +2210,231 @@ def advance_tracking_episode_v1(
         normalized["completed_at"] = str(now_iso)
         normalized["terminal_reason"] = "PAIR_OR_TIMEFRAME_CHANGED"
         normalized["candidate_revision"] = _candidate_revision(session, identity)
+        observation_state = _episode_observation_state(
+            normalized,
+            session,
+            identity,
+            now_iso=now_iso,
+        )
+        observation_state["status"] = "STOPPED"
+        observation_state["reason"] = "MARKET_CONTEXT_CHANGED"
+        normalized["observation_state"] = observation_state
         normalized["permission"] = _episode_permission(
             active=False,
             reason="Pair or timeframe changed; start a new tracking episode after identity stabilizes.",
         )
         return normalized
-    closed_key = str(identity["closed_candle_key"] or "").strip()
-    closed_sequence = int(identity["closed_candle_sequence"] or 0)
-    last_closed_sequence = int(
-        normalized["last_processed_closed_candle_sequence"] or 0
-    )
     if (
-        not closed_key
+        not _text(identity.get("closed_candle_key"))
         or not bool(identity["market_identity_confirmed"])
         or not bool(identity["timeframe_identity_confirmed"])
-        or closed_key == normalized["last_processed_closed_candle_key"]
-        or closed_key in cast(Sequence[str], normalized["processed_closed_candle_keys"])
-        or (
-            closed_sequence > 0
-            and last_closed_sequence > 0
-            and closed_sequence <= last_closed_sequence
-        )
     ):
+        normalized["observation_state"] = _episode_observation_state(
+            normalized,
+            session,
+            identity,
+            now_iso=now_iso,
+        )
         return normalized
-    step = int(normalized["event_cursor"]) + 1
-    if step > TRACKING_EPISODE_HORIZON:
+
+    confirmed_events = _confirmed_episode_events(normalized, identity)
+    if not confirmed_events:
+        normalized["observation_state"] = _episode_observation_state(
+            normalized,
+            session,
+            identity,
+            now_iso=now_iso,
+        )
         return normalized
-    predicted = _predicted_block(normalized, step)
-    actual = _actual_closed_candle(session, identity)
-    predicted_side = _direction(predicted.get("side"))
-    actual_side = _direction(actual.get("side"))
-    predicted_close = _number(predicted.get("expected_close_norm"))
-    actual_close = _number(actual.get("close_norm"))
-    comparable = bool(
-        predicted_close is not None
-        and actual_close is not None
-        and _text(predicted.get("coordinate_space"))
-        == _text(actual.get("coordinate_space"))
-    )
+
+    processed = list(cast(Sequence[str], normalized["processed_closed_candle_keys"]))
+    if any(
+        _text(row.get("closed_candle_key")) in processed
+        for row in confirmed_events
+    ):
+        normalized["observation_state"] = _episode_observation_state(
+            normalized,
+            session,
+            identity,
+            now_iso=now_iso,
+        )
+        return normalized
+
     anchor = _mapping(normalized.get("anchor"))
     frame_id = max(
         0,
         _integer(session.get("model_vote_frame_id", session.get("frame_index", 0))),
     )
-    event = {
-        "schema_version": TRACKING_EPISODE_EVENT_SCHEMA_VERSION,
-        "episode_id": normalized["episode_id"],
-        "event_id": f"{normalized['episode_id']}:E{step}",
-        "step": step,
-        "label": f"E{step}",
-        "observed_at": str(now_iso),
-        "closed_candle_key": closed_key,
-        "closed_candle_sequence": int(identity["closed_candle_sequence"]),
-        "predicted_block": predicted,
-        "actual_block": actual,
-        "direction_agreement": (
-            predicted_side == actual_side
-            if predicted_side in {"BUY", "SELL"} and actual_side in {"BUY", "SELL"}
-            else None
-        ),
-        "displacement_error": (
-            abs(cast(float, predicted_close) - cast(float, actual_close))
-            if comparable
-            else None
-        ),
-        "progress": _progress_snapshot(session),
-        "before_reference": {
-            "frame_id": _integer(anchor.get("frame_id")),
-            "source_capture_id": _text(anchor.get("source_capture_id")),
-            "surface_signature": _text(anchor.get("surface_signature")),
-        },
-        "after_reference": {
-            "frame_id": frame_id,
-            "source_capture_id": _text(session.get("source_capture_id")),
-            "surface_signature": _text(
-                session.get("last_study_surface_signature"),
-                session.get("last_display_surface_signature"),
-            ),
-        },
-    }
     events = cast(list[dict[str, Any]], normalized["events"])
-    events.append(_safe_mapping(event))
+    appended = 0
+    for confirmed in confirmed_events:
+        step = len(events) + 1
+        if step > TRACKING_EPISODE_HORIZON:
+            break
+        closed_key = _text(confirmed.get("closed_candle_key"))
+        closed_sequence = max(
+            0,
+            _integer(confirmed.get("closed_candle_sequence")),
+        )
+        unknown_gap = confirmed.get("unknown_gap") is True
+        predicted = _predicted_block(normalized, step)
+        event_identity = {
+            **identity,
+            "closed_candle_key": closed_key,
+            "closed_candle_sequence": closed_sequence,
+        }
+        actual = (
+            {
+                "status": "UNKNOWN",
+                "reason": "CANDLE_NOT_AVAILABLE_DURING_OBSERVATION_GAP",
+            }
+            if unknown_gap
+            else _actual_closed_candle(
+                session,
+                event_identity,
+                _mapping(confirmed.get("observation")),
+            )
+        )
+        path_fit_by_id, favored_path_id = _event_path_evidence(
+            normalized,
+            session,
+            actual,
+            step=step,
+            unknown=unknown_gap,
+        )
+        path_comparison = _mapping(normalized.get("path_comparison"))
+        transform_proven = bool(
+            not unknown_gap
+            and _transform_continuity_proven(
+                path_comparison.get("transform_contract"),
+                session,
+            )
+        )
+        observed_close_level = (
+            _number(actual.get("chart_close_norm"))
+            if transform_proven
+            else None
+        )
+        previous_entry_progress = _mapping(
+            events[-1].get("entry_location_progress")
+        ) if events else {}
+        entry_location_progress = _entry_location_progress(
+            path_comparison,
+            session,
+            actual,
+            observed_close_level,
+            _number(previous_entry_progress.get("distance")),
+        )
+        predicted_side = _direction(predicted.get("side"))
+        actual_side = _direction(actual.get("side"))
+        predicted_close = _number(predicted.get("expected_close_norm"))
+        actual_close = _number(actual.get("close_norm"))
+        comparable = bool(
+            not unknown_gap
+            and predicted_close is not None
+            and actual_close is not None
+            and _text(predicted.get("coordinate_space"))
+            == _text(actual.get("coordinate_space"))
+        )
+        event = {
+            "schema_version": TRACKING_EPISODE_EVENT_SCHEMA_VERSION,
+            "episode_id": normalized["episode_id"],
+            "event_id": f"{normalized['episode_id']}:E{step}",
+            "step": step,
+            "label": f"E{step}",
+            "observed_at": str(now_iso),
+            "closed_candle_key": closed_key,
+            "closed_candle_sequence": closed_sequence,
+            "observation_kind": (
+                "UNKNOWN_GAP"
+                if unknown_gap
+                else "REACQUIRED_HISTORY"
+                if confirmed.get("reacquired") is True
+                else "LIVE_CLOSE"
+            ),
+            "result_available": not unknown_gap,
+            "predicted_block": predicted,
+            "actual_block": actual,
+            "path_fit_by_id": path_fit_by_id,
+            "favored_path_id": favored_path_id,
+            "observed_close_level": observed_close_level,
+            "entry_location_progress": entry_location_progress,
+            "geometry_status": "AVAILABLE" if observed_close_level is not None else "UNAVAILABLE",
+            "direction_agreement": (
+                predicted_side == actual_side
+                if not unknown_gap
+                and predicted_side in {"BUY", "SELL"}
+                and actual_side in {"BUY", "SELL"}
+                else None
+            ),
+            "displacement_error": (
+                abs(cast(float, predicted_close) - cast(float, actual_close))
+                if comparable
+                else None
+            ),
+            "continuity_evidence": {
+                "confirmation_reason": _text(
+                    confirmed.get("confirmation_reason"),
+                    identity.get("transition_reason"),
+                ),
+                "batch_size": len(confirmed_events),
+                "reacquired": confirmed.get("reacquired") is True,
+                "unknown_gap": unknown_gap,
+            },
+            "progress": _progress_snapshot(session),
+            "before_reference": {
+                "frame_id": _integer(anchor.get("frame_id")),
+                "source_capture_id": _text(anchor.get("source_capture_id")),
+                "surface_signature": _text(anchor.get("surface_signature")),
+            },
+            "after_reference": {
+                "frame_id": frame_id,
+                "source_capture_id": _text(session.get("source_capture_id")),
+                "surface_signature": _text(
+                    session.get("last_study_surface_signature"),
+                    session.get("last_display_surface_signature"),
+                ),
+            },
+        }
+        events.append(_safe_mapping(event))
+        processed.append(closed_key)
+        normalized["last_processed_closed_candle_key"] = closed_key
+        normalized["last_processed_closed_candle_sequence"] = closed_sequence
+        appended += 1
+
+    if appended <= 0:
+        normalized["observation_state"] = _episode_observation_state(
+            normalized,
+            session,
+            identity,
+            now_iso=now_iso,
+        )
+        return normalized
     normalized["events"] = events[:TRACKING_EPISODE_HORIZON]
     normalized["event_cursor"] = len(normalized["events"])
-    processed = list(cast(Sequence[str], normalized["processed_closed_candle_keys"]))
-    processed.append(closed_key)
+    normalized["path_comparison"] = _updated_path_comparison(
+        normalized.get("path_comparison"),
+        cast(Sequence[Mapping[str, Any]], normalized["events"]),
+    )
+    updated_comparison = _mapping(normalized.get("path_comparison"))
+    updated_entry_location = _mapping(updated_comparison.get("entry_location"))
+    latest_event = _mapping(cast(Sequence[Any], normalized["events"])[-1])
+    updated_entry_location["progress"] = _safe_mapping(
+        latest_event.get("entry_location_progress")
+    ) or {"status": "UNKNOWN"}
+    updated_comparison["entry_location"] = updated_entry_location
+    normalized["path_comparison"] = updated_comparison
     normalized["processed_closed_candle_keys"] = list(dict.fromkeys(processed))[-(TRACKING_EPISODE_HORIZON + 1) :]
-    normalized["last_processed_closed_candle_key"] = closed_key
-    normalized["last_processed_closed_candle_sequence"] = int(identity["closed_candle_sequence"])
     normalized["candidate_revision"] = _candidate_revision(session, identity)
     normalized["revision"] = int(normalized["revision"]) + 1
     normalized["updated_at"] = str(now_iso)
+    normalized["observation_state"] = _episode_observation_state(
+        normalized,
+        session,
+        identity,
+        now_iso=now_iso,
+        newly_confirmed=appended,
+    )
     if int(normalized["event_cursor"]) >= TRACKING_EPISODE_HORIZON:
         normalized["state"] = "COMPLETED"
         normalized["completed_at"] = str(now_iso)
@@ -875,6 +2443,12 @@ def advance_tracking_episode_v1(
             active=False,
             reason="All 12 closed-candle events were observed; start a new episode for another baseline.",
         )
+        observation_state = _normalize_observation_state(
+            normalized.get("observation_state")
+        )
+        observation_state["status"] = "STOPPED"
+        observation_state["reason"] = "EPISODE_HORIZON_COMPLETE"
+        normalized["observation_state"] = observation_state
     return normalized
 
 
@@ -1006,10 +2580,12 @@ __all__ = [
     "TRACKING_EPISODE_HISTORY_SCHEMA_VERSION",
     "TRACKING_EPISODE_SCHEMA_VERSION",
     "TrackingEpisodeReadinessError",
+    "TrackingEpisodeStateError",
     "TrackingEpisodeState",
     "advance_tracking_episode_v1",
     "default_tracking_episode_v1",
     "normalize_tracking_episode_v1",
+    "reset_tracking_episode_v1",
     "start_tracking_episode_v1",
     "stop_tracking_episode_v1",
     "tracking_episode_is_active_v1",

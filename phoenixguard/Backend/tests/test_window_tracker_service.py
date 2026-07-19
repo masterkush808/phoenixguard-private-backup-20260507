@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import json
 import time
@@ -3091,6 +3092,67 @@ def test_live_selector_lane_reads_pair_and_m5_despite_toolbar_clutter() -> None:
     assert str(market["raw_text"]).replace(" ", "") == "GBP/USDOTC"
 
 
+def test_live_selector_lane_reads_m5_below_full_browser_chrome() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    width, height = 1942, 1040
+    pixels = np.full((height, width, 3), (21, 26, 38), dtype=np.uint8)
+
+    # A complete Edge window places the toolbar and asset tabs above the chart.
+    # The authoritative M5 chip therefore crosses the old 24% ROI cutoff and
+    # was truncated before its complete glyph could be scored.
+    offset_x, offset_y = 80, 141
+    cv2.rectangle(
+        pixels,
+        (263 + offset_x, 98 + offset_y),
+        (335 + offset_x, 140 + offset_y),
+        (25, 110, 210),
+        -1,
+    )
+    cv2.rectangle(
+        pixels,
+        (270 + offset_x, 104 + offset_y),
+        (328 + offset_x, 136 + offset_y),
+        (29, 38, 58),
+        -1,
+    )
+    cv2.rectangle(
+        pixels,
+        (297 + offset_x, 99 + offset_y),
+        (323 + offset_x, 119 + offset_y),
+        (25, 110, 210),
+        -1,
+    )
+    cv2.putText(
+        pixels,
+        "M5",
+        (299 + offset_x, 115 + offset_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (248, 250, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.circle(
+        pixels,
+        (284 + offset_x, 126 + offset_y),
+        8,
+        (248, 250, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    detect_timeframe = cast(
+        Callable[[Image.Image], dict[str, Any]],
+        getattr(adapter, "_detect_timeframe_selector"),
+    )
+    timeframe = detect_timeframe(Image.fromarray(pixels, mode="RGB"))
+
+    assert timeframe["value"] == "M5"
+    assert float(timeframe["confidence"]) >= 0.56
+    assert int(cast(list[int], timeframe["bbox"])[3]) >= int(height * 0.24) + 20
+
+
 def test_tiny_live_m5_glyph_uses_shape_topology_instead_of_m1_guess() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     # Exact seven-pixel topology observed in the live broker's antialiased M5
@@ -4716,6 +4778,71 @@ def test_start_session_clears_stalepackets_before_first_fresh_capture(
         tracker.latest_model_council_study_packet(str(session["session_id"]))
 
 
+def test_start_session_reconciles_missing_worker_after_api_recycle_without_resetting_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "window_tracker"
+    recycled_process = ContinuousWindowTrackerService(
+        root_dir=root_dir,
+        capture_backend=_FakeCaptureBackend([_surface()]),
+        tracking_adapter=_FakeTrackingAdapter(),
+    )
+    session = recycled_process.create_session(session_id="pocket-live")
+    payload = recycled_process.load_session(str(session["session_id"]))
+    assert payload is not None
+    payload.update(
+        {
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            },
+            "status": "running",
+            "tracking_enabled": True,
+            "frame_index": 37,
+            "capture_count": 37,
+            "last_capture_epoch": 1234.5,
+            "decision_valid_until_epoch": 1294.5,
+            "recent_studies": [{"frame_id": 37, "summary": "preserve-me"}],
+            "tracking_episode_history": [
+                {"episode_id": "episode-preserved", "state": "STOPPED"}
+            ],
+            "model_council_study_packet": {
+                "packet_id": "study-preserved",
+                "packet_type": "STUDY_PACKET",
+            },
+        }
+    )
+    # This is the state a new API process reads from disk: active persisted
+    # intent and history, with an empty process-local worker registry.
+    recycled_process.save_session(payload)
+    ensure_calls: list[tuple[str, bool]] = []
+
+    def _ensure_worker_stub(session_id: str, *, capture_now: bool = False) -> None:
+        ensure_calls.append((session_id, capture_now))
+
+    monkeypatch.setattr(recycled_process, "_ensure_worker", _ensure_worker_stub)
+
+    reconciled = recycled_process.start_session("pocket-live")
+
+    assert ensure_calls == [("pocket-live", True)]
+    assert reconciled["status"] == "running"
+    assert reconciled["tracking_enabled"] is True
+    assert reconciled["frame_index"] == 37
+    assert reconciled["capture_count"] == 37
+    assert reconciled["last_capture_epoch"] == 1234.5
+    assert reconciled["recent_studies"] == [
+        {"frame_id": 37, "summary": "preserve-me"}
+    ]
+    assert reconciled["tracking_episode_history"] == [
+        {"episode_id": "episode-preserved", "state": "STOPPED"}
+    ]
+    stored = recycled_process.load_session("pocket-live")
+    assert stored is not None
+    assert stored["decision_valid_until_epoch"] == 1294.5
+    assert stored["model_council_study_packet"]["packet_id"] == "study-preserved"
+
+
 def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 150.0)
     expiredpacket: dict[str, Any] = {
@@ -5545,6 +5672,200 @@ def test_new_forecast_frame_advances_retained_snapshot_epoch() -> None:
     assert cast(dict[str, Any], snapshot["lstm_contribution"])["path_side"] == "BUY"
 
 
+def _complete_scene_snapshot_fixture(
+    *,
+    closed_candle_key: str = "closed-event-71",
+    pair: str = "GBP/USD OTC",
+    timeframe: str = "M5",
+    frame_id: int = 71,
+) -> dict[str, Any]:
+    anchor_x = 0.58
+    anchor_y = 0.52
+    scenarios: list[dict[str, Any]] = []
+    for role, direction, selected, y_step in (
+        ("base", "SELL", True, 0.006),
+        ("bull", "BUY", False, -0.004),
+        ("bear", "SELL", False, 0.01),
+    ):
+        points = [
+            [round(anchor_x + step * 0.012, 6), round(anchor_y + step * y_step, 6)]
+            for step in range(13)
+        ]
+        candles = [
+            {
+                "step": step,
+                "x_norm": points[step][0],
+                "open_y_norm": points[step - 1][1],
+                "high_y_norm": min(points[step - 1][1], points[step][1]) - 0.001,
+                "low_y_norm": max(points[step - 1][1], points[step][1]) + 0.001,
+                "close_y_norm": points[step][1],
+                "movement_side": direction,
+            }
+            for step in range(1, 13)
+        ]
+        scenarios.append(
+            {
+                "role": role,
+                "side": direction,
+                "selected": selected,
+                "line_points": points,
+                "forecast_candles": candles,
+            }
+        )
+    selected_scenario = scenarios[0]
+    return {
+        "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+        "provider": "SCENE_STATISTICAL_FALLBACK_V3",
+        "provider_status": "AVAILABLE",
+        "forecast_available": True,
+        "pair": pair,
+        "timeframe": timeframe,
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "identity_contract_status": "CONFIRMED",
+        "frame_id": frame_id,
+        "display_frame_id": frame_id,
+        "forecast_computed_frame_id": frame_id,
+        "source_forecast_frame_id": frame_id,
+        "geometry_projected_frame_id": frame_id,
+        "geometry_frame_match_verified": True,
+        "geometry_reprojected_from_cache": False,
+        "frame_reused_without_reforecast": False,
+        "same_event_cache_rebuild_required": False,
+        "closed_candle_key": closed_candle_key,
+        "closed_candle_sequence": 8,
+        "path_side": "SELL",
+        "side": "SELL",
+        "forecast_anchor": {
+            "x_norm": anchor_x,
+            "y_norm": anchor_y,
+            "verified_latest_close": True,
+        },
+        "line_points": copy.deepcopy(selected_scenario["line_points"]),
+        "forecast_candles": copy.deepcopy(selected_scenario["forecast_candles"]),
+        "forecast_scenarios": scenarios,
+    }
+
+
+def test_same_event_compact_scene_does_not_downgrade_retained_snapshot_geometry() -> None:
+    scene = _complete_scene_snapshot_fixture()
+    compact_payload = cast(
+        Callable[[Mapping[str, Any]], dict[str, Any]],
+        getattr(window_tracker_module, "_compact_session_persisted_payload"),
+    )
+    complete_geometry = cast(
+        Callable[[Any], bool],
+        getattr(window_tracker_module, "_complete_scene_forecast_geometry_v3"),
+    )
+    first = compact_payload(
+        {
+            "session_id": "same-event-scene-retention",
+            "display_frame_id": 71,
+            "frame_index": 71,
+            "model_vote_frame_id": 71,
+            "latest_signal": {"scene_forecast_contribution": scene},
+            "tracking_summary": {"scene_forecast_contribution": scene},
+        }
+    )
+    first_snapshot = cast(dict[str, Any], first["forecast_snapshot_v3"])
+    first_scene = cast(dict[str, Any], first_snapshot["scene_forecast_contribution"])
+    assert complete_geometry(first_scene) is True
+    assert "line_points" not in cast(
+        dict[str, Any],
+        cast(dict[str, Any], first["latest_signal"])["scene_forecast_contribution"],
+    )
+
+    second = compact_payload(first)
+    second_scene = cast(
+        dict[str, Any],
+        cast(dict[str, Any], second["forecast_snapshot_v3"])[
+            "scene_forecast_contribution"
+        ],
+    )
+
+    assert complete_geometry(second_scene) is True
+    assert second_scene["closed_candle_key"] == "closed-event-71"
+    assert second_scene["line_points"] == first_scene["line_points"]
+    assert second_scene["forecast_candles"] == first_scene["forecast_candles"]
+    retained_scenarios = cast(list[dict[str, Any]], second_scene["forecast_scenarios"])
+    assert len(retained_scenarios) == 3
+    assert sum(bool(row["selected"]) for row in retained_scenarios) == 1
+    assert all(len(cast(list[Any], row["line_points"])) == 13 for row in retained_scenarios)
+    assert all(len(cast(list[Any], row["forecast_candles"])) == 12 for row in retained_scenarios)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("closed_candle_key", "different-closed-event"),
+        ("pair", "USD/JPY OTC"),
+    ),
+)
+def test_compact_scene_never_revives_geometry_for_another_event_or_pair(
+    field: str,
+    replacement: str,
+) -> None:
+    scene = _complete_scene_snapshot_fixture()
+    compact_payload = cast(
+        Callable[[Mapping[str, Any]], dict[str, Any]],
+        getattr(window_tracker_module, "_compact_session_persisted_payload"),
+    )
+    first = compact_payload(
+        {
+            "display_frame_id": 71,
+            "frame_index": 71,
+            "latest_signal": {"scene_forecast_contribution": scene},
+            "tracking_summary": {"scene_forecast_contribution": scene},
+        }
+    )
+    changed = copy.deepcopy(first)
+    for container_key in ("latest_signal", "tracking_summary"):
+        container = cast(dict[str, Any], changed[container_key])
+        compact_scene = cast(dict[str, Any], container["scene_forecast_contribution"])
+        compact_scene[field] = replacement
+
+    second = compact_payload(changed)
+    second_scene = cast(
+        dict[str, Any],
+        cast(dict[str, Any], second["forecast_snapshot_v3"])[
+            "scene_forecast_contribution"
+        ],
+    )
+    assert second_scene.get(field) == replacement
+    assert second_scene.get("line_points", []) == []
+    assert second_scene.get("forecast_candles", []) == []
+    assert second_scene.get("forecast_scenarios", []) == []
+
+
+def test_malformed_same_event_scene_does_not_reuse_retained_geometry() -> None:
+    scene = _complete_scene_snapshot_fixture()
+    snapshot_builder = cast(
+        Callable[[Mapping[str, Any]], dict[str, Any]],
+        getattr(window_tracker_module, "_forecast_snapshot_v3"),
+    )
+    existing = snapshot_builder(
+        {
+            "display_frame_id": 71,
+            "latest_signal": {"scene_forecast_contribution": scene},
+        }
+    )
+    malformed = copy.deepcopy(scene)
+    malformed["line_points"] = cast(list[Any], malformed["line_points"])[:-1]
+
+    result = snapshot_builder(
+        {
+            "display_frame_id": 71,
+            "latest_signal": {"scene_forecast_contribution": malformed},
+            "forecast_snapshot_v3": existing,
+        }
+    )
+    result_scene = cast(dict[str, Any], result["scene_forecast_contribution"])
+    assert len(cast(list[Any], result_scene["line_points"])) == 12
+    assert result_scene["line_points"] != cast(
+        dict[str, Any], existing["scene_forecast_contribution"]
+    )["line_points"]
+
+
 def test_lstm_composite_forecast_survives_bounded_cold_persistence(tmp_path: Path) -> None:
     root_dir = tmp_path / "lstm-composite-cold-persistence"
     tracker = ContinuousWindowTrackerService(root_dir=root_dir)
@@ -5891,6 +6212,142 @@ def test_compact_persisted_scene_forecast_keeps_drawable_geometry() -> None:
     assert [row["step"] for row in compact["forecast_path"]] == list(range(1, 13))
     assert [row["step"] for row in compact["forecast_candles"]] == list(range(1, 13))
     assert compact["forecast_scenarios"][0]["line_points"] == line_points
+
+
+def _complete_scene_forecast_for_persistence(
+    *,
+    pair: str = "GBP/USD OTC",
+    closed_candle_key: str = "closed-event-42",
+) -> dict[str, Any]:
+    line_points = [
+        [round(0.52 + index * 0.02, 6), round(0.48 - index * 0.003, 6)]
+        for index in range(13)
+    ]
+    forecast_candles = [
+        {
+            "step": index,
+            "x_norm": line_points[index][0],
+            "open_y_norm": line_points[index - 1][1],
+            "close_y_norm": line_points[index][1],
+        }
+        for index in range(1, 13)
+    ]
+    return {
+        "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+        "provider": "SCENE_STATISTICAL_FALLBACK_V3",
+        "provider_status": "AVAILABLE",
+        "forecast_available": True,
+        "pair": pair,
+        "timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "identity_contract_status": "CONFIRMED",
+        "frame_id": 42,
+        "display_frame_id": 43,
+        "forecast_computed_frame_id": 42,
+        "source_forecast_frame_id": 42,
+        "geometry_projected_frame_id": 43,
+        "geometry_frame_match_verified": True,
+        "geometry_reprojected_from_cache": True,
+        "frame_reused_without_reforecast": True,
+        "closed_candle_key": closed_candle_key,
+        "closed_candle_sequence": 7,
+        "line_points": line_points,
+        "forecast_candles": forecast_candles,
+        "forecast_scenarios": [
+            {
+                "role": role,
+                "side": side,
+                "selected": role == "base",
+                "line_points": line_points,
+                "forecast_candles": forecast_candles,
+            }
+            for role, side in (("base", "BUY"), ("bull", "BUY"), ("bear", "SELL"))
+        ],
+    }
+
+
+def test_same_event_control_save_retains_complete_scene_forecast_geometry() -> None:
+    scene = _complete_scene_forecast_for_persistence()
+    first = window_tracker_module._compact_session_persisted_payload(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": "pocket-live",
+            "frame_index": 43,
+            "display_frame_id": 43,
+            "model_vote_frame_id": 43,
+            "model_capture_epoch": 1_720_000_043.0,
+            "tracking_summary": {"scene_forecast_contribution": scene},
+            "latest_signal": {"scene_forecast_contribution": scene},
+        }
+    )
+    assert not cast(dict[str, Any], first["latest_signal"])[
+        "scene_forecast_contribution"
+    ].get("line_points")
+
+    second = window_tracker_module._compact_session_persisted_payload(first)  # pyright: ignore[reportPrivateUsage]
+    retained = cast(
+        dict[str, Any],
+        cast(dict[str, Any], second["forecast_snapshot_v3"])[
+            "scene_forecast_contribution"
+        ],
+    )
+
+    assert retained["closed_candle_key"] == "closed-event-42"
+    assert retained["pair"] == "GBP/USD OTC"
+    assert len(retained["line_points"]) == 13
+    assert len(retained["forecast_candles"]) == 12
+    assert len(retained["forecast_scenarios"]) == 3
+    assert all(
+        len(scenario["line_points"]) == 13
+        and len(scenario["forecast_candles"]) == 12
+        for scenario in retained["forecast_scenarios"]
+    )
+    assert sum(
+        bool(scenario.get("selected")) for scenario in retained["forecast_scenarios"]
+    ) == 1
+
+
+def test_changed_scene_identity_does_not_retain_previous_forecast_geometry() -> None:
+    scene = _complete_scene_forecast_for_persistence()
+    first = window_tracker_module._compact_session_persisted_payload(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": "pocket-live",
+            "frame_index": 43,
+            "display_frame_id": 43,
+            "model_vote_frame_id": 43,
+            "tracking_summary": {"scene_forecast_contribution": scene},
+            "latest_signal": {"scene_forecast_contribution": scene},
+        }
+    )
+    changed = dict(first)
+    for surface_name in ("latest_signal", "tracking_summary"):
+        surface = dict(cast(Mapping[str, Any], changed[surface_name]))
+        summary_scene = dict(
+            cast(Mapping[str, Any], surface["scene_forecast_contribution"])
+        )
+        summary_scene.update(
+            {
+                "pair": "EUR/USD OTC",
+                "closed_candle_key": "closed-event-43",
+                "closed_candle_sequence": 8,
+            }
+        )
+        surface["scene_forecast_contribution"] = summary_scene
+        changed[surface_name] = surface
+
+    second = window_tracker_module._compact_session_persisted_payload(changed)  # pyright: ignore[reportPrivateUsage]
+    current = cast(
+        dict[str, Any],
+        cast(dict[str, Any], second["forecast_snapshot_v3"])[
+            "scene_forecast_contribution"
+        ],
+    )
+
+    assert current["closed_candle_key"] == "closed-event-43"
+    assert current["pair"] == "EUR/USD OTC"
+    assert not current.get("line_points")
+    assert not current.get("forecast_candles")
+    assert not current.get("forecast_scenarios")
 
 
 def test_stale_study_gate_recovers_after_watchdog_window() -> None:
@@ -9005,6 +9462,131 @@ def test_tracker_live_execution_uses_fixed_amount_and_fake_click_backend(tmp_pat
     assert result["broker_execution_state"]["active_trade"] == {}
 
 
+def test_fast_visual_blocked_capture_persists_active_episode_reacquiring_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episode_id = "episode-active-e0-fast-visual"
+    anchor_key = "anchor-closed-e0"
+    scene: dict[str, Any] = {
+        "pair": "GBP/USD OTC",
+        "timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "closed_candle_key": anchor_key,
+        "closed_candle_sequence": 0,
+        "closed_candle_transition_reason": "AMBIGUOUS_SCREENSHOT_REUSES_EVENT",
+        "closed_candle_match_scores": {
+            "coverage_degradation_observed": True,
+        },
+        "closed_candle_identity_state": {
+            "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+            "pair": "GBP/USD OTC",
+            "timeframe": "M5",
+            "event_key": anchor_key,
+            "event_sequence": 0,
+            "latest_closed": {"track_id": "50", "side": "BUY"},
+            "forming": {"track_id": "51", "side": "SELL"},
+            "confirmed_event_batch": [],
+            "transition_count": 0,
+            "reacquisition": {
+                "status": "NOT_CONFIRMED",
+                "reason": "FORMER_LIVE_BAR_MATCH_AMBIGUOUS",
+                "confirmed_closed_count": 0,
+            },
+        },
+        "line_points": [[index / 12.0, 0.5] for index in range(13)],
+        "forecast_candles": [{"step": index} for index in range(1, 13)],
+        "forecast_scenarios": [
+            {"role": "base"},
+            {"role": "bull"},
+            {"role": "bear"},
+        ],
+    }
+
+    class _AmbiguousEpisodeTrackingAdapter(_FakeTrackingAdapter):
+        def study(
+            self,
+            image: Image.Image,
+            *,
+            session_payload: Mapping[str, Any] | None = None,
+        ) -> TrackingStudy:
+            study = super().study(image, session_payload=session_payload)
+            study.tracking_summary["detected_market"] = "GBP/USD OTC"
+            study.tracking_summary["scene_forecast_contribution"] = scene
+            study.latest_signal["market"] = "GBP/USD OTC"
+            study.latest_signal["scene_forecast_contribution"] = scene
+            return study
+
+    monkeypatch.setenv("PHOENIXGUARD_FAST_VISUAL_ONLY_WHEN_NOT_EXECUTABLE", "1")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_synthetic_broker_window()]),
+        tracking_adapter=_AmbiguousEpisodeTrackingAdapter("BUY"),
+    )
+    session_id = str(tracker.create_session(session_id="pocket-live")['session_id'])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    controls = dict(payload["execution_controls"])
+    controls.update({"live_execution_enabled": True, "execution_mode": "live"})
+    payload["execution_controls"] = controls
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "session_id": session_id,
+        "episode_id": episode_id,
+        "state": "ACTIVE",
+        "revision": 1,
+        "event_horizon": 12,
+        "event_cursor": 0,
+        "started_at": "2026-07-18T00:00:00+00:00",
+        "updated_at": "2026-07-18T00:00:00+00:00",
+        "pair": "GBP/USD OTC",
+        "timeframe": "M5",
+        "anchor": {
+            "pair": "GBP/USD OTC",
+            "timeframe": "M5",
+            "closed_candle_key": anchor_key,
+            "closed_candle_sequence": 0,
+            "closed_candle_identity_state": scene[
+                "closed_candle_identity_state"
+            ],
+        },
+        "baseline_forecasts": {"scene": scene, "lstm": {}, "memory": {}},
+        "committed_plan": {},
+        "events": [],
+        "processed_closed_candle_keys": [],
+        "last_processed_closed_candle_key": anchor_key,
+        "last_processed_closed_candle_sequence": 0,
+        "observation_state": {
+            "schema_version": "PG_TRACKING_EPISODE_OBSERVATION_V1",
+            "status": "WAITING_FOR_BASELINE",
+            "reason": "NO_ACTIVE_BASELINE",
+            "unresolved_gap": False,
+        },
+    }
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+
+    _allow_next_capture(tracker, session_id)
+    result = tracker.capture_once(session_id)
+    persisted = tracker.load_session_payload(session_id)
+    returned_episode = cast(dict[str, Any], result["tracking_episode"])
+    persisted_episode = cast(dict[str, Any], persisted["tracking_episode"])
+    decision = json.loads(Path(str(result["last_decision_path"])).read_text(encoding="utf-8"))
+
+    assert decision["decision_artifact_state"] == (
+        "visual_only_blocked_no_execution_packet"
+    )
+    for episode in (returned_episode, persisted_episode):
+        assert episode["episode_id"] == episode_id
+        assert episode["state"] == "ACTIVE"
+        assert episode["event_cursor"] == 0
+        assert episode["observation_state"]["status"] == "REACQUIRING"
+        assert episode["observation_state"]["unresolved_gap"] is True
+        assert episode["observation_state"]["status"] != "WAITING_FOR_BASELINE"
+
+
 def test_tracker_live_execution_clicks_sell_with_swing_expiry(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     tracker = ContinuousWindowTrackerService(
@@ -10654,6 +11236,11 @@ def test_scene_forecast_replaces_same_event_cache_after_detector_coverage_rebase
 
 def test_scene_candle_identity_and_geometry_restore_across_process_restart() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
+    original_tracker = getattr(adapter, "_scene_belief_tracker")
+    checkpoint = cast(
+        dict[str, Any],
+        getattr(original_tracker, "to_state_dict")(),
+    )
     identity_state = {
         "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
         "pair": "NZDUSD_OTC",
@@ -10675,13 +11262,27 @@ def test_scene_candle_identity_and_geometry_restore_across_process_restart() -> 
             {"role": "bear"},
         ],
     }
+    compact_scene = {
+        "closed_candle_identity_state": identity_state,
+        "closed_candle_key": "stable-closed-event",
+        "closed_candle_sequence": 8,
+        "belief_tracker_checkpoint": checkpoint,
+    }
 
     restore = cast(
         Callable[[Mapping[str, Any]], None],
         getattr(adapter, "_restore_scene_belief_checkpoint"),
     )
+    # An API child can receive one incomplete session view while the persisted
+    # live state is being reattached.  That first view must not permanently
+    # disable restoration and baseline the current candle as a false event.
+    restore({"session_id": "pocket-live-8788"})
+    assert getattr(adapter, "_scene_belief_restore_attempted") is False
     restore(
         {
+            "tracking_summary": {
+                "scene_forecast_contribution": compact_scene,
+            },
             "forecast_snapshot_v3": {
                 "scene_forecast_contribution": scene,
             }
@@ -10710,6 +11311,105 @@ def test_scene_candle_identity_and_geometry_restore_across_process_restart() -> 
         ("NZDUSD_OTC", "M5", "stable-closed-event")
     ]
     assert restored["line_points"] == scene["line_points"]
+    assert restored["belief_tracker_checkpoint"] == checkpoint
+    assert getattr(adapter, "_scene_belief_tracker") is not original_tracker
+    assert getattr(adapter, "_scene_belief_restore_attempted") is True
+
+
+def test_active_e0_anchor_recovers_matching_identity_from_older_decision_artifact(
+    tmp_path: Path,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    anchor_identity = {
+        "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+        "pair": "GBPUSD_OTC",
+        "timeframe": "M5",
+        "event_key": "anchor-closed-event",
+        "event_sequence": 0,
+        "latest_closed": {"track_id": "50", "side": "BUY"},
+        "forming": {"track_id": "51", "side": "SELL"},
+    }
+    anchor_scene = {
+        "closed_candle_identity_state": anchor_identity,
+        "closed_candle_key": "anchor-closed-event",
+        "closed_candle_sequence": 0,
+        "line_points": [[index / 12.0, 0.5] for index in range(13)],
+        "forecast_candles": [{"step": index} for index in range(1, 13)],
+        "forecast_scenarios": [
+            {"role": "base"},
+            {"role": "bull"},
+            {"role": "bear"},
+        ],
+    }
+    wrong_scene = {
+        "closed_candle_identity_state": {
+            **anchor_identity,
+            "event_key": "wrong-new-baseline",
+            "event_sequence": 1,
+        },
+        "closed_candle_key": "wrong-new-baseline",
+        "closed_candle_sequence": 1,
+    }
+    artifact_dir = tmp_path / "artifacts"
+    old_path = artifact_dir / "000139_anchor_decision.json"
+    new_path = artifact_dir / "000141_wrong_decision.json"
+    write_json_atomic(
+        old_path,
+        {"forecast_snapshot_v3": {"scene_forecast_contribution": anchor_scene}},
+    )
+    write_json_atomic(
+        new_path,
+        {"forecast_snapshot_v3": {"scene_forecast_contribution": wrong_scene}},
+    )
+    restore = cast(
+        Callable[[Mapping[str, Any]], None],
+        getattr(adapter, "_restore_scene_belief_checkpoint"),
+    )
+
+    restore(
+        {
+            "session_id": "pocket-live-8788",
+            "last_decision_path": str(new_path),
+            "tracking_episode": {
+                "schema_version": "PG_TRACKING_EPISODE_V1",
+                "session_id": "pocket-live-8788",
+                "episode_id": "episode-active-e0",
+                "state": "ACTIVE",
+                "revision": 1,
+                "event_cursor": 0,
+                "pair": "GBPUSD_OTC",
+                "timeframe": "M5",
+                "anchor": {
+                    "pair": "GBPUSD_OTC",
+                    "timeframe": "M5",
+                    "closed_candle_key": "anchor-closed-event",
+                    "closed_candle_sequence": 0,
+                },
+            },
+            "tracking_summary": {"scene_forecast_contribution": wrong_scene},
+            "forecast_snapshot_v3": {"scene_forecast_contribution": wrong_scene},
+        }
+    )
+
+    context_key = ("GBPUSD_OTC", "M5")
+    identity_states = cast(
+        dict[tuple[str, str], dict[str, Any]],
+        getattr(adapter, "_scene_candle_identity_states"),
+    )
+    event_sequences = cast(
+        dict[tuple[str, str], tuple[str, int]],
+        getattr(adapter, "_scene_event_sequences"),
+    )
+    forecast_cache = cast(
+        dict[tuple[str, str, str], dict[str, Any]],
+        getattr(adapter, "_scene_forecast_cache"),
+    )
+    assert identity_states[context_key]["event_key"] == "anchor-closed-event"
+    assert event_sequences[context_key] == ("anchor-closed-event", 0)
+    assert forecast_cache[("GBPUSD_OTC", "M5", "anchor-closed-event")][
+        "line_points"
+    ] == anchor_scene["line_points"]
+    assert getattr(adapter, "_scene_belief_restore_attempted") is True
 
 
 def test_real_tracking_adapter_reads_sell_pressure_from_downtrend_surface() -> None:

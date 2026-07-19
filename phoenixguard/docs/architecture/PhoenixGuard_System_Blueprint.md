@@ -1,5 +1,9 @@
 # PhoenixGuard Complete System Blueprint
 
+> Current live tracking and 12-closed-candle episode behavior is documented in
+> [PhoenixGuard Live Tracking Blueprint](PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md). This broader
+> blueprint remains the subsystem reference.
+
 Generated: 2026-06-21
 
 Runtime profile: PhoenixGuard V3 / FINAL_LIVE

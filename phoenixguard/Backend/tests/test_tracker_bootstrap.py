@@ -194,6 +194,15 @@ def test_launcher_defaults_to_live_execution_without_explicit_live_env(monkeypat
                 "execution_controls": payload,
                 "manual_focus_region": {"enabled": True, "normalized_bbox": [0.1, 0.2, 0.8, 0.9]},
             }
+        if path.endswith("/start"):
+            assert method == "POST"
+            return {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_interval_sec": 1.0,
+                "manual_focus_region": {"enabled": True, "normalized_bbox": [0.1, 0.2, 0.8, 0.9]},
+            }
         assert method == "GET"
         return {
             "session_id": "pocket-live-8788",
@@ -219,6 +228,56 @@ def test_launcher_defaults_to_live_execution_without_explicit_live_env(monkeypat
     assert control_payloads
     assert control_payloads[0]["live_execution_enabled"] is True
     assert control_payloads[0]["execution_mode"] == "live"
+
+
+def test_launcher_reconciles_fresh_persisted_running_session_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    now_epoch = time.time()
+    running_session: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "status": "running",
+        "tracking_enabled": True,
+        "capture_interval_sec": 30.0,
+        "last_capture_epoch": now_epoch,
+        "decision_valid_until_epoch": now_epoch + 120.0,
+        "manual_focus_region": {
+            "enabled": True,
+            "normalized_bbox": [0.1, 0.2, 0.8, 0.9],
+        },
+    }
+
+    def _fake_request_json(
+        base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        del base_url, payload, timeout
+        calls.append((method, path))
+        return dict(running_session)
+
+    monkeypatch.setattr(tracker_launcher, "_request_json", _fake_request_json)
+
+    reconciled = tracker_launcher.ensure_session(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        30.0,
+        True,
+        "Pocket Option",
+        0,
+        None,
+    )
+
+    assert reconciled["status"] == "running"
+    assert (
+        "POST",
+        "/v1/mobile/window-tracker/sessions/pocket-live-8788/start",
+    ) in calls
+    assert not any(path.endswith("/stop") for _method, path in calls)
 
 
 def test_quarantine_stale_session_on_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

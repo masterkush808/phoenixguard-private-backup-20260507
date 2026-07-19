@@ -73,6 +73,7 @@ from phoenixguard.tracking.tracking_episode_v3 import (
     advance_tracking_episode_v1,
     default_tracking_episode_v1,
     normalize_tracking_episode_v1,
+    reset_tracking_episode_v1,
     start_tracking_episode_v1,
     stop_tracking_episode_v1,
     tracking_episode_readiness_v1,
@@ -2210,6 +2211,73 @@ def _compact_forecast_trajectory_scenarios(value: Any) -> list[dict[str, Any]]:
     return scenarios
 
 
+def _complete_scene_forecast_geometry_v3(value: Any) -> bool:
+    """Validate one atomic anchor-plus-twelve, three-scenario Scene bundle."""
+
+    scene = _mapping_to_dict(value)
+    if not str(scene.get("closed_candle_key") or "").strip():
+        return False
+
+    def sequence(value: Any, *, size: int) -> list[Any] | None:
+        if not isinstance(value, Sequence) or isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            return None
+        items = list(cast(Sequence[Any], value))
+        return items if len(items) == size else None
+
+    def finite_number(value: Any) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    def complete_points(value: Any) -> bool:
+        points = sequence(value, size=13)
+        if points is None:
+            return False
+        for point in points:
+            coordinates = sequence(point, size=2)
+            if coordinates is None or not all(finite_number(item) for item in coordinates):
+                return False
+        return True
+
+    def complete_candles(value: Any) -> bool:
+        candles = sequence(value, size=12)
+        if candles is None:
+            return False
+        required_fields = (
+            "x_norm",
+            "open_y_norm",
+            "high_y_norm",
+            "low_y_norm",
+            "close_y_norm",
+        )
+        for item in candles:
+            candle = _mapping_to_dict(item)
+            if not candle or not all(
+                finite_number(candle.get(field)) for field in required_fields
+            ):
+                return False
+        return True
+
+    if not complete_points(scene.get("line_points")) or not complete_candles(
+        scene.get("forecast_candles")
+    ):
+        return False
+    scenarios = _sequence_of_mappings(scene.get("forecast_scenarios"))
+    if len(scenarios) != 3:
+        return False
+    if sum(bool(scenario.get("selected", False)) for scenario in scenarios) != 1:
+        return False
+    return all(
+        complete_points(scenario.get("line_points"))
+        and complete_candles(scenario.get("forecast_candles"))
+        for scenario in scenarios
+    )
+
+
 def _forecast_snapshot_v3(
     payload: Mapping[str, Any],
     *,
@@ -2221,6 +2289,13 @@ def _forecast_snapshot_v3(
     the values required to explain and draw the last model forecast on the
     exact broker frame that produced it.
     """
+
+    def positive_frame_id(*values: Any) -> int:
+        for value in values:
+            candidate = int(_float_or(value, 0.0))
+            if candidate > 0:
+                return candidate
+        return 0
 
     existing = _mapping_to_dict(payload.get("forecast_snapshot_v3"))
     tracking = _mapping_to_dict(payload.get("tracking_summary"))
@@ -2283,6 +2358,64 @@ def _forecast_snapshot_v3(
             == "MARKET_IDENTITY_PENDING"
         )
     )
+    existing_scene = _mapping_to_dict(existing.get("scene_forecast_contribution"))
+    scene_geometry_absent = not any(
+        scene.get(key) not in (None, "", [], {})
+        for key in ("line_points", "forecast_candles", "forecast_scenarios")
+    )
+    scene_pair = str(scene.get("pair") or "").strip().upper()
+    scene_timeframe = str(scene.get("timeframe") or "").strip().upper()
+    scene_event_key = str(scene.get("closed_candle_key") or "").strip()
+    existing_pair = str(
+        existing_scene.get("pair") or existing.get("pair") or ""
+    ).strip().upper()
+    existing_timeframe = str(
+        existing_scene.get("timeframe") or existing.get("timeframe") or ""
+    ).strip().upper()
+    existing_event_key = str(
+        existing_scene.get("closed_candle_key") or ""
+    ).strip()
+    scene_frame_id = positive_frame_id(
+        scene.get("display_frame_id"),
+        scene.get("frame_id"),
+        scene.get("geometry_projected_frame_id"),
+    )
+    existing_scene_frame_id = positive_frame_id(
+        existing.get("source_frame_id"),
+        existing_scene.get("display_frame_id"),
+        existing_scene.get("frame_id"),
+        existing_scene.get("geometry_projected_frame_id"),
+    )
+    if (
+        scene
+        and scene_geometry_absent
+        and not identity_pending
+        and bool(scene.get("market_identity_confirmed", False))
+        and bool(scene.get("timeframe_identity_confirmed", False))
+        and scene.get("same_event_cache_rebuild_required") is not True
+        and bool(scene.get("geometry_frame_match_verified", False))
+        and scene_pair
+        and scene_pair == existing_pair
+        and scene_timeframe
+        and scene_timeframe == existing_timeframe
+        and scene_event_key
+        and scene_event_key == existing_event_key
+        and scene_frame_id > 0
+        and scene_frame_id == existing_scene_frame_id
+        and _complete_scene_forecast_geometry_v3(existing_scene)
+    ):
+        # Signal/council persistence intentionally strips dense geometry. A
+        # control-only save of the exact same frame must retain the one
+        # authoritative Scene bundle without reviving another market/event.
+        retained_scene = copy.deepcopy(existing_scene)
+        retained_scene.update(
+            {
+                key: copy.deepcopy(value)
+                for key, value in scene.items()
+                if key not in _PERSISTED_FORECAST_GEOMETRY_KEYS
+            }
+        )
+        scene = retained_scene
     existing_lstm = _mapping_to_dict(existing.get("lstm_contribution"))
     if (
         not identity_pending
@@ -2310,13 +2443,6 @@ def _forecast_snapshot_v3(
             lstm = retained_lstm
     if not (two_candle or scene or lstm or high_frequency):
         return existing
-
-    def positive_frame_id(*values: Any) -> int:
-        for value in values:
-            candidate = int(_float_or(value, 0.0))
-            if candidate > 0:
-                return candidate
-        return 0
 
     frame_id = positive_frame_id(
         scene.get("display_frame_id"),
@@ -17715,18 +17841,181 @@ class PhoenixGuardWindowTrackingAdapter:
         with self._scene_forecast_lock:
             if self._scene_belief_restore_attempted:
                 return
-            self._scene_belief_restore_attempted = True
             session_row = _mapping_to_dict(session_payload)
             tracking = _mapping_to_dict(session_row.get("tracking_summary", {}))
             signal = _mapping_to_dict(session_row.get("latest_signal", {}))
             snapshot = _mapping_to_dict(session_row.get("forecast_snapshot_v3", {}))
-            previous = _first_forecast_mapping(
-                tracking.get("scene_forecast_contribution"),
-                signal.get("scene_forecast_contribution"),
-                snapshot.get("scene_forecast_contribution"),
-                tracking.get("lstm_contribution"),
-                signal.get("lstm_contribution"),
-                snapshot.get("lstm_contribution"),
+            session_candidates = [
+                _mapping_to_dict(value)
+                for value in (
+                    tracking.get("scene_forecast_contribution"),
+                    signal.get("scene_forecast_contribution"),
+                    snapshot.get("scene_forecast_contribution"),
+                    tracking.get("lstm_contribution"),
+                    signal.get("lstm_contribution"),
+                    snapshot.get("lstm_contribution"),
+                )
+                if isinstance(value, Mapping)
+            ]
+            episode = normalize_tracking_episode_v1(
+                session_row.get("tracking_episode"),
+                session_id=str(session_row.get("session_id", "") or ""),
+            )
+            episode_anchor = _mapping_to_dict(episode.get("anchor", {}))
+            authoritative_episode_anchor = bool(
+                str(episode.get("state", "") or "").upper() == "ACTIVE"
+                and int(episode.get("event_cursor", 0) or 0) == 0
+                and str(episode_anchor.get("closed_candle_key", "") or "")
+            )
+            authoritative_key = (
+                str(episode_anchor.get("closed_candle_key", "") or "")
+                if authoritative_episode_anchor
+                else ""
+            )
+
+            def candidate_key(candidate: Mapping[str, Any]) -> str:
+                state = _mapping_to_dict(
+                    candidate.get("closed_candle_identity_state", {})
+                )
+                return str(
+                    candidate.get("closed_candle_key")
+                    or state.get("event_key")
+                    or ""
+                )
+
+            episode_candidates: list[dict[str, Any]] = []
+            if authoritative_episode_anchor:
+                baseline = _mapping_to_dict(episode.get("baseline_forecasts", {}))
+                baseline_scene = _mapping_to_dict(baseline.get("scene", {}))
+                anchor_identity = _mapping_to_dict(
+                    episode_anchor.get("closed_candle_identity_state", {})
+                )
+                baseline_key = candidate_key(baseline_scene)
+                if baseline_scene and baseline_key in {"", authoritative_key}:
+                    episode_candidate = copy.deepcopy(baseline_scene)
+                    if anchor_identity:
+                        episode_candidate["closed_candle_identity_state"] = (
+                            copy.deepcopy(anchor_identity)
+                        )
+                    episode_candidate["closed_candle_key"] = authoritative_key
+                    episode_candidate["closed_candle_sequence"] = int(
+                        episode_anchor.get("closed_candle_sequence", 0) or 0
+                    )
+                    episode_candidates.append(episode_candidate)
+
+            matching_session_candidate = any(
+                candidate_key(candidate) == authoritative_key
+                for candidate in [*episode_candidates, *session_candidates]
+            ) if authoritative_episode_anchor else True
+            artifact_candidates: list[dict[str, Any]] = []
+            if authoritative_episode_anchor and not matching_session_candidate:
+                raw_last_decision_path = str(
+                    session_row.get("last_decision_path", "") or ""
+                ).strip()
+                last_decision_path = Path(raw_last_decision_path) if raw_last_decision_path else None
+                artifact_paths: list[Path] = []
+                if last_decision_path is not None:
+                    if last_decision_path.is_file():
+                        artifact_paths.append(last_decision_path)
+                    artifact_dir = last_decision_path.parent
+                    if artifact_dir.is_dir():
+                        artifact_paths.extend(
+                            sorted(
+                                artifact_dir.glob("*_decision.json"),
+                                key=lambda path: (
+                                    path.stat().st_mtime_ns if path.exists() else 0
+                                ),
+                                reverse=True,
+                            )[:24]
+                        )
+                seen_paths: set[str] = set()
+                for artifact_path in artifact_paths:
+                    path_key = str(artifact_path).lower()
+                    if path_key in seen_paths:
+                        continue
+                    seen_paths.add(path_key)
+                    try:
+                        if artifact_path.stat().st_size > 32 * 1024 * 1024:
+                            continue
+                    except OSError:
+                        continue
+                    artifact = _mapping_to_dict(_read_json(artifact_path, {}))
+                    artifact_tracking = _mapping_to_dict(
+                        artifact.get("tracking_summary", {})
+                    )
+                    artifact_signal = _mapping_to_dict(
+                        artifact.get("latest_signal", {})
+                    )
+                    artifact_snapshot = _mapping_to_dict(
+                        artifact.get("forecast_snapshot_v3", {})
+                    )
+                    rows = [
+                        _mapping_to_dict(value)
+                        for value in (
+                            artifact_tracking.get("scene_forecast_contribution"),
+                            artifact_signal.get("scene_forecast_contribution"),
+                            artifact_snapshot.get("scene_forecast_contribution"),
+                        )
+                        if isinstance(value, Mapping)
+                    ]
+                    matches = [
+                        candidate
+                        for candidate in rows
+                        if candidate_key(candidate) == authoritative_key
+                    ]
+                    if matches:
+                        artifact_candidates.extend(matches)
+                        break
+
+            candidates = [
+                candidate
+                for candidate in [
+                    *episode_candidates,
+                    *artifact_candidates,
+                    *session_candidates,
+                ]
+                if not authoritative_episode_anchor
+                or candidate_key(candidate) == authoritative_key
+            ]
+            if authoritative_episode_anchor and not candidates:
+                pair = str(
+                    episode_anchor.get("pair") or episode.get("pair") or ""
+                ).upper()
+                timeframe = str(
+                    episode_anchor.get("timeframe")
+                    or episode.get("timeframe")
+                    or ""
+                ).upper()
+                sequence = int(
+                    episode_anchor.get("closed_candle_sequence", 0) or 0
+                )
+                minimal_state = _mapping_to_dict(
+                    episode_anchor.get("closed_candle_identity_state", {})
+                ) or {
+                    "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+                    "pair": pair,
+                    "timeframe": timeframe,
+                    "event_key": authoritative_key,
+                    "event_sequence": sequence,
+                }
+                if pair and timeframe:
+                    context_key = (pair, timeframe)
+                    self._scene_candle_identity_states[context_key] = minimal_state
+                    self._scene_event_sequences[context_key] = (
+                        authoritative_key,
+                        sequence,
+                    )
+                self._scene_belief_restore_attempted = False
+                return
+            previous = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if _mapping_to_dict(
+                        candidate.get("closed_candle_identity_state", {})
+                    )
+                ),
+                candidates[0] if candidates else {},
             )
             identity_state = _mapping_to_dict(
                 previous.get("closed_candle_identity_state", {})
@@ -17736,9 +18025,29 @@ class PhoenixGuardWindowTrackingAdapter:
                 identity_state.get("timeframe") or ""
             ).upper()
             identity_key = str(identity_state.get("event_key") or "")
+            raw_identity_sequence = identity_state.get("event_sequence", -1)
             identity_sequence = int(
-                identity_state.get("event_sequence", -1) or -1
+                -1 if raw_identity_sequence is None else raw_identity_sequence
             )
+            checkpoint_candidate = next(
+                (
+                    value
+                    for candidate in candidates
+                    if (
+                        value := _mapping_to_dict(
+                            candidate.get("belief_tracker_checkpoint", {})
+                        )
+                    )
+                ),
+                None,
+            )
+            checkpoint: dict[str, Any] = checkpoint_candidate or {}
+            identity_restored = False
+            identity_complete = bool(
+                _mapping_to_dict(identity_state.get("latest_closed", {}))
+                and _mapping_to_dict(identity_state.get("forming", {}))
+            )
+            geometry_restored = False
             if (
                 identity_pair
                 and identity_timeframe
@@ -17751,53 +18060,80 @@ class PhoenixGuardWindowTrackingAdapter:
                     identity_key,
                     identity_sequence,
                 )
-                previous_line = previous.get("line_points", [])
-                previous_candles = previous.get("forecast_candles", [])
-                previous_scenarios = previous.get("forecast_scenarios", [])
-                line_items = (
-                    cast(Sequence[Any], previous_line)
-                    if isinstance(previous_line, Sequence)
-                    and not isinstance(previous_line, (str, bytes, bytearray))
-                    else ()
-                )
-                candle_items = (
-                    cast(Sequence[Any], previous_candles)
-                    if isinstance(previous_candles, Sequence)
-                    and not isinstance(previous_candles, (str, bytes, bytearray))
-                    else ()
-                )
-                scenario_items = (
-                    cast(Sequence[Any], previous_scenarios)
-                    if isinstance(previous_scenarios, Sequence)
-                    and not isinstance(previous_scenarios, (str, bytes, bytearray))
-                    else ()
-                )
-                complete_geometry = bool(
-                    len(line_items) == 13
-                    and len(candle_items) == 12
-                    and len(scenario_items) >= 3
-                )
-                if complete_geometry:
+                identity_restored = True
+                geometry_source: dict[str, Any] = {}
+                for candidate in candidates:
+                    candidate_state = _mapping_to_dict(
+                        candidate.get("closed_candle_identity_state", {})
+                    )
+                    candidate_event_key = str(
+                        candidate.get("closed_candle_key")
+                        or candidate_state.get("event_key")
+                        or ""
+                    )
+                    line_items = candidate.get("line_points", [])
+                    candle_items = candidate.get("forecast_candles", [])
+                    scenario_items = candidate.get("forecast_scenarios", [])
+                    complete_geometry = bool(
+                        candidate_event_key == identity_key
+                        and isinstance(line_items, Sequence)
+                        and not isinstance(line_items, (str, bytes, bytearray))
+                        and len(cast(Sequence[Any], line_items)) == 13
+                        and isinstance(candle_items, Sequence)
+                        and not isinstance(candle_items, (str, bytes, bytearray))
+                        and len(cast(Sequence[Any], candle_items)) == 12
+                        and isinstance(scenario_items, Sequence)
+                        and not isinstance(scenario_items, (str, bytes, bytearray))
+                        and len(cast(Sequence[Any], scenario_items)) >= 3
+                    )
+                    if complete_geometry:
+                        geometry_source = candidate
+                        break
+                if geometry_source:
                     # A process restart during the same forming candle must
                     # restore the already-issued event study, not recompute it
                     # from a detector refinement of that same screenshot bar.
+                    restored_contribution = copy.deepcopy(geometry_source)
+                    restored_contribution["closed_candle_identity_state"] = (
+                        copy.deepcopy(identity_state)
+                    )
+                    restored_contribution["closed_candle_key"] = identity_key
+                    restored_contribution["closed_candle_sequence"] = (
+                        identity_sequence
+                    )
+                    if checkpoint:
+                        restored_contribution["belief_tracker_checkpoint"] = (
+                            copy.deepcopy(checkpoint)
+                        )
                     self._scene_forecast_cache[
                         (identity_pair, identity_timeframe, identity_key)
-                    ] = copy.deepcopy(previous)
-            checkpoint = _mapping_to_dict(
-                previous.get("belief_tracker_checkpoint", {})
-            )
+                    ] = restored_contribution
+                    geometry_restored = True
             if not checkpoint:
+                # The first study after an API-child restart can arrive before
+                # the persisted session has been fully reattached.  Retry on a
+                # later study rather than permanently baselining the current
+                # candle as a new event.  Once identity is restored, the guard
+                # can safely close even when no belief checkpoint exists.
+                self._scene_belief_restore_attempted = bool(
+                    identity_restored and identity_complete and geometry_restored
+                )
                 return
             try:
                 restored = ForecastBeliefTrackerV3.from_state_dict(checkpoint)
             except (TypeError, ValueError):
+                self._scene_belief_restore_attempted = bool(
+                    identity_restored and identity_complete and geometry_restored
+                )
                 LOGGER.warning(
                     "Ignoring an invalid persisted scene-belief checkpoint.",
                     exc_info=True,
                 )
                 return
             self._scene_belief_tracker = restored
+            self._scene_belief_restore_attempted = bool(
+                identity_restored and identity_complete and geometry_restored
+            )
             for context in cast(
                 Sequence[Mapping[str, Any]],
                 checkpoint.get("contexts", []),
@@ -17805,7 +18141,8 @@ class PhoenixGuardWindowTrackingAdapter:
                 pair = str(context.get("pair") or "").upper()
                 timeframe = str(context.get("timeframe") or "").upper()
                 closed_key = str(context.get("last_closed_candle_key") or "")
-                sequence = int(context.get("last_closed_candle_sequence", -1) or -1)
+                raw_sequence = context.get("last_closed_candle_sequence", -1)
+                sequence = int(-1 if raw_sequence is None else raw_sequence)
                 if pair and timeframe and closed_key and sequence >= 0:
                     self._scene_event_sequences[(pair, timeframe)] = (
                         closed_key,
@@ -22526,7 +22863,11 @@ class PhoenixGuardWindowTrackingAdapter:
             return {}
 
         roi_x1 = min(width, max(112, int(round(width * 0.42))))
-        roi_y1 = min(height, max(56, int(round(height * 0.24))))
+        # The locked broker surface can be either the chart-focused plane or
+        # the complete browser window. Browser chrome moves the same selector
+        # from roughly 13% to 25% of the image height, so the old 24% crop cut
+        # through the live M5 chip before OCR could inspect it.
+        roi_y1 = min(height, max(56, int(round(height * 0.34))))
         roi = arr[:roi_y1, :roi_x1]
         candidates: list[dict[str, Any]] = []
         min_confidence_by_label: dict[str, float] = {
@@ -22547,16 +22888,16 @@ class PhoenixGuardWindowTrackingAdapter:
             blue_mask = np.where(
                 (hsv[:, :, 0] >= 88)
                 & (hsv[:, :, 0] <= 132)
-                & (hsv[:, :, 1] >= 70)
-                & (hsv[:, :, 2] >= 70),
+                & (hsv[:, :, 1] >= 100)
+                & (hsv[:, :, 2] >= 90),
                 255,
                 0,
             ).astype(np.uint8)
             kernel = np.ones((3, 3), dtype=np.uint8)
             blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
             contours, _hier = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            anchor_x = float(roi.shape[1]) * 0.38
-            anchor_y = float(roi.shape[0]) * 0.55
+            anchor_x = float(roi.shape[1]) * 0.46
+            anchor_ys = (float(height) * 0.13, float(height) * 0.255)
             for contour in contours:
                 x, y, box_w, box_h = cv2.boundingRect(contour)
                 area = int(box_w * box_h)
@@ -22587,13 +22928,16 @@ class PhoenixGuardWindowTrackingAdapter:
                     continue
                 center_x = x + box_w * 0.5
                 center_y = y + box_h * 0.5
-                position_score = _clip01(
-                    1.0
-                    - (
-                        (abs(center_x - anchor_x) / max(roi.shape[1], 1))
-                        + (abs(center_y - anchor_y) / max(roi.shape[0], 1))
+                position_score = max(
+                    _clip01(
+                        1.0
+                        - (
+                            (abs(center_x - anchor_x) / max(roi.shape[1], 1))
+                            + (abs(center_y - anchor_y) / max(roi.shape[0], 1))
+                        )
+                        * 2.40
                     )
-                    * 2.40
+                    for anchor_y in anchor_ys
                 )
                 if position_score < 0.42:
                     continue
@@ -23371,21 +23715,30 @@ class ContinuousWindowTrackerService:
             after,
             session_id=session_id,
         )
-        episode_id = str(after_episode.get("episode_id", "") or "").strip()
+        after_episode_id = str(after_episode.get("episode_id", "") or "").strip()
+        before_episode_id = str(before_episode.get("episode_id", "") or "").strip()
+        resetting_to_idle = bool(
+            not after_episode_id
+            and before_episode_id
+            and str(after_episode.get("state", "") or "").strip().upper() == "IDLE"
+        )
+        episode_id = after_episode_id or (before_episode_id if resetting_to_idle else "")
         if not episode_id:
             return
         before_revision = int(before_episode.get("revision", 0) or 0)
         after_revision = int(after_episode.get("revision", 0) or 0)
         if (
-            str(before_episode.get("episode_id", "") or "") == episode_id
+            after_episode_id
+            and str(before_episode.get("episode_id", "") or "") == episode_id
             and before_revision == after_revision
         ):
             return
+        record_episode = before_episode if resetting_to_idle else after_episode
         record_path = self._durable_tracking_episode_record_path(
             session_id,
             episode_id,
         )
-        _write_json_atomic(record_path, after_episode)
+        _write_json_atomic(record_path, record_episode)
         ledger_path = self._durable_tracking_episode_ledger_path(session_id)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         transition = {
@@ -23404,7 +23757,7 @@ class ContinuousWindowTrackerService:
             handle.write(json.dumps(transition, sort_keys=True) + "\n")
         self._prune_session_event_log(ledger_path)
 
-        terminal_history = update_tracking_episode_history_v1([], after_episode)
+        terminal_history = update_tracking_episode_history_v1([], record_episode)
         if terminal_history:
             history_path = self._durable_tracking_episode_history_path(session_id)
             history = self._merge_tracking_episode_history(
@@ -23417,7 +23770,11 @@ class ContinuousWindowTrackerService:
                     "schema_version": "PG_TRACKING_EPISODE_ARCHIVE_V1",
                     "session_id": str(session_id),
                     "episodes": history,
-                    "updated_at": str(after_episode.get("updated_at", "") or _now_iso()),
+                    "updated_at": str(
+                        after_episode.get("updated_at", "")
+                        or before_episode.get("updated_at", "")
+                        or _now_iso()
+                    ),
                 },
             )
 
@@ -23452,13 +23809,21 @@ class ContinuousWindowTrackerService:
             after,
             session_id=session_id,
         )
-        episode_id = str(after_episode.get("episode_id", "") or "").strip()
+        after_episode_id = str(after_episode.get("episode_id", "") or "").strip()
+        before_episode_id = str(before_episode.get("episode_id", "") or "").strip()
+        resetting_to_idle = bool(
+            not after_episode_id
+            and before_episode_id
+            and str(after_episode.get("state", "") or "").strip().upper() == "IDLE"
+        )
+        episode_id = after_episode_id or (before_episode_id if resetting_to_idle else "")
         if not episode_id:
             return
         before_revision = int(before_episode.get("revision", 0) or 0)
         after_revision = int(after_episode.get("revision", 0) or 0)
         if (
-            str(before_episode.get("episode_id", "") or "") == episode_id
+            after_episode_id
+            and str(before_episode.get("episode_id", "") or "") == episode_id
             and before_revision == after_revision
         ):
             return
@@ -23491,12 +23856,13 @@ class ContinuousWindowTrackerService:
                 session_id,
                 episode_id,
             )
-            _write_json_atomic(record_path, after_episode)
+            record_episode = before_episode if resetting_to_idle else after_episode
+            _write_json_atomic(record_path, record_episode)
             ledger_path = self._tracking_episode_ledger_path(session_id)
             ledger_path.parent.mkdir(parents=True, exist_ok=True)
             events = [
                 dict(cast(Mapping[str, Any], item))
-                for item in cast(Sequence[Any], after_episode.get("events", []))
+                for item in cast(Sequence[Any], record_episode.get("events", []))
                 if isinstance(item, Mapping)
             ]
             latest_event = events[-1] if events else {}
@@ -26686,6 +27052,51 @@ class ContinuousWindowTrackerService:
             )
             return after
 
+    def reset_tracking_episode(self, session_id: str) -> dict[str, Any]:
+        """Reset only a terminal episode pointer; workers and model state stay warm."""
+
+        normalized_session_id = str(session_id or "").strip()
+        with self._session_commit_lock_for(normalized_session_id):
+            payload = self._require_session(normalized_session_id)
+            normalized_session_id = str(
+                payload.get("session_id", normalized_session_id)
+                or normalized_session_id
+            )
+            before = normalize_tracking_episode_v1(
+                payload.get("tracking_episode"),
+                session_id=normalized_session_id,
+            )
+            after = reset_tracking_episode_v1(
+                before,
+                session_id=normalized_session_id,
+            )
+            if after == before:
+                return after
+            now_iso = _now_iso()
+            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
+                payload.get("tracking_episode_history"),
+                before,
+            )
+            payload["tracking_episode"] = after
+            payload["updated_at"] = now_iso
+            payload["__control_write_v3"] = True
+            self._save_session(payload)
+            self._persist_tracking_episode_transition(
+                normalized_session_id,
+                before,
+                after,
+                source="reset_tracking",
+            )
+            self._write_session_event_log(
+                normalized_session_id,
+                "tracking_episode_reset",
+                archived_episode_id=str(before.get("episode_id", "") or ""),
+                archived_state=str(before.get("state", "IDLE") or "IDLE"),
+                event_cursor=int(before.get("event_cursor", 0) or 0),
+                state="IDLE",
+            )
+            return after
+
     def start_session(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
         manual_focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
@@ -26701,6 +27112,32 @@ class ContinuousWindowTrackerService:
                 payload["updated_at"] = _now_iso()
                 self._save_session(payload)
             return self.get_session(str(payload["session_id"]))
+        normalized_session_id = str(payload["session_id"])
+        persisted_running = bool(payload.get("tracking_enabled", False)) and str(
+            payload.get("status", "") or ""
+        ).strip().lower() == "running"
+        if persisted_running:
+            # Worker threads are process-local while the running intent is
+            # persisted in session.json.  After an API process recycle the
+            # saved session can therefore still be running even though the new
+            # service instance has no worker.  Treat Start as an idempotent
+            # reconciliation in that state: recreate only the missing worker
+            # and retain the captured frame, forecast, episode, and history.
+            with self._lock:
+                worker = self._workers.get(normalized_session_id)
+                worker_was_alive = bool(worker is not None and worker.thread.is_alive())
+            self._ensure_worker(
+                normalized_session_id,
+                capture_now=not worker_was_alive,
+            )
+            if not worker_was_alive:
+                self._write_session_event_log(
+                    normalized_session_id,
+                    "tracker_worker_reconciled",
+                    status=str(payload.get("status", "running") or "running"),
+                    reason="missing_process_local_worker",
+                )
+            return self.get_session_snapshot(normalized_session_id)
         with self._lock:
             payload["tracking_enabled"] = True
             payload["status"] = "running"
@@ -26728,8 +27165,8 @@ class ContinuousWindowTrackerService:
                 status="running",
                 capture_interval_sec=float(payload.get("capture_interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC) or _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
             )
-        self._ensure_worker(str(payload["session_id"]), capture_now=True)
-        return self.get_session(str(payload["session_id"]))
+        self._ensure_worker(normalized_session_id, capture_now=True)
+        return self.get_session(normalized_session_id)
 
     def stop_session(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -32523,7 +32960,34 @@ class ContinuousWindowTrackerService:
                     visual_payload,
                     tombstone=_mapping_to_dict(model_council_result.get(_EXECUTION_PACKET_REVOCATION_KEY)),
                 )
+            # Episode observation is a visual-market concern, not an execution
+            # concern.  Fast blocked captures return before the later broker
+            # execution commit, so advance the authoritative persisted episode
+            # while the per-session commit lock is still held.
+            visual_forecast_snapshot = _forecast_snapshot_v3(visual_payload)
+            if visual_forecast_snapshot:
+                visual_payload["forecast_snapshot_v3"] = visual_forecast_snapshot
+            episode_before_visual_commit = normalize_tracking_episode_v1(
+                visual_payload.get("tracking_episode"),
+                session_id=str(visual_payload["session_id"]),
+            )
+            episode_after_visual_commit = advance_tracking_episode_v1(
+                episode_before_visual_commit,
+                visual_payload,
+                now_iso=visual_published_at,
+            )
+            visual_payload["tracking_episode"] = episode_after_visual_commit
+            visual_payload["tracking_episode_history"] = update_tracking_episode_history_v1(
+                visual_payload.get("tracking_episode_history"),
+                episode_after_visual_commit,
+            )
             self._save_session(visual_payload)
+            self._persist_tracking_episode_transition(
+                str(visual_payload["session_id"]),
+                episode_before_visual_commit,
+                episode_after_visual_commit,
+                source="visual_capture_commit",
+            )
         if fast_visual_only_when_blocked:
             blocked_forecast_snapshot = _forecast_snapshot_v3(visual_payload)
             blocked_decision_model_council_result = (
