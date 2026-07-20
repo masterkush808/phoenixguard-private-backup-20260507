@@ -6358,6 +6358,99 @@ def test_changed_scene_identity_does_not_retain_previous_forecast_geometry() -> 
     assert not current.get("forecast_scenarios")
 
 
+def test_order_positioning_source_snapshot_is_bounded_and_replaced_per_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_rows = [
+        {
+            "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+            "overlay_id": f"source-{index}",
+            "type": "DEMAND_ZONE",
+            "frame_id": 81,
+            "bounds": [0.10, 0.60, 0.20, 0.66],
+        }
+        for index in range(30)
+    ]
+    def source_rows_stub(
+        _payload: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [dict(row) for row in source_rows]
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "order_positioning_source_rows_v3",
+        source_rows_stub,
+    )
+    snapshot_builder = cast(
+        Callable[[Mapping[str, Any]], dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_tracking_summary_with_order_positioning_sources_v3",
+        ),
+    )
+
+    first = snapshot_builder(
+        {
+            "frame_index": 81,
+            "display_frame_id": 81,
+            "chart_frame_id": 81,
+            "overlay_frame_id": 81,
+            "model_vote_frame_id": 81,
+            "tracking_summary": {
+                "order_positioning_sources_v3": {
+                    "frame_id": 80,
+                    "objects": [{"overlay_id": "stale-source"}],
+                }
+            },
+        }
+    )
+    first_snapshot = cast(
+        dict[str, Any], first["order_positioning_sources_v3"]
+    )
+    assert first_snapshot["frame_id"] == 81
+    assert len(cast(list[Any], first_snapshot["objects"])) == 24
+    assert all(
+        row["overlay_id"] != "stale-source"
+        for row in cast(list[dict[str, Any]], first_snapshot["objects"])
+    )
+
+    source_rows[:] = [
+        {
+            "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
+            "overlay_id": "source-next-frame",
+            "type": "SUPPLY_ZONE",
+            "frame_id": 82,
+            "bounds": [0.10, 0.30, 0.20, 0.36],
+        }
+    ]
+    second = snapshot_builder(
+        {
+            "frame_index": 82,
+            "display_frame_id": 82,
+            "chart_frame_id": 82,
+            "overlay_frame_id": 82,
+            "model_vote_frame_id": 82,
+            "tracking_summary": first,
+        }
+    )
+    second_snapshot = cast(
+        dict[str, Any], second["order_positioning_sources_v3"]
+    )
+    assert second_snapshot["frame_id"] == 82
+    assert cast(list[dict[str, Any]], second_snapshot["objects"]) == source_rows
+
+    compacted = window_tracker_module._compact_session_persisted_payload(  # pyright: ignore[reportPrivateUsage]
+        {"tracking_summary": first}
+    )
+    compact_snapshot = cast(
+        dict[str, Any],
+        cast(dict[str, Any], compacted["tracking_summary"])[
+            "order_positioning_sources_v3"
+        ],
+    )
+    assert len(cast(list[Any], compact_snapshot["objects"])) == 24
+
+
 def test_stale_study_gate_recovers_after_watchdog_window() -> None:
     tracker = ContinuousWindowTrackerService()
     session_id = "stale-study"

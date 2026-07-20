@@ -13,6 +13,10 @@ from phoenixguard.decision.order_positioning_v3 import (
     inverse_reproject_order_positioning_y_v3,
     order_positioning_plan_anchors_valid_v3,
 )
+from phoenixguard.tracking.market_object_tracker_v3 import (
+    build_market_object_registry_v3,
+)
+from phoenixguard.vision.v3_overlay_contract import normalize_v3_overlay_object
 
 
 TRACKING_EPISODE_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_V1"
@@ -686,9 +690,182 @@ _POSITIONING_SOURCE_TYPES: Final = frozenset(
         "RESISTANCE_TRENDLINE",
     }
 )
+_POSITIONING_SOURCE_LIMIT: Final = 24
+_CANONICAL_ANCHOR_QUALITY_FIELDS: Final = frozenset(
+    {
+        "has_candle_anchor",
+        "has_sequence_anchor",
+        "inside_plot_area",
+        "matches_symbol_timeframe",
+        "chart_transform_valid",
+    }
+)
+_POSITIONING_SOURCE_EXPORT_FIELDS: Final = frozenset(
+    {
+        "schema_version",
+        "overlay_id",
+        "id",
+        "object_id",
+        "track_id",
+        "type",
+        "side",
+        "frame_id",
+        "sequence_id",
+        "chart_transform_id",
+        "broker_source_lock_id",
+        "coordinate_mode",
+        "bounds",
+        "bbox",
+        "lifecycle_state",
+        "anchor_evidence_status",
+        "anchor_evidence",
+        "anchor_quality",
+        "confidence",
+        "truth_score",
+        "anchor_candle_indices",
+        "anchor_candles",
+        "projected_entry_band",
+        "projected_price_band",
+        "confirmation_evidence",
+        "confirmation_state",
+        "breakout_confirmation_state",
+        "stop_entry_confirmation_valid",
+        "confirmation_is_closed",
+        "confirmation_closed_candle_key",
+        "confirmed_candle_key",
+        "confirmation_closed_candle_index",
+        "confirmation_side",
+        "confirmation_direction",
+        "breakout_side",
+        "confirmation_event",
+        "confirmation_type",
+        "reaction_type",
+        "knowledge_tags",
+    }
+)
 
 
-def _positioning_overlay_rows(session: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _stable_broker_source_lock_id(session: Mapping[str, Any]) -> str:
+    tracking = _mapping(session.get("tracking_summary"))
+    latest = _mapping(session.get("latest_signal"))
+    return _text(
+        _mapping(tracking.get("broker_source")).get("lock_id"),
+        _mapping(tracking.get("broker_source_lock")).get("lock_id"),
+        _mapping(latest.get("broker_source")).get("lock_id"),
+        _mapping(latest.get("broker_source_lock")).get("lock_id"),
+        _mapping(session.get("broker_source")).get("lock_id"),
+        _mapping(session.get("broker_source_lock")).get("lock_id"),
+    )
+
+
+def _current_positioning_frame_id(session: Mapping[str, Any]) -> int:
+    for key in (
+        "display_frame_id",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "model_vote_frame_id",
+        "frame_index",
+        "frame_id",
+    ):
+        value = session.get(key)
+        if value not in (None, ""):
+            return _integer(value)
+    return 0
+
+
+def _current_positioning_snapshot(
+    session: Mapping[str, Any],
+    *,
+    frame_id: int,
+) -> tuple[bool, list[dict[str, Any]]]:
+    tracking = _mapping(session.get("tracking_summary"))
+    snapshot = _mapping(tracking.get("order_positioning_sources_v3"))
+    if not snapshot or snapshot.get("frame_id") in (None, ""):
+        return False, []
+    snapshot_frame_id = _integer(snapshot.get("frame_id"), -1)
+    current_frame_ids = [
+        _integer(session.get(key), -1)
+        for key in (
+            "display_frame_id",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "model_vote_frame_id",
+            "frame_index",
+            "frame_id",
+        )
+        if session.get(key) not in (None, "")
+    ]
+    if (
+        snapshot_frame_id != frame_id
+        or any(current != snapshot_frame_id for current in current_frame_ids)
+    ):
+        return False, []
+    return True, _rows(snapshot.get("objects"), limit=_POSITIONING_SOURCE_LIMIT)
+
+
+def _positioning_source_is_current(
+    row: Mapping[str, Any],
+    *,
+    frame_id: int,
+) -> bool:
+    coordinate_mode = _text(row.get("coordinate_mode")).upper()
+    precision_quality = _mapping(row.get("anchor_quality"))
+    return bool(
+        _text(row.get("frame_id")) == str(frame_id)
+        and _text(row.get("schema_version")) == "PG_V3_OVERLAY_OBJECT_V1"
+        and _text(row.get("type")).upper() in _POSITIONING_SOURCE_TYPES
+        and "CHART" in coordinate_mode
+        and "PLOT" not in coordinate_mode
+        and row.get("precision_rejected") is not True
+        and _text(precision_quality.get("status")).upper() != "REJECT"
+    )
+
+
+def _canonical_positioning_source(
+    row: Mapping[str, Any],
+    *,
+    stable_source_lock_id: str,
+    image_size: Sequence[Any] | None,
+) -> dict[str, Any]:
+    source = dict(row)
+    quality = _mapping(source.get("anchor_quality"))
+    if not _CANONICAL_ANCHOR_QUALITY_FIELDS.issubset(quality):
+        # The market-object registry intentionally replaces the public V3
+        # contract quality object with its precision-refinement report. Strip
+        # that internal shape and rebuild the canonical, fail-closed quality
+        # flags consumed by order_positioning_v3.
+        source.pop("anchor_quality", None)
+        source.pop("anchor_confidence", None)
+        try:
+            source = {
+                str(key): value
+                for key, value in normalize_v3_overlay_object(
+                    source,
+                    strict=False,
+                    image_size=image_size,
+                ).items()
+            }
+        except (TypeError, ValueError):
+            return {}
+    if stable_source_lock_id:
+        source["broker_source_lock_id"] = stable_source_lock_id
+    return source
+
+
+def _project_positioning_source(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _safe_mapping(
+        {
+            key: value
+            for key, value in row.items()
+            if key in _POSITIONING_SOURCE_EXPORT_FIELDS
+            and value not in (None, "", [], {})
+        }
+    )
+
+
+def _explicit_positioning_overlay_rows(
+    session: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     containers: list[Any] = [
         session.get("v3_overlay_objects"),
         session.get("overlay_objects"),
@@ -726,13 +903,79 @@ def _positioning_overlay_rows(session: Mapping[str, Any]) -> list[dict[str, Any]
     return output
 
 
+def order_positioning_source_rows_v3(
+    session: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return bounded canonical positioning sources for the displayed frame.
+
+    Persisted tracking sessions deliberately omit the full overlay arrays. In
+    that compact state the market-object registry is the authoritative fallback
+    because it reconstructs the same frame from retained vision artifacts.
+    """
+
+    frame_id = _current_positioning_frame_id(session)
+    stable_source_lock_id = _stable_broker_source_lock_id(session)
+    dimensions = _source_image_dimensions(_scene_forecast(session))
+    image_size: Sequence[Any] | None = dimensions
+
+    snapshot_is_current, snapshot_rows = _current_positioning_snapshot(
+        session,
+        frame_id=frame_id,
+    )
+    if snapshot_is_current:
+        raw_sources = snapshot_rows
+    else:
+        raw_sources = [
+            row
+            for row in _explicit_positioning_overlay_rows(session)
+            if _positioning_source_is_current(row, frame_id=frame_id)
+        ]
+    if not snapshot_is_current and not raw_sources:
+        try:
+            registry = build_market_object_registry_v3(session)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return []
+        raw_sources = [
+            row
+            for row in _rows(registry.overlays, limit=512)
+            if _positioning_source_is_current(row, frame_id=frame_id)
+        ]
+
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_sources:
+        row = _canonical_positioning_source(
+            raw,
+            stable_source_lock_id=stable_source_lock_id,
+            image_size=image_size,
+        )
+        if not row or not _positioning_source_is_current(row, frame_id=frame_id):
+            continue
+        key = _text(row.get("track_id"), row.get("object_id"), row.get("overlay_id"))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(_project_positioning_source(row))
+        if len(output) >= _POSITIONING_SOURCE_LIMIT:
+            break
+    output.sort(
+        key=lambda row: (
+            _text(row.get("sequence_id")),
+            _text(row.get("chart_transform_id")),
+            _text(row.get("broker_source_lock_id")),
+            _text(row.get("track_id"), row.get("object_id")),
+        )
+    )
+    return output
+
+
 def _order_positioning_candidate_v3(
     session: Mapping[str, Any],
     *,
     frame_id: int,
     identity: Mapping[str, Any],
 ) -> dict[str, Any]:
-    overlays = _positioning_overlay_rows(session)
+    overlays = order_positioning_source_rows_v3(session)
     current_frame = str(frame_id)
     lineage_rows = [
         row
@@ -894,6 +1137,18 @@ def _order_positioning_candidate_v3(
     )
 
 
+def build_tracking_order_positioning_candidate_v3(
+    session: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the fail-closed positioning preview for the displayed frame."""
+
+    return _order_positioning_candidate_v3(
+        session,
+        frame_id=_current_positioning_frame_id(session),
+        identity=_identity(session),
+    )
+
+
 def _order_positioning_actual_v3(
     plan: Mapping[str, Any],
     session: Mapping[str, Any],
@@ -906,7 +1161,7 @@ def _order_positioning_actual_v3(
     current_frame = str(frame_id)
     lineage_rows = [
         row
-        for row in _positioning_overlay_rows(session)
+        for row in order_positioning_source_rows_v3(session)
         if _text(row.get("frame_id")) == current_frame
         and _text(row.get("schema_version")) == "PG_V3_OVERLAY_OBJECT_V1"
         and _text(row.get("type")).upper() in _POSITIONING_SOURCE_TYPES
@@ -1264,9 +1519,18 @@ def tracking_reprojection_anchors_v3(
     width = dimensions[0] if dimensions is not None else None
     anchors: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for candle in _rows(tracking.get("tracked_candles"), limit=256):
-        if candle.get("is_closed") is not True:
-            continue
+    tracked_closed = [
+        candle
+        for candle in _rows(tracking.get("tracked_candles"), limit=256)
+        if candle.get("is_closed") is True
+    ]
+    identity_state = _mapping(scene.get("closed_candle_identity_state"))
+    closed_tail = _rows(identity_state.get("closed_tail"), limit=24)
+    latest_closed = _mapping(identity_state.get("latest_closed"))
+    closed_candidates = [*tracked_closed, *closed_tail]
+    if latest_closed:
+        closed_candidates.append(latest_closed)
+    for candle in closed_candidates:
         anchor_id = _text(
             candle.get("track_id"),
             candle.get("object_id"),
@@ -1286,6 +1550,8 @@ def tracking_reprojection_anchors_v3(
                 candle.get("center_x_px")
                 if candle.get("center_x_px") is not None
                 else candle.get("center_x")
+                if candle.get("center_x") is not None
+                else candle.get("x")
             )
             raw_bbox = candle.get("bbox") or candle.get("bounds")
             if (
@@ -3013,8 +3279,10 @@ __all__ = [
     "TrackingEpisodeStateError",
     "TrackingEpisodeState",
     "advance_tracking_episode_v1",
+    "build_tracking_order_positioning_candidate_v3",
     "default_tracking_episode_v1",
     "normalize_tracking_episode_v1",
+    "order_positioning_source_rows_v3",
     "reset_tracking_episode_v1",
     "start_tracking_episode_v1",
     "stop_tracking_episode_v1",

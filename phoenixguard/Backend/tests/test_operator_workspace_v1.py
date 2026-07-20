@@ -150,6 +150,11 @@ class _OverlayView(TypedDict):
     trajectory_mode: NotRequired[str]
     trajectory_mode_probability_calibrated: NotRequired[bool]
     interval: NotRequired[object]
+    positioning_status: NotRequired[str]
+    positioning_basis: NotRequired[str]
+    positioning_mode: NotRequired[str]
+    immutable_geometry: NotRequired[bool]
+    evidence_only: NotRequired[bool]
 
 
 class _HistoryView(TypedDict):
@@ -344,6 +349,64 @@ def _positioning_anchor_rows(
     ]
 
 
+def _ready_positioning_preview_candidate(
+    *,
+    frame_id: int = 14,
+) -> dict[str, object]:
+    zones = [
+        {
+            "zone_id": "order-zone-private-buy-limit",
+            "intent": "ENTRY_LIMIT",
+            "order_kind": "BUY_LIMIT",
+            "side": "BUY",
+            "bounds": [0.56, 0.62, 0.78, 0.68],
+            "source_confidence": 0.91,
+            "public_basis": "PRIVATE_BUY_LIMIT_BASIS",
+        },
+        {
+            "zone_id": "order-zone-private-sell-limit",
+            "intent": "ENTRY_LIMIT",
+            "order_kind": "SELL_LIMIT",
+            "side": "SELL",
+            "bounds": [0.54, 0.24, 0.76, 0.30],
+            "source_confidence": 0.89,
+        },
+        {
+            "zone_id": "order-zone-private-buy-stop",
+            "intent": "ENTRY_STOP",
+            "order_kind": "BUY_STOP",
+            "side": "BUY",
+            "bounds": [0.60, 0.18, 0.80, 0.22],
+            "source_confidence": 0.87,
+        },
+        {
+            "zone_id": "order-zone-private-sell-stop",
+            "intent": "ENTRY_STOP",
+            "order_kind": "SELL_STOP",
+            "side": "SELL",
+            "bounds": [0.58, 0.72, 0.79, 0.76],
+            "source_confidence": 0.86,
+        },
+        {
+            "zone_id": "order-zone-private-plan-failure",
+            "intent": "PROTECTIVE_STOP",
+            "order_kind": "SELL_STOP",
+            "side": "SELL",
+            "bounds": [0.56, 0.68, 0.78, 0.70],
+            "source_confidence": 0.91,
+        },
+    ]
+    return {
+        "schema_version": "PG_ORDER_POSITIONING_CANDIDATES_V3",
+        "status": "READY",
+        "frame_id": frame_id,
+        "coordinate_mode": "CHART_NORMALIZED",
+        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+        "candidate_zones": zones,
+        "blockers": ["PRIVATE_READY_TELEMETRY"],
+    }
+
+
 def _seal_positioning_plan(plan: dict[str, object]) -> None:
     zones = cast(list[dict[str, object]], plan["zones"])
     static = [
@@ -444,6 +507,172 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
     assert r"C:\\secret" not in serialized
     assert "exec-secret" not in serialized
     assert "private-agent" not in serialized
+
+
+def test_idle_workspace_publishes_exact_validated_order_area_previews(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload(side="BUY")
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "state": "IDLE",
+        "revision": 0,
+        "event_horizon": 12,
+        "event_cursor": 0,
+    }
+    payload["overlays"] = {
+        "objects": [
+            {
+                "overlay_id": "adaptive-trigger",
+                "type": "TRIGGER_ZONE",
+                "side": "BUY",
+                "layer": "trigger_zones",
+                "bounds": [0.61, 0.46, 0.66, 0.50],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+            },
+            {
+                "overlay_id": "adaptive-target",
+                "type": "TARGET_ZONE_BOX",
+                "side": "BUY",
+                "layer": "target_zones",
+                "bounds": [0.62, 0.20, 0.72, 0.27],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+            },
+        ]
+    }
+
+    def preview_candidate_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return _ready_positioning_preview_candidate()
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_positioning_candidate_v3",
+        preview_candidate_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    previews = [
+        row
+        for row in workspace["overlays"]
+        if row["family"] == "order_positioning"
+    ]
+
+    assert {row["kind"]: row["bounds"] for row in previews} == {
+        "lower_price_buy_area": [0.56, 0.62, 0.78, 0.68],
+        "higher_price_sell_area": [0.54, 0.24, 0.76, 0.30],
+        "upside_break_area": [0.60, 0.18, 0.80, 0.22],
+        "downside_break_area": [0.58, 0.72, 0.79, 0.76],
+        "plan_failure_area": [0.56, 0.68, 0.78, 0.70],
+    }
+    assert all(row.get("positioning_mode") == "PREVIEW" for row in previews)
+    assert all(row.get("immutable_geometry") is False for row in previews)
+    assert all(row.get("evidence_only") is True for row in previews)
+    assert all(row["coordinate_units"] == "normalized" for row in previews)
+    assert {row["id"] for row in previews}.isdisjoint(
+        {
+            "order-zone-private-buy-limit",
+            "order-zone-private-sell-limit",
+            "order-zone-private-buy-stop",
+            "order-zone-private-sell-stop",
+            "order-zone-private-plan-failure",
+        }
+    )
+    # Preview evidence must not hide the current adaptive plan; only a frozen
+    # active episode owns that precedence.
+    assert any(row["id"] == "adaptive-trigger" for row in workspace["overlays"])
+    assert any(row["id"] == "adaptive-target" for row in workspace["overlays"])
+    episode = _mutable_mapping(
+        _mutable_mapping(workspace["tracking"])["episode"]
+    )
+    order_areas = _mutable_mapping(episode["order_areas"])
+    assert order_areas == {
+        "status": "PREVIEW",
+        "count": 5,
+        "message": (
+            "5 current order area previews are aligned to this chart. "
+            "Start Tracking to freeze the geometry."
+        ),
+        "kind_counts": {
+            "lower_price_buy_area": 1,
+            "higher_price_sell_area": 1,
+            "upside_break_area": 1,
+            "downside_break_area": 1,
+            "plan_failure_area": 1,
+        },
+    }
+    serialized = json.dumps(workspace)
+    for private_token in (
+        "PG_ORDER_POSITIONING",
+        "ENTRY_LIMIT",
+        "ENTRY_STOP",
+        "PROTECTIVE_STOP",
+        "BUY_LIMIT",
+        "SELL_LIMIT",
+        "PRIVATE_BUY_LIMIT_BASIS",
+        "PRIVATE_READY_TELEMETRY",
+        "order-zone-private",
+    ):
+        assert private_token not in serialized
+
+
+def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "state": "IDLE",
+        "revision": 0,
+    }
+
+    def blocked_candidate_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "PG_ORDER_POSITIONING_CANDIDATES_V3",
+            "status": "BLOCKED",
+            "frame_id": 14,
+            "coordinate_mode": "CHART_NORMALIZED",
+            "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+            "candidate_zones": _ready_positioning_preview_candidate()[
+                "candidate_zones"
+            ],
+            "blockers": ["PRIVATE_SOURCE_LOCK_FAILURE"],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_positioning_candidate_v3",
+        blocked_candidate_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert not any(
+        row["family"] == "order_positioning" for row in workspace["overlays"]
+    )
+    episode = _mutable_mapping(
+        _mutable_mapping(workspace["tracking"])["episode"]
+    )
+    assert episode["order_areas"] == {
+        "status": "UNAVAILABLE",
+        "count": 0,
+        "message": "No chart-verified order area is available on this current frame.",
+        "kind_counts": {
+            "lower_price_buy_area": 0,
+            "higher_price_sell_area": 0,
+            "upside_break_area": 0,
+            "downside_break_area": 0,
+            "plan_failure_area": 0,
+        },
+    }
+    serialized = json.dumps(workspace)
+    assert "PRIVATE_SOURCE_LOCK_FAILURE" not in serialized
+    assert "PG_ORDER_POSITIONING" not in serialized
 
 
 def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_boxes() -> None:
@@ -553,6 +782,20 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
                 "frame_id": 14,
                 "coordinate_mode": "CHART_NORMALIZED",
             },
+            {
+                "overlay_id": "adaptive-preview-must-not-win",
+                "type": "SELL_LIMIT_ZONE",
+                "side": "SELL",
+                "layer": "order_positioning",
+                "bounds": [0.20, 0.20, 0.40, 0.26],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "positioning_status": "WAITING",
+                "positioning_basis": "PRIVATE_MOVING_PREVIEW",
+                "positioning_mode": "PREVIEW",
+                "immutable_geometry": False,
+                "evidence_only": True,
+            },
         ]
     }
 
@@ -568,7 +811,12 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
     }
     assert all(row["frame_id"] == 14 for row in first_areas)
     assert all(row["coordinate_units"] == "normalized" for row in first_areas)
+    assert all(row.get("positioning_mode") == "FROZEN" for row in first_areas)
     assert all(cast(dict[str, object], row)["immutable_geometry"] is True for row in first_areas)
+    assert not any(
+        row["id"] == "adaptive-preview-must-not-win"
+        for row in first["overlays"]
+    )
     assert not any(row["kind"] == "target_area" for row in first["overlays"])
     public_episode = _mutable_mapping(
         cast(dict[str, object], first["tracking"])["episode"]

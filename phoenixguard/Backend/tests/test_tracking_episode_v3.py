@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from fastapi.testclient import TestClient
@@ -17,16 +18,20 @@ from phoenixguard.mobile_api.operator_workspace_v1 import (
     build_operator_workspace_v1,
     project_public_tracking_episode_v1,
 )
+from phoenixguard.tracking import tracking_episode_v3 as tracking_episode_module
 from phoenixguard.tracking.tracking_episode_v3 import (
     TRACKING_EPISODE_HORIZON,
     TrackingEpisodeReadinessError,
     TrackingEpisodeStateError,
     advance_tracking_episode_v1,
+    build_tracking_order_positioning_candidate_v3,
     default_tracking_episode_v1,
+    order_positioning_source_rows_v3,
     reset_tracking_episode_v1,
     start_tracking_episode_v1,
     stop_tracking_episode_v1,
     tracking_episode_readiness_v1,
+    tracking_reprojection_anchors_v3,
     update_tracking_episode_history_v1,
 )
 
@@ -389,6 +394,136 @@ def _positioning_overlay(
             "chart_transform_valid": True,
         },
     }
+
+
+def test_compact_positioning_sources_rebuild_canonical_registry_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _ready_session(side="BUY")
+    session["broker_source"] = {"lock_id": "stale-top-level-source"}
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "stable-broker-source"}
+    tracking["tracked_candles"] = _stable_reprojection_candles()
+    tracking["order_positioning_sources_v3"] = {
+        "frame_id": 9,
+        "objects": [
+            _positioning_overlay(
+                "SUPPLY_ZONE",
+                "SELL",
+                [300.0, 180.0, 650.0, 210.0],
+                track_id="stale-snapshot-source",
+            )
+        ],
+    }
+    registry_rows: list[dict[str, Any]] = []
+    for index in range(30):
+        source = _positioning_overlay(
+            "DEMAND_ZONE",
+            "BUY",
+            [300.0, 300.0, 650.0, 340.0],
+            track_id=f"registry-demand-{index:02d}",
+        )
+        source["broker_source_lock_id"] = f"frame-varying-lock-{index}"
+        source["anchor_confidence"] = 0.96
+        source["anchor_quality"] = {
+            "score": 0.96,
+            "status": "VALID",
+            "reason": "precision_refinement_valid",
+            "anchor_count": 2,
+            "selected_anchor_indices": [7, 9],
+            "selected_anchor_points": [[300.0, 320.0], [650.0, 320.0]],
+        }
+        source["style"] = {"diagnostic_only": True}
+        source["source_path"] = "tracking_summary.internal_geometry"
+        registry_rows.append(source)
+
+    registry_calls = 0
+
+    def fake_registry(_session: object) -> SimpleNamespace:
+        nonlocal registry_calls
+        registry_calls += 1
+        return SimpleNamespace(overlays=tuple(registry_rows))
+
+    monkeypatch.setattr(
+        tracking_episode_module,
+        "build_market_object_registry_v3",
+        fake_registry,
+    )
+
+    rows = order_positioning_source_rows_v3(session)
+    candidate = build_tracking_order_positioning_candidate_v3(session)
+
+    assert registry_calls == 2
+    assert len(rows) == 24
+    assert all(row["frame_id"] == 10 for row in rows)
+    assert all(row["broker_source_lock_id"] == "stable-broker-source" for row in rows)
+    assert all(row["anchor_quality"]["has_candle_anchor"] is True for row in rows)
+    assert all(row["anchor_quality"]["has_sequence_anchor"] is True for row in rows)
+    assert all(row["anchor_quality"]["inside_plot_area"] is True for row in rows)
+    assert all("style" not in row and "source_path" not in row for row in rows)
+    assert candidate["status"] == "READY"
+    assert {zone["order_kind"] for zone in candidate["candidate_zones"]} == {
+        "BUY_LIMIT",
+        "SELL_STOP",
+    }
+
+
+def test_current_positioning_snapshot_prevents_registry_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _ready_session(side="BUY")
+    session["chart_frame_id"] = 10
+    session["overlay_frame_id"] = 10
+    source = _positioning_overlay(
+        "DEMAND_ZONE",
+        "BUY",
+        [300.0, 300.0, 650.0, 340.0],
+        track_id="current-snapshot-source",
+    )
+    cast(dict[str, Any], session["tracking_summary"])[
+        "order_positioning_sources_v3"
+    ] = {
+        "frame_id": 10,
+        "objects": [source],
+    }
+
+    def unexpected_registry(_session: object) -> None:
+        raise AssertionError("current bounded snapshot must avoid a registry rebuild")
+
+    monkeypatch.setattr(
+        tracking_episode_module,
+        "build_market_object_registry_v3",
+        unexpected_registry,
+    )
+
+    rows = order_positioning_source_rows_v3(session)
+
+    assert [row["track_id"] for row in rows] == ["current-snapshot-source"]
+
+
+def test_reprojection_anchors_use_scene_closed_tail_when_compact_rows_omit_state() -> None:
+    session = _ready_session()
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["tracked_candles"] = [
+        {"track_id": "compact-row", "x": 900.0, "close_y": 450.0}
+    ]
+    snapshot = cast(dict[str, Any], session["forecast_snapshot_v3"])
+    scene = cast(dict[str, Any], snapshot["scene_forecast_contribution"])
+    identity_state = cast(dict[str, Any], scene["closed_candle_identity_state"])
+    identity_state["closed_tail"] = [
+        {"track_id": "tail-a", "x": 100.0, "close_y": 100.0},
+        {"track_id": "tail-b", "x": 400.0, "close_y": 250.0},
+        {"track_id": "tail-c", "x": 800.0, "close_y": 400.0},
+    ]
+    identity_state["latest_closed"] = dict(identity_state["closed_tail"][-1])
+
+    anchors = tracking_reprojection_anchors_v3(session)
+
+    assert anchors == [
+        {"anchor_id": "tail-a", "x_norm": 0.1, "y_norm": 0.2},
+        {"anchor_id": "tail-b", "x_norm": 0.4, "y_norm": 0.5},
+        {"anchor_id": "tail-c", "x_norm": 0.8, "y_norm": 0.8},
+    ]
 
 
 def test_tracking_episode_requires_a_complete_event_locked_baseline() -> None:

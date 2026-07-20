@@ -20,6 +20,8 @@ from phoenixguard.decision.order_positioning_v3 import (
 from phoenixguard.tracking.tracking_episode_v3 import (
     TRACKING_EPISODE_HISTORY_LIMIT,
     TRACKING_EPISODE_HORIZON,
+    build_tracking_order_positioning_candidate_v3,
+    order_positioning_source_rows_v3,
     tracking_episode_readiness_v1,
     tracking_reprojection_anchors_v3,
 )
@@ -2479,6 +2481,135 @@ _PUBLIC_POSITIONING_STATES = frozenset(
     }
 )
 
+_PUBLIC_POSITIONING_KINDS = (
+    "lower_price_buy_area",
+    "higher_price_sell_area",
+    "upside_break_area",
+    "downside_break_area",
+    "plan_failure_area",
+)
+
+
+def _positioning_overlay_type(zone: Mapping[str, Any]) -> str:
+    overlay_type = _text(
+        zone.get("overlay_type") or zone.get("type"),
+        "",
+        limit=48,
+    ).upper()
+    if overlay_type in _ORDER_POSITIONING_TYPES:
+        return overlay_type
+    intent = _text(zone.get("intent"), "", limit=32).upper()
+    order_kind = _text(zone.get("order_kind"), "", limit=32).upper()
+    if intent == "PROTECTIVE_STOP":
+        return "PROTECTIVE_STOP_ZONE"
+    return {
+        ("ENTRY_LIMIT", "BUY_LIMIT"): "BUY_LIMIT_ZONE",
+        ("ENTRY_LIMIT", "SELL_LIMIT"): "SELL_LIMIT_ZONE",
+        ("ENTRY_STOP", "BUY_STOP"): "BUY_STOP_ENTRY_ZONE",
+        ("ENTRY_STOP", "SELL_STOP"): "SELL_STOP_ENTRY_ZONE",
+    }.get((intent, order_kind), "")
+
+
+def _positioning_public_basis(zone: Mapping[str, Any], overlay_type: str) -> str:
+    _ = zone
+    return {
+        "BUY_LIMIT_ZONE": "Lower-price reaction area",
+        "SELL_LIMIT_ZONE": "Higher-price reaction area",
+        "BUY_STOP_ENTRY_ZONE": "Completed-candle upside confirmation",
+        "SELL_STOP_ENTRY_ZONE": "Completed-candle downside confirmation",
+        "PROTECTIVE_STOP_ZONE": "Original plan boundary",
+    }.get(overlay_type, "Verified chart structure")
+
+
+def _idle_order_positioning_rows(
+    payload: Mapping[str, Any],
+    *,
+    display_frame_id: int | str | None,
+) -> list[Mapping[str, Any]]:
+    """Publish current validated candidates as mutable, evidence-only previews."""
+
+    episode = _mapping(payload.get("tracking_episode"))
+    if (
+        _text(episode.get("state"), "IDLE", limit=24).upper() != "IDLE"
+        or display_frame_id is None
+    ):
+        return []
+    try:
+        candidate = build_tracking_order_positioning_candidate_v3(payload)
+    except Exception:
+        # Preview generation is advisory. Any registry/model/runtime failure
+        # must fail closed without breaking operator polling or exposing the
+        # private rejection reason.
+        return []
+    if (
+        _text(candidate.get("status"), "", limit=24).upper() != "READY"
+        or not _frame_matches(candidate.get("frame_id"), display_frame_id)
+        or _text(candidate.get("coordinate_mode"), "", limit=32).upper()
+        != "CHART_NORMALIZED"
+        or _normalized_rectangle(candidate.get("chart_bounds"))
+        != [0.0, 0.0, 1.0, 1.0]
+    ):
+        return []
+
+    output: list[Mapping[str, Any]] = []
+    for index, zone in enumerate(_rows(candidate.get("candidate_zones"))[:24]):
+        overlay_type = _positioning_overlay_type(zone)
+        if overlay_type not in _ORDER_POSITIONING_TYPES:
+            continue
+        bounds = _normalized_rectangle(
+            zone.get("normalized_bounds") or zone.get("bounds")
+        )
+        if len(bounds) != 4:
+            continue
+        source_id = _safe_identifier(
+            zone.get("zone_id") or zone.get("order_zone_id"),
+            f"preview-order-area-{index + 1}",
+        )
+        public_id = _stable_public_digest(
+            {
+                "source": source_id,
+                "kind": _PUBLIC_OVERLAY_KINDS[overlay_type][0],
+                "frame": display_frame_id,
+            },
+            prefix="order_area",
+        )
+        output.append(
+            {
+                "overlay_id": public_id,
+                "object_id": public_id,
+                "track_id": public_id,
+                "type": overlay_type,
+                "layer": "order_positioning",
+                "role": "current_order_area_preview",
+                "side": _side(zone.get("side")),
+                "label": _OVERLAY_PRESENTATION[overlay_type][1],
+                "label_hidden": True,
+                "bounds": bounds,
+                "coordinate_space": "CHART_NORMALIZED",
+                "coordinate_units": "normalized",
+                "frame_id": display_frame_id,
+                "confidence": _confidence(
+                    zone.get("confidence"),
+                    zone.get("source_confidence"),
+                    zone.get("source_truth_score"),
+                ),
+                "lifecycle_state": "ACTIVE",
+                "positioning_status": (
+                    "STANDBY"
+                    if overlay_type == "PROTECTIVE_STOP_ZONE"
+                    else "WAITING"
+                ),
+                "positioning_basis": _positioning_public_basis(
+                    zone,
+                    overlay_type,
+                ),
+                "positioning_mode": "PREVIEW",
+                "immutable_geometry": False,
+                "evidence_only": True,
+            }
+        )
+    return output
+
 
 def _episode_order_positioning_rows(
     payload: Mapping[str, Any],
@@ -2519,7 +2650,7 @@ def _episode_order_positioning_rows(
     ):
         return []
     current_lineages: set[tuple[str, str, str]] = set()
-    for row in _overlay_rows(payload):
+    for row in order_positioning_source_rows_v3(payload):
         row_frame = _frame_id(row.get("frame_id"), row.get("display_frame_id"))
         if (
             row_frame is None
@@ -2558,22 +2689,7 @@ def _episode_order_positioning_rows(
 
     output: list[Mapping[str, Any]] = []
     for index, zone in enumerate(zones):
-        overlay_type = _text(
-            zone.get("overlay_type") or zone.get("type"),
-            "",
-            limit=48,
-        ).upper()
-        if not overlay_type:
-            intent = _text(zone.get("intent"), "", limit=32).upper()
-            order_kind = _text(zone.get("order_kind"), "", limit=32).upper()
-            overlay_type = {
-                ("ENTRY_LIMIT", "BUY_LIMIT"): "BUY_LIMIT_ZONE",
-                ("ENTRY_LIMIT", "SELL_LIMIT"): "SELL_LIMIT_ZONE",
-                ("ENTRY_STOP", "BUY_STOP"): "BUY_STOP_ENTRY_ZONE",
-                ("ENTRY_STOP", "SELL_STOP"): "SELL_STOP_ENTRY_ZONE",
-            }.get((intent, order_kind), "")
-            if intent == "PROTECTIVE_STOP":
-                overlay_type = "PROTECTIVE_STOP_ZONE"
+        overlay_type = _positioning_overlay_type(zone)
         if overlay_type not in _ORDER_POSITIONING_TYPES:
             return []
         raw_bounds = zone.get("normalized_bounds") or zone.get("bounds")
@@ -2604,12 +2720,20 @@ def _episode_order_positioning_rows(
             zone.get("zone_id") or zone.get("order_zone_id"),
             f"{episode_id}-order-area-{index + 1}",
         )
+        public_id = _stable_public_digest(
+            {
+                "source": source_id,
+                "kind": _PUBLIC_OVERLAY_KINDS[overlay_type][0],
+                "episode": episode_id,
+            },
+            prefix="order_area",
+        )
         label = _OVERLAY_PRESENTATION[overlay_type][1]
         output.append(
             {
-                "overlay_id": source_id,
-                "object_id": source_id,
-                "track_id": source_id,
+                "overlay_id": public_id,
+                "object_id": public_id,
+                "track_id": public_id,
                 "type": overlay_type,
                 "layer": "order_positioning",
                 "role": "episode_frozen_order_area",
@@ -2627,19 +2751,11 @@ def _episode_order_positioning_rows(
                 ),
                 "lifecycle_state": "ACTIVE",
                 "positioning_status": status,
-                "positioning_basis": _safe_public_text(
-                    zone.get("public_basis") or zone.get("basis_label"),
-                    (
-                        "Lower-price reaction area"
-                        if _text(zone.get("source_type")).upper()
-                        in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"}
-                        else "Higher-price reaction area"
-                        if _text(zone.get("source_type")).upper()
-                        in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}
-                        else "Validated chart reaction"
-                    ),
-                    limit=96,
+                "positioning_basis": _positioning_public_basis(
+                    zone,
+                    overlay_type,
                 ),
+                "positioning_mode": "FROZEN",
                 "immutable_geometry": True,
                 "geometry_reprojected": True,
                 "reprojection_method": "GLOBAL_CLOSED_CANDLE_AFFINE_V1",
@@ -2922,6 +3038,11 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         window_dimensions,
     )
     visual_observation = _mapping(payload.get("visual_observation_v3"))
+    episode_state = _text(
+        _mapping(payload.get("tracking_episode")).get("state"),
+        "IDLE",
+        limit=24,
+    ).upper()
     waiting_for_new_frame = bool(
         _text(visual_observation.get("status")).upper() == "WAITING_FOR_NEW_FRAME"
         and _explicit_bool(visual_observation.get("new_visual_evidence")) is not True
@@ -2930,10 +3051,33 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         payload,
         display_frame_id=display_frame_id,
     )
-    source_rows = [*frozen_positioning_rows, *_overlay_rows(payload)]
+    preview_positioning_rows = (
+        []
+        if frozen_positioning_rows
+        else _idle_order_positioning_rows(
+            payload,
+            display_frame_id=display_frame_id,
+        )
+    )
+    source_rows = [
+        *frozen_positioning_rows,
+        *preview_positioning_rows,
+        *_overlay_rows(payload),
+    ]
     for index, overlay in enumerate(source_rows[:256]):
         raw_type = _text(overlay.get("type") or overlay.get("overlay_type") or overlay.get("kind"), "").upper()
         layer = _text(overlay.get("layer"), "").lower()
+        source_positioning_mode = _text(
+            overlay.get("positioning_mode"),
+            "",
+            limit=16,
+        ).upper()
+        if raw_type in _ORDER_POSITIONING_TYPES and (
+            (episode_state == "ACTIVE" and source_positioning_mode != "FROZEN")
+            or (episode_state == "IDLE" and source_positioning_mode != "PREVIEW")
+            or episode_state not in {"ACTIVE", "IDLE"}
+        ):
+            continue
         if frozen_positioning_rows and raw_type in _ADAPTIVE_PLAN_OVERLAY_TYPES:
             # Once tracking owns a frozen order-positioning plan, current-frame
             # trigger/target copies must not slide over it.  Their source
@@ -3192,6 +3336,20 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 "WAITING",
                 limit=24,
             ).upper()
+            positioning_mode = _text(
+                overlay.get("positioning_mode"),
+                "",
+                limit=16,
+            ).upper()
+            immutable_geometry = _explicit_bool(
+                overlay.get("immutable_geometry")
+            )
+            if (
+                positioning_mode not in {"PREVIEW", "FROZEN"}
+                or immutable_geometry is None
+                or (positioning_mode == "FROZEN") != immutable_geometry
+            ):
+                continue
             public_overlay.update(
                 {
                     "positioning_status": (
@@ -3204,7 +3362,8 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                         "Saved chart structure",
                         limit=96,
                     ),
-                    "immutable_geometry": True,
+                    "positioning_mode": positioning_mode,
+                    "immutable_geometry": immutable_geometry,
                     "evidence_only": True,
                 }
             )
@@ -3919,6 +4078,35 @@ def _episode_order_area_contract(episode: Mapping[str, Any]) -> dict[str, object
     }
 
 
+def _idle_order_area_contract(
+    overlays: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    kind_counts = dict.fromkeys(_PUBLIC_POSITIONING_KINDS, 0)
+    for overlay in overlays:
+        if (
+            overlay.get("family") != "order_positioning"
+            or overlay.get("positioning_mode") != "PREVIEW"
+            or overlay.get("immutable_geometry") is not False
+            or overlay.get("evidence_only") is not True
+        ):
+            continue
+        kind = _text(overlay.get("kind"), "", limit=48)
+        if kind in kind_counts:
+            kind_counts[kind] += 1
+    count = sum(kind_counts.values())
+    return {
+        "status": "PREVIEW" if count else "UNAVAILABLE",
+        "count": count,
+        "message": (
+            f"{count} current order area preview{'s are' if count != 1 else ' is'} "
+            "aligned to this chart. Start Tracking to freeze the geometry."
+            if count
+            else "No chart-verified order area is available on this current frame."
+        ),
+        "kind_counts": kind_counts,
+    }
+
+
 def _episode_path_comparison_contract(
     episode: Mapping[str, Any],
     observation: Mapping[str, object],
@@ -4620,6 +4808,11 @@ def build_operator_workspace_v1(
     )
     overlays = _sanitize_overlays(source, display_frame)
     tracking_episode = _tracking_episode_contract(source)
+    if tracking_episode.get("state") == "IDLE":
+        tracking_episode = {
+            **tracking_episode,
+            "order_areas": _idle_order_area_contract(overlays),
+        }
     frozen_future_blocks = cast(
         list[dict[str, object]],
         tracking_episode.get("future_blocks", []),

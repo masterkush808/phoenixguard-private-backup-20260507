@@ -1921,16 +1921,49 @@
     }
 
     .surface-hotspot.family-order-positioning {
-      border-width: 1.5px;
-      border-style: solid;
-      background: rgba(242, 200, 102, 0.025);
-      box-shadow: inset 0 0 0 1px rgba(255, 247, 220, 0.025);
+      min-width: 0;
+      min-height: 0;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
     }
 
-    .surface-hotspot.family-order-positioning[data-overlay-kind="plan_failure_area"] {
+    .surface-hotspot.family-order-positioning::after {
+      inset: 0;
+    }
+
+    .surface-hotspot.family-order-positioning .order-area-visual {
+      position: absolute;
+      inset: 10px;
+      border: 1.5px solid var(--overlay-plan);
+      border-radius: 3px;
+      background: rgba(242, 200, 102, 0.025);
+      box-shadow: inset 0 0 0 1px rgba(255, 247, 220, 0.025);
+      pointer-events: none;
+    }
+
+    .surface-hotspot.family-order-positioning.buy .order-area-visual {
+      border-color: var(--up);
+      background: rgba(99, 224, 154, 0.045);
+    }
+
+    .surface-hotspot.family-order-positioning.sell .order-area-visual {
+      border-color: var(--down);
+      background: rgba(255, 101, 79, 0.045);
+    }
+
+    .surface-hotspot.family-order-positioning[data-overlay-kind="plan_failure_area"] .order-area-visual {
       border-color: var(--warn);
       border-style: dashed;
       background: rgba(232, 200, 120, 0.035);
+    }
+
+    .surface-hotspot.family-order-positioning:hover .order-area-visual,
+    .surface-hotspot.family-order-positioning:focus-visible .order-area-visual,
+    .surface-hotspot.family-order-positioning.selected .order-area-visual {
+      border-color: var(--gold-pale);
+      background: rgba(242, 200, 102, 0.075);
+      box-shadow: 0 0 18px rgba(242, 200, 102, 0.18);
     }
 
     .surface-hotspot span {
@@ -1957,6 +1990,29 @@
       text-transform: uppercase;
       white-space: nowrap;
       pointer-events: none;
+    }
+
+    .surface-hotspot.label-lane-below span {
+      top: calc(100% + 4px);
+    }
+
+    .surface-hotspot.label-lane-end span {
+      right: -1px;
+      left: auto;
+    }
+
+    .surface-hotspot.family-order-positioning span {
+      top: -12px;
+      left: 9px;
+    }
+
+    .surface-hotspot.family-order-positioning.label-lane-below span {
+      top: calc(100% - 6px);
+    }
+
+    .surface-hotspot.family-order-positioning.label-lane-end span {
+      right: 9px;
+      left: auto;
     }
 
     .surface-hotspot.buy span {
@@ -2281,6 +2337,24 @@
       min-height: 27px;
       padding-inline: 8px;
       font-size: 10px;
+    }
+
+    .order-area-kind-controls .layer-filter:disabled::before {
+      background: rgba(139, 132, 112, 0.42);
+      box-shadow: none;
+      opacity: 0.42;
+    }
+
+    .order-area-kind-controls .layer-count {
+      margin-left: 2px;
+    }
+
+    .order-area-control-status {
+      width: 100%;
+      margin: 2px 0 0;
+      color: var(--quiet);
+      font-size: 9px;
+      line-height: 1.45;
     }
 
     .layer-filter {
@@ -3461,11 +3535,12 @@
               <button class="layer-filter" type="button" data-overlay-family="invalidation" aria-pressed="true">Risk limits <span class="layer-count" data-layer-count="invalidation">0</span></button>
               <button class="layer-filter" id="tracking-plan-toggle" type="button" data-tracking-plan-control aria-expanded="false">Playbook overlays <span class="layer-count" id="tracking-plan-count">0</span></button>
               <div class="order-area-kind-controls" aria-label="Individual order-area overlays">
-                <button class="layer-filter" type="button" data-overlay-kind-control="lower_price_buy_area" aria-pressed="true">Buy lower · limit</button>
-                <button class="layer-filter" type="button" data-overlay-kind-control="higher_price_sell_area" aria-pressed="true">Sell higher · limit</button>
-                <button class="layer-filter" type="button" data-overlay-kind-control="upside_break_area" aria-pressed="true">Buy above · stop</button>
-                <button class="layer-filter" type="button" data-overlay-kind-control="downside_break_area" aria-pressed="true">Sell below · stop</button>
-                <button class="layer-filter" type="button" data-overlay-kind-control="plan_failure_area" aria-pressed="true">Plan fails here</button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="lower_price_buy_area" data-available="false" aria-pressed="false" disabled>Buy lower · limit <span class="layer-count" data-order-kind-count="lower_price_buy_area">0</span></button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="higher_price_sell_area" data-available="false" aria-pressed="false" disabled>Sell higher · limit <span class="layer-count" data-order-kind-count="higher_price_sell_area">0</span></button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="upside_break_area" data-available="false" aria-pressed="false" disabled>Buy above · stop <span class="layer-count" data-order-kind-count="upside_break_area">0</span></button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="downside_break_area" data-available="false" aria-pressed="false" disabled>Sell below · stop <span class="layer-count" data-order-kind-count="downside_break_area">0</span></button>
+                <button class="layer-filter" type="button" data-overlay-kind-control="plan_failure_area" data-available="false" aria-pressed="false" disabled>Plan fails here <span class="layer-count" data-order-kind-count="plan_failure_area">0</span></button>
+                <p class="order-area-control-status" id="order-area-control-status" aria-live="polite">Start tracking to anchor verified order areas.</p>
               </div>
             </div>
             <div class="playbook-panel" id="tracking-plan-panel" data-ready="false" aria-live="polite" hidden>
@@ -3922,6 +3997,7 @@
       trackingPlanToggle: byId("tracking-plan-toggle"),
       trackingPlanCount: byId("tracking-plan-count"),
       trackingPlanPanel: byId("tracking-plan-panel"),
+      orderAreaControlStatus: byId("order-area-control-status"),
       detailedOverlayControls: byId("detailed-overlay-controls"),
       detailedOverlayCount: byId("detailed-overlay-count"),
       detailedOverlayList: byId("detailed-overlay-list"),
@@ -6744,31 +6820,120 @@
       renderOverlays();
     }
 
+    function overlayIsRenderableForControl(overlay) {
+      if (
+        !overlay
+        || overlayIsDiagnostic(overlay)
+        || !episodeAllowsOverlay(overlay, state.payload || state.pendingPayload)
+        || !lifecycleIsVisible(overlay)
+        || !overlayMatchesSurface(overlay)
+        || !state.naturalWidth
+        || !state.naturalHeight
+      ) {
+        return false;
+      }
+      const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
+      if (overlayFamily(overlay) === "lstm" && forecastRole === "center") {
+        return false;
+      }
+      const geometry = projectedOverlayGeometry(overlay);
+      return Boolean(geometry.bounds || geometry.points.length >= 2);
+    }
+
+    function orderAreaControlMessage(renderableCount) {
+      const episode = trackingEpisode(state.payload || state.pendingPayload || {});
+      const orderAreas = safeObject(episode.order_areas);
+      const orderAreaStatus = safeText(orderAreas.status, "").toUpperCase();
+      const previewMode = orderAreaStatus === "PREVIEW"
+        || state.overlays.some(function (overlay) {
+          return overlayFamily(overlay) === "order_positioning"
+            && safeText(overlay.positioning_mode, "").toUpperCase() === "PREVIEW";
+        });
+      if (previewMode && renderableCount > 0) {
+        return renderableCount + " current order-area preview"
+          + (renderableCount === 1 ? " is" : "s are")
+          + " aligned to this chart. Start Tracking to freeze "
+          + (renderableCount === 1 ? "it." : "them.");
+      }
+      if (renderableCount > 0) {
+        return renderableCount + " saved order area" + (renderableCount === 1 ? " is" : "s are")
+          + " anchored to the starting chart.";
+      }
+      if (episodeIsActive(episode)) {
+        return neutralPublicText(
+          orderAreas.message,
+          "No chart-verified order area is available for this tracking episode.",
+        );
+      }
+      if (
+        ["PREVIEW", "UNAVAILABLE"].includes(orderAreaStatus)
+        && safeText(orderAreas.message, "")
+      ) {
+        return neutralPublicText(
+          orderAreas.message,
+          "No chart-verified order area is available yet.",
+        );
+      }
+      if (Number(orderAreas.count || 0) > 0) {
+        return "Saved order areas are not drawable on this current broker frame.";
+      }
+      return "Start tracking to anchor verified order areas.";
+    }
+
     function renderDetailedOverlayControls(overlays) {
       const kinds = new Map();
       safeList(overlays || state.overlays).forEach(function (overlay) {
         const kind = overlayKind(overlay);
-        if (!kind || overlayIsDiagnostic(overlay) || !episodeAllowsOverlay(overlay, state.payload || state.pendingPayload)) {
+        if (!kind || !overlayIsRenderableForControl(overlay)) {
           return;
         }
-        const current = kinds.get(kind) || {label: overlayKindLabel(overlay), count: 0};
+        const current = kinds.get(kind) || {
+          label: overlayKindLabel(overlay),
+          count: 0,
+          families: new Set(),
+          familyCounts: new Map(),
+        };
         current.count += 1;
+        const family = overlayFamily(overlay);
+        current.families.add(family);
+        current.familyCounts.set(family, Number(current.familyCounts.get(family) || 0) + 1);
         kinds.set(kind, current);
       });
       const entries = Array.from(kinds.entries()).sort(function (left, right) {
         return left[1].label.localeCompare(right[1].label);
       });
+      let orderAreaCount = 0;
       document.querySelectorAll("[data-overlay-kind-control]").forEach(function (button) {
         const kind = safeText(button.dataset.overlayKindControl, "").toLowerCase();
-        const available = kinds.has(kind);
-        const enabled = !state.disabledKinds.has(kind);
+        const meta = kinds.get(kind);
+        const count = meta ? Number(meta.familyCounts.get("order_positioning") || 0) : 0;
+        const available = count > 0;
+        const enabled = available
+          && state.activeFamilies.has("order_positioning")
+          && !state.disabledKinds.has(kind);
+        orderAreaCount += count;
+        button.disabled = !available;
+        button.setAttribute("aria-disabled", available ? "false" : "true");
         button.setAttribute("aria-pressed", enabled ? "true" : "false");
         button.dataset.available = available ? "true" : "false";
+        const countNode = button.querySelector("[data-order-kind-count]");
+        if (countNode) {
+          countNode.textContent = String(count);
+        }
         button.title = available
-          ? (enabled ? "Hide this saved order area" : "Show this saved order area")
+          ? (enabled
+            ? "Hide " + count + " saved order area" + (count === 1 ? "" : "s")
+            : "Show " + count + " saved order area" + (count === 1 ? "" : "s"))
           : "This area appears only when the starting chart provides verified positioning evidence";
       });
-      setText(els.detailedOverlayCount, entries.length ? entries.length + " available" : "No current marks");
+      setText(els.orderAreaControlStatus, orderAreaControlMessage(orderAreaCount));
+      setText(
+        els.detailedOverlayCount,
+        entries.length
+          ? entries.length + " type" + (entries.length === 1 ? "" : "s") + " · "
+            + entries.reduce(function (sum, entry) { return sum + entry[1].count; }, 0) + " marks"
+          : "No current marks",
+      );
       if (!entries.length) {
         const empty = document.createElement("p");
         empty.className = "detailed-overlay-empty";
@@ -6784,7 +6949,14 @@
         button.type = "button";
         button.className = "kind-filter";
         button.dataset.overlayKind = kind;
-        button.setAttribute("aria-pressed", state.disabledKinds.has(kind) ? "false" : "true");
+        const familyEnabled = Array.from(meta.families).some(function (family) {
+          return state.activeFamilies.has(family);
+        });
+        button.dataset.available = "true";
+        button.setAttribute(
+          "aria-pressed",
+          familyEnabled && !state.disabledKinds.has(kind) ? "true" : "false",
+        );
         button.textContent = meta.label + " · " + meta.count;
         fragment.appendChild(button);
       });
@@ -6825,6 +6997,10 @@
         counts[family] = Number(counts[family] || 0) + 1;
       });
       applyStudyBackedCounts(counts, state.payload || state.pendingPayload, overlayPool);
+      counts.order_positioning = overlayPool.filter(function (overlay) {
+        return overlayFamily(overlay) === "order_positioning"
+          && overlayIsRenderableForControl(overlay);
+      }).length;
       document.querySelectorAll("[data-overlay-family]").forEach(function (button) {
         const family = button.dataset.overlayFamily;
         const count = Number(counts[family] || 0);
@@ -6916,13 +7092,33 @@
       if (!token) {
         return;
       }
-      if (state.disabledKinds.has(token)) {
+      const matches = state.overlays.filter(function (overlay) {
+        return overlayKind(overlay) === token && overlayIsRenderableForControl(overlay);
+      });
+      if (!matches.length) {
+        return;
+      }
+      const families = new Set(matches.map(overlayFamily));
+      const familyIsActive = Array.from(families).some(function (family) {
+        return state.activeFamilies.has(family);
+      });
+      if (!familyIsActive) {
+        families.forEach(function (family) {
+          state.activeFamilies.add(family);
+        });
+        state.disabledKinds.delete(token);
+      } else if (state.disabledKinds.has(token)) {
         state.disabledKinds.delete(token);
       } else {
         state.disabledKinds.add(token);
       }
+      state.overlayView = "custom";
+      document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
+        button.setAttribute("aria-pressed", "false");
+      });
       persistDisabledOverlayKinds();
-      renderDetailedOverlayControls(state.overlays);
+      persistOverlaySelection();
+      syncOverlayButtons();
       renderOverlays();
     }
 
@@ -8010,8 +8206,13 @@
       if (!box) {
         return null;
       }
-      const minimumWidth = Math.max(10, box[2] - box[0]);
-      const minimumHeight = Math.max(10, box[3] - box[1]);
+      const exactOrderAreaBounds = family === "order_positioning";
+      const visibleWidth = exactOrderAreaBounds
+        ? box[2] - box[0]
+        : Math.max(10, box[2] - box[0]);
+      const visibleHeight = exactOrderAreaBounds
+        ? box[3] - box[1]
+        : Math.max(10, box[3] - box[1]);
       button.type = "button";
       button.className = "surface-hotspot group-" + group
         + " family-" + familyClass
@@ -8038,10 +8239,27 @@
       button.dataset.overlayLayer = safeText(overlay.layer, "");
       button.dataset.priority = String(overlayPriority(overlay));
       button.setAttribute("aria-label", overlayLabel(overlay));
-      button.style.left = percent(box[0], state.naturalWidth) + "%";
-      button.style.top = percent(box[1], state.naturalHeight) + "%";
-      button.style.width = percent(minimumWidth, state.naturalWidth) + "%";
-      button.style.height = percent(minimumHeight, state.naturalHeight) + "%";
+      const leftPercent = percent(box[0], state.naturalWidth);
+      const topPercent = percent(box[1], state.naturalHeight);
+      const widthPercent = percent(visibleWidth, state.naturalWidth);
+      const heightPercent = percent(visibleHeight, state.naturalHeight);
+      if (exactOrderAreaBounds) {
+        const hitPadding = 10;
+        button.dataset.hitPadding = String(hitPadding);
+        button.style.left = "calc(" + leftPercent + "% - " + hitPadding + "px)";
+        button.style.top = "calc(" + topPercent + "% - " + hitPadding + "px)";
+        button.style.width = "calc(" + widthPercent + "% + " + (hitPadding * 2) + "px)";
+        button.style.height = "calc(" + heightPercent + "% + " + (hitPadding * 2) + "px)";
+        const visual = document.createElement("i");
+        visual.className = "order-area-visual";
+        visual.setAttribute("aria-hidden", "true");
+        button.appendChild(visual);
+      } else {
+        button.style.left = leftPercent + "%";
+        button.style.top = topPercent + "%";
+        button.style.width = widthPercent + "%";
+        button.style.height = heightPercent + "%";
+      }
       const label = document.createElement("span");
       label.textContent = overlayLabel(overlay);
       button.appendChild(label);
@@ -8199,6 +8417,13 @@
       if (target instanceof HTMLButtonElement) {
         const targetLabel = target.querySelector("span");
         const sourceLabel = source.querySelector("span");
+        const targetVisual = target.querySelector(".order-area-visual");
+        const sourceVisual = source.querySelector(".order-area-visual");
+        if (sourceVisual && !targetVisual) {
+          target.insertBefore(sourceVisual.cloneNode(true), targetLabel || null);
+        } else if (targetVisual && !sourceVisual) {
+          targetVisual.remove();
+        }
         if (targetLabel && sourceLabel) {
           targetLabel.textContent = sourceLabel.textContent;
         }
@@ -8395,19 +8620,28 @@
       if (!root || state.labelMode === "off") {
         return;
       }
+      const rootRect = root.getBoundingClientRect();
       const buttons = Array.from(root.querySelectorAll(".surface-hotspot")).sort(function (a, b) {
         return Number(b.dataset.priority || 0) - Number(a.dataset.priority || 0);
       });
       const accepted = [];
       buttons.forEach(function (button) {
-        button.classList.remove("label-collision-hidden");
+        button.classList.remove("label-collision-hidden", "label-lane-below", "label-lane-end");
         const label = button.querySelector("span");
         if (!label) {
           return;
         }
-        const rect = label.getBoundingClientRect();
+        let rect = label.getBoundingClientRect();
         if (!rect.width || !rect.height) {
           return;
+        }
+        if (rect.top < rootRect.top + 2) {
+          button.classList.add("label-lane-below");
+          rect = label.getBoundingClientRect();
+        }
+        if (rect.right > rootRect.right - 2) {
+          button.classList.add("label-lane-end");
+          rect = label.getBoundingClientRect();
         }
         if (accepted.some(function (existing) { return rectsOverlap(rect, existing, 3); })) {
           button.classList.add("label-collision-hidden");

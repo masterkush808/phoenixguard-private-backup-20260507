@@ -3149,11 +3149,22 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
     chromium_browser: Browser,
 ) -> None:
     payload = _operator_payload()
+    payload["tracking"]["episode"].update(
+        {
+            "state": "IDLE",
+            "order_areas": {
+                "status": "PREVIEW",
+                "count": 3,
+                "message": "Current chart preview is ready to be frozen.",
+            },
+        }
+    )
     specs = (
         ("saved-buy-limit", "lower_price_buy_area", "Lower-price buy area", "BUY", [0.48, 0.58, 0.68, 0.63]),
-        ("saved-sell-limit", "higher_price_sell_area", "Higher-price sell area", "SELL", [0.48, 0.28, 0.68, 0.33]),
-        ("saved-buy-stop", "upside_break_area", "Upside break area", "BUY", [0.70, 0.24, 0.84, 0.26]),
-        ("saved-sell-stop", "downside_break_area", "Downside break area", "SELL", [0.70, 0.66, 0.84, 0.68]),
+        # A six-thousandth chart-height stop band is deliberately thinner than
+        # the old ten-pixel hotspot minimum. Its exact visible child must keep
+        # the server boundary while its transparent parent supplies hit area.
+        ("saved-buy-stop", "upside_break_area", "Upside break area", "BUY", [0.94, 0.005, 0.99, 0.011]),
         ("saved-plan-failure", "plan_failure_area", "Plan failure area", "BUY", [0.48, 0.70, 0.68, 0.73]),
     )
     payload["overlays"].extend(
@@ -3177,7 +3188,8 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
             "coordinate_space": "chart",
             "coordinate_units": "normalized",
             "positioning_status": "WAITING",
-            "positioning_basis": "Saved chart structure",
+            "positioning_mode": "PREVIEW",
+            "positioning_basis": "Current chart structure",
             "immutable_geometry": True,
             "evidence_only": True,
         }
@@ -3185,16 +3197,142 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
     )
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator('[data-layer-count="order_positioning"]').inner_text() == "5"
-        assert {
-            row[0]
-            for row in specs
-        }.issubset(
+        assert (
+            page.locator('[data-layer-count="order_positioning"]').inner_text() == "3"
+        )
+        assert {row[0] for row in specs}.issubset(
             set(
                 page.locator("[data-overlay-id]").evaluate_all(
                     "nodes => nodes.map(node => node.dataset.overlayId)"
                 )
             )
+        )
+
+        expected_counts = {
+            "lower_price_buy_area": "1",
+            "higher_price_sell_area": "0",
+            "upside_break_area": "1",
+            "downside_break_area": "0",
+            "plan_failure_area": "1",
+        }
+        for kind, count in expected_counts.items():
+            control = page.locator(f'[data-overlay-kind-control="{kind}"]')
+            assert control.locator("[data-order-kind-count]").inner_text() == count
+            available = count != "0"
+            assert control.get_attribute("data-available") == str(available).lower()
+            assert control.is_disabled() is (not available)
+            assert control.get_attribute("aria-disabled") == str(not available).lower()
+            assert control.get_attribute("aria-pressed") == str(available).lower()
+        assert page.locator("#order-area-control-status").inner_text() == (
+            "3 current order-area previews are aligned to this chart. "
+            "Start Tracking to freeze them."
+        )
+
+        def assert_pixel_geometry(
+            overlay_id: str,
+            expected: tuple[float, float, float, float],
+        ) -> None:
+            metrics = page.evaluate(
+                """
+                overlayId => {
+                  const image = document.querySelector('#surface-raw').getBoundingClientRect();
+                  const hotspot = document.querySelector(
+                    `[data-overlay-id="${overlayId}"]`
+                  );
+                  const box = (
+                    hotspot.querySelector('.order-area-visual') || hotspot
+                  ).getBoundingClientRect();
+                  return {
+                    image: {left: image.left, top: image.top, width: image.width, height: image.height},
+                    box: {left: box.left, top: box.top, width: box.width, height: box.height},
+                  };
+                }
+                """,
+                overlay_id,
+            )
+            image = metrics["image"]
+            box = metrics["box"]
+            expected_pixels = (
+                image["left"] + image["width"] * expected[0],
+                image["top"] + image["height"] * expected[1],
+                image["width"] * expected[2],
+                image["height"] * expected[3],
+            )
+            for actual, wanted in zip(
+                (box["left"], box["top"], box["width"], box["height"]),
+                expected_pixels,
+                strict=True,
+            ):
+                assert abs(float(actual) - float(wanted)) <= 1.0
+
+        # Full broker mode maps chart coordinates through [0.10, 0.12, 0.90, 0.92].
+        assert_pixel_geometry("saved-buy-limit", (0.484, 0.584, 0.16, 0.04))
+        assert_pixel_geometry("saved-buy-stop", (0.852, 0.124, 0.04, 0.0048))
+
+        page.locator("#frame-chart").click()
+        page.wait_for_function(
+            "() => document.querySelector('#surface-raw').src.includes('latest-chart')"
+        )
+        assert_pixel_geometry("saved-buy-limit", (0.48, 0.58, 0.20, 0.05))
+        assert_pixel_geometry("saved-buy-stop", (0.94, 0.005, 0.05, 0.006))
+        page.evaluate(
+            "() => window.resolveLabelCollisions(document.querySelector('#hotspot-layer'))"
+        )
+        classes = (
+            page.locator('[data-overlay-id="saved-buy-stop"]').get_attribute("class")
+            or ""
+        ).split()
+        assert "label-lane-below" in classes
+        assert "label-lane-end" in classes
+        page.locator('[data-overlay-id="saved-buy-stop"]').scroll_into_view_if_needed()
+        hit_target = page.evaluate(
+            """
+            () => {
+              const node = document.querySelector('[data-overlay-id="saved-buy-stop"]');
+              const hitBox = node.getBoundingClientRect();
+              const visual = node.querySelector('.order-area-visual').getBoundingClientRect();
+              return {
+                clickX: visual.left + visual.width / 2,
+                clickY: visual.bottom + 6,
+                visibleBottom: visual.bottom,
+                hitExpansionBottom: hitBox.bottom - visual.bottom,
+                hitElement: document.elementFromPoint(
+                  visual.left + visual.width / 2,
+                  visual.bottom + 6
+                )?.closest?.('[data-overlay-id]')?.dataset?.overlayId || '',
+              };
+            }
+            """
+        )
+        assert hit_target["clickY"] > hit_target["visibleBottom"]
+        assert hit_target["hitExpansionBottom"] >= 9
+        assert hit_target["hitElement"] == "saved-buy-stop", hit_target
+        page.mouse.click(hit_target["clickX"], hit_target["clickY"])
+        assert "selected" in (
+            page.locator('[data-overlay-id="saved-buy-stop"]').get_attribute("class")
+            or ""
+        ).split()
+        label_bounds = page.evaluate(
+            """
+            () => {
+              const root = document.querySelector('#hotspot-layer').getBoundingClientRect();
+              const label = document.querySelector(
+                '[data-overlay-id="saved-buy-stop"] span'
+              ).getBoundingClientRect();
+              return {root: {top: root.top, right: root.right}, label: {
+                top: label.top, right: label.right
+              }};
+            }
+            """
+        )
+        assert label_bounds["label"]["top"] >= label_bounds["root"]["top"] - 1
+        assert label_bounds["label"]["right"] <= label_bounds["root"]["right"] + 1
+
+        # Returning to Full broker keeps the toggle checks below on the same
+        # projection used when this operator panel first opened.
+        page.locator("#frame-window").click()
+        page.wait_for_function(
+            "() => document.querySelector('#surface-raw').src.includes('latest-window')"
         )
 
         buy_limit_control = page.locator(
@@ -3203,10 +3341,23 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
         buy_limit_control.click()
         assert buy_limit_control.get_attribute("aria-pressed") == "false"
         assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 0
-        assert page.locator('[data-overlay-id="saved-sell-limit"]').count() == 1
+        assert page.locator('[data-overlay-id="saved-buy-stop"]').count() == 1
         assert page.locator('[data-overlay-id="saved-plan-failure"]').count() == 1
 
         buy_limit_control.click()
+        assert buy_limit_control.get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 1
+
+        page.locator('[data-overlay-family="order_positioning"]').click()
+        assert buy_limit_control.get_attribute("aria-pressed") == "false"
+        assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 0
+        buy_limit_control.click()
+        assert (
+            page.locator('[data-overlay-family="order_positioning"]').get_attribute(
+                "aria-pressed"
+            )
+            == "true"
+        )
         assert buy_limit_control.get_attribute("aria-pressed") == "true"
         assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 1
 

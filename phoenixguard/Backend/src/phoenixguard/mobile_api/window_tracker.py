@@ -77,6 +77,7 @@ from phoenixguard.tracking.tracking_episode_v3 import (
     advance_tracking_episode_v1,
     default_tracking_episode_v1,
     normalize_tracking_episode_v1,
+    order_positioning_source_rows_v3,
     reset_tracking_episode_v1,
     start_tracking_episode_v1,
     stop_tracking_episode_v1,
@@ -1474,6 +1475,33 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
     return value
 
 
+_ORDER_POSITIONING_SOURCE_SNAPSHOT_LIMIT = 24
+
+
+def _compact_order_positioning_sources_v3(value: Any) -> dict[str, Any]:
+    """Keep one bounded, current-frame source snapshot without history growth."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    source = cast(Mapping[str, Any], value)
+    frame_id = int(_float_or(source.get("frame_id"), 0.0) or 0)
+    rows = _sequence_of_mappings(source.get("objects"))[
+        :_ORDER_POSITIONING_SOURCE_SNAPSHOT_LIMIT
+    ]
+    if frame_id <= 0 or not rows:
+        return {}
+    return {
+        "schema_version": "PG_ORDER_POSITIONING_SOURCES_V3",
+        "frame_id": frame_id,
+        # Compact every row independently so the general eight-item sequence
+        # cap cannot silently discard valid source zones from this bounded set.
+        "objects": [
+            _compact_live_state_observability_value(row)
+            for row in rows
+        ],
+    }
+
+
 _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
     {
         "action",
@@ -2722,6 +2750,45 @@ def _frame_bundle_complete_v3(payload: Mapping[str, Any]) -> bool:
     )
 
 
+def _tracking_summary_with_order_positioning_sources_v3(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Replace the order-source snapshot with the current aligned frame only."""
+
+    tracking = _mapping_to_dict(payload.get("tracking_summary"))
+    current = dict(payload)
+    current["tracking_summary"] = tracking
+    try:
+        rows = order_positioning_source_rows_v3(current)
+    except Exception:
+        # Positioning is evidence-only. A malformed optional source must fail
+        # closed without interrupting the chart capture or tracking episode.
+        LOGGER.debug(
+            "Unable to refresh current order-positioning sources.",
+            exc_info=True,
+        )
+        rows = []
+    frame_id = int(
+        _float_or(
+            payload.get("display_frame_id")
+            or payload.get("frame_index")
+            or payload.get("model_vote_frame_id"),
+            0.0,
+        )
+        or 0
+    )
+    if rows and frame_id > 0:
+        tracking["order_positioning_sources_v3"] = {
+            "schema_version": "PG_ORDER_POSITIONING_SOURCES_V3",
+            "frame_id": frame_id,
+            "objects": rows[:_ORDER_POSITIONING_SOURCE_SNAPSHOT_LIMIT],
+        }
+    else:
+        # A stale source snapshot must never be carried into a newer frame.
+        tracking.pop("order_positioning_sources_v3", None)
+    return tracking
+
+
 _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
     {
         "action",
@@ -2788,6 +2855,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "scene_forecast_contribution",
         "micro_candle_forecast",
         "overlay_kind",
+        "order_positioning_sources_v3",
         "overlay_source_window_signature",
         "overlay_truth_audit",
         "pair",
@@ -2916,6 +2984,10 @@ def _compact_live_state_market_payload(value: Any) -> Any:
                 compact_projection = _compact_persisted_projection(item)
                 if compact_projection:
                     payload[key] = compact_projection
+            elif key == "order_positioning_sources_v3":
+                compact_sources = _compact_order_positioning_sources_v3(item)
+                if compact_sources:
+                    payload[key] = compact_sources
             else:
                 payload[key] = _compact_live_state_observability_value(item)
     return payload
@@ -33491,6 +33563,10 @@ class ContinuousWindowTrackerService:
                     visual_payload,
                     tombstone=_mapping_to_dict(model_council_result.get(_EXECUTION_PACKET_REVOCATION_KEY)),
                 )
+            tracking_summary = _tracking_summary_with_order_positioning_sources_v3(
+                visual_payload
+            )
+            visual_payload["tracking_summary"] = tracking_summary
             # Episode observation is a visual-market concern, not an execution
             # concern.  Fast blocked captures return before the later broker
             # execution commit, so advance the authoritative persisted episode
@@ -34001,6 +34077,10 @@ class ContinuousWindowTrackerService:
                 "log_path": str(self._event_log_path(str(payload["session_id"]))),
                 "updated_at": published_at,
             }
+            tracking_summary = _tracking_summary_with_order_positioning_sources_v3(
+                payload
+            )
+            payload["tracking_summary"] = tracking_summary
             episode_after_commit = advance_tracking_episode_v1(
                 episode_before_commit,
                 payload,
