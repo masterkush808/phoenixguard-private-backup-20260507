@@ -91,7 +91,11 @@ def _scene(key: str = "closed-0", sequence: int = 10, side: str = "BUY") -> dict
         "closed_candle_identity_state": {
             "event_key": key,
             "event_sequence": sequence,
-            "latest_closed": {"track_id": str(sequence), "side": side},
+            "latest_closed": {
+                "track_id": str(sequence),
+                "side": side,
+                "x": 790.0,
+            },
             "forming": {
                 "track_id": f"forming-{sequence}",
                 "side": side,
@@ -236,6 +240,7 @@ def _ready_session(
                     "track_id": str(sequence),
                     "is_closed": True,
                     "direction": side,
+                    "x_norm": 0.79,
                     "close_norm": round(0.50 + sequence * 0.001, 6),
                     "price_proxy": round(0.50 + sequence * 0.001, 6),
                 },
@@ -583,6 +588,19 @@ def test_order_reference_map_projects_nearest_live_locations_without_authority()
     assert reference_map["status"] == "READY"
     assert reference_map["chart_bounds"] == [0.0, 0.0, 1.0, 1.0]
     assert reference_map["current_price_y_norm"] == 0.488
+    assert reference_map["current_price_basis"] == "FORMING_LIVE_CANDLE"
+    assert reference_map["geometry_role"] == "FORWARD_REACTION_WINDOW"
+    assert reference_map["reaction_window_anchor"] == "LATEST_COMPLETED_CANDLE"
+    assert reference_map["reaction_window"] == {
+        "reaction_window_verified": True,
+        "geometry_role": "FORWARD_REACTION_WINDOW",
+        "reaction_window_anchor": "LATEST_COMPLETED_CANDLE",
+        "reaction_window_anchor_id": "10",
+        "reaction_window_origin_x_norm": 0.79,
+        "reaction_window_step_x_norm": 0.0175,
+        "reaction_window_horizon_steps": 12,
+        "x_bounds": [0.79, 1.0],
+    }
     assert reference_map["observational_only"] is True
     assert reference_map["execution_authority"] == "NONE"
     assert candidate["status"] == "BLOCKED"
@@ -595,10 +613,39 @@ def test_order_reference_map_projects_nearest_live_locations_without_authority()
         ("ENTRY_STOP", "BUY_STOP"),
         ("ENTRY_STOP", "SELL_STOP"),
     ]
-    assert by_route[("ENTRY_LIMIT", "BUY_LIMIT")]["bounds"] == [0.3, 0.6, 0.65, 0.68]
-    assert by_route[("ENTRY_LIMIT", "SELL_LIMIT")]["bounds"] == [0.3, 0.36, 0.65, 0.42]
-    assert by_route[("ENTRY_STOP", "BUY_STOP")]["bounds"] == [0.3, 0.353, 0.65, 0.36]
-    assert by_route[("ENTRY_STOP", "SELL_STOP")]["bounds"] == [0.3, 0.68, 0.65, 0.687]
+    assert by_route[("ENTRY_LIMIT", "BUY_LIMIT")]["bounds"] == [0.79, 0.6, 1.0, 0.68]
+    assert by_route[("ENTRY_LIMIT", "SELL_LIMIT")]["bounds"] == [0.79, 0.36, 1.0, 0.42]
+    assert by_route[("ENTRY_STOP", "BUY_STOP")]["bounds"] == [0.79, 0.353, 1.0, 0.36]
+    assert by_route[("ENTRY_STOP", "SELL_STOP")]["bounds"] == [0.79, 0.68, 1.0, 0.687]
+    assert by_route[("ENTRY_LIMIT", "BUY_LIMIT")]["source_bounds"] == [
+        0.3,
+        0.6,
+        0.65,
+        0.68,
+    ]
+    assert by_route[("ENTRY_LIMIT", "SELL_LIMIT")]["source_bounds"] == [
+        0.3,
+        0.36,
+        0.65,
+        0.42,
+    ]
+    assert by_route[("ENTRY_STOP", "BUY_STOP")]["source_bounds"] == [
+        0.3,
+        0.36,
+        0.65,
+        0.42,
+    ]
+    assert by_route[("ENTRY_STOP", "SELL_STOP")]["source_bounds"] == [
+        0.3,
+        0.6,
+        0.65,
+        0.68,
+    ]
+    assert all(row["geometry_role"] == "FORWARD_REACTION_WINDOW" for row in rows)
+    assert all(
+        row["reaction_window_anchor"] == "LATEST_COMPLETED_CANDLE"
+        for row in rows
+    )
     assert all(row["confidence"] == 0.9 for row in rows)
     assert all(row["observational_only"] is True for row in rows)
     assert all(row["execution_authority"] == "NONE" for row in rows)
@@ -631,6 +678,7 @@ def test_order_reference_map_uses_verified_compact_visual_geometry() -> None:
     tracking["tracked_candles"] = [
         {
             "track_id": f"compact-{index}",
+            "is_closed": index < 7,
             "direction": "BUY" if index % 2 == 0 else "SELL",
             "close_y_px": 215.0 + (index * 5.0),
             "bbox": [700.0 + index, 210.0, 706.0 + index, 255.0],
@@ -661,11 +709,123 @@ def test_order_reference_map_uses_verified_compact_visual_geometry() -> None:
     shifted_map = build_tracking_order_reference_map_v3(shifted)
 
     assert reference_map["status"] == "READY"
-    assert reference_map["current_price_basis"] == "CURRENT_VISUAL_CANDLE"
+    assert reference_map["current_price_basis"] == "FORMING_LIVE_CANDLE"
     assert reference_map["current_price_y_norm"] == 0.5
     assert reference_map["reference_count"] == 4
+    assert reference_map["reaction_window"]["reaction_window_anchor_id"] == "compact-6"
+    assert reference_map["reaction_window"]["x_bounds"] == [0.709, 0.721]
+    assert all(
+        row["bounds"][0] == 0.709 and row["bounds"][2] == 0.721
+        for row in reference_map["rows"]
+    )
     assert shifted_map["status"] == "UNAVAILABLE"
     assert shifted_map["availability_reason"] == "TRANSFORM_NOT_LOCKED"
+
+
+def test_order_reference_and_candidate_use_explicit_live_and_closed_anchors() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "live-spacing-source-lock"}
+    tracking["tracked_candles"] = [
+        {
+            "track_id": "8",
+            "is_closed": True,
+            "direction": "BUY",
+            "x_norm": 0.62,
+            "price_proxy": 0.49,
+        },
+        {
+            "track_id": "9",
+            "is_closed": True,
+            "direction": "SELL",
+            "x_norm": 0.63,
+            "price_proxy": 0.50,
+        },
+        {
+            "track_id": "10",
+            "is_closed": True,
+            "direction": "BUY",
+            "x_norm": 0.64,
+            "price_proxy": 0.51,
+        },
+        {
+            "track_id": "forming-10",
+            "is_closed": False,
+            "direction": "SELL",
+            "x_norm": 0.645,
+            "close_y": 244.0,
+        },
+    ]
+    session["overlay_objects"] = _order_reference_sources()
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+    candidate = build_tracking_order_positioning_candidate_v3(session)
+
+    assert reference_map["status"] == "READY"
+    assert reference_map["current_price_y_norm"] == 0.488
+    assert reference_map["current_price_basis"] == "FORMING_LIVE_CANDLE"
+    assert candidate["status"] == "READY"
+    assert candidate["baseline_price_y_norm"] == 0.49
+    assert candidate["current_price_basis"] == "LATEST_COMPLETED_CANDLE"
+    for payload in (reference_map, candidate):
+        window = cast(dict[str, Any], payload["reaction_window"])
+        assert window["reaction_window_anchor_id"] == "10"
+        assert window["reaction_window_origin_x_norm"] == 0.64
+        assert window["reaction_window_step_x_norm"] == 0.01
+        assert window["reaction_window_horizon_steps"] == 12
+        assert window["x_bounds"] == [0.64, 0.76]
+        assert round(
+            (window["x_bounds"][1] - window["x_bounds"][0])
+            / window["reaction_window_step_x_norm"],
+            6,
+        ) == 12.0
+    assert all(
+        row["bounds"][0] == 0.64 and row["bounds"][2] == 0.76
+        for row in reference_map["rows"]
+    )
+
+
+def test_raw_zones_do_not_publish_stop_entries_without_named_closed_confirmation() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "raw-zone-source-lock"}
+    sources = _order_reference_sources()[:2]
+    for source in sources:
+        evidence = cast(dict[str, Any], source["confirmation_evidence"])
+        evidence.pop("closed_candle_key")
+        evidence["closed_candle_index"] = 9
+    session["overlay_objects"] = sources
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+    rows = cast(list[dict[str, Any]], reference_map["rows"])
+
+    assert reference_map["status"] == "READY"
+    assert {(row["intent"], row["order_kind"]) for row in rows} == {
+        ("ENTRY_LIMIT", "BUY_LIMIT"),
+        ("ENTRY_LIMIT", "SELL_LIMIT"),
+    }
+
+
+def test_verified_trendline_bands_publish_passive_limits_without_stop_proof() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "trendline-source-lock"}
+    resistance, support = _order_reference_sources()[2:]
+    for source in (resistance, support):
+        evidence = cast(dict[str, Any], source["confirmation_evidence"])
+        evidence.pop("closed_candle_key")
+        evidence["closed_candle_index"] = 9
+    session["overlay_objects"] = [resistance, support]
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+    rows = cast(list[dict[str, Any]], reference_map["rows"])
+    by_kind = {row["order_kind"]: row for row in rows}
+
+    assert reference_map["status"] == "READY"
+    assert set(by_kind) == {"BUY_LIMIT", "SELL_LIMIT"}
+    assert by_kind["BUY_LIMIT"]["source_bounds"] == [0.3, 0.75, 0.65, 0.77]
+    assert by_kind["SELL_LIMIT"]["source_bounds"] == [0.3, 0.29, 0.65, 0.31]
+    assert all(row["intent"] == "ENTRY_LIMIT" for row in rows)
 
 
 def test_order_reference_map_accepts_tested_and_mitigated_live_sources() -> None:

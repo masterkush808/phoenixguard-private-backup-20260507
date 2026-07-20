@@ -1958,19 +1958,35 @@
       background: rgba(232, 200, 120, 0.035);
     }
 
-    /* REFERENCE locations remain fully visible, but their measured/dashed
-       treatment makes them distinct from an execution preview or frozen plan. */
+    /* The mutable current reaction is the chart's visual priority. Saved-start
+       and earlier study geometry stays available, but deliberately recedes so
+       an operator cannot mistake an old formation for the place to react now. */
     .surface-hotspot.family-order-positioning[data-positioning-mode="REFERENCE"] .order-area-visual {
-      border-style: dashed;
+      border-width: 2px;
+      border-style: solid;
       background-image: linear-gradient(
         135deg,
-        rgba(242, 200, 102, 0.055),
+        rgba(242, 200, 102, 0.075),
         transparent 42%,
-        rgba(242, 200, 102, 0.025)
+        rgba(242, 200, 102, 0.04)
       );
       box-shadow:
-        inset 0 0 0 1px rgba(255, 247, 220, 0.07),
-        inset 0 0 14px rgba(242, 200, 102, 0.045);
+        inset 0 0 0 1px rgba(255, 247, 220, 0.10),
+        0 0 12px rgba(242, 200, 102, 0.10);
+    }
+
+    .surface-hotspot.family-order-positioning.order-context-saved .order-area-visual {
+      border-style: dashed;
+      background: rgba(242, 200, 102, 0.018);
+      box-shadow: none;
+      opacity: 0.46;
+    }
+
+    .surface-hotspot.family-order-positioning.order-context-history .order-area-visual {
+      border-style: dotted;
+      background: transparent;
+      box-shadow: none;
+      opacity: 0.30;
     }
 
     .surface-hotspot.family-order-positioning:hover .order-area-visual,
@@ -2019,6 +2035,7 @@
     .surface-hotspot.family-order-positioning span {
       top: -12px;
       left: 9px;
+      max-width: 210px;
     }
 
     .surface-hotspot.family-order-positioning.label-lane-below span {
@@ -2055,6 +2072,14 @@
     .surface-hotspot.label-policy-hidden:not(:hover):not(:focus-visible):not(.selected) span,
     .surface-hotspot.label-collision-hidden:not(:hover):not(:focus-visible):not(.selected) span {
       opacity: 0;
+    }
+
+    body.labels-on .surface-hotspot.family-order-positioning.order-label-primary.order-context-current span {
+      opacity: var(--overlay-label-opacity) !important;
+    }
+
+    body.labels-on .surface-hotspot.family-order-positioning.order-label-primary.order-context-current.label-collision-hidden:not(:hover):not(:focus-visible):not(.selected) span {
+      opacity: 0 !important;
     }
 
     .surface-hotspot.line-hit {
@@ -3785,7 +3810,7 @@
       zones: ["supply_demand"],
       plan: ["council", "order_positioning", "triggers", "targets", "invalidation"],
       forecast: ["two_candle", "scene_forecaster", "lstm", "prediction"],
-      history: ["history", "major_swings", "local_swings"],
+      history: ["history", "major_swings", "local_swings", "order_positioning"],
     });
     const TRACKING_PLAN_FAMILIES = Object.freeze([
       "chart_bounds",
@@ -4117,6 +4142,7 @@
       frameMode: readStoredValue("phoenixguard.surface.frame.v1", "window") === "chart" ? "chart" : "window",
       surfaceMode: "overlay",
       overlayView: readStoredPreset(),
+      showSavedOrderContext: ["all", "plan", "history"].includes(readStoredPreset()),
       activeFamilies: readStoredFamilies(),
       disabledKinds: readStoredDisabledKinds(),
       trackingPlanOpen: false,
@@ -6409,7 +6435,10 @@
         // especially on the larger Chart focus PNG. Keep one atomic load and
         // coalesce newer state until the matched image has committed.
         state.queuedSurfacePayload = payload;
-        syncOverlayButtons(safeList(payload.overlays), {loading: true});
+        // The old image and its overlays remain the committed visual truth
+        // until the new bitmap decodes. Keep its controls atomic as well;
+        // pending-frame rows cannot disable buttons for boxes still on screen.
+        syncOverlayButtons(state.overlays, {loading: true});
         return;
       }
       if (primaryUrl === state.imageUrl && els.surfaceImage.complete && els.surfaceImage.naturalWidth > 0) {
@@ -6439,7 +6468,7 @@
       // until the next image has decoded. This avoids a blank workspace during
       // a normal frame transition without ever mixing new geometry with the
       // old image.
-      syncOverlayButtons(safeList(payload.overlays), {loading: true});
+      syncOverlayButtons(state.overlays, {loading: true});
       els.surfaceCanvas.classList.add("updating");
       els.surfaceCanvas.setAttribute("aria-busy", "true");
       els.surfaceImage.dataset.space = state.pendingImageSpace;
@@ -6597,6 +6626,7 @@
       state.overlayView = next;
       if (next !== "custom") {
         state.activeFamilies = new Set(OVERLAY_PRESETS[next] || OVERLAY_PRESETS.live);
+        state.showSavedOrderContext = ["all", "plan", "history"].includes(next);
       }
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
         button.setAttribute("aria-pressed", button.dataset.overlayView === next ? "true" : "false");
@@ -6813,6 +6843,7 @@
     function setTrackingPlanOpen(open) {
       state.trackingPlanOpen = Boolean(open);
       if (state.trackingPlanOpen) {
+        state.showSavedOrderContext = true;
         const planFamilies = trackingPlanFamilies(state.payload || state.pendingPayload, state.overlays);
         const planFamilySet = new Set(planFamilies);
         planFamilies.forEach(function (family) {
@@ -6842,6 +6873,7 @@
         || overlayIsDiagnostic(overlay)
         || !episodeAllowsOverlay(overlay, state.payload || state.pendingPayload)
         || !lifecycleIsVisible(overlay)
+        || !quickViewShowsOverlay(overlay)
         || !overlayMatchesSurface(overlay)
         || !state.naturalWidth
         || !state.naturalHeight
@@ -6859,6 +6891,45 @@
     function orderPositioningMode(overlay) {
       const mode = safeText(overlay && overlay.positioning_mode, "").toUpperCase();
       return ["REFERENCE", "PREVIEW", "FROZEN"].includes(mode) ? mode : "";
+    }
+
+    function orderPositioningContext(overlay) {
+      const lifecycle = safeText(overlay && overlay.lifecycle, "current").toLowerCase();
+      const geometryRole = safeText(overlay && overlay.geometry_role, "").toUpperCase();
+      if (geometryRole === "SOURCE_ORIGIN") {
+        return "history";
+      }
+      if (["historical", "archived", "ended", "expired", "superseded", "stale"].includes(lifecycle)) {
+        return "history";
+      }
+      return orderPositioningMode(overlay) === "FROZEN" ? "saved" : "current";
+    }
+
+    function orderAreaPlainLabel(overlay) {
+      const labels = {
+        lower_price_buy_area: "Buy lower · limit",
+        higher_price_sell_area: "Sell higher · limit",
+        upside_break_area: "Buy above · stop",
+        downside_break_area: "Sell below · stop",
+        plan_failure_area: "Plan fails here",
+      };
+      return labels[overlayKind(overlay)] || "Order area";
+    }
+
+    function orderAreaDisplayLabel(overlay) {
+      const base = orderAreaPlainLabel(overlay);
+      const context = orderPositioningContext(overlay);
+      if (context === "history") {
+        return base + " · earlier";
+      }
+      const mode = orderPositioningMode(overlay);
+      if (mode === "FROZEN") {
+        return base + " · saved start";
+      }
+      if (mode === "PREVIEW") {
+        return base + " · plan";
+      }
+      return base + " · current";
     }
 
     function resolvedOrderAreaMode(modeCounts, fallbackStatus) {
@@ -6890,37 +6961,34 @@
         const frozenCount = Number(modeCounts instanceof Map ? modeCounts.get("FROZEN") : 0) || 0;
         if (referenceCount > 0 && frozenCount > 0) {
           return renderableCount + " order locations are visible: "
-            + referenceCount + " current structural reference" + (referenceCount === 1 ? "" : "s")
-            + " and " + frozenCount + " saved tracking area" + (frozenCount === 1 ? "" : "s")
-            + ". References may update with current evidence; the saved tracking plan is unchanged, and entry permission remains separate.";
+            + referenceCount + " current reaction area" + (referenceCount === 1 ? "" : "s")
+            + " and " + frozenCount + " muted saved-start area" + (frozenCount === 1 ? "" : "s")
+            + ". React only at a current area; saved-start context and entry permission remain separate.";
         }
         if (referenceCount > 0 && previewCount > 0) {
           return renderableCount + " order locations are visible: "
-            + previewCount + " verified preview" + (previewCount === 1 ? "" : "s")
-            + " and " + referenceCount + " current chart reference" + (referenceCount === 1 ? "" : "s")
-            + ". Start Tracking saves only the verified preview geometry; current chart references may continue to update, and entry permission remains separate.";
+            + referenceCount + " current reaction area" + (referenceCount === 1 ? "" : "s")
+            + " and " + previewCount + " current plan area" + (previewCount === 1 ? "" : "s")
+            + ". Wait for the marked price instead of chasing; Start Tracking saves only verified plan geometry, and entry permission remains separate.";
         }
         if (mode === "REFERENCE") {
-          return renderableCount + " current chart order location"
+          return renderableCount + " current reaction area"
             + (renderableCount === 1 ? " is" : "s are")
-            + " visible for structural study. "
-            + (renderableCount === 1 ? "It may " : "They may ")
+            + " marked. Wait for price to reach a limit area; a stop area matters only while it remains ahead of price. "
             + (activeEpisode
-              ? "update with current evidence; the saved tracking plan is unchanged"
-              : "update as the chart changes; Start Tracking saves only a verified plan")
+              ? "The saved tracking plan is unchanged"
+              : "Start Tracking saves only a verified plan")
             + ", and entry permission remains separate.";
         }
         if (mode === "PREVIEW") {
-          return renderableCount + " verified order-area preview"
+          return renderableCount + " current plan area"
             + (renderableCount === 1 ? " is" : "s are")
-            + " aligned to this chart. Start Tracking to freeze "
+            + " aligned to this chart. Wait for the marked price instead of chasing; Start Tracking freezes "
             + (renderableCount === 1 ? "it" : "them")
             + "; entry permission remains separate.";
         }
-        return renderableCount + " saved order area" + (renderableCount === 1 ? " is" : "s are")
-          + " anchored to the starting chart. "
-          + (renderableCount === 1 ? "Its geometry is" : "Their geometry is")
-          + " frozen; entry permission remains separate.";
+        return renderableCount + " saved-start area" + (renderableCount === 1 ? " is" : "s are")
+          + " shown as muted earlier context. Use Live read for the current reaction area; entry permission remains separate.";
       }
       if (mode === "REFERENCE") {
         return activeEpisode
@@ -7206,6 +7274,7 @@
     function setAllOverlayFamilies(enabled) {
       state.activeFamilies = new Set(enabled ? ALL_OVERLAY_FAMILIES : []);
       if (enabled) {
+        state.showSavedOrderContext = true;
         state.disabledKinds.clear();
         persistDisabledOverlayKinds();
       }
@@ -7227,19 +7296,32 @@
       const lifecycle = safeText(overlay.lifecycle, "current").toLowerCase();
       const family = overlayFamily(overlay);
       if (["expired", "stale", "invalidated", "retired", "superseded"].includes(lifecycle)) {
+        if (family === "order_positioning" && orderPositioningContext(overlay) === "history") {
+          return state.activeFamilies.has("history") && state.activeFamilies.has("order_positioning");
+        }
         return family === "history" && state.activeFamilies.has("history");
       }
       if (["historical", "archived"].includes(lifecycle)) {
+        if (family === "order_positioning" && orderPositioningContext(overlay) === "history") {
+          return state.activeFamilies.has("history") && state.activeFamilies.has("order_positioning");
+        }
         return family === "history" && state.activeFamilies.has("history");
       }
       return true;
     }
 
     function quickViewShowsOverlay(overlay) {
-      // Presets choose overlay families; they must never reinterpret the
-      // backend's label policy as permission to remove chart geometry.
-      // `label_hidden` declutters only the text label via
-      // `.label-policy-hidden`, while the box/line remains inspectable.
+      if (overlayFamily(overlay) === "order_positioning") {
+        const context = orderPositioningContext(overlay);
+        if (state.overlayView === "history") {
+          return context !== "current";
+        }
+        if (!state.showSavedOrderContext) {
+          return context === "current";
+        }
+      }
+      // Presets choose overlay families. Label policy only declutters text;
+      // it never changes the geometry retained inside the selected context.
       return true;
     }
 
@@ -8270,14 +8352,41 @@
     }
 
     function overlayLabel(overlay) {
+      if (overlayFamily(overlay) === "order_positioning") {
+        return orderAreaDisplayLabel(overlay);
+      }
       return overlayKindLabel(overlay) || overlayFamilyTitle(overlayFamily(overlay));
+    }
+
+    function prominentCurrentOrderLabelIds(overlays) {
+      const selectedByKind = new Map();
+      safeList(overlays).forEach(function (overlay) {
+        if (
+          overlayFamily(overlay) !== "order_positioning"
+          || orderPositioningContext(overlay) !== "current"
+        ) {
+          return;
+        }
+        const modeWeight = {
+          REFERENCE: 3,
+          PREVIEW: 2,
+          FROZEN: 1,
+        }[orderPositioningMode(overlay)] || 0;
+        const score = modeWeight * 1000 + clamp(overlay.confidence, 0, 1) * 100;
+        const kind = overlayKind(overlay);
+        const current = selectedByKind.get(kind);
+        if (!current || score > current.score) {
+          selectedByKind.set(kind, {id: overlaySemanticId(overlay, 0), score: score});
+        }
+      });
+      return new Set(Array.from(selectedByKind.values()).map(function (row) { return row.id; }));
     }
 
     function percent(value, total) {
       return total > 0 ? clamp(value / total * 100, 0, 100) : 0;
     }
 
-    function createOverlayButton(overlay, bounds, points) {
+    function createOverlayButton(overlay, bounds, points, prominentOrderLabel) {
       const button = document.createElement("button");
       const group = overlayGroup(overlay);
       const family = overlayFamily(overlay);
@@ -8286,6 +8395,9 @@
       const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
       const forecastStatus = effectiveForecastStatus(overlay);
       const id = overlaySemanticId(overlay, 0);
+      const orderContext = family === "order_positioning"
+        ? orderPositioningContext(overlay)
+        : "";
       // Diagnostic range heads may be much wider than the expected-close
       // trajectory. Keep the selectable forecast lane attached to the path,
       // not to hidden high/low extremes.
@@ -8329,7 +8441,9 @@
         // focus so it cannot cover the forecast path.
         + (forecastRole === "composite" || overlay.label_hidden === true
           ? " label-policy-hidden"
-          : "");
+          : "")
+        + (orderContext ? " order-context-" + orderContext : "")
+        + (prominentOrderLabel ? " order-label-primary" : "");
       button.dataset.overlayId = id;
       button.dataset.overlayFamilyId = family;
       button.dataset.overlayKind = overlayKind(overlay);
@@ -8340,8 +8454,26 @@
         if (positioningMode) {
           button.dataset.positioningMode = positioningMode;
         }
+        button.dataset.orderContext = orderContext;
+        const geometryRole = safeText(overlay.geometry_role, "").toUpperCase();
+        if (["FORWARD_REACTION_WINDOW", "SOURCE_ORIGIN"].includes(geometryRole)) {
+          button.dataset.geometryRole = geometryRole;
+        }
+        const reactionAnchor = safeText(overlay.reaction_window_anchor, "").toUpperCase();
+        if (reactionAnchor === "LATEST_COMPLETED_CANDLE") {
+          button.dataset.reactionWindowAnchor = reactionAnchor;
+        }
       }
-      button.setAttribute("aria-label", overlayLabel(overlay));
+      button.setAttribute(
+        "aria-label",
+        (orderContext === "current"
+          ? "Current reaction area · "
+          : orderContext === "saved"
+            ? "Saved starting area · "
+            : orderContext === "history"
+              ? "Earlier source area · "
+              : "") + overlayLabel(overlay),
+      );
       const leftPercent = percent(box[0], state.naturalWidth);
       const topPercent = percent(box[1], state.naturalHeight);
       const widthPercent = percent(visibleWidth, state.naturalWidth);
@@ -8600,6 +8732,40 @@
       });
     }
 
+    function orderOriginStudyOverlay(overlay) {
+      if (
+        overlayFamily(overlay) !== "order_positioning"
+        || overlayKind(overlay) === "plan_failure_area"
+        || safeText(overlay.geometry_role, "").toUpperCase() !== "FORWARD_REACTION_WINDOW"
+      ) {
+        return null;
+      }
+      const sourceBounds = safeList(overlay.source_bounds).map(Number);
+      const currentBounds = safeList(overlay.bounds).map(Number);
+      if (
+        sourceBounds.length !== 4
+        || !sourceBounds.every(Number.isFinite)
+        || sourceBounds[2] <= sourceBounds[0]
+        || sourceBounds[3] <= sourceBounds[1]
+        || (
+          currentBounds.length === 4
+          && sourceBounds.every(function (value, index) {
+            return Math.abs(value - currentBounds[index]) <= 0.000001;
+          })
+        )
+      ) {
+        return null;
+      }
+      return Object.assign({}, overlay, {
+        id: overlaySemanticId(overlay, 0) + "-source-origin",
+        bounds: sourceBounds,
+        group: "history",
+        lifecycle: "historical",
+        geometry_role: "SOURCE_ORIGIN",
+        label_hidden: true,
+      });
+    }
+
     function renderOverlays() {
       const focused = document.activeElement && document.activeElement.closest
         ? document.activeElement.closest(".surface-hotspot")
@@ -8623,7 +8789,22 @@
         return;
       }
 
-      const visible = state.overlays.filter(function (overlay) {
+      const displayOverlays = state.overlays.slice();
+      if (state.showSavedOrderContext || state.overlayView === "history") {
+        const seenOrderOrigins = new Set();
+        state.overlays.forEach(function (overlay) {
+          const origin = orderOriginStudyOverlay(overlay);
+          if (origin) {
+            const originSignature = overlayKind(origin) + ":" + safeList(origin.bounds).join(",");
+            if (seenOrderOrigins.has(originSignature)) {
+              return;
+            }
+            seenOrderOrigins.add(originSignature);
+            displayOverlays.push(origin);
+          }
+        });
+      }
+      const visible = displayOverlays.filter(function (overlay) {
         return !overlayIsDiagnostic(overlay)
           && episodeAllowsOverlay(overlay, state.payload)
           && state.activeFamilies.has(overlayFamily(overlay))
@@ -8632,6 +8813,7 @@
           && quickViewShowsOverlay(overlay)
           && overlayMatchesSurface(overlay);
       });
+      const prominentOrderLabels = prominentCurrentOrderLabelIds(visible);
       if (
         state.selectedOverlayId
         && !visible.some(function (overlay) { return safeText(overlay.id, "") === state.selectedOverlayId; })
@@ -8685,7 +8867,12 @@
         const button = ["band_90", "upper_90", "lower_90"].includes(forecastRole)
           || (forecastRole === "composite" && !hasDirectionalForecastPrimary(overlay))
           ? null
-          : createOverlayButton(overlay, bounds, points);
+          : createOverlayButton(
+              overlay,
+              bounds,
+              points,
+              prominentOrderLabels.has(overlaySemanticId(overlay, 0)),
+            );
         if (button) {
           hotspotCandidates.push(prepareRenderedNode(button, overlay, "hotspot"));
         }
@@ -8814,10 +9001,10 @@
         const kind = overlayKind(overlay);
         const positioningMode = orderPositioningMode(overlay);
         const explanations = {
-          lower_price_buy_area: "A conventional buy-limit location: this lower-price structural area may never be reached or filled.",
-          higher_price_sell_area: "A conventional sell-limit location: this higher-price structural area may never be reached or filled.",
-          upside_break_area: "A conventional buy-stop location: price must first prove the upward break area instead of being chased after the move.",
-          downside_break_area: "A conventional sell-stop location: price must first prove the downward break area instead of being chased after the move.",
+          lower_price_buy_area: "Wait for price to return to this lower buy-limit area; do not buy above it or chase a move that has already left.",
+          higher_price_sell_area: "Wait for price to rise into this higher sell-limit area; do not sell below it or chase a move that has already left.",
+          upside_break_area: "This buy-stop area exists only because a completed candle confirmed the setup. It matters only while still ahead of price; do not chase after price has crossed it.",
+          downside_break_area: "This sell-stop area exists only because a completed candle confirmed the setup. It matters only while still ahead of price; do not chase after price has crossed it.",
           plan_failure_area: "This protection location marks where the chart idea would fail; it is separate from an entry area.",
         };
         const statusLabels = {
@@ -8854,12 +9041,12 @@
           trackingEpisode(state.payload || state.pendingPayload || {}),
         );
         const referenceExplanation = activeEpisode
-          ? " This is a current chart reference for structural study. It may update with current evidence during active tracking. It is not a verified preview or a saved tracking area, and the saved tracking plan remains unchanged."
-          : " This is a current chart reference for structural study. It may update as the chart changes before Start Tracking. It is not a verified preview or a saved tracking area; Start Tracking saves only a verified plan.";
+          ? " This is the current reaction area, anchored from the latest completed candle. It may update with current evidence during active tracking; the saved starting plan remains unchanged."
+          : " This is the current reaction area, anchored from the latest completed candle. It may update as the chart changes; Start Tracking saves only a verified plan.";
         const modeExplanations = {
           REFERENCE: referenceExplanation,
-          PREVIEW: " This is a verified preview aligned to current chart evidence. It remains mutable until Start Tracking saves its geometry; it is not yet a saved tracking area.",
-          FROZEN: " This is a saved tracking area. It was anchored when tracking started and does not slide on later candles.",
+          PREVIEW: " This current plan area is aligned to present chart evidence. It remains mutable until Start Tracking saves its geometry.",
+          FROZEN: " This muted area is the saved starting plan. It remains fixed for before-and-after study and is not the current reaction area.",
         };
         const status = safeText(overlay.positioning_status, "WAITING").toUpperCase();
         const basisFallbacks = {
@@ -9299,6 +9486,7 @@
           frameMode: state.frameMode,
           surfaceMode: state.surfaceMode,
           overlayView: state.overlayView,
+          showSavedOrderContext: state.showSavedOrderContext,
           activeFamilies: Array.from(state.activeFamilies),
           disabledKinds: Array.from(state.disabledKinds),
           trackingPlanOpen: state.trackingPlanOpen,

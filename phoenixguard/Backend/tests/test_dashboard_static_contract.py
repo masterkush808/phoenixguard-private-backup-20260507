@@ -322,6 +322,14 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
     assert 'document.querySelectorAll("[data-overlay-kind-control]")' in text
     assert "toggleOverlayKind(button.dataset.overlayKindControl);" in text
     assert 'live: ["current_candles", "market_context", "council", "order_positioning"]' in text
+    assert 'history: ["history", "major_swings", "local_swings", "order_positioning"]' in text
+    assert "function orderPositioningContext(overlay)" in text
+    assert "function orderOriginStudyOverlay(overlay)" in text
+    assert '"FORWARD_REACTION_WINDOW"' in text
+    assert '"LATEST_COMPLETED_CANDLE"' in text
+    assert 'syncOverlayButtons(state.overlays, {loading: true});' in text
+    assert "Current reaction area · " in text
+    assert "Earlier source area · " in text
     assert "does not slide to chase price" in text
     assert "Evidence only; entry permission remains separate." in text
 

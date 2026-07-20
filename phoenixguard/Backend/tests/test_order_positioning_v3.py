@@ -75,6 +75,7 @@ def _session(
         "market": "EURUSD_OTC",
         "timeframe": "M5",
         "price_axis_orientation": "SCREEN_Y_INCREASES_DOWN",
+        "current_price_basis": "LATEST_COMPLETED_CANDLE",
         "display_band_norm": 0.006,
         "display_band_verified": True,
         "display_band_basis": "VERIFIED_MEDIAN_CANDLE_RANGE",
@@ -83,6 +84,13 @@ def _session(
         "current_price_verified": True,
         "timing_verified": True,
         "favorable_candles_since_origin": favorable_candles,
+        "reaction_window_verified": True,
+        "geometry_role": "FORWARD_REACTION_WINDOW",
+        "reaction_window_anchor": "LATEST_COMPLETED_CANDLE",
+        "reaction_window_anchor_id": "candle-d",
+        "reaction_window_origin_x_norm": 0.72,
+        "reaction_window_step_x_norm": 0.01,
+        "reaction_window_horizon_steps": 12,
         "overlay_objects": overlays or [],
         "reprojection_anchors": [
             {"anchor_id": "candle-a", "x_norm": 0.20, "y_norm": 0.35},
@@ -197,9 +205,13 @@ def test_buy_builds_pullback_breakout_and_distinct_protective_stop_areas() -> No
     assert len(stop_entry) == 1
     assert len(protection) == 2
     assert limit[0]["order_kind"] == "BUY_LIMIT"
-    assert limit[0]["bounds"] == [0.2, 0.533333, 0.55, 0.633333]
+    assert limit[0]["bounds"] == [0.72, 0.533333, 0.84, 0.633333]
+    assert limit[0]["source_bounds"] == [0.2, 0.533333, 0.55, 0.633333]
+    assert limit[0]["geometry_role"] == "FORWARD_REACTION_WINDOW"
+    assert limit[0]["reaction_window_anchor"] == "LATEST_COMPLETED_CANDLE"
     assert stop_entry[0]["order_kind"] == "BUY_STOP"
-    assert stop_entry[0]["bounds"] == [0.2, 0.160667, 0.55, 0.166667]
+    assert stop_entry[0]["bounds"] == [0.72, 0.160667, 0.84, 0.166667]
+    assert stop_entry[0]["source_bounds"] == [0.2, 0.166667, 0.55, 0.266667]
     assert {zone["order_kind"] for zone in protection} == {"SELL_STOP"}
     assert all(zone["protected_entry_zone_id"] for zone in protection)
 
@@ -256,6 +268,20 @@ def test_unverified_price_or_anchor_fails_closed_without_any_zone() -> None:
     assert anchor_blocked["rejected_sources"] == [
         {"source_key": "demand-7-9", "reason": "ANCHOR_EVIDENCE_INVALID"}
     ]
+
+
+def test_reaction_window_rejects_a_claimed_horizon_that_would_be_truncated() -> None:
+    candidate = build_order_positioning_candidates_v3(
+        _session(
+            overlays=[_demand()],
+            reaction_window_origin_x_norm=0.90,
+            reaction_window_step_x_norm=0.02,
+        )
+    )
+
+    assert candidate["status"] == "BLOCKED"
+    assert candidate["candidate_zones"] == []
+    assert candidate["blockers"] == ["REACTION_WINDOW_HORIZON_TRUNCATED"]
 
 
 def test_stale_transform_and_source_lock_are_rejected() -> None:
@@ -405,7 +431,81 @@ def test_overlapping_order_routes_keep_only_the_strongest_verified_source() -> N
     assert len(_zones_by_intent(candidate, "PROTECTIVE_STOP")) == 1
     assert {
         row["reason"] for row in candidate["rejected_sources"]
-    } == {"CONFLICTING_ORDER_AREA_OVERLAP"}
+    } == {"VALID_CONTEXT_NOT_NEAREST_ENTRY_LIMIT"}
+
+
+def test_non_overlapping_same_intent_selects_nearest_route_before_protection() -> None:
+    nearest = _overlay(
+        "DEMAND_ZONE",
+        "BUY",
+        [300.0, 390.0, 650.0, 430.0],
+        source_key="nearest-current-demand",
+        anchor_candle_indices=[65, 66],
+        anchor_quality={
+            "score": 0.82,
+            "has_candle_anchor": True,
+            "has_sequence_anchor": True,
+            "inside_plot_area": True,
+            "matches_symbol_timeframe": True,
+            "chart_transform_valid": True,
+        },
+    )
+    stronger_but_deeper = _overlay(
+        "DEMAND_ZONE",
+        "BUY",
+        [300.0, 520.0, 650.0, 580.0],
+        source_key="stronger-deep-context",
+        anchor_candle_indices=[60, 61],
+        confidence=0.99,
+        truth_score=0.99,
+        anchor_quality={
+            "score": 0.99,
+            "has_candle_anchor": True,
+            "has_sequence_anchor": True,
+            "inside_plot_area": True,
+            "matches_symbol_timeframe": True,
+            "chart_transform_valid": True,
+        },
+    )
+
+    candidate = build_order_positioning_candidates_v3(
+        _session(overlays=[stronger_but_deeper, nearest])
+    )
+    entries = _zones_by_intent(candidate, "ENTRY_LIMIT")
+    protection = _zones_by_intent(candidate, "PROTECTIVE_STOP")
+
+    assert len(entries) == 1
+    assert len(protection) == 1
+    assert entries[0]["source_key"] == "nearest-current-demand"
+    assert entries[0]["bounds"] == [0.72, 0.483333, 0.84, 0.55]
+    assert entries[0]["source_bounds"] == [0.2, 0.483333, 0.55, 0.55]
+    assert protection[0]["protected_entry_zone_id"] == entries[0]["zone_id"]
+    assert {
+        (row["source_key"], row["reason"])
+        for row in candidate["rejected_sources"]
+    } == {
+        ("stronger-deep-context", "VALID_CONTEXT_NOT_NEAREST_ENTRY_LIMIT")
+    }
+
+
+def test_stop_entry_requires_a_named_closed_confirmation_not_only_an_index() -> None:
+    supply = _supply()
+    evidence = dict(supply["confirmation_evidence"])
+    evidence.pop("closed_candle_key")
+    evidence["closed_candle_index"] = 66
+    supply["confirmation_evidence"] = evidence
+
+    candidate = build_order_positioning_candidates_v3(
+        _session(overlays=[_demand(), supply])
+    )
+
+    assert _zones_by_intent(candidate, "ENTRY_STOP") == []
+    assert {
+        (row["source_key"], row["reason"])
+        for row in candidate["rejected_sources"]
+    } == {
+        ("supply-7-9", "STOP_ENTRY_CONFIRMATION_CANDLE_ID_MISSING")
+    }
 
 
 def test_global_reprojection_needs_three_consistent_anchors_and_moves_one_plane() -> None:

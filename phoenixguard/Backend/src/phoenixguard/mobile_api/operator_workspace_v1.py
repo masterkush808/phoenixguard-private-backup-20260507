@@ -1825,6 +1825,25 @@ def _normalized_rectangle(value: object) -> list[float]:
     return [round(x0, 6), round(y0, 6), round(x1, 6), round(y1, 6)]
 
 
+def _strict_normalized_rectangle(value: object) -> list[float]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return []
+    if len(cast(Sequence[object], value)) != 4:
+        return []
+    bounds = _bounds(cast(Sequence[object], value))
+    if (
+        len(bounds) != 4
+        or any(number < 0.0 or number > 1.0 for number in bounds)
+        or bounds[2] <= bounds[0]
+        or bounds[3] <= bounds[1]
+    ):
+        return []
+    return bounds
+
+
 def _image_dimensions(*candidates: object) -> tuple[float, float] | None:
     for value in candidates:
         candidate = _mapping(value)
@@ -2489,7 +2508,8 @@ _PUBLIC_POSITIONING_KINDS = (
     "downside_break_area",
     "plan_failure_area",
 )
-_ORDER_POSITIONING_BOUNDS_TOLERANCE = 0.002
+_POSITIONING_GEOMETRY_ROLE = "FORWARD_REACTION_WINDOW"
+_POSITIONING_REACTION_WINDOW_ANCHOR = "LATEST_COMPLETED_CANDLE"
 
 
 def _positioning_overlay_type(zone: Mapping[str, Any]) -> str:
@@ -2535,6 +2555,91 @@ def _positioning_public_basis(
     }.get(overlay_type, "Verified chart structure")
 
 
+def _positioning_geometry_contract(
+    row: Mapping[str, Any],
+    *,
+    required: bool,
+) -> dict[str, str] | None:
+    """Validate the only public current-reaction geometry provenance fields."""
+
+    geometry_role = _text(row.get("geometry_role"), "", limit=40).upper()
+    reaction_window_anchor = _text(
+        row.get("reaction_window_anchor"),
+        "",
+        limit=40,
+    ).upper()
+    if not geometry_role and not reaction_window_anchor:
+        return None if required else {}
+    if (
+        geometry_role != _POSITIONING_GEOMETRY_ROLE
+        or reaction_window_anchor != _POSITIONING_REACTION_WINDOW_ANCHOR
+    ):
+        return None
+    return {
+        "geometry_role": geometry_role,
+        "reaction_window_anchor": reaction_window_anchor,
+    }
+
+
+def _positioning_source_bounds_contract(
+    row: Mapping[str, Any],
+    geometry_contract: Mapping[str, str],
+) -> dict[str, list[float]] | None:
+    """Expose an origin only beside a proven forward-reaction rectangle."""
+
+    if "source_bounds" not in row or row.get("source_bounds") is None:
+        return {}
+    if not geometry_contract:
+        # Legacy frozen plans predate the forward-window contract. Keep their
+        # live reprojected area, but do not expose an origin that cannot be
+        # distinguished safely from the current reaction rectangle.
+        return {}
+    source_bounds = _strict_normalized_rectangle(row.get("source_bounds"))
+    if (
+        not source_bounds
+        or geometry_contract.get("geometry_role")
+        != _POSITIONING_GEOMETRY_ROLE
+        or geometry_contract.get("reaction_window_anchor")
+        != _POSITIONING_REACTION_WINDOW_ANCHOR
+    ):
+        return None
+    return {"source_bounds": source_bounds}
+
+
+def _bounded_positioning_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Keep one primary row per public kind and a paired protective boundary."""
+
+    selected: list[Mapping[str, Any]] = []
+    seen_types: set[str] = set()
+    for row in rows:
+        overlay_type = _text(row.get("type"), "", limit=48).upper()
+        if overlay_type not in _ORDER_POSITIONING_TYPES or overlay_type in seen_types:
+            continue
+        seen_types.add(overlay_type)
+        selected.append(row)
+
+    entry_sides = {
+        _side(row.get("side"))
+        for row in selected
+        if _text(row.get("type"), "", limit=48).upper()
+        != "PROTECTIVE_STOP_ZONE"
+    }
+    output: list[Mapping[str, Any]] = []
+    for row in selected:
+        if _text(row.get("type"), "", limit=48).upper() == "PROTECTIVE_STOP_ZONE":
+            protective_order_side = _side(row.get("side"))
+            protected_thesis_side = {
+                "BUY": "SELL",
+                "SELL": "BUY",
+            }.get(protective_order_side, "")
+            if not protected_thesis_side or protected_thesis_side not in entry_sides:
+                continue
+        output.append(row)
+    return output
+
+
 def _current_positioning_overlay_row(
     row: Mapping[str, Any],
     *,
@@ -2543,12 +2648,24 @@ def _current_positioning_overlay_row(
     mode: str,
 ) -> Mapping[str, Any] | None:
     overlay_type = _positioning_overlay_type(row)
+    # The producer's `bounds` is the current forward reaction window. Its
+    # immutable `source_bounds` is separate optional history evidence: never
+    # substitute it for the live rectangle, and publish it only after strict
+    # normalized validation beside the named forward-window contract.
     bounds = _normalized_rectangle(
-        row.get("normalized_bounds") or row.get("bounds")
+        row.get("bounds") or row.get("normalized_bounds")
+    )
+    geometry_contract = _positioning_geometry_contract(row, required=True)
+    source_bounds_contract = (
+        _positioning_source_bounds_contract(row, geometry_contract)
+        if geometry_contract is not None
+        else None
     )
     if (
         overlay_type not in _ORDER_POSITIONING_TYPES
         or len(bounds) != 4
+        or geometry_contract is None
+        or source_bounds_contract is None
         or (mode == "REFERENCE" and overlay_type == "PROTECTIVE_STOP_ZONE")
     ):
         return None
@@ -2578,7 +2695,7 @@ def _current_positioning_overlay_row(
         "role": f"current_order_area_{mode.lower()}",
         "side": _side(row.get("side")),
         "label": _OVERLAY_PRESENTATION[overlay_type][1],
-        "label_hidden": True,
+        "label_hidden": False,
         "bounds": bounds,
         "coordinate_space": "CHART_NORMALIZED",
         "coordinate_units": "normalized",
@@ -2602,6 +2719,8 @@ def _current_positioning_overlay_row(
         "positioning_mode": mode,
         "immutable_geometry": False,
         "evidence_only": True,
+        **geometry_contract,
+        **source_bounds_contract,
     }
 
 
@@ -2644,7 +2763,7 @@ def _idle_order_positioning_rows(
         )
         for index, zone in enumerate(_rows(candidate.get("candidate_zones"))[:24])
     )
-    return [row for row in rows if row is not None]
+    return _bounded_positioning_rows([row for row in rows if row is not None])
 
 
 def _current_order_reference_rows(
@@ -2702,54 +2821,26 @@ def _current_order_reference_rows(
         )
         if public_row is not None:
             output.append(public_row)
-    return output
+    return _bounded_positioning_rows(output)
 
 
 def _merge_order_positioning_rows(
     primary_rows: Sequence[Mapping[str, Any]],
     references: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
-    """Prefer preview/frozen rows and retain only distinct current references."""
+    """Expose one row per kind, preferring frozen/preview over references."""
 
-    primary_geometry: list[tuple[str, tuple[float, ...]]] = []
-    for row in primary_rows:
-        overlay_type = _text(row.get("type"), "", limit=48).upper()
-        bounds = tuple(_normalized_rectangle(row.get("bounds")))
-        if len(bounds) == 4:
-            primary_geometry.append((overlay_type, bounds))
-    output = list(primary_rows)
-    seen_references: set[tuple[str, tuple[float, ...]]] = set()
+    output = _bounded_positioning_rows(primary_rows)
+    selected_types = {
+        _text(row.get("type"), "", limit=48).upper() for row in output
+    }
     for row in references:
         overlay_type = _text(row.get("type"), "", limit=48).upper()
-        bounds = tuple(_normalized_rectangle(row.get("bounds")))
-        if len(bounds) != 4:
+        if overlay_type not in _ORDER_POSITIONING_TYPES or overlay_type in selected_types:
             continue
-        signature = (overlay_type, bounds)
-        overlaps_primary = any(
-            bounds == primary_bounds
-            or (
-                overlay_type == primary_type
-                and all(
-                    math.isclose(
-                        current,
-                        primary,
-                        rel_tol=0.0,
-                        abs_tol=_ORDER_POSITIONING_BOUNDS_TOLERANCE,
-                    )
-                    for current, primary in zip(
-                        bounds,
-                        primary_bounds,
-                        strict=True,
-                    )
-                )
-            )
-            for primary_type, primary_bounds in primary_geometry
-        )
-        if overlaps_primary or signature in seen_references:
-            continue
-        seen_references.add(signature)
+        selected_types.add(overlay_type)
         output.append(row)
-    return output
+    return _bounded_positioning_rows(output)
 
 
 def _episode_order_positioning_rows(
@@ -2870,6 +2961,15 @@ def _episode_order_positioning_rows(
             prefix="order_area",
         )
         label = _OVERLAY_PRESENTATION[overlay_type][1]
+        geometry_contract = _positioning_geometry_contract(zone, required=False)
+        if geometry_contract is None:
+            return []
+        source_bounds_contract = _positioning_source_bounds_contract(
+            zone,
+            geometry_contract,
+        )
+        if source_bounds_contract is None:
+            return []
         output.append(
             {
                 "overlay_id": public_id,
@@ -2880,7 +2980,7 @@ def _episode_order_positioning_rows(
                 "role": "episode_frozen_order_area",
                 "side": _side(zone.get("side")),
                 "label": label,
-                "label_hidden": True,
+                "label_hidden": False,
                 "bounds": [left, top, right, bottom],
                 "coordinate_space": "CHART_NORMALIZED",
                 "coordinate_units": "normalized",
@@ -2906,9 +3006,11 @@ def _episode_order_positioning_rows(
                     zone.get("origin_frame_id"),
                     anchor.get("frame_id"),
                 ),
+                **geometry_contract,
+                **source_bounds_contract,
             }
         )
-    return output
+    return _bounded_positioning_rows(output)
 
 
 def _forecast_lane_authorization_evidence(
@@ -3508,10 +3610,21 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             immutable_geometry = _explicit_bool(
                 overlay.get("immutable_geometry")
             )
+            geometry_contract = _positioning_geometry_contract(
+                overlay,
+                required=positioning_mode != "FROZEN",
+            )
+            source_bounds_contract = (
+                _positioning_source_bounds_contract(overlay, geometry_contract)
+                if geometry_contract is not None
+                else None
+            )
             if (
                 positioning_mode not in {"PREVIEW", "FROZEN", "REFERENCE"}
                 or immutable_geometry is None
                 or (positioning_mode == "FROZEN") != immutable_geometry
+                or geometry_contract is None
+                or source_bounds_contract is None
                 or (
                     positioning_mode == "REFERENCE"
                     and overlay.get("evidence_only") is not True
@@ -3533,6 +3646,8 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                     "positioning_mode": positioning_mode,
                     "immutable_geometry": immutable_geometry,
                     "evidence_only": True,
+                    **geometry_contract,
+                    **source_bounds_contract,
                 }
             )
         if scene_forecast_overlay:

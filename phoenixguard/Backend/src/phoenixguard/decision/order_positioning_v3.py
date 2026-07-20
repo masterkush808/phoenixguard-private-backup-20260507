@@ -46,6 +46,9 @@ _MIN_REPROJECTION_ANCHORS = 3
 _MAX_REPROJECTION_RMSE = 0.0125
 _MAX_REPROJECTION_RESIDUAL = 0.03
 _MAX_DISPLAY_BAND_NORM = 0.05
+_REACTION_WINDOW_GEOMETRY_ROLE = "FORWARD_REACTION_WINDOW"
+_REACTION_WINDOW_ANCHOR = "LATEST_COMPLETED_CANDLE"
+_MAX_REACTION_STEP_NORM = 0.05
 _CONFIRMED_STATES = {
     "CONFIRMED",
     "CLOSED_CONFIRMED",
@@ -319,12 +322,7 @@ def _stop_confirmation_reason(
         or overlay.get("confirmation_closed_candle_key")
         or overlay.get("confirmed_candle_key")
     )
-    closed_index = _integer(
-        evidence.get("closed_candle_index")
-        if evidence.get("closed_candle_index") is not None
-        else overlay.get("confirmation_closed_candle_index")
-    )
-    if not closed_key and (closed_index is None or closed_index < 0):
+    if not closed_key:
         return "STOP_ENTRY_CONFIRMATION_CANDLE_ID_MISSING"
     confirmation_side = _upper(
         evidence.get("side")
@@ -346,6 +344,16 @@ def _stop_confirmation_reason(
     if not tokens.intersection(_STOP_CONFIRMATION_EVENTS):
         return "STOP_ENTRY_STRUCTURE_EVENT_MISSING"
     return ""
+
+
+def order_positioning_stop_confirmation_reason_v3(
+    overlay: Mapping[str, Any],
+    *,
+    thesis_side: str,
+) -> str:
+    """Return the fail-closed reason for an observational stop-entry source."""
+
+    return _stop_confirmation_reason(overlay, thesis_side=_upper(thesis_side))
 
 
 def _positive_area_overlap(left: Any, right: Any) -> bool:
@@ -375,6 +383,54 @@ def _timing_state(y: float, bounds: Sequence[float]) -> str:
     return "WAITING_EARLY"
 
 
+def _reaction_window_contract(
+    session: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    geometry_role = _upper(session.get("geometry_role"))
+    reaction_window_anchor = _upper(session.get("reaction_window_anchor"))
+    anchor_id = _text(session.get("reaction_window_anchor_id"))
+    origin_x = _finite(session.get("reaction_window_origin_x_norm"))
+    step_x = _finite(session.get("reaction_window_step_x_norm"))
+    horizon_steps = _integer(session.get("reaction_window_horizon_steps"))
+    if session.get("reaction_window_verified") is not True:
+        return {}, "REACTION_WINDOW_UNVERIFIED"
+    if geometry_role != _REACTION_WINDOW_GEOMETRY_ROLE:
+        return {}, "REACTION_WINDOW_GEOMETRY_ROLE_INVALID"
+    if reaction_window_anchor != _REACTION_WINDOW_ANCHOR or not anchor_id:
+        return {}, "REACTION_WINDOW_ANCHOR_UNPROVEN"
+    if (
+        origin_x is None
+        or step_x is None
+        or horizon_steps != ORDER_POSITIONING_HORIZON_STEPS
+        or not 0.0 <= origin_x < 1.0
+        or not 0.0 < step_x <= _MAX_REACTION_STEP_NORM
+    ):
+        return {}, "REACTION_WINDOW_GEOMETRY_INVALID"
+    end_x = origin_x + step_x * horizon_steps
+    if end_x > 1.0 + 1e-9:
+        return {}, "REACTION_WINDOW_HORIZON_TRUNCATED"
+    end_x = min(1.0, end_x)
+    if end_x - origin_x <= 1e-6:
+        return {}, "REACTION_WINDOW_HAS_NO_FORWARD_ROOM"
+    return (
+        {
+            "reaction_window_verified": True,
+            "geometry_role": _REACTION_WINDOW_GEOMETRY_ROLE,
+            "reaction_window_anchor": _REACTION_WINDOW_ANCHOR,
+            "anchor_id": anchor_id,
+            "reaction_window_anchor_id": anchor_id,
+            "origin_x_norm": round(origin_x, 6),
+            "reaction_window_origin_x_norm": round(origin_x, 6),
+            "step_x_norm": round(step_x, 6),
+            "reaction_window_step_x_norm": round(step_x, 6),
+            "horizon_steps": horizon_steps,
+            "reaction_window_horizon_steps": horizon_steps,
+            "x_bounds": [round(origin_x, 6), round(end_x, 6)],
+        },
+        "",
+    )
+
+
 def _entry_is_late(
     *,
     intent: OrderIntentV3,
@@ -401,26 +457,30 @@ def _entry_bounds(
     thesis_side: str,
     source_bounds: Sequence[float],
     display_band_norm: float,
+    reaction_x_bounds: Sequence[float],
 ) -> list[float]:
+    left, right = float(reaction_x_bounds[0]), float(reaction_x_bounds[1])
     if intent == "ENTRY_LIMIT":
-        return list(source_bounds)
+        return [left, float(source_bounds[1]), right, float(source_bounds[3])]
     if thesis_side == "BUY":
         top = max(0.0, source_bounds[1] - display_band_norm)
-        return [source_bounds[0], top, source_bounds[2], source_bounds[1]]
+        return [left, top, right, source_bounds[1]]
     bottom = min(1.0, source_bounds[3] + display_band_norm)
-    return [source_bounds[0], source_bounds[3], source_bounds[2], bottom]
+    return [left, source_bounds[3], right, bottom]
 
 
 def _protective_bounds(
     thesis_side: str,
     source_bounds: Sequence[float],
     display_band_norm: float,
+    reaction_x_bounds: Sequence[float],
 ) -> list[float]:
+    left, right = float(reaction_x_bounds[0]), float(reaction_x_bounds[1])
     if thesis_side == "BUY":
         bottom = min(1.0, source_bounds[3] + display_band_norm)
-        return [source_bounds[0], source_bounds[3], source_bounds[2], bottom]
+        return [left, source_bounds[3], right, bottom]
     top = max(0.0, source_bounds[1] - display_band_norm)
-    return [source_bounds[0], top, source_bounds[2], source_bounds[1]]
+    return [left, top, right, source_bounds[1]]
 
 
 def _order_kind(intent: OrderIntentV3, thesis_side: str) -> OrderKindV3:
@@ -606,6 +666,7 @@ def _zone_payload(
     thesis_side: str,
     intent: OrderIntentV3,
     display_band_norm: float,
+    reaction_window: Mapping[str, Any],
 ) -> dict[str, Any]:
     order_kind = _order_kind(intent, thesis_side)
     source_key = _source_key(overlay)
@@ -614,6 +675,7 @@ def _zone_payload(
         thesis_side,
         normalized_source,
         display_band_norm,
+        cast(Sequence[float], reaction_window["x_bounds"]),
     )
     zone_id = _zone_id(
         sequence_id=sequence_id,
@@ -632,6 +694,8 @@ def _zone_payload(
         "route": route,
         "bounds": bounds,
         "source_bounds": list(normalized_source),
+        "geometry_role": _REACTION_WINDOW_GEOMETRY_ROLE,
+        "reaction_window_anchor": _REACTION_WINDOW_ANCHOR,
         "chart_bounds": [0.0, 0.0, 1.0, 1.0],
         "coordinate_mode": _NORMALIZED_MODE,
         "boundary_y_norm": bounds[1] if thesis_side == "BUY" else bounds[3],
@@ -649,6 +713,17 @@ def _zone_payload(
         "source_truth_score": _finite(overlay.get("truth_score")),
         "source_confidence": _finite(overlay.get("confidence")),
         "source_anchor_quality": _quality_score(overlay),
+        "source_latest_anchor_index": max(
+            (
+                index
+                for value in _sequence(
+                    overlay.get("anchor_candle_indices")
+                    or overlay.get("anchor_candles")
+                )
+                if (index := _integer(value)) is not None and index >= 0
+            ),
+            default=-1,
+        ),
         "status": "CANDIDATE",
         "status_reason": "verified structural positioning area",
         "last_updated_step": 0,
@@ -663,6 +738,7 @@ def _protective_zone(
     sequence_id: str,
     thesis_side: str,
     display_band_norm: float,
+    reaction_window: Mapping[str, Any],
 ) -> dict[str, Any]:
     intent: OrderIntentV3 = "PROTECTIVE_STOP"
     order_kind = _order_kind(intent, thesis_side)
@@ -676,6 +752,7 @@ def _protective_zone(
         thesis_side,
         normalized_source,
         display_band_norm,
+        cast(Sequence[float], reaction_window["x_bounds"]),
     )
     return {
         "zone_id": zone_id,
@@ -687,6 +764,8 @@ def _protective_zone(
         "protected_entry_zone_id": entry_id,
         "bounds": bounds,
         "source_bounds": list(normalized_source),
+        "geometry_role": _REACTION_WINDOW_GEOMETRY_ROLE,
+        "reaction_window_anchor": _REACTION_WINDOW_ANCHOR,
         "chart_bounds": [0.0, 0.0, 1.0, 1.0],
         "coordinate_mode": _NORMALIZED_MODE,
         "boundary_y_norm": bounds[3] if thesis_side == "BUY" else bounds[1],
@@ -704,6 +783,17 @@ def _protective_zone(
         "source_truth_score": _finite(overlay.get("truth_score")),
         "source_confidence": _finite(overlay.get("confidence")),
         "source_anchor_quality": _quality_score(overlay),
+        "source_latest_anchor_index": max(
+            (
+                index
+                for value in _sequence(
+                    overlay.get("anchor_candle_indices")
+                    or overlay.get("anchor_candles")
+                )
+                if (index := _integer(value)) is not None and index >= 0
+            ),
+            default=-1,
+        ),
         "status": "CANDIDATE",
         "status_reason": "protective stop beyond verified structural boundary",
         "last_updated_step": 0,
@@ -749,7 +839,8 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
     ``sequence_id``, ``chart_transform_id``, ``broker_source_lock_id``,
     ``coordinate_mode``, ``chart_bounds``, ``current_price_y``,
     ``current_price_verified``, ``timing_verified``,
-    ``favorable_candles_since_origin``, and canonical V3 overlay objects.
+    ``favorable_candles_since_origin``, a named latest-completed-candle
+    reaction window, and canonical V3 overlay objects.
 
     The function deliberately does not consume trigger, target, sniper, model
     path, or raw-detection geometry. Missing proof returns ``BLOCKED`` with no
@@ -786,6 +877,12 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
         blockers.append("TIMEFRAME_IDENTITY_MISSING")
     if _upper(session.get("price_axis_orientation")) != "SCREEN_Y_INCREASES_DOWN":
         blockers.append("PRICE_AXIS_ORIENTATION_UNPROVEN")
+    if _upper(session.get("current_price_basis")) != _REACTION_WINDOW_ANCHOR:
+        blockers.append("BASELINE_PRICE_ANCHOR_UNPROVEN")
+
+    reaction_window, reaction_window_reason = _reaction_window_contract(session)
+    if reaction_window_reason:
+        blockers.append(reaction_window_reason)
 
     display_band_norm = _finite(session.get("display_band_norm"))
     if (
@@ -827,7 +924,9 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
     if current_price_y is None or not chart_bounds or display_band_norm is None:
         return _candidate_blocked(["GEOMETRY_UNAVAILABLE"], side=side)
     current_y_norm = _normalize_y(current_price_y, chart_bounds)
-    route_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    route_candidates: list[
+        tuple[dict[str, Any], Mapping[str, Any], list[float]]
+    ] = []
     rejected: list[dict[str, str]] = []
 
     source_rows = sorted(
@@ -912,36 +1011,61 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
                 thesis_side=side,
                 intent=intent,
                 display_band_norm=display_band_norm,
+                reaction_window=reaction_window,
             )
-            protective = _protective_zone(
-                entry_zone=entry,
-                overlay=overlay,
-                normalized_source=normalized_source,
-                sequence_id=sequence_id,
-                thesis_side=side,
-                display_band_norm=display_band_norm,
-            )
-            if _box(entry.get("bounds")) and _box(protective.get("bounds")):
-                route_candidates.append((entry, protective))
+            if _box(entry.get("bounds")):
+                route_candidates.append((entry, overlay, normalized_source))
 
-    route_candidates.sort(
-        key=lambda route: (
-            -(_finite(route[0].get("source_anchor_quality")) or 0.0),
-            -(_finite(route[0].get("source_truth_score")) or 0.0),
-            -(_finite(route[0].get("source_confidence")) or 0.0),
-            0 if _upper(route[0].get("intent")) == "ENTRY_LIMIT" else 1,
-            _text(route[0].get("source_key")),
-            _text(route[0].get("zone_id")),
-        )
-    )
-    zones: list[dict[str, Any]] = []
-    emitted_zone_ids: set[str] = set()
-    for entry, protective in route_candidates:
-        route_zone_ids = {
+    def route_rank(
+        route: tuple[dict[str, Any], Mapping[str, Any], list[float]],
+    ) -> tuple[float, int, float, float, float, str, str]:
+        entry = route[0]
+        latest_anchor_index = _finite(entry.get("source_latest_anchor_index"))
+        return (
+            _distance_to_box(current_y_norm, _box(entry.get("bounds"))),
+            -int(latest_anchor_index if latest_anchor_index is not None else -1),
+            -(_finite(entry.get("source_anchor_quality")) or 0.0),
+            -(_finite(entry.get("source_truth_score")) or 0.0),
+            -(_finite(entry.get("source_confidence")) or 0.0),
+            _text(entry.get("source_key")),
             _text(entry.get("zone_id")),
-            _text(protective.get("zone_id")),
-        }
-        if route_zone_ids & emitted_zone_ids:
+        )
+
+    selected_routes: list[
+        tuple[dict[str, Any], Mapping[str, Any], list[float]]
+    ] = []
+    for intent in ("ENTRY_LIMIT", "ENTRY_STOP"):
+        matching = sorted(
+            (
+                route
+                for route in route_candidates
+                if _upper(route[0].get("intent")) == intent
+            ),
+            key=route_rank,
+        )
+        if not matching:
+            continue
+        selected_routes.append(matching[0])
+        for entry, _, _ in matching[1:]:
+            rejected.append(
+                {
+                    "source_key": _text(entry.get("source_key")),
+                    "reason": f"VALID_CONTEXT_NOT_NEAREST_{intent}",
+                }
+            )
+
+    zones: list[dict[str, Any]] = []
+    for entry, overlay, normalized_source in selected_routes:
+        protective = _protective_zone(
+            entry_zone=entry,
+            overlay=overlay,
+            normalized_source=normalized_source,
+            sequence_id=sequence_id,
+            thesis_side=side,
+            display_band_norm=display_band_norm,
+            reaction_window=reaction_window,
+        )
+        if not _box(protective.get("bounds")):
             continue
         if any(
             _positive_area_overlap(candidate.get("bounds"), accepted.get("bounds"))
@@ -956,7 +1080,6 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
             )
             continue
         zones.extend((entry, protective))
-        emitted_zone_ids.update(route_zone_ids)
 
     intent_order = {"ENTRY_LIMIT": 0, "ENTRY_STOP": 1, "PROTECTIVE_STOP": 2}
     zones.sort(
@@ -996,6 +1119,11 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
         "display_band_basis": _text(session.get("display_band_basis")),
         "chart_bounds": [0.0, 0.0, 1.0, 1.0],
         "current_price_y_norm": current_y_norm,
+        "baseline_price_y_norm": current_y_norm,
+        "current_price_basis": _REACTION_WINDOW_ANCHOR,
+        "geometry_role": _REACTION_WINDOW_GEOMETRY_ROLE,
+        "reaction_window_anchor": _REACTION_WINDOW_ANCHOR,
+        "reaction_window": reaction_window,
         "horizon_steps": ORDER_POSITIONING_HORIZON_STEPS,
         "timing": {
             "verified": True,
@@ -1434,5 +1562,6 @@ __all__ = [
     "inverse_reproject_order_positioning_y_v3",
     "order_positioning_plan_anchors_valid_v3",
     "order_positioning_plan_geometry_valid_v3",
+    "order_positioning_stop_confirmation_reason_v3",
     "reproject_order_positioning_bounds_v3",
 ]

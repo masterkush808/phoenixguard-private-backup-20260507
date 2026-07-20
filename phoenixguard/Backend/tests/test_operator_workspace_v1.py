@@ -155,6 +155,9 @@ class _OverlayView(TypedDict):
     positioning_mode: NotRequired[str]
     immutable_geometry: NotRequired[bool]
     evidence_only: NotRequired[bool]
+    geometry_role: NotRequired[str]
+    reaction_window_anchor: NotRequired[str]
+    source_bounds: NotRequired[list[float]]
 
 
 class _HistoryView(TypedDict):
@@ -396,6 +399,23 @@ def _ready_positioning_preview_candidate(
             "source_confidence": 0.91,
         },
     ]
+    for zone in zones:
+        bounds = cast(list[float], zone["bounds"])
+        zone.update(
+            {
+                "source_bounds": [0.12, bounds[1], 0.30, bounds[3]],
+                "geometry_role": "FORWARD_REACTION_WINDOW",
+                "reaction_window_anchor": "LATEST_COMPLETED_CANDLE",
+            }
+        )
+    zones.append(
+        {
+            **zones[0],
+            "zone_id": "order-zone-private-buy-limit-secondary",
+            "bounds": [0.66, 0.64, 0.88, 0.70],
+            "source_confidence": 0.99,
+        }
+    )
     return {
         "schema_version": "PG_ORDER_POSITIONING_CANDIDATES_V3",
         "status": "READY",
@@ -461,6 +481,22 @@ def _ready_order_reference_map(
             "execution_authority": "NONE",
         },
     ]
+    for row in rows:
+        bounds = cast(list[float], row["bounds"])
+        row.update(
+            {
+                "source_bounds": [0.10, bounds[1], 0.28, bounds[3]],
+                "geometry_role": "FORWARD_REACTION_WINDOW",
+                "reaction_window_anchor": "LATEST_COMPLETED_CANDLE",
+            }
+        )
+    rows.append(
+        {
+            **rows[1],
+            "reference_id": "private-reference-sell-limit-secondary",
+            "bounds": [0.64, 0.18, 0.84, 0.24],
+        }
+    )
     return {
         "schema_version": "PG_ORDER_REFERENCE_MAP_V1",
         "status": "READY",
@@ -672,20 +708,33 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
         "downside_break_area": [0.58, 0.72, 0.79, 0.76],
         "plan_failure_area": [0.56, 0.68, 0.78, 0.70],
     }
-    assert {row["kind"]: row["bounds"] for row in reference_rows} == {
-        "lower_price_buy_area": [0.50, 0.64, 0.74, 0.70],
-        "higher_price_sell_area": [0.52, 0.22, 0.76, 0.28],
-        "upside_break_area": [0.61, 0.16, 0.79, 0.20],
-        "downside_break_area": [0.59, 0.74, 0.80, 0.78],
-    }
-    # Same-kind references survive when their chart location is materially
-    # different. Near-identical and exact shared bounds are collapsed.
-    assert len(positioning_rows) == 9
-    assert len(reference_rows) == 4
-    assert all(row.get("positioning_status") == "WAITING" for row in reference_rows)
+    # A verified preview owns its public kind. Current references fill only a
+    # genuinely missing kind instead of creating a second visible rectangle.
+    assert reference_rows == []
+    assert len(positioning_rows) == 5
     assert all(row.get("immutable_geometry") is False for row in positioning_rows)
     assert all(row.get("evidence_only") is True for row in positioning_rows)
     assert all(row["coordinate_units"] == "normalized" for row in positioning_rows)
+    assert all(row["lifecycle"] == "current" for row in positioning_rows)
+    assert all(row["label_hidden"] is False for row in positioning_rows)
+    assert {
+        row.get("geometry_role") for row in positioning_rows
+    } == {"FORWARD_REACTION_WINDOW"}
+    assert {
+        row.get("reaction_window_anchor") for row in positioning_rows
+    } == {"LATEST_COMPLETED_CANDLE"}
+    published_source_bounds = [
+        cast(list[float], row.get("source_bounds")) for row in positioning_rows
+    ]
+    assert all(len(bounds) == 4 for bounds in published_source_bounds)
+    assert all(
+        source_bounds[0] < row["bounds"][0]
+        for source_bounds, row in zip(
+            published_source_bounds,
+            positioning_rows,
+            strict=True,
+        )
+    )
     assert {row["id"] for row in positioning_rows}.isdisjoint(
         {
             "order-zone-private-buy-limit",
@@ -704,16 +753,15 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
     )
     order_areas = _mutable_mapping(episode["order_areas"])
     assert order_areas["status"] == "PREVIEW"
-    assert order_areas["count"] == 9
+    assert order_areas["count"] == 5
     assert order_areas["kind_counts"] == {
-        "lower_price_buy_area": 2,
-        "higher_price_sell_area": 2,
-        "upside_break_area": 2,
-        "downside_break_area": 2,
+        "lower_price_buy_area": 1,
+        "higher_price_sell_area": 1,
+        "upside_break_area": 1,
+        "downside_break_area": 1,
         "plan_failure_area": 1,
     }
-    assert "4 distinct chart location references" in str(order_areas["message"])
-    assert "entry permission remains separate" in str(order_areas["message"])
+    assert "5 current order area previews" in str(order_areas["message"])
     serialized = json.dumps(workspace)
     for private_token in (
         "PG_ORDER_POSITIONING",
@@ -798,6 +846,62 @@ def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
     assert "PG_ORDER_POSITIONING" not in serialized
 
 
+def test_idle_preview_drops_unpaired_plan_failure_area(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload(side="SELL")
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "state": "IDLE",
+        "revision": 0,
+    }
+    candidate = _ready_positioning_preview_candidate()
+    zones = cast(list[dict[str, object]], candidate["candidate_zones"])
+    candidate["candidate_zones"] = [
+        next(row for row in zones if row.get("order_kind") == "SELL_LIMIT"),
+        # A SELL protective order protects a BUY thesis. There is no selected
+        # BUY entry in this candidate, so the boundary must not float alone.
+        next(row for row in zones if row.get("intent") == "PROTECTIVE_STOP"),
+    ]
+
+    def candidate_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return candidate
+
+    def unavailable_reference_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {"status": "UNAVAILABLE"}
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_positioning_candidate_v3",
+        candidate_stub,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        unavailable_reference_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    positioning_rows = [
+        row
+        for row in workspace["overlays"]
+        if row["family"] == "order_positioning"
+    ]
+    assert [row["kind"] for row in positioning_rows] == [
+        "higher_price_sell_area"
+    ]
+    episode = _mutable_mapping(
+        _mutable_mapping(workspace["tracking"])["episode"]
+    )
+    order_areas = _mutable_mapping(episode["order_areas"])
+    assert order_areas["count"] == 1
+    assert _mutable_mapping(order_areas["kind_counts"])["plan_failure_area"] == 0
+
+
 def test_idle_blocked_candidate_publishes_observational_order_references(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -864,6 +968,13 @@ def test_idle_blocked_candidate_publishes_observational_order_references(
     assert all(row.get("positioning_status") == "WAITING" for row in references)
     assert all(row.get("immutable_geometry") is False for row in references)
     assert all(row.get("evidence_only") is True for row in references)
+    assert all(row.get("geometry_role") == "FORWARD_REACTION_WINDOW" for row in references)
+    assert all(
+        row.get("reaction_window_anchor") == "LATEST_COMPLETED_CANDLE"
+        for row in references
+    )
+    assert all(row["label_hidden"] is False for row in references)
+    assert all(row["lifecycle"] == "current" for row in references)
     assert any(
         row["id"] == "adaptive-target-remains-visible"
         for row in workspace["overlays"]
@@ -934,6 +1045,9 @@ def test_final_public_overlay_boundary_preserves_only_safe_order_positioning_sem
                 "positioning_basis": "Possible higher-price\nreaction area",
                 "immutable_geometry": False,
                 "evidence_only": True,
+                "geometry_role": "forward_reaction_window",
+                "reaction_window_anchor": "latest_completed_candle",
+                "source_bounds": [0.10, 0.22, 0.30, 0.28],
                 "execution_authority": "NONE",
                 "source_lineage": "private-lineage",
             }
@@ -946,6 +1060,9 @@ def test_final_public_overlay_boundary_preserves_only_safe_order_positioning_sem
     assert safe_rows[0]["positioning_basis"] == "Possible higher-price reaction area"
     assert safe_rows[0]["immutable_geometry"] is False
     assert safe_rows[0]["evidence_only"] is True
+    assert safe_rows[0]["geometry_role"] == "FORWARD_REACTION_WINDOW"
+    assert safe_rows[0]["reaction_window_anchor"] == "LATEST_COMPLETED_CANDLE"
+    assert safe_rows[0]["source_bounds"] == [0.10, 0.22, 0.30, 0.28]
     assert "execution_authority" not in safe_rows[0]
     assert "source_lineage" not in safe_rows[0]
 
@@ -959,6 +1076,36 @@ def test_final_public_overlay_boundary_preserves_only_safe_order_positioning_sem
         ]
     )
     assert unsafe_rows == []
+
+    stale_source_rows = mobile_app._safe_operator_overlay_rows(  # pyright: ignore[reportPrivateUsage]
+        [
+            {
+                **safe_rows[0],
+                "id": "missing-current-reaction-contract",
+                "geometry_role": "",
+                "reaction_window_anchor": "",
+            }
+        ]
+    )
+    assert stale_source_rows == []
+
+    for invalid_source_bounds in (
+        [0.10, 0.22, 0.30],
+        [0.10, 0.22, 0.30, 0.28, 0.40],
+        [float("nan"), 0.22, 0.30, 0.28],
+        [-0.10, 0.22, 0.30, 0.28],
+        [0.30, 0.22, 0.10, 0.28],
+    ):
+        malformed_origin_rows = mobile_app._safe_operator_overlay_rows(  # pyright: ignore[reportPrivateUsage]
+            [
+                {
+                    **safe_rows[0],
+                    "id": "malformed-history-origin",
+                    "source_bounds": invalid_source_bounds,
+                }
+            ]
+        )
+        assert malformed_origin_rows == []
 
 
 def test_order_reference_with_execution_authority_fails_closed(
@@ -1281,7 +1428,7 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
     assert all(row["frame_id"] == 14 for row in first_areas)
     assert all(row["coordinate_units"] == "normalized" for row in first_areas)
     assert sum(row.get("positioning_mode") == "FROZEN" for row in first_areas) == 3
-    assert sum(row.get("positioning_mode") == "REFERENCE" for row in first_areas) == 4
+    assert sum(row.get("positioning_mode") == "REFERENCE" for row in first_areas) == 2
     assert all(
         row.get("positioning_status") == "WAITING"
         for row in first_areas
@@ -1291,6 +1438,19 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
         cast(dict[str, object], row)["immutable_geometry"]
         is (row.get("positioning_mode") == "FROZEN")
         for row in first_areas
+    )
+    assert all(row["label_hidden"] is False for row in first_areas)
+    assert all(row["lifecycle"] == "current" for row in first_areas)
+    assert all(
+        row.get("geometry_role") == "FORWARD_REACTION_WINDOW"
+        and row.get("reaction_window_anchor") == "LATEST_COMPLETED_CANDLE"
+        for row in first_areas
+        if row.get("positioning_mode") == "REFERENCE"
+    )
+    assert all(
+        "geometry_role" not in row and "reaction_window_anchor" not in row
+        for row in first_areas
+        if row.get("positioning_mode") == "FROZEN"
     )
     assert not any(
         row["id"] == "adaptive-preview-must-not-win"
@@ -1302,11 +1462,11 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
     )
     public_order_areas = _mutable_mapping(public_episode["order_areas"])
     assert public_order_areas["status"] == "TRACKING"
-    assert public_order_areas["count"] == 7
+    assert public_order_areas["count"] == 5
     assert public_order_areas["kind_counts"] == {
-        "lower_price_buy_area": 2,
+        "lower_price_buy_area": 1,
         "higher_price_sell_area": 1,
-        "upside_break_area": 2,
+        "upside_break_area": 1,
         "downside_break_area": 1,
         "plan_failure_area": 1,
     }

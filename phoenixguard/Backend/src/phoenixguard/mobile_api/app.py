@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -803,11 +804,16 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "positioning_basis",
         "immutable_geometry",
         "evidence_only",
+        "geometry_role",
+        "reaction_window_anchor",
+        "source_bounds",
         *_SCENE_FORECAST_OVERLAY_FIELDS,
     }
 )
 
 _SAFE_OPERATOR_POSITIONING_MODES = frozenset({"REFERENCE", "PREVIEW", "FROZEN"})
+_SAFE_OPERATOR_POSITIONING_GEOMETRY_ROLE = "FORWARD_REACTION_WINDOW"
+_SAFE_OPERATOR_POSITIONING_REACTION_ANCHOR = "LATEST_COMPLETED_CANDLE"
 _SAFE_OPERATOR_POSITIONING_STATES = frozenset(
     {
         "WAITING",
@@ -1393,6 +1399,31 @@ def _safe_operator_forecast_bundle_complete(row: Mapping[str, object]) -> bool:
     return True
 
 
+def _safe_operator_normalized_rectangle(value: object) -> list[float]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return []
+    values = cast(Sequence[object], value)
+    if len(values) != 4:
+        return []
+    numbers: list[float] = []
+    for item in values:
+        if isinstance(item, bool) or item is None:
+            return []
+        try:
+            number = float(cast(Any, item))
+        except (TypeError, ValueError):
+            return []
+        if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+            return []
+        numbers.append(round(number, 6))
+    if numbers[2] <= numbers[0] or numbers[3] <= numbers[1]:
+        return []
+    return numbers
+
+
 def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -1411,17 +1442,49 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             "positioning_basis",
             "immutable_geometry",
             "evidence_only",
+            "geometry_role",
+            "reaction_window_anchor",
+            "source_bounds",
         )
         if str(row.get("family") or "").strip().lower() == "order_positioning":
             positioning_mode = str(row.get("positioning_mode") or "").strip().upper()
             positioning_status = str(row.get("positioning_status") or "").strip().upper()
             immutable_geometry = row.get("immutable_geometry") is True
             evidence_only = row.get("evidence_only") is True
+            geometry_role = str(row.get("geometry_role") or "").strip().upper()
+            reaction_window_anchor = str(
+                row.get("reaction_window_anchor") or ""
+            ).strip().upper()
+            geometry_contract_present = bool(
+                geometry_role or reaction_window_anchor
+            )
+            geometry_contract_valid = bool(
+                geometry_role == _SAFE_OPERATOR_POSITIONING_GEOMETRY_ROLE
+                and reaction_window_anchor
+                == _SAFE_OPERATOR_POSITIONING_REACTION_ANCHOR
+            )
+            source_bounds_present = "source_bounds" in row
+            source_bounds = _safe_operator_normalized_rectangle(
+                row.get("source_bounds")
+            )
             if (
                 positioning_mode not in _SAFE_OPERATOR_POSITIONING_MODES
                 or positioning_status not in _SAFE_OPERATOR_POSITIONING_STATES
                 or immutable_geometry != (positioning_mode == "FROZEN")
                 or not evidence_only
+                or (
+                    positioning_mode != "FROZEN"
+                    and not geometry_contract_valid
+                )
+                or (
+                    positioning_mode == "FROZEN"
+                    and geometry_contract_present
+                    and not geometry_contract_valid
+                )
+                or (
+                    source_bounds_present
+                    and (not geometry_contract_valid or not source_bounds)
+                )
             ):
                 # A positioning rectangle without explicit persistence and
                 # evidence-only semantics could be mistaken for permission.
@@ -1443,6 +1506,15 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
                     "evidence_only": True,
                 }
             )
+            if geometry_contract_valid:
+                row.update(
+                    {
+                        "geometry_role": geometry_role,
+                        "reaction_window_anchor": reaction_window_anchor,
+                    }
+                )
+            if source_bounds_present:
+                row["source_bounds"] = source_bounds
         else:
             for positioning_key in positioning_keys:
                 row.pop(positioning_key, None)

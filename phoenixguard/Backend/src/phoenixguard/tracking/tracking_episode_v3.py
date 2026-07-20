@@ -12,6 +12,7 @@ from phoenixguard.decision.order_positioning_v3 import (
     freeze_order_positioning_plan_v3,
     inverse_reproject_order_positioning_y_v3,
     order_positioning_plan_anchors_valid_v3,
+    order_positioning_stop_confirmation_reason_v3,
 )
 from phoenixguard.tracking.market_object_tracker_v3 import (
     build_market_object_registry_v3,
@@ -27,6 +28,8 @@ TRACKING_EPISODE_OBSERVATION_SCHEMA_VERSION: Final = (
 )
 ORDER_REFERENCE_MAP_SCHEMA_VERSION: Final = "PG_ORDER_REFERENCE_MAP_V1"
 TRACKING_EPISODE_HORIZON: Final = 12
+_ORDER_REACTION_WINDOW_GEOMETRY_ROLE: Final = "FORWARD_REACTION_WINDOW"
+_ORDER_REACTION_WINDOW_ANCHOR: Final = "LATEST_COMPLETED_CANDLE"
 TRACKING_EPISODE_HISTORY_LIMIT: Final = 24
 TRACKING_PATH_COMPARISON_SCHEMA_VERSION: Final = "PG_TRACKING_PATH_COMPARISON_V1"
 _PATH_FAVOR_MIN_EVENTS: Final = 3
@@ -1068,6 +1071,141 @@ def _order_reference_geometry(
     return width, height, round(min(0.012, max(3.0 / height, 0.003)), 6)
 
 
+def _order_candle_x_norm(
+    candle: Mapping[str, Any],
+    *,
+    chart_width: float,
+) -> float | None:
+    normalized = _number(
+        candle.get("x_norm")
+        if candle.get("x_norm") is not None
+        else candle.get("normalized_x")
+        if candle.get("normalized_x") is not None
+        else candle.get("center_x_norm")
+    )
+    if normalized is not None and 0.0 <= normalized <= 1.0:
+        return normalized
+    center_x = _number(
+        candle.get("center_x_px")
+        if candle.get("center_x_px") is not None
+        else candle.get("center_x")
+        if candle.get("center_x") is not None
+        else candle.get("x")
+    )
+    raw_bbox = candle.get("bbox") or candle.get("bounds")
+    if (
+        center_x is None
+        and isinstance(raw_bbox, Sequence)
+        and not isinstance(raw_bbox, (str, bytes, bytearray))
+    ):
+        bbox = cast(Sequence[Any], raw_bbox)
+        left = _number(bbox[0]) if len(bbox) >= 4 else None
+        right = _number(bbox[2]) if len(bbox) >= 4 else None
+        if left is not None and right is not None:
+            center_x = 0.5 * (left + right)
+    if center_x is None or chart_width <= 0.0:
+        return None
+    normalized = center_x / chart_width
+    return normalized if 0.0 <= normalized <= 1.0 else None
+
+
+def _order_reaction_window(
+    session: Mapping[str, Any],
+    *,
+    chart_width: float,
+) -> dict[str, Any]:
+    """Anchor a bounded twelve-step display window to one named closed candle."""
+
+    identity = _identity(session)
+    actual = _actual_closed_candle(session, identity)
+    anchor_id = _text(actual.get("track_id"))
+    if not anchor_id:
+        return {}
+    anchors = tracking_reprojection_anchors_v3(session)
+    anchor = next(
+        (row for row in anchors if _text(row.get("anchor_id")) == anchor_id),
+        None,
+    )
+    anchor_x = _number(anchor.get("x_norm")) if anchor is not None else None
+    if anchor_x is None:
+        scene = _scene_forecast(session)
+        identity_state = _mapping(scene.get("closed_candle_identity_state"))
+        latest_closed = _mapping(identity_state.get("latest_closed"))
+        if _text(latest_closed.get("track_id")) == anchor_id:
+            anchor_x = _order_candle_x_norm(
+                latest_closed,
+                chart_width=chart_width,
+            )
+    tracking = _mapping(session.get("tracking_summary"))
+    tracked_candles = _rows(tracking.get("tracked_candles"), limit=256)
+    if anchor_x is None:
+        matching_candle = next(
+            (
+                candle
+                for candle in reversed(tracked_candles)
+                if _text(candle.get("track_id")) == anchor_id
+                and candle.get("is_closed") is True
+            ),
+            None,
+        )
+        if matching_candle is not None:
+            anchor_x = _order_candle_x_norm(
+                matching_candle,
+                chart_width=chart_width,
+            )
+    if anchor_x is None or not 0.0 <= anchor_x < 1.0:
+        return {}
+
+    x_values = sorted(
+        {
+            round(value, 9)
+            for row in anchors
+            if (value := _number(row.get("x_norm"))) is not None
+            and 0.0 <= value <= 1.0
+        }
+        | {
+            round(value, 9)
+            for candle in tracked_candles
+            if (value := _order_candle_x_norm(candle, chart_width=chart_width))
+            is not None
+        }
+    )
+    local_steps = [
+        right - left
+        for left, right in zip(x_values, x_values[1:], strict=False)
+        if 1e-6 < right - left <= 0.05
+    ]
+    step_x = _median_positive(local_steps)
+    if step_x is None:
+        forecast_anchor = _mapping(_scene_forecast(session).get("forecast_anchor"))
+        fallback_step = _number(forecast_anchor.get("event_step_x_norm"))
+        if fallback_step is not None and 1e-6 < fallback_step <= 0.05:
+            step_x = fallback_step
+    if step_x is None or anchor_x + step_x <= anchor_x:
+        return {}
+    # Preserve the twelve-event meaning even when the latest closed candle is
+    # near the right edge. Clipping only the end would silently advertise a
+    # twelve-step window while drawing fewer than twelve candle intervals.
+    available_step_x = (1.0 - anchor_x) / TRACKING_EPISODE_HORIZON
+    step_x = min(step_x, available_step_x)
+    if step_x <= 1e-6:
+        return {}
+    end_x = anchor_x + step_x * TRACKING_EPISODE_HORIZON
+    return {
+        "reaction_window_verified": True,
+        "geometry_role": _ORDER_REACTION_WINDOW_GEOMETRY_ROLE,
+        "reaction_window_anchor": _ORDER_REACTION_WINDOW_ANCHOR,
+        "reaction_window_anchor_id": anchor_id,
+        "reaction_window_origin_x_norm": round(anchor_x, 6),
+        "reaction_window_step_x_norm": round(step_x, 6),
+        "reaction_window_horizon_steps": TRACKING_EPISODE_HORIZON,
+        "x_bounds": [
+            round(anchor_x, 6),
+            round(end_x, 6),
+        ],
+    }
+
+
 def _order_reference_current_y(
     session: Mapping[str, Any],
     *,
@@ -1078,7 +1216,7 @@ def _order_reference_current_y(
     forming = _mapping(identity_state.get("forming"))
     forming_y = _number(_normalized_observation_geometry(forming, scene).get("chart_close_norm"))
     if forming_y is not None and 0.0 <= forming_y <= 1.0:
-        return round(forming_y, 6), "CURRENT_CANDLE"
+        return round(forming_y, 6), "FORMING_LIVE_CANDLE"
     actual_y = _number(_actual_closed_candle(session, _identity(session)).get("chart_close_norm"))
     if actual_y is not None and 0.0 <= actual_y <= 1.0:
         return round(actual_y, 6), "LATEST_COMPLETED_CANDLE"
@@ -1104,7 +1242,7 @@ def _order_reference_current_y(
                 side = _direction(candle.get("direction"), candle.get("side"))
                 close_y = top if side == "BUY" else bottom if side == "SELL" else None
         if close_y is not None and 0.0 <= close_y <= chart_height:
-            return round(close_y / chart_height, 6), "CURRENT_VISUAL_CANDLE"
+            return round(close_y / chart_height, 6), "FORMING_LIVE_CANDLE"
     return None, ""
 
 
@@ -1191,6 +1329,7 @@ def _order_reference_row(
     side: str,
     role: str,
     bounds: Sequence[float],
+    source_bounds: Sequence[float],
     boundary_y: float,
     current_y: float,
 ) -> dict[str, Any]:
@@ -1215,6 +1354,11 @@ def _order_reference_row(
         "side": side,
         "location_role": role,
         "bounds": [round(float(value), 6) for value in bounds[:4]],
+        "source_bounds": [
+            round(float(value), 6) for value in source_bounds[:4]
+        ],
+        "geometry_role": _ORDER_REACTION_WINDOW_GEOMETRY_ROLE,
+        "reaction_window_anchor": _ORDER_REACTION_WINDOW_ANCHOR,
         "boundary_y_norm": round(boundary_y, 6),
         "distance_from_current_norm": round(abs(boundary_y - current_y), 6),
         "confidence": round(confidence, 4),
@@ -1246,6 +1390,32 @@ def build_tracking_order_reference_map_v3(session: Mapping[str, Any]) -> dict[st
     if geometry is None:
         return _order_reference_unavailable(session, "TRANSFORM_NOT_LOCKED")
     chart_width, chart_height, band_thickness = geometry
+    reaction_window = _order_reaction_window(
+        session,
+        chart_width=chart_width,
+    )
+    reaction_x_bounds = reaction_window.get("x_bounds")
+    if (
+        reaction_window.get("reaction_window_verified") is not True
+        or not isinstance(reaction_x_bounds, Sequence)
+        or isinstance(reaction_x_bounds, (str, bytes, bytearray))
+        or len(cast(Sequence[Any], reaction_x_bounds)) < 2
+    ):
+        return _order_reference_unavailable(
+            session,
+            "LATEST_COMPLETED_REACTION_WINDOW_UNAVAILABLE",
+        )
+    reaction_left = _number(cast(Sequence[Any], reaction_x_bounds)[0])
+    reaction_right = _number(cast(Sequence[Any], reaction_x_bounds)[1])
+    if (
+        reaction_left is None
+        or reaction_right is None
+        or not 0.0 <= reaction_left < reaction_right <= 1.0
+    ):
+        return _order_reference_unavailable(
+            session,
+            "LATEST_COMPLETED_REACTION_WINDOW_UNAVAILABLE",
+        )
     current_y, price_basis = _order_reference_current_y(session, chart_height=chart_height)
     if current_y is None:
         return _order_reference_unavailable(session, "CURRENT_PRICE_UNAVAILABLE")
@@ -1290,20 +1460,26 @@ def build_tracking_order_reference_map_v3(session: Mapping[str, Any]) -> dict[st
         expected_side = "SELL" if above else "BUY"
         if _direction(source.get("side")) != expected_side:
             continue
-        bounds = _order_reference_bounds(
+        source_bounds = _order_reference_bounds(
             source,
             chart_width=chart_width,
             chart_height=chart_height,
         )
         if (
-            not bounds
-            or (above and bounds[3] >= current_y)
-            or (not above and bounds[1] <= current_y)
+            not source_bounds
+            or (above and source_bounds[3] >= current_y)
+            or (not above and source_bounds[1] <= current_y)
         ):
             continue
-        if source_type == "SUPPLY_ZONE":
+        bounds = [
+            reaction_left,
+            source_bounds[1],
+            reaction_right,
+            source_bounds[3],
+        ]
+        if source_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}:
             limit_kind = "SELL_LIMIT"
-        elif source_type == "DEMAND_ZONE":
+        elif source_type in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"}:
             limit_kind = "BUY_LIMIT"
         else:
             limit_kind = ""
@@ -1316,15 +1492,21 @@ def build_tracking_order_reference_map_v3(session: Mapping[str, Any]) -> dict[st
                     side=expected_side,
                     role="UPPER_ENTRY" if above else "LOWER_ENTRY",
                     bounds=bounds,
+                    source_bounds=source_bounds,
                     boundary_y=bounds[3] if above else bounds[1],
                     current_y=current_y,
                 )
             )
+        stop_kind = "BUY_STOP" if above else "SELL_STOP"
+        stop_side = "BUY" if above else "SELL"
+        if order_positioning_stop_confirmation_reason_v3(
+            source,
+            thesis_side=stop_side,
+        ):
+            continue
         stop_bounds = _order_reference_band(bounds, above=above, thickness=band_thickness)
         if not stop_bounds:
             continue
-        stop_kind = "BUY_STOP" if above else "SELL_STOP"
-        stop_side = "BUY" if above else "SELL"
         boundary_y = 0.5 * (stop_bounds[1] + stop_bounds[3])
         drafts.append(
             _order_reference_row(
@@ -1334,6 +1516,7 @@ def build_tracking_order_reference_map_v3(session: Mapping[str, Any]) -> dict[st
                 side=stop_side,
                 role="UPPER_CONFIRMATION" if above else "LOWER_CONFIRMATION",
                 bounds=stop_bounds,
+                source_bounds=source_bounds,
                 boundary_y=boundary_y,
                 current_y=current_y,
             )
@@ -1388,6 +1571,9 @@ def build_tracking_order_reference_map_v3(session: Mapping[str, Any]) -> dict[st
         "chart_bounds": [0.0, 0.0, 1.0, 1.0],
         "current_price_y_norm": current_y,
         "current_price_basis": price_basis,
+        "geometry_role": _ORDER_REACTION_WINDOW_GEOMETRY_ROLE,
+        "reaction_window_anchor": _ORDER_REACTION_WINDOW_ANCHOR,
+        "reaction_window": reaction_window,
         "reference_count": len(selected),
         "rows": selected,
         "observational_only": True,
@@ -1455,6 +1641,11 @@ def _order_positioning_candidate_v3(
         else close_level * height
         if close_level is not None and height is not None
         else None
+    )
+    reaction_window = (
+        _order_reaction_window(session, chart_width=width)
+        if width is not None and width > 0.0
+        else {}
     )
     latest = _mapping(session.get("latest_signal"))
     tracking = _mapping(session.get("tracking_summary"))
@@ -1549,6 +1740,7 @@ def _order_positioning_candidate_v3(
             "chart_bounds": chart_bounds,
             "current_price_y": current_price_y,
             "current_price_verified": close_level is not None,
+            "current_price_basis": _ORDER_REACTION_WINDOW_ANCHOR,
             "timing_verified": bool(
                 _text(identity.get("closed_candle_key"))
                 and transform.get("status") == "LOCKED"
@@ -1557,6 +1749,7 @@ def _order_positioning_candidate_v3(
             "display_band_verified": transform.get("status") == "LOCKED",
             "display_band_basis": "VERIFIED_MEDIAN_CANDLE_RANGE",
             "favorable_candles_since_origin": favorable_candles,
+            **reaction_window,
             "overlay_objects": overlays,
             "reprojection_anchors": tracking_reprojection_anchors_v3(session),
         }
