@@ -3145,7 +3145,7 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
         assert page.locator('[data-overlay-id="scene-current"]').count() >= 1
 
 
-def test_frozen_order_areas_have_independent_always_visible_controls(
+def test_order_area_modes_have_independent_always_visible_controls(
     chromium_browser: Browser,
 ) -> None:
     payload = _operator_payload()
@@ -3153,9 +3153,9 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
         {
             "state": "IDLE",
             "order_areas": {
-                "status": "PREVIEW",
-                "count": 3,
-                "message": "Current chart preview is ready to be frozen.",
+                "status": "REFERENCE",
+                "count": 2,
+                "message": "Current chart reference locations are ready for study.",
             },
         }
     )
@@ -3165,7 +3165,6 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
         # the old ten-pixel hotspot minimum. Its exact visible child must keep
         # the server boundary while its transparent parent supplies hit area.
         ("saved-buy-stop", "upside_break_area", "Upside break area", "BUY", [0.94, 0.005, 0.99, 0.011]),
-        ("saved-plan-failure", "plan_failure_area", "Plan failure area", "BUY", [0.48, 0.70, 0.68, 0.73]),
     )
     payload["overlays"].extend(
         {
@@ -3188,17 +3187,67 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
             "coordinate_space": "chart",
             "coordinate_units": "normalized",
             "positioning_status": "WAITING",
-            "positioning_mode": "PREVIEW",
+            "positioning_mode": "REFERENCE",
             "positioning_basis": "Current chart structure",
-            "immutable_geometry": True,
+            "immutable_geometry": False,
             "evidence_only": True,
         }
         for overlay_id, kind, label, side, bounds in specs
     )
 
+    def payload_for_mode(
+        mode: str,
+        revision: int,
+        episode_state: str,
+    ) -> dict[str, Any]:
+        updated = copy.deepcopy(payload)
+        updated["revision"] = revision
+        updated["tracking"]["episode"]["state"] = episode_state
+        updated["tracking"]["episode"]["order_areas"].update(
+            {
+                "status": mode,
+                "count": 2 if mode == "REFERENCE" else 3,
+                "message": f"{mode.title()} order locations are available.",
+            }
+        )
+        for overlay in updated["overlays"]:
+            if overlay.get("family") != "order_positioning":
+                continue
+            overlay["positioning_mode"] = mode
+            overlay["immutable_geometry"] = mode == "FROZEN"
+        if mode in {"PREVIEW", "FROZEN"}:
+            plan_failure = copy.deepcopy(
+                next(
+                    overlay
+                    for overlay in updated["overlays"]
+                    if overlay.get("id") == "saved-buy-limit"
+                )
+            )
+            plan_failure.update(
+                {
+                    "id": "saved-plan-failure",
+                    "type": "risk",
+                    "kind": "plan_failure_area",
+                    "kind_label": "Plan failure area",
+                    "label": "Plan failure area",
+                    "bounds": [0.48, 0.70, 0.68, 0.73],
+                    "positioning_status": "WAITING",
+                    "positioning_basis": (
+                        "Saved chart structure"
+                        if mode == "FROZEN"
+                        else "Verified current-chart evidence"
+                    ),
+                }
+            )
+            updated["overlays"].append(plan_failure)
+        return updated
+
+    def assert_plain_operator_copy(text: str) -> None:
+        assert all(token not in text for token in ("REFERENCE", "PREVIEW", "FROZEN"))
+
     with _dashboard_page(chromium_browser, payload) as page:
         assert (
-            page.locator('[data-layer-count="order_positioning"]').inner_text() == "3"
+            page.locator('[data-layer-count="order_positioning"]').inner_text() == "2"
         )
         assert {row[0] for row in specs}.issubset(
             set(
@@ -3213,7 +3262,7 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
             "higher_price_sell_area": "0",
             "upside_break_area": "1",
             "downside_break_area": "0",
-            "plan_failure_area": "1",
+            "plan_failure_area": "0",
         }
         for kind, count in expected_counts.items():
             control = page.locator(f'[data-overlay-kind-control="{kind}"]')
@@ -3224,9 +3273,36 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
             assert control.get_attribute("aria-disabled") == str(not available).lower()
             assert control.get_attribute("aria-pressed") == str(available).lower()
         assert page.locator("#order-area-control-status").inner_text() == (
-            "3 current order-area previews are aligned to this chart. "
-            "Start Tracking to freeze them."
+            "2 current chart order locations are visible for structural study. "
+            "They may update as the chart changes; Start Tracking saves only a "
+            "verified plan, and entry permission remains separate."
         )
+        reference_treatment = page.locator(
+            '[data-overlay-id="saved-buy-limit"]'
+        ).evaluate(
+            """
+            node => {
+              const visual = node.querySelector('.order-area-visual');
+              const style = getComputedStyle(visual);
+              return {
+                mode: node.dataset.positioningMode,
+                disabled: node.disabled,
+                display: style.display,
+                visibility: style.visibility,
+                opacity: style.opacity,
+                borderStyle: style.borderStyle,
+                backgroundImage: style.backgroundImage,
+              };
+            }
+            """
+        )
+        assert reference_treatment["mode"] == "REFERENCE"
+        assert reference_treatment["disabled"] is False
+        assert reference_treatment["display"] != "none"
+        assert reference_treatment["visibility"] == "visible"
+        assert float(reference_treatment["opacity"]) >= 0.95
+        assert reference_treatment["borderStyle"] == "dashed"
+        assert reference_treatment["backgroundImage"] != "none"
 
         def assert_pixel_geometry(
             overlay_id: str,
@@ -3342,7 +3418,7 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
         assert buy_limit_control.get_attribute("aria-pressed") == "false"
         assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 0
         assert page.locator('[data-overlay-id="saved-buy-stop"]').count() == 1
-        assert page.locator('[data-overlay-id="saved-plan-failure"]').count() == 1
+        assert page.locator('[data-overlay-id="saved-plan-failure"]').count() == 0
 
         buy_limit_control.click()
         assert buy_limit_control.get_attribute("aria-pressed") == "true"
@@ -3361,10 +3437,224 @@ def test_frozen_order_areas_have_independent_always_visible_controls(
         assert buy_limit_control.get_attribute("aria-pressed") == "true"
         assert page.locator('[data-overlay-id="saved-buy-limit"]').count() == 1
 
+        page.locator('[data-overlay-id="saved-buy-stop"]').click()
+        inspector_copy = page.locator("#inspector-explanation").inner_text()
+        assert_plain_operator_copy(inspector_copy)
+        inspector = inspector_copy.lower()
+        assert "conventional buy-stop location" in inspector
+        assert "current chart reference for structural study" in inspector
+        assert "may update as the chart changes before start tracking" in inspector
+        assert "not a verified preview or a saved tracking area" in inspector
+        assert "start tracking saves only a verified plan" in inspector
+        assert "current status: under observation" in inspector
+        assert "paired entry" not in inspector
+        assert "reference is" not in inspector
+        assert "entry permission remains separate" in inspector
+        assert (
+            page.locator("#inspector-confidence").inner_text()
+            == "Evidence strength · 84%"
+        )
+
+        preview = payload_for_mode("PREVIEW", 43, "IDLE")
+        page.evaluate("value => window.renderOperatorState(value)", preview)
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-id=\"saved-buy-limit\"]')"
+            "?.dataset.positioningMode === 'PREVIEW'"
+        )
+        assert page.locator("#order-area-control-status").inner_text() == (
+            "3 verified order-area previews are aligned to this chart. "
+            "Start Tracking to freeze them; entry permission remains separate."
+        )
         page.locator('[data-overlay-id="saved-plan-failure"]').click()
-        inspector = page.locator("#inspector-explanation").inner_text().lower()
-        assert "separate from an entry area" in inspector
-        assert "does not slide" in inspector
+        inspector_copy = page.locator("#inspector-explanation").inner_text()
+        assert_plain_operator_copy(inspector_copy)
+        inspector = inspector_copy.lower()
+        assert "verified preview aligned to current chart evidence" in inspector
+        assert "remains mutable until start tracking saves its geometry" in inspector
+        assert "not yet a saved tracking area" in inspector
+        assert "preview is" not in inspector
+        assert "entry permission remains separate" in inspector
+        assert page.locator("#inspector-side").inner_text() == "Risk boundary"
+        assert (
+            page.locator("#inspector-confidence").inner_text()
+            == "Evidence strength · 84%"
+        )
+
+        # A validated preview can coexist with different current chart
+        # references before tracking. Counts and copy must preserve that
+        # boundary: only preview geometry can become the saved plan.
+        mixed_preview = copy.deepcopy(preview)
+        mixed_preview["revision"] = 44
+        reference_rows: list[dict[str, Any]] = []
+        for source_id, changes in (
+            (
+                "saved-buy-limit",
+                {
+                    "id": "current-reference-sell-limit",
+                    "side": "SELL",
+                    "kind": "higher_price_sell_area",
+                    "kind_label": "Higher-price sell area",
+                    "label": "Higher-price sell area",
+                    "bounds": [0.28, 0.22, 0.46, 0.28],
+                },
+            ),
+            (
+                "saved-buy-stop",
+                {
+                    "id": "current-reference-sell-stop",
+                    "side": "SELL",
+                    "kind": "downside_break_area",
+                    "kind_label": "Downside break area",
+                    "label": "Downside break area",
+                    "bounds": [0.56, 0.78, 0.72, 0.82],
+                },
+            ),
+        ):
+            reference = copy.deepcopy(
+                next(
+                    overlay
+                    for overlay in mixed_preview["overlays"]
+                    if overlay.get("id") == source_id
+                )
+            )
+            reference.update(changes)
+            reference.update(
+                {
+                    "positioning_mode": "REFERENCE",
+                    "positioning_status": "WAITING",
+                    "positioning_basis": "Current chart structure",
+                    "immutable_geometry": False,
+                }
+            )
+            reference_rows.append(reference)
+        mixed_preview["overlays"].extend(reference_rows)
+        mixed_preview["tracking"]["episode"]["order_areas"]["count"] = 5
+        page.evaluate("value => window.renderOperatorState(value)", mixed_preview)
+        page.wait_for_function(
+            "() => document.querySelectorAll('[data-positioning-mode=\"REFERENCE\"]')"
+            ".length === 2"
+        )
+        assert page.locator('[data-layer-count="order_positioning"]').inner_text() == "5"
+        for kind in (
+            "lower_price_buy_area",
+            "higher_price_sell_area",
+            "upside_break_area",
+            "downside_break_area",
+            "plan_failure_area",
+        ):
+            assert page.locator(
+                f'[data-overlay-kind-control="{kind}"] [data-order-kind-count]'
+            ).inner_text() == "1"
+        assert page.locator("#order-area-control-status").inner_text() == (
+            "5 order locations are visible: 3 verified previews and 2 current "
+            "chart references. Start Tracking saves only the verified preview "
+            "geometry; current chart references may continue to update, and entry "
+            "permission remains separate."
+        )
+        assert page.locator(
+            '[data-overlay-id="saved-plan-failure"]'
+        ).get_attribute("data-positioning-mode") == "PREVIEW"
+        assert not page.locator(
+            '[data-overlay-kind="plan_failure_area"]'
+        ).evaluate_all(
+            "nodes => nodes.some(node => node.dataset.positioningMode === 'REFERENCE')"
+        )
+
+        frozen = payload_for_mode("FROZEN", 45, "ACTIVE")
+        page.evaluate("value => window.renderOperatorState(value)", frozen)
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-id=\"saved-buy-limit\"]')"
+            "?.dataset.positioningMode === 'FROZEN'"
+        )
+        assert page.locator("#order-area-control-status").inner_text() == (
+            "3 saved order areas are anchored to the starting chart. "
+            "Their geometry is frozen; entry permission remains separate."
+        )
+        page.locator('[data-overlay-id="saved-plan-failure"]').click()
+        inspector_copy = page.locator("#inspector-explanation").inner_text()
+        assert_plain_operator_copy(inspector_copy)
+        inspector = inspector_copy.lower()
+        assert "this is a saved tracking area" in inspector
+        assert "anchored when tracking started" in inspector
+        assert "does not slide on later candles" in inspector
+        assert "frozen is" not in inspector
+        assert "entry permission remains separate" in inspector
+        assert page.locator("#inspector-side").inner_text() == "Risk boundary"
+        assert (
+            page.locator("#inspector-confidence").inner_text()
+            == "Evidence strength · 84%"
+        )
+
+        # REFERENCE remains a current observational layer even while an
+        # episode is active and no frozen order geometry is available.
+        active_reference = payload_for_mode("REFERENCE", 46, "ACTIVE")
+        page.evaluate("value => window.renderOperatorState(value)", active_reference)
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-id=\"saved-buy-limit\"]')"
+            "?.dataset.positioningMode === 'REFERENCE'"
+        )
+        assert page.locator(
+            '[data-overlay-id="saved-buy-limit"]'
+        ).get_attribute("data-positioning-mode") == "REFERENCE"
+        assert page.locator("#order-area-control-status").inner_text() == (
+            "2 current chart order locations are visible for structural study. "
+            "They may update with current evidence; the saved tracking plan is "
+            "unchanged, and entry permission remains separate."
+        )
+        assert page.locator(
+            '[data-overlay-kind-control="lower_price_buy_area"]'
+        ).get_attribute("aria-pressed") == "true"
+        plan_failure_control = page.locator(
+            '[data-overlay-kind-control="plan_failure_area"]'
+        )
+        assert plan_failure_control.locator(
+            "[data-order-kind-count]"
+        ).inner_text() == "0"
+        assert plan_failure_control.is_disabled()
+
+        # Current references can coexist with frozen plan geometry. They are
+        # counted and toggled, but the copy makes the persistence boundary
+        # explicit instead of implying that the saved plan moved.
+        mixed = payload_for_mode("FROZEN", 47, "ACTIVE")
+        current_reference = copy.deepcopy(
+            next(
+                overlay
+                for overlay in mixed["overlays"]
+                if overlay.get("id") == "saved-buy-limit"
+            )
+        )
+        current_reference.update(
+            {
+                "id": "current-reference-buy-limit",
+                "bounds": [0.25, 0.42, 0.36, 0.47],
+                "positioning_mode": "REFERENCE",
+                "positioning_basis": "Current live structure",
+                "immutable_geometry": False,
+            }
+        )
+        mixed["overlays"].append(current_reference)
+        mixed["tracking"]["episode"]["order_areas"]["count"] = 4
+        page.evaluate("value => window.renderOperatorState(value)", mixed)
+        page.wait_for_function(
+            "() => document.querySelectorAll('[data-overlay-id=\"current-reference-buy-limit\"]')"
+            ".length === 1"
+        )
+        assert page.locator('[data-overlay-id="current-reference-buy-limit"]').count() == 1
+        assert page.locator(
+            '[data-overlay-kind-control="lower_price_buy_area"] [data-order-kind-count]'
+        ).inner_text() == "2"
+        assert page.locator("#order-area-control-status").inner_text() == (
+            "4 order locations are visible: 1 current structural reference and "
+            "3 saved tracking areas. References may update with current evidence; the "
+            "saved tracking plan is unchanged, and entry permission remains separate."
+        )
+        page.locator('[data-overlay-id="current-reference-buy-limit"]').click()
+        inspector_copy = page.locator("#inspector-explanation").inner_text()
+        assert_plain_operator_copy(inspector_copy)
+        inspector = inspector_copy.lower()
+        assert "current chart reference for structural study" in inspector
+        assert "may update with current evidence during active tracking" in inspector
+        assert "saved tracking plan remains unchanged" in inspector
         assert "entry permission remains separate" in inspector
 
 

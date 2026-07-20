@@ -20,10 +20,12 @@ from phoenixguard.mobile_api.operator_workspace_v1 import (
 )
 from phoenixguard.tracking import tracking_episode_v3 as tracking_episode_module
 from phoenixguard.tracking.tracking_episode_v3 import (
+    ORDER_REFERENCE_MAP_SCHEMA_VERSION,
     TRACKING_EPISODE_HORIZON,
     TrackingEpisodeReadinessError,
     TrackingEpisodeStateError,
     advance_tracking_episode_v1,
+    build_tracking_order_reference_map_v3,
     build_tracking_order_positioning_candidate_v3,
     default_tracking_episode_v1,
     order_positioning_source_rows_v3,
@@ -396,6 +398,44 @@ def _positioning_overlay(
     }
 
 
+def _order_reference_sources() -> list[dict[str, Any]]:
+    supply = _positioning_overlay(
+        "SUPPLY_ZONE",
+        "SELL",
+        [300.0, 180.0, 650.0, 210.0],
+        track_id="reference-supply",
+    )
+    demand = _positioning_overlay(
+        "DEMAND_ZONE",
+        "BUY",
+        [300.0, 300.0, 650.0, 340.0],
+        track_id="reference-demand",
+    )
+    resistance = _positioning_overlay(
+        "RESISTANCE_TRENDLINE",
+        "SELL",
+        [250.0, 140.0, 700.0, 142.0],
+        track_id="reference-resistance",
+    )
+    resistance["projected_entry_band"] = {
+        "verified": True,
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "bounds": [300.0, 145.0, 650.0, 155.0],
+    }
+    support = _positioning_overlay(
+        "SUPPORT_TRENDLINE",
+        "BUY",
+        [250.0, 380.0, 700.0, 382.0],
+        track_id="reference-support",
+    )
+    support["projected_entry_band"] = {
+        "verified": True,
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "bounds": [300.0, 375.0, 650.0, 385.0],
+    }
+    return [supply, demand, resistance, support]
+
+
 def test_compact_positioning_sources_rebuild_canonical_registry_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -524,6 +564,151 @@ def test_reprojection_anchors_use_scene_closed_tail_when_compact_rows_omit_state
         {"anchor_id": "tail-b", "x_norm": 0.4, "y_norm": 0.5},
         {"anchor_id": "tail-c", "x_norm": 0.8, "y_norm": 0.8},
     ]
+
+
+def test_order_reference_map_projects_nearest_live_locations_without_authority() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "reference-source-lock"}
+    session["overlay_objects"] = _order_reference_sources()
+    session["signal_thesis_v3"] = {"side": "HOLD", "state": "INVALID"}
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+    candidate = build_tracking_order_positioning_candidate_v3(session)
+    session["tracking_episode_v1"] = {"state": "ACTIVE", "episode_id": "active-1"}
+    active_map = build_tracking_order_reference_map_v3(session)
+
+    assert reference_map == active_map
+    assert reference_map["schema_version"] == ORDER_REFERENCE_MAP_SCHEMA_VERSION
+    assert reference_map["status"] == "READY"
+    assert reference_map["chart_bounds"] == [0.0, 0.0, 1.0, 1.0]
+    assert reference_map["current_price_y_norm"] == 0.488
+    assert reference_map["observational_only"] is True
+    assert reference_map["execution_authority"] == "NONE"
+    assert candidate["status"] == "BLOCKED"
+
+    rows = cast(list[dict[str, Any]], reference_map["rows"])
+    by_route = {(row["intent"], row["order_kind"]): row for row in rows}
+    assert list(by_route) == [
+        ("ENTRY_LIMIT", "BUY_LIMIT"),
+        ("ENTRY_LIMIT", "SELL_LIMIT"),
+        ("ENTRY_STOP", "BUY_STOP"),
+        ("ENTRY_STOP", "SELL_STOP"),
+    ]
+    assert by_route[("ENTRY_LIMIT", "BUY_LIMIT")]["bounds"] == [0.3, 0.6, 0.65, 0.68]
+    assert by_route[("ENTRY_LIMIT", "SELL_LIMIT")]["bounds"] == [0.3, 0.36, 0.65, 0.42]
+    assert by_route[("ENTRY_STOP", "BUY_STOP")]["bounds"] == [0.3, 0.353, 0.65, 0.36]
+    assert by_route[("ENTRY_STOP", "SELL_STOP")]["bounds"] == [0.3, 0.68, 0.65, 0.687]
+    assert all(row["confidence"] == 0.9 for row in rows)
+    assert all(row["observational_only"] is True for row in rows)
+    assert all(row["execution_authority"] == "NONE" for row in rows)
+    assert all(len(row["source_reference_id"]) == 20 for row in rows)
+    assert len({tuple(row["bounds"]) for row in rows}) == len(rows)
+    public_text = json.dumps(reference_map, sort_keys=True).upper()
+    assert all(
+        private_term not in public_text
+        for private_term in (
+            "SUPPLY_ZONE",
+            "DEMAND_ZONE",
+            "RESISTANCE_TRENDLINE",
+            "SUPPORT_TRENDLINE",
+            "PROTECTIVE_INVALIDATION",
+            "PLAN_INVALIDATION",
+            "PROTECTED_SIDE",
+        )
+    )
+
+
+def test_order_reference_map_uses_verified_compact_visual_geometry() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "compact-reference-lock"}
+    tracking["chart_region"] = {
+        "width": 1000,
+        "height": 500,
+        "pixel_bbox": [0, 0, 1000, 500],
+    }
+    tracking["tracked_candles"] = [
+        {
+            "track_id": f"compact-{index}",
+            "direction": "BUY" if index % 2 == 0 else "SELL",
+            "close_y_px": 215.0 + (index * 5.0),
+            "bbox": [700.0 + index, 210.0, 706.0 + index, 255.0],
+        }
+        for index in range(8)
+    ]
+    tracking["order_positioning_sources_v3"] = {
+        "frame_id": 10,
+        "objects": _order_reference_sources(),
+    }
+    scene = cast(
+        dict[str, Any],
+        cast(dict[str, Any], session["forecast_snapshot_v3"])[
+            "scene_forecast_contribution"
+        ],
+    )
+    scene.pop("source_image_size")
+    scene["closed_candle_identity_state"] = {
+        "event_key": "closed-0",
+        "event_sequence": 10,
+    }
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+    shifted = deepcopy(session)
+    cast(dict[str, Any], cast(dict[str, Any], shifted["tracking_summary"])["chart_region"])[
+        "pixel_bbox"
+    ] = [10, 0, 1010, 500]
+    shifted_map = build_tracking_order_reference_map_v3(shifted)
+
+    assert reference_map["status"] == "READY"
+    assert reference_map["current_price_basis"] == "CURRENT_VISUAL_CANDLE"
+    assert reference_map["current_price_y_norm"] == 0.5
+    assert reference_map["reference_count"] == 4
+    assert shifted_map["status"] == "UNAVAILABLE"
+    assert shifted_map["availability_reason"] == "TRANSFORM_NOT_LOCKED"
+
+
+def test_order_reference_map_accepts_tested_and_mitigated_live_sources() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "reference-source-lock"}
+    sources = _order_reference_sources()
+    for index, source in enumerate(sources):
+        source["lifecycle_state"] = "TESTED" if index % 2 == 0 else "MITIGATED"
+    session["overlay_objects"] = sources
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+    rows = cast(list[dict[str, Any]], reference_map["rows"])
+
+    assert reference_map["status"] == "READY"
+    assert reference_map["reference_count"] == 4
+    assert {row["order_kind"] for row in rows} == {
+        "BUY_LIMIT",
+        "SELL_LIMIT",
+        "BUY_STOP",
+        "SELL_STOP",
+    }
+    assert len({tuple(row["bounds"]) for row in rows}) == 4
+
+
+def test_order_reference_map_excludes_non_live_source_lifecycles() -> None:
+    session = _ready_session(side="BUY")
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking["broker_source"] = {"lock_id": "reference-source-lock"}
+    sources = _order_reference_sources()
+    for source, lifecycle in zip(
+        sources,
+        ("BROKEN_REFERENCE", "HISTORICAL_ACTIVE", "PREDICTED", "STALE"),
+        strict=True,
+    ):
+        source["lifecycle_state"] = lifecycle
+    session["overlay_objects"] = sources
+
+    reference_map = build_tracking_order_reference_map_v3(session)
+
+    assert reference_map["status"] == "UNAVAILABLE"
+    assert reference_map["availability_reason"] == "CURRENT_LINEAGE_UNAVAILABLE"
+    assert reference_map["rows"] == []
 
 
 def test_tracking_episode_requires_a_complete_event_locked_baseline() -> None:

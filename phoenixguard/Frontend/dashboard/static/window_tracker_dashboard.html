@@ -1958,6 +1958,21 @@
       background: rgba(232, 200, 120, 0.035);
     }
 
+    /* REFERENCE locations remain fully visible, but their measured/dashed
+       treatment makes them distinct from an execution preview or frozen plan. */
+    .surface-hotspot.family-order-positioning[data-positioning-mode="REFERENCE"] .order-area-visual {
+      border-style: dashed;
+      background-image: linear-gradient(
+        135deg,
+        rgba(242, 200, 102, 0.055),
+        transparent 42%,
+        rgba(242, 200, 102, 0.025)
+      );
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 247, 220, 0.07),
+        inset 0 0 14px rgba(242, 200, 102, 0.045);
+    }
+
     .surface-hotspot.family-order-positioning:hover .order-area-visual,
     .surface-hotspot.family-order-positioning:focus-visible .order-area-visual,
     .surface-hotspot.family-order-positioning.selected .order-area-visual {
@@ -4159,6 +4174,7 @@
       lastHistoryObservationKey: "",
       historySemanticIdentity: "",
       projectedGeometryCache: new Map(),
+      controlGeometryCache: new Map(),
       detachedOverlayNodes: new Map(),
       historyItemNodes: new Map(),
       lastVisualBundleKey: "",
@@ -6836,28 +6852,86 @@
       if (overlayFamily(overlay) === "lstm" && forecastRole === "center") {
         return false;
       }
-      const geometry = projectedOverlayGeometry(overlay);
+      const geometry = projectedOverlayGeometryForControl(overlay);
       return Boolean(geometry.bounds || geometry.points.length >= 2);
     }
 
-    function orderAreaControlMessage(renderableCount) {
+    function orderPositioningMode(overlay) {
+      const mode = safeText(overlay && overlay.positioning_mode, "").toUpperCase();
+      return ["REFERENCE", "PREVIEW", "FROZEN"].includes(mode) ? mode : "";
+    }
+
+    function resolvedOrderAreaMode(modeCounts, fallbackStatus) {
+      const modes = modeCounts instanceof Map
+        ? new Set(Array.from(modeCounts.keys()))
+        : new Set(safeList(modeCounts));
+      if (modes.has("FROZEN")) {
+        return "FROZEN";
+      }
+      if (modes.has("PREVIEW")) {
+        return "PREVIEW";
+      }
+      if (modes.has("REFERENCE")) {
+        return "REFERENCE";
+      }
+      const status = safeText(fallbackStatus, "").toUpperCase();
+      return ["REFERENCE", "PREVIEW", "FROZEN"].includes(status) ? status : "";
+    }
+
+    function orderAreaControlMessage(renderableCount, modeCounts) {
       const episode = trackingEpisode(state.payload || state.pendingPayload || {});
+      const activeEpisode = episodeIsActive(episode);
       const orderAreas = safeObject(episode.order_areas);
       const orderAreaStatus = safeText(orderAreas.status, "").toUpperCase();
-      const previewMode = orderAreaStatus === "PREVIEW"
-        || state.overlays.some(function (overlay) {
-          return overlayFamily(overlay) === "order_positioning"
-            && safeText(overlay.positioning_mode, "").toUpperCase() === "PREVIEW";
-        });
-      if (previewMode && renderableCount > 0) {
-        return renderableCount + " current order-area preview"
-          + (renderableCount === 1 ? " is" : "s are")
-          + " aligned to this chart. Start Tracking to freeze "
-          + (renderableCount === 1 ? "it." : "them.");
-      }
+      const mode = resolvedOrderAreaMode(modeCounts, orderAreaStatus);
       if (renderableCount > 0) {
+        const referenceCount = Number(modeCounts instanceof Map ? modeCounts.get("REFERENCE") : 0) || 0;
+        const previewCount = Number(modeCounts instanceof Map ? modeCounts.get("PREVIEW") : 0) || 0;
+        const frozenCount = Number(modeCounts instanceof Map ? modeCounts.get("FROZEN") : 0) || 0;
+        if (referenceCount > 0 && frozenCount > 0) {
+          return renderableCount + " order locations are visible: "
+            + referenceCount + " current structural reference" + (referenceCount === 1 ? "" : "s")
+            + " and " + frozenCount + " saved tracking area" + (frozenCount === 1 ? "" : "s")
+            + ". References may update with current evidence; the saved tracking plan is unchanged, and entry permission remains separate.";
+        }
+        if (referenceCount > 0 && previewCount > 0) {
+          return renderableCount + " order locations are visible: "
+            + previewCount + " verified preview" + (previewCount === 1 ? "" : "s")
+            + " and " + referenceCount + " current chart reference" + (referenceCount === 1 ? "" : "s")
+            + ". Start Tracking saves only the verified preview geometry; current chart references may continue to update, and entry permission remains separate.";
+        }
+        if (mode === "REFERENCE") {
+          return renderableCount + " current chart order location"
+            + (renderableCount === 1 ? " is" : "s are")
+            + " visible for structural study. "
+            + (renderableCount === 1 ? "It may " : "They may ")
+            + (activeEpisode
+              ? "update with current evidence; the saved tracking plan is unchanged"
+              : "update as the chart changes; Start Tracking saves only a verified plan")
+            + ", and entry permission remains separate.";
+        }
+        if (mode === "PREVIEW") {
+          return renderableCount + " verified order-area preview"
+            + (renderableCount === 1 ? " is" : "s are")
+            + " aligned to this chart. Start Tracking to freeze "
+            + (renderableCount === 1 ? "it" : "them")
+            + "; entry permission remains separate.";
+        }
         return renderableCount + " saved order area" + (renderableCount === 1 ? " is" : "s are")
-          + " anchored to the starting chart.";
+          + " anchored to the starting chart. "
+          + (renderableCount === 1 ? "Its geometry is" : "Their geometry is")
+          + " frozen; entry permission remains separate.";
+      }
+      if (mode === "REFERENCE") {
+        return activeEpisode
+          ? "No current chart reference is drawable on this broker frame; the saved tracking plan is unchanged, and entry permission remains separate."
+          : "No current chart reference is drawable yet. Start Tracking saves only a verified plan; entry permission remains separate.";
+      }
+      if (mode === "PREVIEW") {
+        return "No verified preview is drawable on this broker frame yet; entry permission remains separate.";
+      }
+      if (mode === "FROZEN") {
+        return "No saved tracking area is drawable on this broker frame; entry permission remains separate.";
       }
       if (episodeIsActive(episode)) {
         return neutralPublicText(
@@ -6866,7 +6940,7 @@
         );
       }
       if (
-        ["PREVIEW", "UNAVAILABLE"].includes(orderAreaStatus)
+        orderAreaStatus === "UNAVAILABLE"
         && safeText(orderAreas.message, "")
       ) {
         return neutralPublicText(
@@ -6882,6 +6956,7 @@
 
     function renderDetailedOverlayControls(overlays) {
       const kinds = new Map();
+      const orderAreaModeCounts = new Map();
       safeList(overlays || state.overlays).forEach(function (overlay) {
         const kind = overlayKind(overlay);
         if (!kind || !overlayIsRenderableForControl(overlay)) {
@@ -6897,6 +6972,12 @@
         const family = overlayFamily(overlay);
         current.families.add(family);
         current.familyCounts.set(family, Number(current.familyCounts.get(family) || 0) + 1);
+        if (family === "order_positioning") {
+          const mode = orderPositioningMode(overlay);
+          if (mode) {
+            orderAreaModeCounts.set(mode, Number(orderAreaModeCounts.get(mode) || 0) + 1);
+          }
+        }
         kinds.set(kind, current);
       });
       const entries = Array.from(kinds.entries()).sort(function (left, right) {
@@ -6922,11 +7003,11 @@
         }
         button.title = available
           ? (enabled
-            ? "Hide " + count + " saved order area" + (count === 1 ? "" : "s")
-            : "Show " + count + " saved order area" + (count === 1 ? "" : "s"))
-          : "This area appears only when the starting chart provides verified positioning evidence";
+            ? "Hide " + count + " current order location" + (count === 1 ? "" : "s")
+            : "Show " + count + " current order location" + (count === 1 ? "" : "s"))
+          : "This area appears when the current chart provides verified positioning evidence";
       });
-      setText(els.orderAreaControlStatus, orderAreaControlMessage(orderAreaCount));
+      setText(els.orderAreaControlStatus, orderAreaControlMessage(orderAreaCount, orderAreaModeCounts));
       setText(
         els.detailedOverlayCount,
         entries.length
@@ -7446,6 +7527,22 @@
       if (cacheable) {
         state.projectedGeometryCache.set(id, {signature: signature, geometry: geometry});
       }
+      return geometry;
+    }
+
+    function projectedOverlayGeometryForControl(overlay) {
+      const id = overlaySemanticId(overlay, 0);
+      const signature = surfaceProjectionIdentity()
+        + "|" + overlayGeometrySourceIdentity(overlay);
+      const cached = state.controlGeometryCache.get(id);
+      if (cached && cached.signature === signature) {
+        return cached.geometry;
+      }
+      const geometry = {
+        bounds: overlayBounds(overlay),
+        points: overlayPoints(overlay),
+      };
+      state.controlGeometryCache.set(id, {signature: signature, geometry: geometry});
       return geometry;
     }
 
@@ -8238,6 +8335,12 @@
       button.dataset.overlayKind = overlayKind(overlay);
       button.dataset.overlayLayer = safeText(overlay.layer, "");
       button.dataset.priority = String(overlayPriority(overlay));
+      if (exactOrderAreaBounds) {
+        const positioningMode = orderPositioningMode(overlay);
+        if (positioningMode) {
+          button.dataset.positioningMode = positioningMode;
+        }
+      }
       button.setAttribute("aria-label", overlayLabel(overlay));
       const leftPercent = percent(box[0], state.naturalWidth);
       const topPercent = percent(box[1], state.naturalHeight);
@@ -8378,6 +8481,9 @@
         scenarios: forecastRole ? overlay.forecast_scenarios : null,
         forecastAnchor: forecastRole ? overlay.forecast_anchor : null,
         baselineLocked: overlay.baseline_locked === true,
+        positioningMode: orderPositioningMode(overlay),
+        positioningStatus: overlay.positioning_status,
+        positioningBasis: overlay.positioning_basis,
         trackingEpisode: (() => {
           const episode = trackingEpisode(state.payload || {});
           return [episode.episode_id || "", episode.revision || 0, episode.state || ""];
@@ -8485,6 +8591,11 @@
       Array.from(state.projectedGeometryCache.keys()).forEach(function (key) {
         if (!activeIds.has(key)) {
           state.projectedGeometryCache.delete(key);
+        }
+      });
+      Array.from(state.controlGeometryCache.keys()).forEach(function (key) {
+        if (!activeIds.has(key)) {
+          state.controlGeometryCache.delete(key);
         }
       });
     }
@@ -8701,12 +8812,13 @@
       }
       if (family === "order_positioning") {
         const kind = overlayKind(overlay);
+        const positioningMode = orderPositioningMode(overlay);
         const explanations = {
-          lower_price_buy_area: "A conventional buy-limit study: this lower-price area was supported by the starting chart and may never be reached or filled.",
-          higher_price_sell_area: "A conventional sell-limit study: this higher-price area was supported by the starting chart and may never be reached or filled.",
-          upside_break_area: "A conventional buy-stop entry study: price must first prove the saved upward break area instead of being chased after the move.",
-          downside_break_area: "A conventional sell-stop entry study: price must first prove the saved downward break area instead of being chased after the move.",
-          plan_failure_area: "This saved protection area marks where the original chart idea would fail; it is separate from an entry area.",
+          lower_price_buy_area: "A conventional buy-limit location: this lower-price structural area may never be reached or filled.",
+          higher_price_sell_area: "A conventional sell-limit location: this higher-price structural area may never be reached or filled.",
+          upside_break_area: "A conventional buy-stop location: price must first prove the upward break area instead of being chased after the move.",
+          downside_break_area: "A conventional sell-stop location: price must first prove the downward break area instead of being chased after the move.",
+          plan_failure_area: "This protection location marks where the chart idea would fail; it is separate from an entry area.",
         };
         const statusLabels = {
           WAITING: "waiting",
@@ -8714,20 +8826,60 @@
           ARMED: "protection is armed",
           APPROACHING: "price is approaching",
           TOUCHED: "price touched the area",
-          ACTIVATED: "the saved condition activated",
+          ACTIVATED: "the condition activated",
           RESPECTED: "price respected the area",
-          FAVORED: "the move favored the saved idea",
-          FAILED: "the saved idea failed",
+          FAVORED: "the move favored this location",
+          FAILED: "the chart idea failed",
           MISSED: "the opportunity moved away; do not chase",
-          EXPIRED: "the saved study expired",
-          INVALIDATED: "the saved idea was invalidated",
+          EXPIRED: "the study expired",
+          INVALIDATED: "the chart idea was invalidated",
           AMBIGUOUS: "the result is unclear",
         };
+        const referenceStatusLabels = {
+          WAITING: "under observation",
+          STANDBY: "under observation",
+          ARMED: "under observation",
+          APPROACHING: "price is approaching",
+          TOUCHED: "price reached the area",
+          ACTIVATED: "price crossed the area",
+          RESPECTED: "price reacted at the area",
+          FAVORED: "later movement supported this location",
+          FAILED: "price did not respect this location",
+          MISSED: "price moved away from the area",
+          EXPIRED: "the location is no longer current",
+          INVALIDATED: "the location is no longer valid",
+          AMBIGUOUS: "the result is unclear",
+        };
+        const activeEpisode = episodeIsActive(
+          trackingEpisode(state.payload || state.pendingPayload || {}),
+        );
+        const referenceExplanation = activeEpisode
+          ? " This is a current chart reference for structural study. It may update with current evidence during active tracking. It is not a verified preview or a saved tracking area, and the saved tracking plan remains unchanged."
+          : " This is a current chart reference for structural study. It may update as the chart changes before Start Tracking. It is not a verified preview or a saved tracking area; Start Tracking saves only a verified plan.";
+        const modeExplanations = {
+          REFERENCE: referenceExplanation,
+          PREVIEW: " This is a verified preview aligned to current chart evidence. It remains mutable until Start Tracking saves its geometry; it is not yet a saved tracking area.",
+          FROZEN: " This is a saved tracking area. It was anchored when tracking started and does not slide on later candles.",
+        };
         const status = safeText(overlay.positioning_status, "WAITING").toUpperCase();
-        const basis = neutralPublicText(overlay.positioning_basis, "Saved chart structure");
+        const basisFallbacks = {
+          REFERENCE: "Current chart structure",
+          PREVIEW: "Verified current-chart evidence",
+          FROZEN: "Saved chart structure",
+        };
+        const basis = neutralPublicText(
+          overlay.positioning_basis,
+          basisFallbacks[positioningMode] || "Chart structure",
+        );
         return (explanations[kind] || FAMILY_EXPLANATIONS.order_positioning)
-          + " It was frozen when tracking started and does not slide on later candles. Current status: "
-          + (statusLabels[status] || "under review") + ". Basis: " + basis + ". Evidence only; entry permission remains separate.";
+          + (modeExplanations[positioningMode] || " This is a chart-positioning study; its persistence state is not available.")
+          + " Current status: "
+          + (
+            positioningMode === "REFERENCE"
+              ? referenceStatusLabels[status] || "under observation"
+              : statusLabels[status] || "under review"
+          )
+          + ". Basis: " + basis + ". Evidence only; entry permission remains separate.";
       }
       return FAMILY_EXPLANATIONS[family] || GROUP_EXPLANATIONS[group] || GROUP_EXPLANATIONS.structure;
     }
@@ -8737,6 +8889,8 @@
       renderOverlays();
       const group = overlayGroup(overlay);
       const family = overlayFamily(overlay);
+      const kind = overlayKind(overlay);
+      const orderPositioning = family === "order_positioning";
       const title = overlayLabel(overlay);
       const explanation = overlayExplanation(overlay);
       const side = directionalSide(overlay.side);
@@ -8753,14 +8907,20 @@
       setText(els.inspectorExplanation, explanation);
       setText(
         els.inspectorSide,
-        forecastRole === "composite" && side === "HOLD" && ["BUY", "SELL"].includes(forecastDirection)
+        orderPositioning && kind === "plan_failure_area"
+          ? "Risk boundary"
+          : forecastRole === "composite" && side === "HOLD" && ["BUY", "SELL"].includes(forecastDirection)
           ? "No edge · path leans " + (forecastDirection === "BUY" ? "up" : "down")
           : side === "HOLD" ? "Neutral" : side === "BUY" ? "Up / buy-side" : "Down / sell-side",
       );
       setText(els.inspectorLifecycle, titleCase(lifecycle));
       setText(
         els.inspectorConfidence,
-        safeText(overlay.path_confidence_status, "").toUpperCase() === "UNAVAILABLE"
+        orderPositioning
+          ? Number.isFinite(confidence) && confidence > 0
+            ? "Evidence strength · " + Math.round(clamp(confidence, 0, 1) * 100) + "%"
+            : "Evidence strength not stated"
+          : safeText(overlay.path_confidence_status, "").toUpperCase() === "UNAVAILABLE"
           ? "Not calibrated"
           : Number.isFinite(confidence) && confidence > 0
           ? Math.round(clamp(confidence, 0, 1) * 100) + "% path confidence"

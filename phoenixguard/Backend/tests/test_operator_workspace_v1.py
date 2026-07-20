@@ -407,6 +407,76 @@ def _ready_positioning_preview_candidate(
     }
 
 
+def _ready_order_reference_map(
+    *,
+    frame_id: int = 14,
+) -> dict[str, object]:
+    rows = [
+        {
+            "reference_id": "private-reference-buy-limit",
+            "order_kind": "BUY_LIMIT",
+            "intent": "ENTRY_LIMIT",
+            "side": "BUY",
+            "bounds": [0.50, 0.64, 0.74, 0.70],
+            "boundary_y_norm": 0.64,
+            "location_role": "LOWER_ENTRY",
+            "source_reference_id": "private-demand-source",
+            "observational_only": True,
+            "execution_authority": "NONE",
+        },
+        {
+            "reference_id": "private-reference-sell-limit",
+            "order_kind": "SELL_LIMIT",
+            "intent": "ENTRY_LIMIT",
+            "side": "SELL",
+            "bounds": [0.52, 0.22, 0.76, 0.28],
+            "boundary_y_norm": 0.28,
+            "location_role": "UPPER_ENTRY",
+            "source_reference_id": "private-supply-source",
+            "observational_only": True,
+            "execution_authority": "NONE",
+        },
+        {
+            "reference_id": "private-reference-buy-stop",
+            "order_kind": "BUY_STOP",
+            "intent": "ENTRY_STOP",
+            "side": "BUY",
+            "bounds": [0.61, 0.16, 0.79, 0.20],
+            "boundary_y_norm": 0.20,
+            "location_role": "UPPER_CONFIRMATION",
+            "source_reference_id": "private-resistance-source",
+            "observational_only": True,
+            "execution_authority": "NONE",
+        },
+        {
+            "reference_id": "private-reference-sell-stop",
+            "order_kind": "SELL_STOP",
+            "intent": "ENTRY_STOP",
+            "side": "SELL",
+            "bounds": [0.59, 0.74, 0.80, 0.78],
+            "boundary_y_norm": 0.74,
+            "location_role": "LOWER_CONFIRMATION",
+            "source_reference_id": "private-support-source",
+            "observational_only": True,
+            "execution_authority": "NONE",
+        },
+    ]
+    return {
+        "schema_version": "PG_ORDER_REFERENCE_MAP_V1",
+        "status": "READY",
+        "frame_id": frame_id,
+        "sequence_id": "private-current-sequence",
+        "chart_transform_id": "private-current-transform",
+        "broker_source_lock_id": "private-current-source-lock",
+        "market": "EUR/USD",
+        "timeframe": "M5",
+        "coordinate_mode": "CHART_NORMALIZED",
+        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+        "current_price_y_norm": 0.48,
+        "rows": rows,
+    }
+
+
 def _seal_positioning_plan(plan: dict[str, object]) -> None:
     zones = cast(list[dict[str, object]], plan["zones"])
     static = [
@@ -548,31 +618,75 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
     ) -> dict[str, object]:
         return _ready_positioning_preview_candidate()
 
+    def reference_map_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        reference_map = _ready_order_reference_map()
+        rows = cast(list[dict[str, object]], reference_map["rows"])
+        rows.extend(
+            [
+                {
+                    **rows[0],
+                    "reference_id": "near-preview-same-kind",
+                    "bounds": [0.5605, 0.6205, 0.7795, 0.6805],
+                },
+                {
+                    **rows[1],
+                    "reference_id": "exact-preview-shared-bounds",
+                    "bounds": [0.56, 0.62, 0.78, 0.68],
+                },
+            ]
+        )
+        return reference_map
+
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
         "build_tracking_order_positioning_candidate_v3",
         preview_candidate_stub,
     )
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        reference_map_stub,
+    )
 
     workspace = _build_workspace(payload, now_epoch=100.0)
-    previews = [
+    positioning_rows = [
         row
         for row in workspace["overlays"]
         if row["family"] == "order_positioning"
     ]
+    preview_rows = [
+        row for row in positioning_rows if row.get("positioning_mode") == "PREVIEW"
+    ]
+    reference_rows = [
+        row
+        for row in positioning_rows
+        if row.get("positioning_mode") == "REFERENCE"
+    ]
 
-    assert {row["kind"]: row["bounds"] for row in previews} == {
+    assert {row["kind"]: row["bounds"] for row in preview_rows} == {
         "lower_price_buy_area": [0.56, 0.62, 0.78, 0.68],
         "higher_price_sell_area": [0.54, 0.24, 0.76, 0.30],
         "upside_break_area": [0.60, 0.18, 0.80, 0.22],
         "downside_break_area": [0.58, 0.72, 0.79, 0.76],
         "plan_failure_area": [0.56, 0.68, 0.78, 0.70],
     }
-    assert all(row.get("positioning_mode") == "PREVIEW" for row in previews)
-    assert all(row.get("immutable_geometry") is False for row in previews)
-    assert all(row.get("evidence_only") is True for row in previews)
-    assert all(row["coordinate_units"] == "normalized" for row in previews)
-    assert {row["id"] for row in previews}.isdisjoint(
+    assert {row["kind"]: row["bounds"] for row in reference_rows} == {
+        "lower_price_buy_area": [0.50, 0.64, 0.74, 0.70],
+        "higher_price_sell_area": [0.52, 0.22, 0.76, 0.28],
+        "upside_break_area": [0.61, 0.16, 0.79, 0.20],
+        "downside_break_area": [0.59, 0.74, 0.80, 0.78],
+    }
+    # Same-kind references survive when their chart location is materially
+    # different. Near-identical and exact shared bounds are collapsed.
+    assert len(positioning_rows) == 9
+    assert len(reference_rows) == 4
+    assert all(row.get("positioning_status") == "WAITING" for row in reference_rows)
+    assert all(row.get("immutable_geometry") is False for row in positioning_rows)
+    assert all(row.get("evidence_only") is True for row in positioning_rows)
+    assert all(row["coordinate_units"] == "normalized" for row in positioning_rows)
+    assert {row["id"] for row in positioning_rows}.isdisjoint(
         {
             "order-zone-private-buy-limit",
             "order-zone-private-sell-limit",
@@ -589,21 +703,17 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
         _mutable_mapping(workspace["tracking"])["episode"]
     )
     order_areas = _mutable_mapping(episode["order_areas"])
-    assert order_areas == {
-        "status": "PREVIEW",
-        "count": 5,
-        "message": (
-            "5 current order area previews are aligned to this chart. "
-            "Start Tracking to freeze the geometry."
-        ),
-        "kind_counts": {
-            "lower_price_buy_area": 1,
-            "higher_price_sell_area": 1,
-            "upside_break_area": 1,
-            "downside_break_area": 1,
-            "plan_failure_area": 1,
-        },
+    assert order_areas["status"] == "PREVIEW"
+    assert order_areas["count"] == 9
+    assert order_areas["kind_counts"] == {
+        "lower_price_buy_area": 2,
+        "higher_price_sell_area": 2,
+        "upside_break_area": 2,
+        "downside_break_area": 2,
+        "plan_failure_area": 1,
     }
+    assert "4 distinct chart location references" in str(order_areas["message"])
+    assert "entry permission remains separate" in str(order_areas["message"])
     serialized = json.dumps(workspace)
     for private_token in (
         "PG_ORDER_POSITIONING",
@@ -644,10 +754,23 @@ def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
             "blockers": ["PRIVATE_SOURCE_LOCK_FAILURE"],
         }
 
+    def unavailable_reference_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "PG_ORDER_REFERENCE_MAP_V1",
+            "status": "UNAVAILABLE",
+        }
+
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
         "build_tracking_order_positioning_candidate_v3",
         blocked_candidate_stub,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        unavailable_reference_stub,
     )
 
     workspace = _build_workspace(payload, now_epoch=100.0)
@@ -675,7 +798,322 @@ def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
     assert "PG_ORDER_POSITIONING" not in serialized
 
 
-def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_boxes() -> None:
+def test_idle_blocked_candidate_publishes_observational_order_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode"] = {
+        "schema_version": "PG_TRACKING_EPISODE_V1",
+        "state": "IDLE",
+        "revision": 0,
+    }
+    payload["overlays"] = {
+        "objects": [
+            {
+                "overlay_id": "adaptive-target-remains-visible",
+                "type": "TARGET_ZONE_BOX",
+                "side": "BUY",
+                "layer": "target_zones",
+                "bounds": [0.62, 0.18, 0.75, 0.24],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+            }
+        ]
+    }
+
+    def blocked_candidate_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "PG_ORDER_POSITIONING_CANDIDATES_V3",
+            "status": "BLOCKED",
+            "frame_id": 14,
+            "blockers": ["PRIVATE_EXECUTION_BLOCKER"],
+        }
+
+    def reference_map_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return _ready_order_reference_map()
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_positioning_candidate_v3",
+        blocked_candidate_stub,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        reference_map_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    references = [
+        row
+        for row in workspace["overlays"]
+        if row["family"] == "order_positioning"
+    ]
+
+    assert {row["kind"]: row["bounds"] for row in references} == {
+        "lower_price_buy_area": [0.50, 0.64, 0.74, 0.70],
+        "higher_price_sell_area": [0.52, 0.22, 0.76, 0.28],
+        "upside_break_area": [0.61, 0.16, 0.79, 0.20],
+        "downside_break_area": [0.59, 0.74, 0.80, 0.78],
+    }
+    assert all(row.get("positioning_mode") == "REFERENCE" for row in references)
+    assert all(row.get("positioning_status") == "WAITING" for row in references)
+    assert all(row.get("immutable_geometry") is False for row in references)
+    assert all(row.get("evidence_only") is True for row in references)
+    assert any(
+        row["id"] == "adaptive-target-remains-visible"
+        for row in workspace["overlays"]
+    )
+    order_areas = _mutable_mapping(
+        _mutable_mapping(_mutable_mapping(workspace["tracking"])["episode"])[
+            "order_areas"
+        ]
+    )
+    assert order_areas["status"] == "REFERENCE"
+    assert order_areas["count"] == 4
+    assert order_areas["kind_counts"] == {
+        "lower_price_buy_area": 1,
+        "higher_price_sell_area": 1,
+        "upside_break_area": 1,
+        "downside_break_area": 1,
+        "plan_failure_area": 0,
+    }
+    assert "Entry permission remains separate" in str(order_areas["message"])
+    serialized = json.dumps(workspace)
+    for private_token in (
+        "PG_ORDER_REFERENCE_MAP",
+        "ENTRY_LIMIT",
+        "ENTRY_STOP",
+        "PROTECTIVE_INVALIDATION",
+        "BUY_LIMIT",
+        "SELL_LIMIT",
+        "BUY_STOP",
+        "SELL_STOP",
+        "execution_authority",
+        "observational_only",
+        "source_reference_id",
+        "location_role",
+        "protected_side",
+        "protected_reference_id",
+        "private-reference",
+        "private-current",
+        "PRIVATE_EXECUTION_BLOCKER",
+    ):
+        assert private_token not in serialized
+    assert "Original plan boundary" not in serialized
+
+
+def test_final_public_overlay_boundary_preserves_only_safe_order_positioning_semantics() -> None:
+    safe_rows = mobile_app._safe_operator_overlay_rows(  # pyright: ignore[reportPrivateUsage]
+        [
+            {
+                "id": "current-higher-price-reference",
+                "type": "entry",
+                "kind": "higher_price_sell_area",
+                "kind_label": "Higher-price sell area",
+                "side": "SELL",
+                "group": "plan",
+                "family": "order_positioning",
+                "layer": "order_positioning",
+                "label": "Higher-price sell area",
+                "label_hidden": True,
+                "bounds": [0.52, 0.22, 0.76, 0.28],
+                "points": [],
+                "line_points": [],
+                "confidence": 0.82,
+                "lifecycle": "current",
+                "frame_id": 14,
+                "coordinate_space": "chart",
+                "coordinate_units": "normalized",
+                "positioning_mode": "reference",
+                "positioning_status": "waiting",
+                "positioning_basis": "Possible higher-price\nreaction area",
+                "immutable_geometry": False,
+                "evidence_only": True,
+                "execution_authority": "NONE",
+                "source_lineage": "private-lineage",
+            }
+        ]
+    )
+
+    assert len(safe_rows) == 1
+    assert safe_rows[0]["positioning_mode"] == "REFERENCE"
+    assert safe_rows[0]["positioning_status"] == "WAITING"
+    assert safe_rows[0]["positioning_basis"] == "Possible higher-price reaction area"
+    assert safe_rows[0]["immutable_geometry"] is False
+    assert safe_rows[0]["evidence_only"] is True
+    assert "execution_authority" not in safe_rows[0]
+    assert "source_lineage" not in safe_rows[0]
+
+    unsafe_rows = mobile_app._safe_operator_overlay_rows(  # pyright: ignore[reportPrivateUsage]
+        [
+            {
+                **safe_rows[0],
+                "id": "ambiguous-order-area",
+                "positioning_mode": "",
+            }
+        ]
+    )
+    assert unsafe_rows == []
+
+
+def test_order_reference_with_execution_authority_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode"] = {"state": "IDLE", "revision": 0}
+
+    def blocked_candidate_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {"status": "BLOCKED"}
+
+    def unauthorized_reference_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        reference_map = _ready_order_reference_map()
+        rows = cast(list[dict[str, object]], reference_map["rows"])
+        reference_map["rows"] = [{**rows[0], "execution_authority": "EXECUTE"}]
+        return reference_map
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_positioning_candidate_v3",
+        blocked_candidate_stub,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        unauthorized_reference_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert not any(
+        row["family"] == "order_positioning" for row in workspace["overlays"]
+    )
+    assert "EXECUTE" not in json.dumps(workspace)
+
+
+def test_observational_plan_failure_reference_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload()
+    payload["tracking_episode"] = {"state": "IDLE", "revision": 0}
+
+    def blocked_candidate_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {"status": "BLOCKED"}
+
+    def legacy_reference_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        reference_map = _ready_order_reference_map()
+        rows = cast(list[dict[str, object]], reference_map["rows"])
+        reference_map["rows"] = [
+            {
+                **rows[0],
+                "reference_id": "legacy-plan-failure-reference",
+                "intent": "PROTECTIVE_INVALIDATION",
+                "order_kind": "SELL_STOP",
+                "location_role": "PLAN_INVALIDATION",
+            }
+        ]
+        return reference_map
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_positioning_candidate_v3",
+        blocked_candidate_stub,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        legacy_reference_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    episode = _mutable_mapping(
+        _mutable_mapping(workspace["tracking"])["episode"]
+    )
+
+    assert not any(
+        row["family"] == "order_positioning" for row in workspace["overlays"]
+    )
+    assert _mutable_mapping(episode["order_areas"])["status"] == "UNAVAILABLE"
+    assert "legacy-plan-failure-reference" not in json.dumps(workspace)
+
+
+def test_active_episode_without_frozen_areas_shows_current_references_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fresh_payload()
+    payload["overlays"] = {
+        "objects": [
+            {
+                "overlay_id": "raw-active-preview",
+                "type": "SELL_LIMIT_ZONE",
+                "side": "SELL",
+                "layer": "order_positioning",
+                "bounds": [0.20, 0.20, 0.40, 0.26],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "positioning_mode": "PREVIEW",
+                "immutable_geometry": False,
+                "evidence_only": True,
+            }
+        ]
+    }
+    episode_before = json.dumps(payload["tracking_episode"], sort_keys=True)
+
+    def reference_map_stub(
+        _payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return _ready_order_reference_map()
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        reference_map_stub,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    references = [
+        row
+        for row in workspace["overlays"]
+        if row["family"] == "order_positioning"
+    ]
+    order_areas = _mutable_mapping(
+        _mutable_mapping(_mutable_mapping(workspace["tracking"])["episode"])[
+            "order_areas"
+        ]
+    )
+
+    assert len(references) == 4
+    assert all(row.get("positioning_mode") == "REFERENCE" for row in references)
+    assert all(row.get("positioning_status") == "WAITING" for row in references)
+    assert not any(row["kind"] == "plan_failure_area" for row in references)
+    assert not any(row["id"] == "raw-active-preview" for row in workspace["overlays"])
+    assert order_areas["status"] == "REFERENCE"
+    assert order_areas["count"] == 4
+    assert _mutable_mapping(order_areas["kind_counts"])["plan_failure_area"] == 0
+    assert "original tracking plan remains unchanged" in str(
+        order_areas["message"]
+    ).lower()
+    assert "entry permission remains separate" in str(
+        order_areas["message"]
+    ).lower()
+    assert json.dumps(payload["tracking_episode"], sort_keys=True) == episode_before
+
+
+def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_boxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = _fresh_payload(side="BUY")
     episode = _mutable_mapping(payload["tracking_episode"])
     episode["anchor"] = {"frame_id": 9, "closed_candle_key": "closed-9"}
@@ -799,6 +1237,35 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
         ]
     }
 
+    def reference_map_stub(
+        source: Mapping[str, object],
+    ) -> dict[str, object]:
+        frame_id = cast(int, source.get("display_frame_id", 14))
+        reference_map = _ready_order_reference_map(frame_id=frame_id)
+        if frame_id == 14:
+            rows = cast(list[dict[str, object]], reference_map["rows"])
+            rows.extend(
+                [
+                    {
+                        **rows[0],
+                        "reference_id": "near-frozen-same-kind",
+                        "bounds": [0.5605, 0.5205, 0.7795, 0.5805],
+                    },
+                    {
+                        **rows[1],
+                        "reference_id": "exact-frozen-shared-bounds",
+                        "bounds": [0.56, 0.52, 0.78, 0.58],
+                    },
+                ]
+            )
+        return reference_map
+
+    monkeypatch.setattr(
+        "phoenixguard.mobile_api.operator_workspace_v1."
+        "build_tracking_order_reference_map_v3",
+        reference_map_stub,
+    )
+
     first = _build_workspace(payload, now_epoch=100.0)
     first_areas = [
         row for row in first["overlays"] if row["family"] == "order_positioning"
@@ -806,13 +1273,25 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
 
     assert {row["kind"] for row in first_areas} == {
         "lower_price_buy_area",
+        "higher_price_sell_area",
         "upside_break_area",
+        "downside_break_area",
         "plan_failure_area",
     }
     assert all(row["frame_id"] == 14 for row in first_areas)
     assert all(row["coordinate_units"] == "normalized" for row in first_areas)
-    assert all(row.get("positioning_mode") == "FROZEN" for row in first_areas)
-    assert all(cast(dict[str, object], row)["immutable_geometry"] is True for row in first_areas)
+    assert sum(row.get("positioning_mode") == "FROZEN" for row in first_areas) == 3
+    assert sum(row.get("positioning_mode") == "REFERENCE" for row in first_areas) == 4
+    assert all(
+        row.get("positioning_status") == "WAITING"
+        for row in first_areas
+        if row.get("positioning_mode") == "REFERENCE"
+    )
+    assert all(
+        cast(dict[str, object], row)["immutable_geometry"]
+        is (row.get("positioning_mode") == "FROZEN")
+        for row in first_areas
+    )
     assert not any(
         row["id"] == "adaptive-preview-must-not-win"
         for row in first["overlays"]
@@ -821,7 +1300,18 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
     public_episode = _mutable_mapping(
         cast(dict[str, object], first["tracking"])["episode"]
     )
-    assert _mutable_mapping(public_episode["order_areas"])["count"] == 3
+    public_order_areas = _mutable_mapping(public_episode["order_areas"])
+    assert public_order_areas["status"] == "TRACKING"
+    assert public_order_areas["count"] == 7
+    assert public_order_areas["kind_counts"] == {
+        "lower_price_buy_area": 2,
+        "higher_price_sell_area": 1,
+        "upside_break_area": 2,
+        "downside_break_area": 1,
+        "plan_failure_area": 1,
+    }
+    assert "saved fixed order areas" in str(public_order_areas["message"])
+    assert "current chart location references" in str(public_order_areas["message"])
     first_geometry = {row["id"]: row["bounds"] for row in first_areas}
 
     payload["display_frame_id"] = 15
@@ -899,9 +1389,19 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
         row["sequence_id"] = "current-positioning-sequence-16"
         row["chart_transform_id"] = "current-positioning-transform-16"
     unproven = _build_workspace(payload, now_epoch=102.0)
-    assert not any(
-        row["family"] == "order_positioning" for row in unproven["overlays"]
+    unproven_areas = [
+        row
+        for row in unproven["overlays"]
+        if row["family"] == "order_positioning"
+    ]
+    assert len(unproven_areas) == 4
+    assert all(
+        row.get("positioning_mode") == "REFERENCE" for row in unproven_areas
     )
+    unproven_episode = _mutable_mapping(
+        _mutable_mapping(unproven["tracking"])["episode"]
+    )
+    assert _mutable_mapping(unproven_episode["order_areas"])["status"] == "REFERENCE"
 
 
 def test_operator_forecast_keeps_user_truth_and_strips_runtime_telemetry() -> None:

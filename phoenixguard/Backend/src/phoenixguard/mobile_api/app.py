@@ -795,7 +795,34 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "anchor_id",
         "overlay_semantic_revision",
         "overlay_geometry_revision",
+        # These are presentation semantics, not execution telemetry. The
+        # dashboard needs them to distinguish a mutable current reference from
+        # a verified preview or an immutable saved tracking area.
+        "positioning_mode",
+        "positioning_status",
+        "positioning_basis",
+        "immutable_geometry",
+        "evidence_only",
         *_SCENE_FORECAST_OVERLAY_FIELDS,
+    }
+)
+
+_SAFE_OPERATOR_POSITIONING_MODES = frozenset({"REFERENCE", "PREVIEW", "FROZEN"})
+_SAFE_OPERATOR_POSITIONING_STATES = frozenset(
+    {
+        "WAITING",
+        "STANDBY",
+        "ARMED",
+        "APPROACHING",
+        "TOUCHED",
+        "ACTIVATED",
+        "RESPECTED",
+        "FAVORED",
+        "FAILED",
+        "MISSED",
+        "EXPIRED",
+        "AMBIGUOUS",
+        "INVALIDATED",
     }
 )
 
@@ -1378,6 +1405,47 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             for key in _SAFE_OPERATOR_OVERLAY_KEYS
             if key in item
         }
+        positioning_keys = (
+            "positioning_mode",
+            "positioning_status",
+            "positioning_basis",
+            "immutable_geometry",
+            "evidence_only",
+        )
+        if str(row.get("family") or "").strip().lower() == "order_positioning":
+            positioning_mode = str(row.get("positioning_mode") or "").strip().upper()
+            positioning_status = str(row.get("positioning_status") or "").strip().upper()
+            immutable_geometry = row.get("immutable_geometry") is True
+            evidence_only = row.get("evidence_only") is True
+            if (
+                positioning_mode not in _SAFE_OPERATOR_POSITIONING_MODES
+                or positioning_status not in _SAFE_OPERATOR_POSITIONING_STATES
+                or immutable_geometry != (positioning_mode == "FROZEN")
+                or not evidence_only
+            ):
+                # A positioning rectangle without explicit persistence and
+                # evidence-only semantics could be mistaken for permission.
+                # Drop it at the final public boundary instead of guessing.
+                continue
+            positioning_basis = " ".join(
+                re.sub(
+                    r"[\x00-\x1f\x7f]+",
+                    " ",
+                    str(row.get("positioning_basis") or "Current chart structure"),
+                ).split()
+            )[:96]
+            row.update(
+                {
+                    "positioning_mode": positioning_mode,
+                    "positioning_status": positioning_status,
+                    "positioning_basis": positioning_basis or "Current chart structure",
+                    "immutable_geometry": immutable_geometry,
+                    "evidence_only": True,
+                }
+            )
+        else:
+            for positioning_key in positioning_keys:
+                row.pop(positioning_key, None)
         if "forecast_scenarios" in row:
             normalized = str(
                 row.get("forecast_coordinate_units")

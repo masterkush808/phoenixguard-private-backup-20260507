@@ -25,6 +25,7 @@ TRACKING_EPISODE_HISTORY_SCHEMA_VERSION: Final = "PG_TRACKING_EPISODE_HISTORY_EN
 TRACKING_EPISODE_OBSERVATION_SCHEMA_VERSION: Final = (
     "PG_TRACKING_EPISODE_OBSERVATION_V1"
 )
+ORDER_REFERENCE_MAP_SCHEMA_VERSION: Final = "PG_ORDER_REFERENCE_MAP_V1"
 TRACKING_EPISODE_HORIZON: Final = 12
 TRACKING_EPISODE_HISTORY_LIMIT: Final = 24
 TRACKING_PATH_COMPARISON_SCHEMA_VERSION: Final = "PG_TRACKING_PATH_COMPARISON_V1"
@@ -743,6 +744,21 @@ _POSITIONING_SOURCE_EXPORT_FIELDS: Final = frozenset(
         "knowledge_tags",
     }
 )
+_ORDER_REFERENCE_SOURCE_TYPES: Final = frozenset(
+    {"DEMAND_ZONE", "SUPPLY_ZONE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"}
+)
+_ORDER_REFERENCE_LIVE_STATES: Final = frozenset(
+    {
+        "ACTIVE",
+        "CONFIRMED",
+        "FRESH",
+        "TESTED",
+        "MITIGATED",
+        "FRESH_ACTIVE",
+        "MITIGATED_ACTIVE",
+        "ROLE_FLIP_CONFIRMED",
+    }
+)
 
 
 def _stable_broker_source_lock_id(session: Mapping[str, Any]) -> str:
@@ -967,6 +983,416 @@ def order_positioning_source_rows_v3(
         )
     )
     return output
+
+
+def _order_reference_unavailable(
+    session: Mapping[str, Any],
+    reason: str,
+    *,
+    current_y: float | None = None,
+    price_basis: str = "",
+) -> dict[str, Any]:
+    identity = _identity(session)
+    return {
+        "schema_version": ORDER_REFERENCE_MAP_SCHEMA_VERSION,
+        "status": "UNAVAILABLE",
+        "availability_reason": reason,
+        "frame_id": _current_positioning_frame_id(session),
+        "sequence_id": "",
+        "chart_transform_id": "",
+        "broker_source_lock_id": _stable_broker_source_lock_id(session),
+        "market": _text(identity.get("pair")).upper(),
+        "timeframe": _text(identity.get("timeframe")).upper(),
+        "coordinate_mode": "CHART_NORMALIZED",
+        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+        "current_price_y_norm": current_y,
+        "current_price_basis": price_basis,
+        "reference_count": 0,
+        "rows": [],
+        "observational_only": True,
+        "execution_authority": "NONE",
+    }
+
+
+def _order_reference_geometry(
+    session: Mapping[str, Any],
+) -> tuple[float, float, float] | None:
+    transform = _transform_contract(session)
+    width = _number(transform.get("source_width"))
+    height = _number(transform.get("source_height"))
+    tolerance = _number(transform.get("close_tolerance"))
+    if (
+        transform.get("status") == "LOCKED"
+        and width is not None
+        and height is not None
+        and tolerance is not None
+        and width > 0.0
+        and height > 0.0
+        and tolerance > 0.0
+    ):
+        return width, height, round(min(0.012, tolerance), 6)
+
+    tracking = _mapping(session.get("tracking_summary"))
+    region = _mapping(tracking.get("chart_region") or tracking.get("display_region"))
+    width = _number(region.get("width"))
+    height = _number(region.get("height"))
+    raw_bbox = region.get("pixel_bbox")
+    bbox = (
+        cast(Sequence[Any], raw_bbox)
+        if isinstance(raw_bbox, Sequence)
+        and not isinstance(raw_bbox, (str, bytes, bytearray))
+        else ()
+    )
+    values = [_number(bbox[index]) for index in range(4)] if len(bbox) >= 4 else []
+    focus = _mapping(session.get("manual_focus_region"))
+    if (
+        width is None
+        or height is None
+        or width <= 0.0
+        or height <= 0.0
+        or len(values) != 4
+        or any(value is None for value in values)
+        or focus.get("enabled") is not True
+    ):
+        return None
+    left, top, right, bottom = [cast(float, value) for value in values]
+    if (
+        abs(left) > 1.0
+        or abs(top) > 1.0
+        or right <= left
+        or bottom <= top
+        or abs((right - left) - width) > 1.0
+        or abs((bottom - top) - height) > 1.0
+    ):
+        return None
+    return width, height, round(min(0.012, max(3.0 / height, 0.003)), 6)
+
+
+def _order_reference_current_y(
+    session: Mapping[str, Any],
+    *,
+    chart_height: float,
+) -> tuple[float | None, str]:
+    scene = _scene_forecast(session)
+    identity_state = _mapping(scene.get("closed_candle_identity_state"))
+    forming = _mapping(identity_state.get("forming"))
+    forming_y = _number(_normalized_observation_geometry(forming, scene).get("chart_close_norm"))
+    if forming_y is not None and 0.0 <= forming_y <= 1.0:
+        return round(forming_y, 6), "CURRENT_CANDLE"
+    actual_y = _number(_actual_closed_candle(session, _identity(session)).get("chart_close_norm"))
+    if actual_y is not None and 0.0 <= actual_y <= 1.0:
+        return round(actual_y, 6), "LATEST_COMPLETED_CANDLE"
+
+    tracking = _mapping(session.get("tracking_summary"))
+    for candle in reversed(_rows(tracking.get("tracked_candles"), limit=24)):
+        close_y = _number(
+            candle.get("close_y_px")
+            if candle.get("close_y_px") is not None
+            else candle.get("close_y")
+        )
+        if close_y is None:
+            raw_bbox = candle.get("body_bbox") or candle.get("bbox") or candle.get("bounds")
+            bbox = (
+                cast(Sequence[Any], raw_bbox)
+                if isinstance(raw_bbox, Sequence)
+                and not isinstance(raw_bbox, (str, bytes, bytearray))
+                else ()
+            )
+            if len(bbox) >= 4:
+                top = _number(bbox[1])
+                bottom = _number(bbox[3])
+                side = _direction(candle.get("direction"), candle.get("side"))
+                close_y = top if side == "BUY" else bottom if side == "SELL" else None
+        if close_y is not None and 0.0 <= close_y <= chart_height:
+            return round(close_y / chart_height, 6), "CURRENT_VISUAL_CANDLE"
+    return None, ""
+
+
+def _order_reference_bounds(
+    row: Mapping[str, Any],
+    *,
+    chart_width: float,
+    chart_height: float,
+) -> list[float]:
+    coordinate_mode = _text(row.get("coordinate_mode")).upper()
+    raw_bounds: Any = row.get("bounds") or row.get("bbox")
+    if _text(row.get("type")).upper() in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"}:
+        band = _mapping(row.get("projected_entry_band") or row.get("projected_price_band"))
+        if band.get("verified") is not True or _text(band.get("coordinate_mode")).upper() != coordinate_mode:
+            return []
+        raw_bounds = band.get("bounds") or band.get("bbox")
+    if not isinstance(raw_bounds, Sequence) or isinstance(raw_bounds, (str, bytes, bytearray)):
+        return []
+    raw = cast(Sequence[Any], raw_bounds)
+    values = [_number(raw[index]) for index in range(4)] if len(raw) >= 4 else []
+    if len(values) != 4 or any(value is None for value in values):
+        return []
+    x0, y0, x1, y1 = [cast(float, value) for value in values]
+    if x0 >= x1 or y0 >= y1:
+        return []
+    if coordinate_mode == "CHART_IMAGE_SPACE":
+        if x0 < 0.0 or y0 < 0.0 or x1 > chart_width or y1 > chart_height:
+            return []
+        normalized = [x0 / chart_width, y0 / chart_height, x1 / chart_width, y1 / chart_height]
+    elif coordinate_mode == "CHART_NORMALIZED":
+        normalized = [x0, y0, x1, y1]
+    else:
+        return []
+    return (
+        [round(value, 6) for value in normalized]
+        if all(0.0 <= value <= 1.0 for value in normalized)
+        else []
+    )
+
+
+def _order_reference_source_valid(
+    row: Mapping[str, Any],
+    *,
+    frame_id: int,
+    source_lock_id: str,
+) -> bool:
+    quality = _mapping(row.get("anchor_quality"))
+    evidence = _mapping(row.get("anchor_evidence"))
+    quality_score = _number(quality.get("score"))
+    confidence = _number(row.get("confidence"))
+    truth = _number(row.get("truth_score"))
+    return bool(
+        _text(row.get("schema_version")) == "PG_V3_OVERLAY_OBJECT_V1"
+        and _text(row.get("frame_id")) == str(frame_id)
+        and _text(row.get("type")).upper() in _ORDER_REFERENCE_SOURCE_TYPES
+        and _text(row.get("track_id"), row.get("object_id"), row.get("overlay_id"))
+        and _text(row.get("sequence_id"))
+        and _text(row.get("chart_transform_id"))
+        and _text(row.get("broker_source_lock_id")) == source_lock_id
+        and _text(row.get("coordinate_mode")).upper()
+        in {"CHART_IMAGE_SPACE", "CHART_NORMALIZED"}
+        and _text(row.get("lifecycle_state")).upper()
+        in _ORDER_REFERENCE_LIVE_STATES
+        and _text(row.get("anchor_evidence_status")).upper() == "VALID"
+        and evidence.get("valid") is True
+        and quality_score is not None
+        and quality_score >= 0.65
+        and all(
+            quality.get(key) is True
+            for key in _CANONICAL_ANCHOR_QUALITY_FIELDS
+        )
+        and confidence is not None
+        and confidence >= 0.70
+        and truth is not None
+        and truth >= 0.70
+    )
+
+
+def _order_reference_row(
+    source: Mapping[str, Any],
+    *,
+    order_kind: str,
+    intent: str,
+    side: str,
+    role: str,
+    bounds: Sequence[float],
+    boundary_y: float,
+    current_y: float,
+) -> dict[str, Any]:
+    source_key = _text(
+        source.get("track_id"),
+        source.get("object_id"),
+        source.get("overlay_id"),
+    )
+    source_digest = sha256(f"order-source|{source_key}".encode()).hexdigest()
+    source_reference_id = f"ors_{source_digest[:16]}"
+    identity = f"{source_reference_id}|{order_kind}|{intent}"
+    quality = _mapping(source.get("anchor_quality"))
+    confidence = min(
+        cast(float, _number(source.get("confidence"))),
+        cast(float, _number(source.get("truth_score"))),
+        cast(float, _number(quality.get("score"))),
+    )
+    payload: dict[str, Any] = {
+        "reference_id": f"orr_{sha256(identity.encode()).hexdigest()[:18]}",
+        "order_kind": order_kind,
+        "intent": intent,
+        "side": side,
+        "location_role": role,
+        "bounds": [round(float(value), 6) for value in bounds[:4]],
+        "boundary_y_norm": round(boundary_y, 6),
+        "distance_from_current_norm": round(abs(boundary_y - current_y), 6),
+        "confidence": round(confidence, 4),
+        "source_reference_id": source_reference_id,
+        "observational_only": True,
+        "execution_authority": "NONE",
+    }
+    return payload
+
+
+def _order_reference_band(
+    bounds: Sequence[float],
+    *,
+    above: bool,
+    thickness: float,
+) -> list[float]:
+    x0, y0, x1, y1 = [float(value) for value in bounds[:4]]
+    if above:
+        outer = max(0.0, y0 - thickness)
+        return [x0, outer, x1, y0] if outer < y0 else []
+    outer = min(1.0, y1 + thickness)
+    return [x0, y1, x1, outer] if outer > y1 else []
+
+
+def build_tracking_order_reference_map_v3(session: Mapping[str, Any]) -> dict[str, Any]:
+    """Return current visual order locations without granting execution authority."""
+
+    geometry = _order_reference_geometry(session)
+    if geometry is None:
+        return _order_reference_unavailable(session, "TRANSFORM_NOT_LOCKED")
+    chart_width, chart_height, band_thickness = geometry
+    current_y, price_basis = _order_reference_current_y(session, chart_height=chart_height)
+    if current_y is None:
+        return _order_reference_unavailable(session, "CURRENT_PRICE_UNAVAILABLE")
+    source_lock_id = _stable_broker_source_lock_id(session)
+    if not source_lock_id:
+        return _order_reference_unavailable(
+            session,
+            "CURRENT_SOURCE_LOCK_UNAVAILABLE",
+            current_y=current_y,
+            price_basis=price_basis,
+        )
+    frame_id = _current_positioning_frame_id(session)
+    sources = [
+        row
+        for row in order_positioning_source_rows_v3(session)
+        if _order_reference_source_valid(
+            row,
+            frame_id=frame_id,
+            source_lock_id=source_lock_id,
+        )
+    ]
+    lineages = {
+        (
+            _text(row.get("sequence_id")),
+            _text(row.get("chart_transform_id")),
+            _text(row.get("broker_source_lock_id")),
+        )
+        for row in sources
+    }
+    if len(lineages) != 1:
+        return _order_reference_unavailable(
+            session,
+            "CURRENT_LINEAGE_UNAVAILABLE",
+            current_y=current_y,
+            price_basis=price_basis,
+        )
+
+    drafts: list[dict[str, Any]] = []
+    for source in sources:
+        source_type = _text(source.get("type")).upper()
+        above = source_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}
+        expected_side = "SELL" if above else "BUY"
+        if _direction(source.get("side")) != expected_side:
+            continue
+        bounds = _order_reference_bounds(
+            source,
+            chart_width=chart_width,
+            chart_height=chart_height,
+        )
+        if (
+            not bounds
+            or (above and bounds[3] >= current_y)
+            or (not above and bounds[1] <= current_y)
+        ):
+            continue
+        if source_type == "SUPPLY_ZONE":
+            limit_kind = "SELL_LIMIT"
+        elif source_type == "DEMAND_ZONE":
+            limit_kind = "BUY_LIMIT"
+        else:
+            limit_kind = ""
+        if limit_kind:
+            drafts.append(
+                _order_reference_row(
+                    source,
+                    order_kind=limit_kind,
+                    intent="ENTRY_LIMIT",
+                    side=expected_side,
+                    role="UPPER_ENTRY" if above else "LOWER_ENTRY",
+                    bounds=bounds,
+                    boundary_y=bounds[3] if above else bounds[1],
+                    current_y=current_y,
+                )
+            )
+        stop_bounds = _order_reference_band(bounds, above=above, thickness=band_thickness)
+        if not stop_bounds:
+            continue
+        stop_kind = "BUY_STOP" if above else "SELL_STOP"
+        stop_side = "BUY" if above else "SELL"
+        boundary_y = 0.5 * (stop_bounds[1] + stop_bounds[3])
+        drafts.append(
+            _order_reference_row(
+                source,
+                order_kind=stop_kind,
+                intent="ENTRY_STOP",
+                side=stop_side,
+                role="UPPER_CONFIRMATION" if above else "LOWER_CONFIRMATION",
+                bounds=stop_bounds,
+                boundary_y=boundary_y,
+                current_y=current_y,
+            )
+        )
+    route_order = {
+        ("ENTRY_LIMIT", "BUY_LIMIT"): 0,
+        ("ENTRY_LIMIT", "SELL_LIMIT"): 1,
+        ("ENTRY_STOP", "BUY_STOP"): 2,
+        ("ENTRY_STOP", "SELL_STOP"): 3,
+    }
+    selected: list[dict[str, Any]] = []
+    seen_routes: set[tuple[str, str]] = set()
+    seen_geometries: set[tuple[float, ...]] = set()
+    for row in sorted(
+        drafts,
+        key=lambda item: (
+            route_order.get((_text(item.get("intent")), _text(item.get("order_kind"))), 99),
+            _number(item.get("distance_from_current_norm")) or 0.0,
+            -(_number(item.get("confidence")) or 0.0),
+            _text(item.get("reference_id")),
+        ),
+    ):
+        route = (_text(row.get("intent")), _text(row.get("order_kind")))
+        geometry_key = tuple(
+            float(value)
+            for value in cast(Sequence[Any], row.get("bounds", []))[:4]
+        )
+        if route not in seen_routes and geometry_key not in seen_geometries:
+            selected.append(row)
+            seen_routes.add(route)
+            seen_geometries.add(geometry_key)
+    if not selected:
+        return _order_reference_unavailable(
+            session,
+            "NO_CURRENT_STRUCTURAL_REFERENCES",
+            current_y=current_y,
+            price_basis=price_basis,
+        )
+    sequence_id, chart_transform_id, lineage_lock_id = next(iter(lineages))
+    identity = _identity(session)
+    return {
+        "schema_version": ORDER_REFERENCE_MAP_SCHEMA_VERSION,
+        "status": "READY",
+        "availability_reason": "CURRENT_STRUCTURAL_REFERENCES_READY",
+        "frame_id": frame_id,
+        "sequence_id": sequence_id,
+        "chart_transform_id": chart_transform_id,
+        "broker_source_lock_id": lineage_lock_id,
+        "market": _text(identity.get("pair")).upper(),
+        "timeframe": _text(identity.get("timeframe")).upper(),
+        "coordinate_mode": "CHART_NORMALIZED",
+        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+        "current_price_y_norm": current_y,
+        "current_price_basis": price_basis,
+        "reference_count": len(selected),
+        "rows": selected,
+        "observational_only": True,
+        "execution_authority": "NONE",
+    }
 
 
 def _order_positioning_candidate_v3(
@@ -3270,6 +3696,7 @@ def update_tracking_episode_history_v1(
 
 
 __all__ = [
+    "ORDER_REFERENCE_MAP_SCHEMA_VERSION",
     "TRACKING_EPISODE_EVENT_SCHEMA_VERSION",
     "TRACKING_EPISODE_HORIZON",
     "TRACKING_EPISODE_HISTORY_LIMIT",
@@ -3279,6 +3706,7 @@ __all__ = [
     "TrackingEpisodeStateError",
     "TrackingEpisodeState",
     "advance_tracking_episode_v1",
+    "build_tracking_order_reference_map_v3",
     "build_tracking_order_positioning_candidate_v3",
     "default_tracking_episode_v1",
     "normalize_tracking_episode_v1",
