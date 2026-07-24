@@ -211,6 +211,158 @@ def _safe_mapping(value: Any) -> dict[str, Any]:
     return cast(dict[str, Any], safe) if isinstance(safe, dict) else {}
 
 
+def _study_confidence(value: Any) -> float:
+    number = _number(value)
+    if number is None:
+        return 0.0
+    if 1.0 < number <= 100.0:
+        number /= 100.0
+    return round(max(0.0, min(1.0, number)), 6)
+
+
+def _market_study_snapshot_v3(
+    session: Mapping[str, Any],
+    *,
+    study_source: Mapping[str, Any] | None = None,
+    expected_closed_candle_key: str = "",
+    expected_closed_candle_sequence: int = 0,
+) -> dict[str, Any]:
+    """Freeze bounded study facts, optionally proving exact candle identity.
+
+    A reacquired batch describes several historical closes while the session
+    holds only the newest live study.  Callers that pass an expected identity
+    therefore get a snapshot only when both the key and monotonic sequence
+    match; a same-frame study is never backfilled onto older candles.
+    """
+
+    expected_key = _text(expected_closed_candle_key)
+    expected_sequence = max(0, _integer(expected_closed_candle_sequence))
+    if study_source is None:
+        tracking = _mapping(session.get("tracking_summary"))
+        latest = _mapping(session.get("latest_signal"))
+        candidates = [
+            _mapping(tracking.get("market_study_v3")),
+            _mapping(latest.get("market_study_v3")),
+        ]
+        study: dict[str, Any] = {}
+        if expected_key or expected_sequence:
+            for candidate in candidates:
+                if (
+                    _text(candidate.get("closed_candle_key"))
+                    == expected_key
+                    and max(
+                        0,
+                        _integer(candidate.get("closed_candle_sequence")),
+                    )
+                    == expected_sequence
+                ):
+                    study = candidate
+                    break
+        else:
+            for candidate in candidates:
+                if candidate:
+                    study = candidate
+                    break
+    else:
+        study = _mapping(study_source)
+    if (
+        not study
+        or study.get("study_only") is not True
+        or study.get("execution_authority") is not False
+    ):
+        return {}
+    study_key = _text(study.get("closed_candle_key"))
+    study_sequence = max(0, _integer(study.get("closed_candle_sequence")))
+    if expected_key or expected_sequence:
+        if (
+            not expected_key
+            or expected_sequence <= 0
+            or study_key != expected_key
+            or study_sequence != expected_sequence
+        ):
+            return {}
+    regression = _mapping(study.get("regression"))
+    behavior = _mapping(study.get("behavior"))
+    directional = _mapping(study.get("directional_read"))
+    major = (
+        _mapping(regression.get("major_trend"))
+        or _mapping(behavior.get("major_trend"))
+        or _mapping(study.get("major_trend"))
+    )
+    inner = (
+        _mapping(regression.get("inner_trend"))
+        or _mapping(behavior.get("inner_trend"))
+        or _mapping(study.get("inner_trend"))
+    )
+    pressure = _mapping(regression.get("current_pressure")) or _mapping(
+        study.get("current_pressure")
+    )
+    current = _mapping(behavior.get("current_state")) or behavior
+    segment = _mapping(behavior.get("current_segment")) or behavior
+
+    def trend(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "side": _direction(
+                row.get("side"), row.get("direction"), row.get("label")
+            ),
+            "slope": round(
+                _number(row.get("slope", row.get("normalized_slope"))) or 0.0,
+                8,
+            ),
+            "confidence": _study_confidence(
+                row.get("confidence", row.get("strength"))
+            ),
+            "window_candles": max(
+                0,
+                _integer(row.get("window_candles", row.get("candle_count"))),
+            ),
+        }
+
+    snapshot = {
+        "schema_version": "PG_TRACKING_STUDY_SNAPSHOT_V3",
+        "status": _text(study.get("status"), "PENDING")[:40].upper(),
+        "study_only": True,
+        "execution_authority": False,
+        "closed_candle_sequence": study_sequence,
+        "major_trend": trend(major),
+        "inner_trend": trend(inner),
+        "current_pressure": trend(pressure),
+        "directional_read": {
+            "side": _direction(directional.get("side")),
+            "confidence": _study_confidence(directional.get("confidence")),
+            "status": _text(
+                directional.get("status"), "INSUFFICIENT_EVIDENCE"
+            )[:48].upper(),
+        },
+        "behavior": {
+            "state": _text(current.get("state"), segment.get("state"), "UNKNOWN")[
+                :32
+            ].upper(),
+            "direction": _direction(
+                current.get("direction"), segment.get("direction")
+            ),
+            "candle_count": max(
+                0,
+                _integer(
+                    current.get("candle_count", segment.get("candle_count"))
+                ),
+            ),
+            "duration_seconds": max(
+                0,
+                _integer(
+                    current.get(
+                        "duration_seconds", segment.get("duration_seconds")
+                    )
+                ),
+            ),
+            "market_story": _text(behavior.get("market_story"))[:240],
+        },
+    }
+    if study_key:
+        snapshot["closed_candle_key"] = study_key
+    return snapshot
+
+
 def _episode_permission(*, active: bool, reason: str, entry_state: str = "WAIT") -> dict[str, Any]:
     normalized_entry = str(entry_state or "WAIT").strip().upper() or "WAIT"
     entry_permitted = bool(active and normalized_entry in {"ENTER", "ENTER_NOW", "ALLOWED", "PERMITTED"})
@@ -2728,6 +2880,13 @@ def start_tracking_episode_v1(
             identity.get("closed_candle_identity_state")
         ),
         "starting_candle": _actual_closed_candle(session, identity),
+        "market_study_v3": _market_study_snapshot_v3(
+            session,
+            expected_closed_candle_key=str(identity["closed_candle_key"]),
+            expected_closed_candle_sequence=int(
+                identity["closed_candle_sequence"]
+            ),
+        ),
     }
     positioning_candidate = _order_positioning_candidate_v3(
         session,
@@ -3390,19 +3549,25 @@ def _confirmed_episode_events(
             sequence = max(0, _integer(row.get("closed_candle_sequence")))
             if not key or sequence <= 0:
                 return []
-            normalized_batch.append(
-                {
-                    "closed_candle_key": key,
-                    "closed_candle_sequence": sequence,
-                    "observation": _mapping(row.get("observation")),
-                    "confirmation_reason": _text(
-                        row.get("confirmation_reason"),
-                        identity.get("transition_reason"),
-                    ),
-                    "reacquired": row.get("reacquired") is True,
-                    "unknown_gap": False,
-                }
+            observation = _mapping(row.get("observation"))
+            normalized_row: dict[str, Any] = {
+                "closed_candle_key": key,
+                "closed_candle_sequence": sequence,
+                "observation": observation,
+                "confirmation_reason": _text(
+                    row.get("confirmation_reason"),
+                    identity.get("transition_reason"),
+                ),
+                "reacquired": row.get("reacquired") is True,
+                "unknown_gap": False,
+            }
+            row_study = _mapping(
+                row.get("market_study_v3")
+                or observation.get("market_study_v3")
             )
+            if row_study:
+                normalized_row["market_study_v3"] = row_study
+            normalized_batch.append(normalized_row)
         if (
             normalized_batch[-1]["closed_candle_key"] != current_key
             or normalized_batch[-1]["closed_candle_sequence"] != current_sequence
@@ -3623,7 +3788,7 @@ def advance_tracking_episode_v1(
             and _text(predicted.get("coordinate_space"))
             == _text(actual.get("coordinate_space"))
         )
-        event = {
+        event: dict[str, Any] = {
             "schema_version": TRACKING_EPISODE_EVENT_SCHEMA_VERSION,
             "episode_id": normalized["episode_id"],
             "event_id": f"{normalized['episode_id']}:E{step}",
@@ -3683,6 +3848,15 @@ def advance_tracking_episode_v1(
                 ),
             },
         }
+        explicit_event_study = _mapping(confirmed.get("market_study_v3"))
+        event_study = _market_study_snapshot_v3(
+            session,
+            study_source=explicit_event_study or None,
+            expected_closed_candle_key=closed_key,
+            expected_closed_candle_sequence=closed_sequence,
+        )
+        if event_study:
+            event["market_study_v3"] = event_study
         positioning_plan = _mapping(normalized.get("positioning_plan"))
         if positioning_plan.get("frozen") is True:
             positioning_step = max(0, _integer(positioning_plan.get("step"))) + 1
@@ -3798,8 +3972,7 @@ def tracking_episode_history_entry_v1(value: Any) -> dict[str, Any]:
         actual = _mapping(event.get("actual_block"))
         after_reference = _mapping(event.get("after_reference"))
         agreement = event.get("direction_agreement")
-        public_events.append(
-            {
+        public_event: dict[str, Any] = {
                 "event_id": _text(
                     event.get("event_id"),
                     f"{episode_id}:E{index}",
@@ -3824,13 +3997,16 @@ def tracking_episode_history_entry_v1(value: Any) -> dict[str, Any]:
                     ),
                 ),
             }
-        )
+        event_study = _safe_mapping(event.get("market_study_v3"))
+        if event_study:
+            public_event["market_study_v3"] = event_study
+        public_events.append(public_event)
     ended_at = _text(
         episode.get("completed_at"),
         episode.get("stopped_at"),
         episode.get("updated_at"),
     )
-    return {
+    result: dict[str, Any] = {
         "schema_version": TRACKING_EPISODE_HISTORY_SCHEMA_VERSION,
         "episode_id": episode_id,
         "state": state,
@@ -3854,12 +4030,18 @@ def tracking_episode_history_entry_v1(value: Any) -> dict[str, Any]:
         "last_closed_candle_key": str(
             last_event.get("closed_candle_key", "") or ""
         ),
-        # The durable session timeline intentionally stores only neutral
-        # before/after event summaries. Forecast geometry, normalized prices,
-        # model/provider fields, and source lineage remain in the private
-        # per-episode record and never enter the public history contract.
+        # The durable session timeline stores only bounded regression and
+        # behavior summaries. Forecast geometry, embeddings, normalized
+        # prices, provider fields, and source lineage remain private.
         "events": public_events,
     }
+    baseline_study = _safe_mapping(anchor.get("market_study_v3"))
+    final_study = _safe_mapping(last_event.get("market_study_v3"))
+    if baseline_study:
+        result["baseline_market_study_v3"] = baseline_study
+    if final_study:
+        result["final_market_study_v3"] = final_study
+    return result
 
 
 def update_tracking_episode_history_v1(

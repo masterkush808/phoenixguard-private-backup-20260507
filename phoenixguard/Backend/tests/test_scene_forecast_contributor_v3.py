@@ -377,6 +377,11 @@ def test_stateful_identity_advances_when_prior_forming_candle_becomes_closed() -
     assert rollover["transition_observed"] is True
     assert rollover["transition_reason"] == "VISUAL_FORMING_CANDLE_BECAME_CLOSED"
     assert rollover["same_event_cache_rebuild_required"] is False
+    proof = rollover["prior_close_reobservation"]
+    assert proof["status"] == "CONFIRMED"
+    assert proof["prior_closed_candle_key"] == initial["closed_candle_key"]
+    assert proof["prior_closed_candle_sequence"] == 0
+    assert proof["current_row_index"] == 28
 
 
 def _roll_forward_candles(

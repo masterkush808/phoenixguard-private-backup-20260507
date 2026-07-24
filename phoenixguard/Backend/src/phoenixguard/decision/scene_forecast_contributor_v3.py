@@ -674,6 +674,103 @@ def _gap_reacquisition_v3(
     return evidence
 
 
+def _prior_close_reobservation_v3(
+    prior_closed: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    prior_key: str,
+    prior_sequence: int,
+    transition_observed: bool,
+    transition_count: int,
+    x_step: float,
+    range_scale: float,
+) -> dict[str, Any]:
+    """Prove the prior event's close on the current screenshot coordinate axis.
+
+    A rolling tracker ``track_id`` is never identity evidence.  The prior close
+    must instead be the unique visual/source match at the exact predecessor
+    position implied by the resolver's causally confirmed transition count.
+    This bounded proof is consumed by the study lane; it cannot authorize a
+    trade or manufacture a candle event by itself.
+    """
+
+    evidence: dict[str, Any] = {
+        "status": "NOT_CONFIRMED",
+        "reason": "NO_CONFIRMED_CANDLE_TRANSITION",
+        "proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+        "prior_closed_candle_key": str(prior_key or ""),
+        "prior_closed_candle_sequence": max(0, int(prior_sequence)),
+        "current_row_index": -1,
+        "match_score": 0.0,
+        "match_margin": 0.0,
+    }
+    if not transition_observed or transition_count < 1 or not prior_closed:
+        return evidence
+    closed_tail = [
+        dict(cast(Mapping[str, Any], row))
+        for row in cast(Sequence[Any], observation.get("closed_tail") or [])
+        if isinstance(row, Mapping)
+    ]
+    expected_index = len(closed_tail) - int(transition_count) - 1
+    if expected_index < 0 or expected_index >= len(closed_tail) - 1:
+        evidence["reason"] = "PRIOR_CLOSE_NOT_VISIBLE_BEFORE_CONFIRMED_EVENTS"
+        return evidence
+
+    scored = [
+        _visual_candle_match_score_v3(
+            prior_closed,
+            row,
+            x_step=x_step,
+            range_scale=range_scale,
+        )
+        for row in closed_tail
+    ]
+    expected_score = scored[expected_index]
+    second_score = max(
+        (score for index, score in enumerate(scored) if index != expected_index),
+        default=0.0,
+    )
+    margin = expected_score - second_score
+    evidence.update(
+        {
+            "match_score": round(expected_score, 6),
+            "match_margin": round(margin, 6),
+            "candidate_count": len(closed_tail),
+        }
+    )
+    if expected_score < 0.62 or margin < 0.10:
+        evidence["reason"] = "PRIOR_CLOSE_MATCH_AMBIGUOUS"
+        return evidence
+
+    matched = closed_tail[expected_index]
+    successor = closed_tail[expected_index + 1]
+    matched_x = _finite(matched.get("x"))
+    successor_x = _finite(successor.get("x"))
+    if matched_x is None or successor_x is None:
+        evidence["reason"] = "PRIOR_CLOSE_CHAIN_MISSING_X"
+        return evidence
+    observed_step = successor_x - matched_x
+    if not max(0.5, x_step * 0.30) <= observed_step <= max(3.0, x_step * 1.80):
+        evidence["reason"] = "PRIOR_CLOSE_CHAIN_NOT_CONTIGUOUS"
+        return evidence
+
+    parsed_row_index = _finite(matched.get("index"))
+    row_index = int(parsed_row_index) if parsed_row_index is not None else -1
+    if row_index < 0:
+        evidence["reason"] = "PRIOR_CLOSE_ROW_INDEX_UNPROVEN"
+        return evidence
+    evidence.update(
+        {
+            "status": "CONFIRMED",
+            "reason": "PRIOR_CLOSE_REOBSERVED_ON_CURRENT_AXIS",
+            "current_row_index": row_index,
+            "current_track_id": str(matched.get("track_id") or ""),
+            "observed_x_step": round(observed_step, 6),
+        }
+    )
+    return evidence
+
+
 def resolve_closed_candle_identity_v3(
     candles: Sequence[Mapping[str, Any]],
     *,
@@ -734,6 +831,11 @@ def resolve_closed_candle_identity_v3(
             "transition_reason": "INITIAL_CAUSAL_BASELINE",
             "same_event_cache_rebuild_required": False,
             "match_scores": {},
+            "prior_close_reobservation": {
+                "status": "NOT_CONFIRMED",
+                "reason": "INITIAL_CAUSAL_BASELINE",
+                "proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+            },
             "state": state,
         }
 
@@ -918,6 +1020,16 @@ def resolve_closed_candle_identity_v3(
         },
         **next_observation,
     }
+    prior_close_reobservation = _prior_close_reobservation_v3(
+        prior_closed,
+        observation,
+        prior_key=prior_key,
+        prior_sequence=prior_sequence,
+        transition_observed=transition,
+        transition_count=transition_count,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
     return {
         "closed_candle_key": event_key,
         "closed_candle_sequence": event_sequence,
@@ -931,6 +1043,7 @@ def resolve_closed_candle_identity_v3(
         },
         "same_event_cache_rebuild_required": bool(coverage_rebase and not transition),
         "match_scores": scores,
+        "prior_close_reobservation": prior_close_reobservation,
         "state": state,
     }
 

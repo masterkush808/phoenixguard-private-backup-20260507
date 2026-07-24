@@ -56,6 +56,85 @@ def shutdown_tracker_services_after_test(
         service.shutdown()
 
 
+def test_market_study_objects_preserve_bounded_relationship_evidence() -> None:
+    objects = PhoenixGuardWindowTrackingAdapter._market_study_objects_v3(  # noqa: SLF001
+        [
+            {
+                "object_type": "crowded price area",
+                "object_id": "zone-7",
+                "direction": "BUY",
+                "confidence": 0.84,
+                "bounds": [0.2, 0.3, 0.6, 0.7],
+                "points": [[0.2, 0.5], [0.6, 0.5], [900, 400]],
+                "lifecycle": "ACTIVE",
+                "first_seen": 11,
+                "last_seen": 19,
+                "age_frames": 8,
+                "duration_candles": 3,
+                "anchor_candle_id": "close-19",
+                "bbox": [200, 300, 600, 700],
+            }
+        ]
+    )
+
+    assert objects == [
+        {
+            "object_type": "CROWDED_PRICE_AREA",
+            "object_id": "zone-7",
+            "identity_scope": "EXPLICIT",
+            "direction": "BUY",
+            "confidence": 0.84,
+            "bounds": [0.2, 0.3, 0.6, 0.7],
+            "coordinate_space": "NORMALIZED",
+            "points": [[0.2, 0.5], [0.6, 0.5]],
+            "lifecycle": "ACTIVE",
+            "first_seen": 11,
+            "last_seen": 19,
+            "age_frames": 8,
+            "duration_candles": 3,
+            "candle_id": "close-19",
+        }
+    ]
+    assert "bbox" not in objects[0]
+
+
+def test_market_study_objects_keep_real_tracker_zones_and_normalize_geometry() -> None:
+    objects = PhoenixGuardWindowTrackingAdapter._market_study_objects_v3(  # noqa: SLF001
+        [
+            {
+                "key": "support_1",
+                "role": "support",
+                "zone_family": "DEMAND_ZONE",
+                "direction": "BUY",
+                "authority_score": 0.71,
+                "bbox": [100, 200, 500, 240],
+                "touch_points": [[120, 220], [480, 218]],
+            },
+            {
+                "key": "support_2",
+                "role": "support",
+                "zone_family": "DEMAND_ZONE",
+                "direction": "BUY",
+                "authority_score": 0.83,
+                "bbox": [200, 300, 700, 350],
+                "anchor_wick_points": [[220, 325], [680, 327]],
+            },
+        ],
+        image_size=(1000, 500),
+    )
+
+    assert [row["object_id"] for row in objects] == ["support_1", "support_2"]
+    assert [row["object_type"] for row in objects] == ["DEMAND_ZONE", "DEMAND_ZONE"]
+    assert [row["confidence"] for row in objects] == [0.71, 0.83]
+    assert all(row["identity_scope"] == "EXPLICIT" for row in objects)
+    assert objects[0]["bounds"] == [0.1, 0.4, 0.5, 0.48]
+    assert objects[0]["points"] == [[0.12, 0.44], [0.48, 0.436]]
+    assert objects[1]["bounds"] == [0.2, 0.6, 0.7, 0.7]
+    assert objects[1]["points"] == [[0.22, 0.65], [0.68, 0.654]]
+    assert all(row["coordinate_space"] == "NORMALIZED" for row in objects)
+    assert all("bbox" not in row and "touch_points" not in row for row in objects)
+
+
 class _BuildSignalPayloads(Protocol):
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         ...
@@ -8432,7 +8511,8 @@ def test_tracker_dashboard_prioritizes_decision_chart_and_history_without_techni
     assert 'id="surface-stage"' in dashboard_html
     assert "object-fit: contain;" in dashboard_html
     assert 'id="market-history"' in dashboard_html
-    assert "From earlier movement to now" in dashboard_html
+    assert "Regression study · candle by candle" in dashboard_html
+    assert "Each row keeps the major trend, inner trend" in dashboard_html
     assert "voice-toggle" not in dashboard_html
     for removed_surface in (
         "Path Quality",
@@ -8486,11 +8566,15 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert 'data-overlay-view="history"' in dashboard_html
     assert 'data-overlay-family="history"' in dashboard_html
     assert 'data-overlay-family="market_context"' in dashboard_html
-    assert 'data-overlay-family="lstm"' in dashboard_html
-    assert 'data-overlay-family="scene_forecaster"' in dashboard_html
+    assert 'data-overlay-family="lstm"' not in dashboard_html
+    assert 'data-overlay-family="scene_forecaster"' not in dashboard_html
     assert ".surface-trendline.family-scene-forecaster" in dashboard_html
     assert ".surface-trendline.family-lstm" in dashboard_html
-    assert "forecast: [\"two_candle\", \"scene_forecaster\", \"lstm\", \"prediction\"]" in dashboard_html
+    assert "forecast: [\"two_candle\", \"scene_forecaster\", \"lstm\", \"prediction\"]" not in dashboard_html
+    assert (
+        'const RETIRED_FORECAST_FAMILIES = new Set(["two_candle", '
+        '"scene_forecaster", "lstm", "prediction"]);'
+    ) in dashboard_html
     assert 'data-label-mode="on"' in dashboard_html
     assert 'data-label-mode="hover"' in dashboard_html
     assert 'data-label-mode="off"' in dashboard_html
@@ -8498,6 +8582,9 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert "function resolveLabelCollisions(container)" in dashboard_html
     assert "window.resolveLabelCollisions = resolveLabelCollisions;" in dashboard_html
     assert "label-collision-hidden" in dashboard_html
+    assert "body.labels-on.labels-show-all .surface-hotspot.label-policy-hidden span" in dashboard_html
+    assert "body.labels-on.labels-show-all .surface-hotspot.label-collision-hidden span" in dashboard_html
+    assert 'els.body.classList.toggle("labels-show-all", exhaustiveLabelModeActive());' in dashboard_html
     lowered = dashboard_html.lower()
     for private_term in (
         "smc",

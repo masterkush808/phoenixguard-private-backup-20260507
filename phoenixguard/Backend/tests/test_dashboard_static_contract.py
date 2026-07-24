@@ -49,7 +49,8 @@ def test_dashboard_consumes_only_the_public_operator_workspace_contract() -> Non
 
     assert "PG_OPERATOR_WORKSPACE_V1" in text
     assert 'return "/v1/mobile/operator/state/v1/" + encodeURIComponent(SESSION_ID)' in text
-    assert 'const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"]);' in text
+    assert 'const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "history"]);' in text
+    assert 'const RETIRED_FORECAST_FAMILIES = new Set(["two_candle", "scene_forecaster", "lstm", "prediction"]);' in text
     assert '"?view=" + encodeURIComponent(publicView)' in text
     assert 'const publicView = "all";' in text
     assert "ACTIVE_CONTEXT" not in text
@@ -96,7 +97,7 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     text = _dashboard_text()
 
     assert 'id="overlay-explorer" aria-label="Overlay views"' in text
-    for view in ("all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"):
+    for view in ("all", "live", "market_context", "structure", "zones", "plan", "history"):
         assert f'data-overlay-view="{view}"' in text
     for family in (
         "chart_bounds",
@@ -111,23 +112,17 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
         "triggers",
         "targets",
         "invalidation",
-        "two_candle",
-        "scene_forecaster",
-        "lstm",
-        "prediction",
         "history",
     ):
         assert f'data-overlay-family="{family}"' in text
     assert 'id="layers-all"' in text
     assert 'id="layers-clear"' in text
-    assert 'id="run-forecast" type="button">Run forecast</button>' in text
-    assert 'id="show-future-path" type="button">Show future path</button>' in text
-    assert 'id="forecast-action-status" data-state="idle" role="status" aria-live="polite"' in text
-    assert 'method: "POST"' in text
-    assert 'mode === "future" ? "show-future" : "predict"' in text
-    assert 'setOverlayView("forecast", {fetch: false});' in text
-    assert "Every outlook studies 12 candle events" in text
-    assert "A model outlook is evidence, never entry permission." in text
+    assert '>Forecasts</button>' not in text
+    assert 'data-retired-surface="forecast-studies"' not in text
+    assert 'id="run-forecast"' not in text
+    assert 'id="show-future-path"' not in text
+    assert 'if (stored === "forecast") {' in text
+    assert 'writeStoredValue("phoenixguard.overlay.preset.v1", "live");' in text
     assert 'phoenixguard.overlay.layers.v1' in text
     assert 'id="visual-evidence-status" data-source="chart" data-freshness="updating" aria-live="polite"' in text
     assert 'id="overlay-inspector" aria-live="polite"' in text
@@ -140,15 +135,13 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert "refreshOperatorState({force: true});" in text
 
 
-def test_dashboard_explains_forecast_ranges_and_uses_adaptive_fallback_polling() -> None:
+def test_dashboard_removes_forecast_route_controls_and_uses_adaptive_fallback_polling() -> None:
     text = _dashboard_text()
 
-    assert 'id="forecast-path-legend" role="list" aria-label="Forecast path legend"' in text
-    assert "Selected visual route" in text
-    assert "Bullish route" in text
-    assert "Bearish route" in text
-    assert "Green and red are alternative studied routes, not odds." in text
-    assert "Wider route separation means less agreement" in text
+    assert 'id="forecast-path-legend"' not in text
+    assert 'id="tracking-route-svg"' not in text
+    assert 'id="tracking-path-a"' not in text
+    assert 'id="tracking-path-b"' not in text
     assert 'const POLL_INTERVAL_MS = 30000;' in text
     assert 'const ACTIVE_TRACKING_POLL_INTERVAL_MS = 5000;' in text
     assert 'scheduleRefresh(POLL_INTERVAL_MS);' in text
@@ -162,18 +155,24 @@ def test_dashboard_explains_forecast_ranges_and_uses_adaptive_fallback_polling()
     assert "closeSessionStream();" in text
 
 
-def test_dashboard_keeps_current_movement_forecast_and_permission_separate() -> None:
+def test_dashboard_keeps_trend_regression_and_entry_permission_separate() -> None:
     text = _dashboard_text()
 
     assert 'id="current-move-title"' in text
     assert 'id="forecast-title"' in text
     assert 'id="permission-title"' in text
+    assert 'id="story-step-one-label">Major trend</span>' in text
+    assert 'id="story-step-two-label">Inner trend</span>' in text
+    assert 'id="story-step-three-label">Regression study</span>' in text
     assert 'id="pressure-event" data-state="none"' in text
     assert 'const action = normalizeAction(permission.action);' in text
-    assert 'return "WAIT";' in text
-    assert 'currentSide === "BUY"' in text
-    assert 'pressureState === "ended"' in text
-    assert "Past observations stay in history. They never overwrite the current move or regain entry permission." in text
+    assert 'setText(els.beginnerDecisionTitle, action === "WAIT" ? "CLOSED" : action);' in text
+    assert "function marketRegressionStudy(payload)" in text
+    assert "tracking.market_study_v3" in text
+    assert "regressionContract.major_trend" in text
+    assert "regressionContract.inner_trend" in text
+    assert "behaviorContract.market_story" in text
+    assert "Entry permission remains" in text
 
 
 def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -> None:
@@ -202,9 +201,9 @@ def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -
     assert 'id="tracking-event-tape"' in text
     assert "safeList(safeObject(episode).events)" in text
     assert "safeList(episode.future_blocks)" in text
-    assert '"Match · " + publicDirectionWord(event.actual)' in text
-    assert '"Miss · " + publicDirectionWord(event.actual)' in text
-    assert '"Unknown · " + publicDirectionWord(event.actual)' in text
+    assert '"Rest / range"' in text
+    assert '"Up continuation"' in text
+    assert 'detail.textContent = "Pending close";' in text
     assert 'title: "Reacquiring E" + next' in text
     assert "commitRealtimeTracking(operatorState);" in text
     assert text.index("commitRealtimeTracking(operatorState);") < text.index(
@@ -225,20 +224,15 @@ def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -
         assert private_fallback not in text
 
 
-def test_dashboard_compares_exactly_two_public_frozen_paths_without_hiding_either() -> None:
+def test_dashboard_retires_the_dual_route_surface_but_keeps_contract_compatibility() -> None:
     text = _dashboard_text()
 
     assert 'const TRACKING_PATH_COMPARISON_SCHEMA = "PG_TRACKING_PATH_COMPARISON_PUBLIC_V1";' in text
     assert 'id="tracking-path-comparison"' in text
-    assert 'id="tracking-path-a" type="button" data-path-id="PATH_A"' in text
-    assert 'id="tracking-path-b" type="button" data-path-id="PATH_B"' in text
-    assert 'id="tracking-route-svg"' in text
-    assert ">Two frozen forecast routes<" in text
-    assert ">Two frozen scene routes<" not in text
-    assert 'id="tracking-route-path-a"' in text
-    assert 'id="tracking-route-path-b"' in text
-    assert 'id="tracking-route-observed"' in text
-    assert 'id="tracking-entry-band"' in text
+    assert ">Candle-by-candle regression study<" in text
+    assert 'id="tracking-route-plot"' not in text
+    assert 'id="tracking-path-rows"' not in text
+    assert ">Two frozen forecast routes<" not in text
     assert "safeObject(safeObject(episode).path_comparison)" in text
     assert 'safeObject(event.path_fit_by_id)' in text
     assert "event.observed_close_level" in text
@@ -365,6 +359,33 @@ def test_dashboard_prefers_server_episode_history_over_local_fallback() -> None:
     assert "const durableRows = serverRows.concat(episodeEvents);" in text
     assert "const sourceRows = durableRows.length ? durableRows : state.localHistory;" in text
     assert "row.event_id || row.id || row.episode_id" in text
+
+
+def test_show_all_with_labels_on_is_the_explicit_exhaustive_label_mode() -> None:
+    text = _dashboard_text()
+
+    assert "function exhaustiveLabelModeActive()" in text
+    assert 'state.labelMode === "on" && state.overlayView === "all"' in text
+    assert 'els.body.classList.toggle("labels-show-all", exhaustiveLabelModeActive());' in text
+    assert "body.labels-on.labels-show-all .surface-hotspot.label-policy-hidden span" in text
+    assert "body.labels-on.labels-show-all .surface-hotspot.label-collision-hidden span" in text
+    assert "const showEveryLabel = exhaustiveLabelModeActive();" in text
+    assert "if (!showEveryLabel && accepted.some" in text
+
+
+def test_session_history_renders_regression_major_inner_and_behavior_fields() -> None:
+    text = _dashboard_text()
+
+    assert "function decorateHistoryItems(items)" in text
+    assert "rowRegression.major_trend" in text
+    assert "rowRegression.inner_trend" in text
+    assert "rowBehavior.current_state" in text
+    assert 'major.className = "history-major-trend";' in text
+    assert 'inner.className = "history-inner-trend";' in text
+    assert 'regression.className = "history-regression";' in text
+    assert 'side.textContent = item.behavior === "CONTINUATION"' in text
+    assert '"Regression match"' in text
+    assert '"REST"' in text
 
 
 def test_dashboard_source_contains_no_private_strategy_vocabulary() -> None:

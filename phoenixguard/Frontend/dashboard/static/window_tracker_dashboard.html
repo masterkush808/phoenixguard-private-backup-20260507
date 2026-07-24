@@ -980,8 +980,8 @@
 
     .decision-shell {
       display: grid;
-      grid-template-columns: minmax(260px, 0.75fr) minmax(0, 1.65fr);
-      gap: clamp(24px, 4vw, 72px);
+      grid-template-columns: minmax(240px, 0.58fr) minmax(0, 1.72fr);
+      gap: clamp(22px, 3.5vw, 58px);
       align-items: stretch;
       padding: clamp(20px, 3vw, 38px) 0 clamp(22px, 3vw, 42px);
       border-bottom: 1px solid var(--line);
@@ -1035,11 +1035,11 @@
       margin: 0;
       color: var(--ink);
       font-family: var(--font-display);
-      font-size: clamp(42px, 6vw, 78px);
+      font-size: clamp(30px, 3.4vw, 48px);
       font-stretch: condensed;
       font-weight: 800;
       letter-spacing: -0.055em;
-      line-height: 0.95;
+      line-height: 1;
     }
 
     .decision-shell[data-tone="hold"] .decision-action-row h2,
@@ -2082,6 +2082,15 @@
       opacity: 0 !important;
     }
 
+    /* "Show all" + "Labels on" is an explicit exhaustive inspection mode.
+       In that exact combination every published label wins over both the
+       server declutter hint and the normal collision priority pass. */
+    body.labels-on.labels-show-all .surface-hotspot.label-policy-hidden span,
+    body.labels-on.labels-show-all .surface-hotspot.label-collision-hidden span,
+    body.labels-on.labels-show-all .surface-hotspot.family-order-positioning.order-label-primary.order-context-current.label-collision-hidden span {
+      opacity: var(--overlay-label-opacity) !important;
+    }
+
     .surface-hotspot.line-hit {
       min-width: 14px;
       min-height: 14px;
@@ -2765,7 +2774,7 @@
 
     .history-item {
       display: grid;
-      grid-template-columns: 74px 90px minmax(0, 1fr) auto;
+      grid-template-columns: 74px minmax(118px, 0.62fr) minmax(92px, 0.42fr) minmax(180px, 1.7fr) auto;
       gap: 14px;
       align-items: center;
       width: 100%;
@@ -2803,6 +2812,45 @@
 
     .history-side.wait {
       color: var(--hold);
+    }
+
+    .history-trends {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .history-trends strong,
+    .history-trends small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .history-trends strong {
+      color: var(--ink);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .history-trends small {
+      color: var(--quiet);
+      font-size: 9px;
+    }
+
+    .history-study-copy {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .history-regression {
+      color: #c7a452;
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 750;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
     }
 
     .history-copy {
@@ -3005,7 +3053,7 @@
       }
 
       .history-item {
-        grid-template-columns: 62px 72px minmax(0, 1fr);
+        grid-template-columns: 62px minmax(110px, 0.62fr) 86px minmax(0, 1.5fr);
       }
 
       .history-state {
@@ -3242,8 +3290,12 @@
       }
 
       .history-item {
-        grid-template-columns: 58px 64px minmax(0, 1fr);
+        grid-template-columns: 54px minmax(0, 1fr) 76px;
         gap: 8px;
+      }
+
+      .history-study-copy {
+        grid-column: 2 / -1;
       }
 
       .history-copy {
@@ -3362,12 +3414,12 @@
         <div class="tracking-live-fact tracking-anchor-read">
           <span class="tracking-live-label">Latest candle anchor</span>
           <strong id="tracking-anchor-title">Not started</strong>
-          <small id="tracking-anchor-meta">Start Tracking to freeze the latest completed candle and both forecast routes.</small>
+          <small id="tracking-anchor-meta">Start Tracking to anchor the latest completed candle for the regression study.</small>
         </div>
         <div class="tracking-live-fact tracking-forecast-read" id="tracking-forecast-read" data-state="unknown">
-          <span class="tracking-live-label">Path check</span>
-          <strong id="tracking-forecast-title">Waiting for evidence</strong>
-          <small id="tracking-forecast-meta">The server has not favored either frozen route yet.</small>
+          <span class="tracking-live-label">Regression read</span>
+          <strong id="tracking-forecast-title">No completed candle history yet</strong>
+          <small id="tracking-forecast-meta">Completed candles will be counted as upward movement, downward movement, rests, or continuations.</small>
         </div>
         <div class="tracking-live-fact tracking-watch-read" id="tracking-watch-read" data-state="idle">
           <span class="tracking-live-label">Live observation</span>
@@ -3384,51 +3436,12 @@
         </div>
         <div class="tracking-path-comparison" id="tracking-path-comparison" data-state="waiting" data-has-focus="true" data-focused-path="PATH_A">
           <div class="tracking-path-heading">
-            <strong>Two frozen forecast routes</strong>
-            <span>Focus one without hiding the other. Sequence future blocks stay separate, and neither route grants entry permission.</span>
-          </div>
-          <div class="tracking-route-plot" id="tracking-route-plot" data-state="waiting">
-            <svg class="tracking-route-svg" id="tracking-route-svg" viewBox="0 0 1200 158" preserveAspectRatio="none" role="img" aria-label="Two frozen forecast routes and confirmed observed progression">
-              <g id="tracking-route-guides" aria-hidden="true"></g>
-              <rect class="tracking-entry-band" id="tracking-entry-band" x="0" y="0" width="0" height="0" aria-label="Entry area at start" hidden></rect>
-              <polyline class="tracking-route-line path-a" id="tracking-route-path-a" points="" aria-label="Path A frozen route"></polyline>
-              <polyline class="tracking-route-line path-b" id="tracking-route-path-b" points="" aria-label="Path B frozen route"></polyline>
-              <polyline class="tracking-route-line observed" id="tracking-route-observed" points="" aria-label="No completed observed progression yet"></polyline>
-              <g id="tracking-route-nodes" aria-hidden="true"></g>
-              <g id="tracking-observed-nodes" aria-hidden="true"></g>
-              <circle class="tracking-route-anchor" id="tracking-route-anchor" cx="0" cy="0" r="4" aria-label="Shared starting candle"></circle>
-            </svg>
-            <div class="tracking-route-legend" aria-hidden="true">
-              <span class="path-a"><i></i>Path A</span>
-              <span class="path-b"><i></i>Path B</span>
-              <span class="observed"><i></i>Observed</span>
-              <span class="entry-area"><i></i>Entry area at start</span>
-            </div>
-            <div class="tracking-route-axis" id="tracking-route-axis" aria-hidden="true">
-              <span>E1</span><span>E2</span><span>E3</span><span>E4</span><span>E5</span><span>E6</span>
-              <span>E7</span><span>E8</span><span>E9</span><span>E10</span><span>E11</span><span>E12</span>
-            </div>
-            <p class="tracking-route-placeholder" id="tracking-route-placeholder">Waiting for two comparable route shapes.</p>
-          </div>
-          <div class="tracking-path-rows" id="tracking-path-rows" aria-label="Frozen forecast route comparison">
-            <button class="tracking-path-row" id="tracking-path-a" type="button" data-path-id="PATH_A" data-state="waiting" aria-pressed="true">
-              <span class="tracking-path-copy">
-                <strong id="tracking-path-a-title">Path A</strong>
-                <small id="tracking-path-a-summary">Waiting for the frozen main route.</small>
-              </span>
-              <span class="tracking-path-status" id="tracking-path-a-status">Awaiting candles</span>
-            </button>
-            <button class="tracking-path-row" id="tracking-path-b" type="button" data-path-id="PATH_B" data-state="waiting" aria-pressed="false">
-              <span class="tracking-path-copy">
-                <strong id="tracking-path-b-title">Path B</strong>
-                <small id="tracking-path-b-summary">Waiting for the frozen alternate route.</small>
-              </span>
-              <span class="tracking-path-status" id="tracking-path-b-status">Awaiting candles</span>
-            </button>
+            <strong>Candle-by-candle regression study</strong>
+            <span>Every completed candle is recorded as movement, rest, or continuation. This study never grants entry permission.</span>
           </div>
           <div class="tracking-live-rail-heading">
-            <strong>Live completed candles</strong>
-            <span>Each E-step records once. Route favor is shown only when the server confirms it.</span>
+            <strong>Tracked candle sequence</strong>
+            <span>Each E-step records once so rests, swings, changes, and continuations remain visible in order.</span>
           </div>
           <ol class="tracking-event-tape" id="tracking-event-tape" aria-label="Twelve tracked candle events"></ol>
           <div class="tracking-continuity-guidance" id="tracking-continuity-guidance" role="status" aria-live="polite" hidden>
@@ -3448,18 +3461,18 @@
             <span id="beginner-market-context">Market not connected</span>
           </div>
           <div class="decision-action-block">
-            <span class="decision-kicker">What to do now</span>
+            <span class="decision-kicker">Entry permission</span>
             <div class="decision-action-row">
-              <h2 id="beginner-decision-title" aria-live="polite">WAIT</h2>
+              <h2 id="beginner-decision-title" aria-live="polite">CLOSED</h2>
               <span class="decision-confidence" id="beginner-confidence">Building evidence</span>
             </div>
-            <p class="decision-instruction" id="beginner-instruction">Do not place a trade yet.</p>
-            <p class="decision-reason" id="beginner-reason">Phoenix Guard is checking the current move, the likely path, and entry conditions.</p>
+            <p class="decision-instruction" id="beginner-instruction">No trade entry is open.</p>
+            <p class="decision-reason" id="beginner-reason">Entry remains separate from the chart study.</p>
           </div>
         </div>
         <div class="decision-next">
-          <span class="decision-kicker">What must happen next</span>
-          <strong id="beginner-next-condition">Connect a live chart and wait for a current observation.</strong>
+          <span class="decision-kicker">Permission changes when</span>
+          <strong id="beginner-next-condition">A current chart explicitly returns BUY NOW or SELL NOW.</strong>
         </div>
       </div>
 
@@ -3467,42 +3480,42 @@
         <div class="story-heading">
           <div>
             <span class="decision-kicker">Market story</span>
-            <h3 id="beginner-story-title">Building the current view</h3>
+            <h3 id="beginner-story-title">Reading the larger and inner trend</h3>
           </div>
-          <p id="beginner-story-summary">Current movement, forecast, and entry permission are kept separate.</p>
+          <p id="beginner-story-summary">Trend and regression describe the chart. Entry permission remains separate.</p>
         </div>
-        <div class="story-steps" aria-label="Current market story">
+        <div class="story-steps" aria-label="Major trend, inner trend, and regression study">
           <div class="story-step">
-            <span class="story-label" id="story-step-one-label">Now</span>
-            <strong id="current-move-title">Reading movement</strong>
-            <p id="beginner-now-read">The current chart movement is being observed.</p>
+            <span class="story-label" id="story-step-one-label">Major trend</span>
+            <strong id="current-move-title">Reading larger structure</strong>
+            <p id="beginner-now-read">The broader chart direction is being studied.</p>
           </div>
           <div class="story-step">
-            <span class="story-label" id="story-step-two-label">Likely next</span>
-            <strong id="forecast-title">No forecast yet</strong>
-            <p id="beginner-next-read">A forecast will appear only when the current observation is valid.</p>
+            <span class="story-label" id="story-step-two-label">Inner trend</span>
+            <strong id="forecast-title">Reading local movement</strong>
+            <p id="beginner-next-read">The move inside the larger trend is being classified.</p>
           </div>
           <div class="story-step">
-            <span class="story-label" id="story-step-three-label">Entry status</span>
-            <strong id="permission-title">Entry closed</strong>
-            <p id="beginner-entry-read">Wait until this page explicitly says BUY NOW or SELL NOW.</p>
+            <span class="story-label" id="story-step-three-label">Regression study</span>
+            <strong id="permission-title">Building history</strong>
+            <p id="beginner-entry-read">Recorded movement, rests, and continuations will form the history read.</p>
           </div>
         </div>
         <p class="pressure-event" id="pressure-event" data-state="none">No current pressure event has been confirmed.</p>
         <details class="evidence-details">
-          <summary>See why Phoenix Guard is waiting</summary>
+          <summary>See study evidence</summary>
           <div class="evidence-list">
             <div class="evidence-item">
-              <span>Observation</span>
-              <strong id="beginner-evidence-story">Waiting for the chart</strong>
+              <span>Structure</span>
+              <strong id="beginner-evidence-story">Reading major and inner trend</strong>
             </div>
             <div class="evidence-item">
-              <span>Entry</span>
-              <strong id="beginner-evidence-timing">Not open</strong>
+              <span>Regression</span>
+              <strong id="beginner-evidence-timing">Building history</strong>
             </div>
             <div class="evidence-item">
-              <span>Currentness</span>
-              <strong id="beginner-evidence-safety">Checking</strong>
+              <span>Entry permission</span>
+              <strong id="beginner-evidence-safety">Closed while checking</strong>
             </div>
           </div>
           <button class="decision-advanced-link" id="beginner-open-advanced" type="button">Explore the visual evidence</button>
@@ -3536,7 +3549,6 @@
         <button class="overlay-view" type="button" data-overlay-view="structure" aria-pressed="false">Structure</button>
         <button class="overlay-view" type="button" data-overlay-view="zones" aria-pressed="false">Zones</button>
         <button class="overlay-view" type="button" data-overlay-view="plan" aria-pressed="false">Trade plan</button>
-        <button class="overlay-view" type="button" data-overlay-view="forecast" aria-pressed="false">Forecasts</button>
         <button class="overlay-view" type="button" data-overlay-view="history" aria-pressed="false">History</button>
       </nav>
 
@@ -3586,28 +3598,6 @@
             <div class="playbook-panel" id="tracking-plan-panel" data-ready="false" aria-live="polite" hidden>
               <strong>Tracking plan</strong>
               <span>Start a tracking episode to keep one plan and its supporting chart evidence together.</span>
-            </div>
-          </div>
-          <div class="overlay-family-group">
-            <span class="overlay-family-label">Forecast studies</span>
-            <div class="layer-filter-list" aria-label="Forecast study overlays">
-              <button class="layer-filter" type="button" data-overlay-family="two_candle" aria-pressed="false">Near-term candle read <span class="layer-count" data-layer-count="two_candle">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="scene_forecaster" aria-pressed="false">Visual outlook <span class="layer-count" data-layer-count="scene_forecaster">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">12-step sequence outlook <span class="layer-count" data-layer-count="lstm">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="prediction" aria-pressed="false">Possible route <span class="layer-count" data-layer-count="prediction">0</span></button>
-            </div>
-            <div class="forecast-actions" id="forecast-actions" aria-label="Forecast actions" aria-busy="false">
-              <div class="forecast-action-buttons">
-                <button class="forecast-action primary" id="run-forecast" type="button">Run forecast</button>
-                <button class="forecast-action" id="show-future-path" type="button">Show future path</button>
-              </div>
-              <p class="forecast-action-status" id="forecast-action-status" data-state="idle" role="status" aria-live="polite">Every outlook studies 12 candle events. A model outlook is evidence, never entry permission.</p>
-              <div class="forecast-path-legend" id="forecast-path-legend" role="list" aria-label="Forecast path legend">
-                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line" aria-hidden="true"></span>Selected visual route</span>
-                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line bullish" aria-hidden="true"></span>Bullish route</span>
-                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line bearish" aria-hidden="true"></span>Bearish route</span>
-                <span class="forecast-path-legend-note">Green and red are alternative studied routes, not odds. Wider route separation means less agreement about the progression.</span>
-              </div>
             </div>
           </div>
           <div class="overlay-family-group">
@@ -3694,8 +3684,8 @@
       <div class="history-heading">
         <div>
           <span class="section-kicker">Session history</span>
-          <h2 id="history-title">From earlier movement to now</h2>
-          <p>Past observations stay in history. They never overwrite the current move or regain entry permission.</p>
+          <h2 id="history-title">Regression study · candle by candle</h2>
+          <p>Each row keeps the major trend, inner trend, and whether price moved, rested, or continued. History never grants entry permission.</p>
         </div>
         <span class="history-count" id="history-count">No observations yet</span>
       </div>
@@ -3705,7 +3695,7 @@
         <span>Now</span>
       </div>
       <div class="history" id="history-list">
-        <div class="history-empty">Phoenix Guard will place time-ordered movement changes here as the chart is tracked.</div>
+        <div class="history-empty">Completed candle studies will appear here in time order.</div>
       </div>
     </section>
   </main>
@@ -3723,26 +3713,26 @@
       <div class="help-head">
         <div>
           <span class="section-kicker">How to read this page</span>
-          <h2 id="help-title">Three things stay separate</h2>
+          <h2 id="help-title">How the chart study is organized</h2>
         </div>
         <button class="help-close" id="help-close" type="button" aria-label="Close help">×</button>
       </div>
       <div class="help-steps">
         <div class="help-step">
           <span class="help-step-index">01</span>
-          <div><strong>Current movement</strong><p>What price is doing in the newest valid chart observation. An earlier move is shown as history, not as current pressure.</p></div>
+          <div><strong>Major trend</strong><p>The larger regression direction across the proven completed-candle window.</p></div>
         </div>
         <div class="help-step">
           <span class="help-step-index">02</span>
-          <div><strong>Likely next</strong><p>A forecast is a watched direction. It can differ from the current movement and never grants a trade by itself.</p></div>
+          <div><strong>Inner trend</strong><p>The current swing, pullback, rest, or continuation inside the larger trend.</p></div>
         </div>
         <div class="help-step">
           <span class="help-step-index">03</span>
-          <div><strong>Entry status</strong><p>WAIT remains the default. BUY NOW means look for a lower price inside the verified reaction area; SELL NOW means look for a higher price inside the verified reaction area. Never chase a move.</p></div>
+          <div><strong>Regression history</strong><p>Completed candles are classified as upward movement, downward movement, rest, or continuation and compared with similar prior sequences.</p></div>
         </div>
         <div class="help-step">
           <span class="help-step-index">04</span>
-          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. Current movement, reaction areas, trendlines, plans, outlooks, and history remain independent. Open Detailed overlay controls when you need to switch an individual mark type.</p></div>
+          <div><strong>Entry permission</strong><p>CLOSED is independent from the study. BUY NOW or SELL NOW appears only when current safety and location checks explicitly permit entry.</p></div>
         </div>
       </div>
       <p class="help-note">A setup window can remain available for several minutes while Phoenix Guard refreshes current-frame permission. It closes early whenever live truth invalidates the setup. Visual analysis is decision support, not a promise of market outcome.</p>
@@ -3782,7 +3772,8 @@
     const OVERLAY_SCENE_SPLIT_MIGRATION_VERSION = "1";
     const OVERLAY_ORDER_POSITIONING_MIGRATION_KEY = "phoenixguard.overlay.layers.order-positioning-migration.v1";
     const OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION = "1";
-    const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "forecast", "history"]);
+    const RETIRED_FORECAST_FAMILIES = new Set(["two_candle", "scene_forecaster", "lstm", "prediction"]);
+    const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "history"]);
     const ALL_OVERLAY_FAMILIES = Object.freeze([
       "chart_bounds",
       "current_candles",
@@ -3796,10 +3787,6 @@
       "invalidation",
       "market_context",
       "council",
-      "two_candle",
-      "scene_forecaster",
-      "lstm",
-      "prediction",
       "history",
     ]);
     const OVERLAY_PRESETS = Object.freeze({
@@ -3809,7 +3796,6 @@
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
       plan: ["council", "order_positioning", "triggers", "targets", "invalidation"],
-      forecast: ["two_candle", "scene_forecaster", "lstm", "prediction"],
       history: ["history", "major_swings", "local_swings", "order_positioning"],
     });
     const TRACKING_PLAN_FAMILIES = Object.freeze([
@@ -3825,10 +3811,6 @@
       "triggers",
       "targets",
       "invalidation",
-      "two_candle",
-      "scene_forecaster",
-      "lstm",
-      "prediction",
       "history",
     ]);
     const PUBLIC_OVERLAY_KINDS = new Set([
@@ -4123,6 +4105,13 @@
 
     function readStoredPreset() {
       const stored = readStoredValue("phoenixguard.overlay.preset.v1", "live");
+      // The public V3 surface no longer offers the retired forecast workspace.
+      // Migrate a previously persisted selection back to the live study view so
+      // users never reopen on a control-less legacy preset after this upgrade.
+      if (stored === "forecast") {
+        writeStoredValue("phoenixguard.overlay.preset.v1", "live");
+        return "live";
+      }
       return stored === "custom" || PUBLIC_OVERLAY_VIEWS.has(stored) ? stored : "live";
     }
 
@@ -4720,9 +4709,11 @@
     function setTrackingPathFocus(pathId) {
       const next = ["PATH_A", "PATH_B"].includes(pathId) ? pathId : "PATH_A";
       state.trackingPathFocus = next;
-      els.trackingPathComparison.dataset.focusedPath = next;
-      els.trackingPathComparison.dataset.hasFocus = "true";
-      [els.trackingPathA, els.trackingPathB].forEach(function (button) {
+      if (els.trackingPathComparison) {
+        els.trackingPathComparison.dataset.focusedPath = next;
+        els.trackingPathComparison.dataset.hasFocus = "true";
+      }
+      [els.trackingPathA, els.trackingPathB].filter(Boolean).forEach(function (button) {
         button.setAttribute("aria-pressed", button.dataset.pathId === next ? "true" : "false");
       });
     }
@@ -4819,6 +4810,9 @@
     }
 
     function renderTrackingRoutePlot(comparison, events) {
+      if (!els.trackingRouteSvg || !els.trackingRoutePlot) {
+        return;
+      }
       const geometry = trackingRoutePlotGeometry(comparison, events);
       els.trackingRouteGuides.replaceChildren();
       els.trackingRouteNodes.replaceChildren();
@@ -4931,6 +4925,9 @@
       };
       ["PATH_A", "PATH_B"].forEach(function (pathId) {
         const row = rowById[pathId];
+        if (!row.button || !row.title || !row.summary || !row.status) {
+          return;
+        }
         const path = safeObject(pathsById.get(pathId));
         const favored = pathComparison.favoredPathId === pathId;
         row.button.dataset.state = favored ? "favored" : pathComparison.available ? "tracked" : "waiting";
@@ -5032,36 +5029,30 @@
     }
 
     function episodeForecastRead(events) {
-      const compared = events.filter(function (event) { return typeof event.agreement === "boolean"; });
-      const matches = compared.filter(function (event) { return event.agreement === true; }).length;
-      const opposed = compared.length - matches;
-      if (!compared.length) {
+      const sides = safeList(events).map(function (event) {
+        return studyDirection(safeObject(event).actual || safeObject(event).direction || safeObject(event).side);
+      });
+      const up = sides.filter(function (side) { return side === "BUY"; }).length;
+      const down = sides.filter(function (side) { return side === "SELL"; }).length;
+      const rests = sides.length - up - down;
+      let continuations = 0;
+      sides.forEach(function (side, index) {
+        if (index > 0 && side !== "HOLD" && side === sides[index - 1]) {
+          continuations += 1;
+        }
+      });
+      if (!sides.length) {
         return {
           state: "unknown",
-          title: events.length ? "Evidence recorded" : "Waiting for evidence",
-          meta: events.length
-            ? events.length + " completed candle" + (events.length === 1 ? " has" : "s have") + " no directional comparison yet."
-            : "No completed candle has been compared yet.",
-        };
-      }
-      if (opposed === 0) {
-        return {
-          state: "aligned",
-          title: "Following the saved forecast",
-          meta: matches + " of " + compared.length + " directional block" + (compared.length === 1 ? " matches" : "s match") + ".",
-        };
-      }
-      if (matches === 0) {
-        return {
-          state: "opposed",
-          title: "Moving against the saved forecast",
-          meta: opposed + " of " + compared.length + " directional block" + (compared.length === 1 ? " differs" : "s differ") + ".",
+          title: "No completed candle history yet",
+          meta: "The regression read begins after the first completed tracked candle.",
         };
       }
       return {
-        state: "mixed",
-        title: "Mixed against the saved forecast",
-        meta: matches + " matched · " + opposed + " differed.",
+        state: up > down ? "aligned" : down > up ? "opposed" : "mixed",
+        title: up > down ? "Regression leans upward" : down > up ? "Regression leans downward" : "Regression is balanced",
+        meta: up + " up · " + down + " down · " + rests + " rest"
+          + (continuations ? " · " + continuations + " continuation" + (continuations === 1 ? "" : "s") : ""),
       };
     }
 
@@ -5164,17 +5155,15 @@
             ? "E1 is the candle that was live when Start Tracking was pressed. It records only after that candle completes."
             : pathAnchor.status === "CONFIRMED"
               ? (startedAt ? "Started " + formatTime(startedAt) + " · " : "")
-                + "both scene routes were frozen from this completed candle."
+                + "the regression baseline was anchored to this completed candle."
               : "The latest completed-candle anchor is still being prepared."
           : hasEpisode
             ? (startedAt ? "Started " + formatTime(startedAt) + " · " : "")
-              + "saved outlook " + publicDirectionWord(baselineSide)
-            : "Start Tracking to freeze the latest completed candle and both forecast routes.",
+              + "starting movement " + publicDirectionWord(baselineSide)
+            : "Start Tracking to anchor the latest completed candle for regression study.",
       );
 
-      const forecastRead = pathComparison.schemaValid
-        ? episodePathVerdict(pathComparison)
-        : episodeForecastRead(events);
+      const forecastRead = episodeForecastRead(events);
       els.trackingForecastRead.dataset.state = forecastRead.state;
       setText(els.trackingForecastTitle, forecastRead.title);
       setText(els.trackingForecastMeta, forecastRead.meta);
@@ -5188,46 +5177,25 @@
       renderTrackingPathComparison(pathComparison, events, watchRead);
 
       const byStep = new Map(events.map(function (event) { return [event.step, event]; }));
-      const futureByStep = new Map(safeList(episode.future_blocks).map(function (rawBlock, index) {
-        const block = safeObject(rawBlock);
-        const candidate = Number(block.step || index + 1);
-        const step = Math.max(1, Math.min(progress.total, Number.isFinite(candidate) ? Math.round(candidate) : index + 1));
-        return [step, block];
-      }));
       const fragment = document.createDocumentFragment();
+      let previousTrackedSide = "HOLD";
       for (let step = 1; step <= progress.total; step += 1) {
         const item = document.createElement("li");
         item.className = "tracking-event";
         const event = byStep.get(step);
-        const block = safeObject(futureByStep.get(step));
         const label = document.createElement("strong");
         const detail = document.createElement("span");
         label.textContent = "E" + step;
         if (event) {
-          if (pathComparison.schemaValid) {
-            item.dataset.state = event.favoredPathId === "PATH_A"
-              ? "path-a"
-              : event.favoredPathId === "PATH_B"
-                ? "path-b"
-                : "recorded";
-            const anyMeasured = ["PATH_A", "PATH_B"].some(function (pathId) {
-              return safeText(safeObject(event.pathFitById[pathId]).status, "UNKNOWN") === "MEASURED";
-            });
-            detail.textContent = event.favoredPathId === "PATH_A"
-              ? "Path A · " + publicDirectionWord(event.actual)
-              : event.favoredPathId === "PATH_B"
-                ? "Path B · " + publicDirectionWord(event.actual)
-                : anyMeasured
-                  ? "Compared · " + publicDirectionWord(event.actual)
-                  : "Observed · " + publicDirectionWord(event.actual);
-          } else {
-            item.dataset.state = event.agreement === true ? "aligned" : event.agreement === false ? "opposed" : "recorded";
-            detail.textContent = event.agreement === true
-              ? "Match · " + publicDirectionWord(event.actual)
-              : event.agreement === false
-                ? "Miss · " + publicDirectionWord(event.actual)
-                : "Unknown · " + publicDirectionWord(event.actual);
-          }
+          const actualSide = studyDirection(event.actual || event.direction || event.side);
+          const continuation = actualSide !== "HOLD" && actualSide === previousTrackedSide;
+          item.dataset.state = actualSide === "BUY" ? "aligned" : actualSide === "SELL" ? "opposed" : "recorded";
+          detail.textContent = actualSide === "HOLD"
+            ? "Rest / range"
+            : continuation
+              ? (actualSide === "BUY" ? "Up continuation" : "Down continuation")
+              : (actualSide === "BUY" ? "Up movement" : "Down movement");
+          previousTrackedSide = actualSide;
           item.title = event.summary;
           item.setAttribute("aria-label", "E" + step + ". " + event.summary);
         } else if (episodeIsActive(episode) && step === progress.completed + 1) {
@@ -5237,14 +5205,7 @@
           item.setAttribute("aria-label", "E" + step + ". " + watchRead.detail);
         } else {
           item.dataset.state = "pending";
-          const forecastSide = directionalSide(block.movement_side || block.direction || block.side);
-          detail.textContent = pathComparison.schemaValid
-            ? "Not observed"
-            : forecastSide === "BUY"
-              ? "Forecast up"
-              : forecastSide === "SELL"
-                ? "Forecast down"
-                : "Pending";
+          detail.textContent = "Pending close";
           item.title = "E" + step + " has not completed yet.";
           item.setAttribute("aria-label", "E" + step + ". Not completed yet. " + detail.textContent + ".");
         }
@@ -5325,6 +5286,9 @@
     }
 
     function renderForecastGate(payload) {
+      if (!els.runForecast || !els.showFuturePath || !els.forecastActionStatus) {
+        return;
+      }
       const episode = trackingEpisode(payload);
       const active = episodeIsActive(episode);
       const retained = episodeRetainsOutlook(episode);
@@ -6126,14 +6090,14 @@
       setConnectionState("offline", "Offline");
       els.beginnerDecisionShell.dataset.tone = "blocked";
       setText(els.beginnerReadStatus, "No current observation");
-      setText(els.beginnerDecisionTitle, "WAIT");
-      setText(els.beginnerInstruction, "Do not trade while the live view is unavailable.");
+      setText(els.beginnerDecisionTitle, "CLOSED");
+      setText(els.beginnerInstruction, "Entry permission is unavailable.");
       setText(els.beginnerReason, message);
       setText(els.beginnerNextCondition, "Reconnect the chart and wait for a new current observation.");
       updateVisualStatus("chart", "offline", "Broker view unavailable");
     }
 
-    function renderDecision(payload) {
+    function renderDecisionLegacy(payload) {
       const market = safeObject(payload.market);
       const freshness = safeObject(payload.freshness);
       const currentMove = safeObject(payload.current_move);
@@ -6318,6 +6282,379 @@
         setText(els.beginnerEvidenceStory, "Visual outlook · " + (sceneSide === "BUY" ? "buy progression" : sceneSide === "SELL" ? "sell progression" : "range progression"));
       }
       renderEpisodeStory(payload);
+    }
+
+    function studyDirection(value) {
+      const row = safeObject(value);
+      const raw = typeof value === "string" || typeof value === "number"
+        ? value
+        : row.direction
+          || row.side
+          || row.trend
+          || row.bias
+          || row.label
+          || row.action;
+      const token = safeText(raw, "").toUpperCase().replace(/[_-]+/g, " ");
+      if (["BUY", "UP", "BULL", "BULLISH", "RISING", "UPTREND"].includes(token)
+        || /\b(BUY|BULL|UPWARD|RISING|UPTREND)\b/.test(token)) {
+        return "BUY";
+      }
+      if (["SELL", "DOWN", "BEAR", "BEARISH", "FALLING", "DOWNTREND"].includes(token)
+        || /\b(SELL|BEAR|DOWNWARD|FALLING|DOWNTREND)\b/.test(token)) {
+        return "SELL";
+      }
+      return "HOLD";
+    }
+
+    function firstStudyValue(values) {
+      return safeList(values).find(function (value) {
+        if (value === undefined || value === null) {
+          return false;
+        }
+        if (Array.isArray(value)) {
+          return value.length > 0;
+        }
+        if (typeof value === "object") {
+          return Object.keys(value).length > 0;
+        }
+        return safeText(value, "") !== "";
+      });
+    }
+
+    function studySourceSummary(source, fallback) {
+      const row = safeObject(source);
+      return safeText(
+        // A plotted overlay label identifies the drawing; it is not a plain
+        // language explanation of the studied trend. Prefer an authored study
+        // sentence and otherwise use the deterministic trend fallback.
+        row.summary || row.description || row.read || row.story,
+        fallback,
+      );
+    }
+
+    function strongestStudyOverlay(families, predicate) {
+      return safeList(state.overlays).filter(function (overlay) {
+        const row = safeObject(overlay);
+        const lifecycle = safeText(row.lifecycle, "current").toLowerCase();
+        return safeList(families).includes(overlayFamily(row))
+          && !["historical", "archived", "ended", "expired", "stale", "superseded"].includes(lifecycle)
+          && studyDirection(row) !== "HOLD"
+          && (!predicate || predicate(row));
+      }).sort(function (left, right) {
+        return Number(right.confidence || 0) - Number(left.confidence || 0);
+      })[0] || null;
+    }
+
+    function directionCounts(rows) {
+      return safeList(rows).reduce(function (counts, row) {
+        const side = studyDirection(
+          safeObject(row).actual_side
+            || safeObject(row).actual
+            || safeObject(row).direction
+            || safeObject(row).side
+            || safeObject(row).action,
+        );
+        counts[side] += 1;
+        counts.sequence.push(side);
+        return counts;
+      }, {BUY: 0, SELL: 0, HOLD: 0, sequence: []});
+    }
+
+    function dominantStudyDirection(counts, fallback) {
+      const up = Number(safeObject(counts).BUY || 0);
+      const down = Number(safeObject(counts).SELL || 0);
+      if (up > down) {
+        return "BUY";
+      }
+      if (down > up) {
+        return "SELL";
+      }
+      const directional = safeList(safeObject(counts).sequence).filter(function (side) {
+        return side === "BUY" || side === "SELL";
+      });
+      return directional.length ? directional[directional.length - 1] : studyDirection(fallback);
+    }
+
+    function marketRegressionStudy(payload) {
+      const operatorState = safeObject(payload);
+      const tracking = safeObject(operatorState.tracking);
+      const latestSignal = safeObject(operatorState.latest_signal);
+      const explicitStudy = safeObject(
+        tracking.market_study_v3
+          || operatorState.market_study_v3
+          || safeObject(latestSignal).market_study_v3
+          || operatorState.regression_study
+          || operatorState.market_study
+          || operatorState.behavioral_study
+          || operatorState.study,
+      );
+      const regressionContract = safeObject(explicitStudy.regression);
+      const behaviorContract = safeObject(explicitStudy.behavior);
+      const similarityContract = safeObject(explicitStudy.historical_similarity);
+      const continuationContract = safeObject(
+        similarityContract.historical_continuation || similarityContract.continuation,
+      );
+      const directionalRead = safeObject(explicitStudy.directional_read);
+      const structure = safeObject(
+        operatorState.trend_context
+          || operatorState.market_structure
+          || explicitStudy.trends
+          || explicitStudy.structure,
+      );
+      const currentMove = safeObject(operatorState.current_move);
+      const episode = trackingEpisode(operatorState);
+      const rawHistory = safeList(operatorState.history).length
+        ? safeList(operatorState.history)
+        : safeList(operatorState.session_history).concat(safeList(episode.events), state.localHistory);
+      const counts = directionCounts(rawHistory);
+      const historySide = dominantStudyDirection(counts, currentMove);
+      const majorOverlay = strongestStudyOverlay(["major_swings", "trendlines"], function (overlay) {
+        return overlayFamily(overlay) === "major_swings" || overlayKind(overlay) !== "local_structure_line";
+      });
+      const innerOverlay = strongestStudyOverlay(["local_swings", "trendlines"], function (overlay) {
+        return overlayFamily(overlay) === "local_swings" || overlayKind(overlay) === "local_structure_line";
+      });
+      const majorSource = firstStudyValue([
+        regressionContract.major_trend,
+        explicitStudy.major_trend,
+        explicitStudy.major,
+        operatorState.major_trend,
+        operatorState.major_trend_context,
+        structure.major_trend,
+        structure.major,
+        majorOverlay,
+      ]);
+      const innerSource = firstStudyValue([
+        regressionContract.inner_trend,
+        explicitStudy.inner_trend,
+        explicitStudy.inner,
+        operatorState.inner_trend,
+        operatorState.local_trend,
+        structure.inner_trend,
+        structure.inner,
+        currentMove,
+        innerOverlay,
+      ]);
+      const regressionSource = firstStudyValue([
+        directionalRead,
+        continuationContract,
+        explicitStudy.regression,
+        explicitStudy.history_regression,
+        operatorState.history_regression,
+        operatorState.regression,
+      ]);
+      const majorSide = studyDirection(majorSource) !== "HOLD"
+        ? studyDirection(majorSource)
+        : historySide !== "HOLD"
+          ? historySide
+          : studyDirection(currentMove);
+      const innerSide = studyDirection(innerSource) !== "HOLD"
+        ? studyDirection(innerSource)
+        : studyDirection(currentMove);
+      const regressionSide = studyDirection(regressionSource) !== "HOLD"
+        ? studyDirection(regressionSource)
+        : historySide;
+      const sequence = counts.sequence;
+      const latestSide = sequence.length ? sequence[sequence.length - 1] : innerSide;
+      let latestRun = 0;
+      for (let index = sequence.length - 1; index >= 0 && sequence[index] === latestSide; index -= 1) {
+        latestRun += 1;
+      }
+      const inferredPhase = latestSide === "HOLD"
+        ? "resting / ranging"
+        : latestRun >= 2
+          ? (latestSide === "BUY" ? "continuing upward" : "continuing downward")
+          : majorSide !== "HOLD" && innerSide !== "HOLD" && majorSide !== innerSide
+            ? (innerSide === "BUY" ? "an upward pullback" : "a downward pullback")
+            : (innerSide === "BUY" ? "moving upward" : innerSide === "SELL" ? "moving downward" : "resting");
+      const currentStateContract = safeObject(behaviorContract.current_state);
+      const currentSegmentContract = safeObject(behaviorContract.current_segment);
+      const behaviorToken = safeText(
+        currentStateContract.state
+          || currentStateContract.direction
+          || currentSegmentContract.state
+          || currentSegmentContract.next_state
+          || (typeof behaviorContract.current_state === "string" ? behaviorContract.current_state : "")
+          || (typeof behaviorContract.current_segment === "string" ? behaviorContract.current_segment : ""),
+        "",
+      ).toUpperCase().replace(/[_-]+/g, " ");
+      const phase = /REST|PAUSE|RANGE|SIDEWAYS|CONSOLIDAT|COMPRESSION/.test(behaviorToken)
+        ? "resting / ranging"
+        : /CONTINU/.test(behaviorToken)
+          ? (innerSide === "SELL" ? "continuing downward" : innerSide === "BUY" ? "continuing upward" : "continuing its current sequence")
+          : /PULLBACK|RETRACE/.test(behaviorToken)
+            ? (innerSide === "BUY" ? "an upward pullback" : innerSide === "SELL" ? "a downward pullback" : "in a pullback")
+            : /REVERS|TURN|FLIP/.test(behaviorToken)
+              ? "testing a direction change"
+              : inferredPhase;
+      const majorTitle = majorSide === "BUY" ? "Uptrend" : majorSide === "SELL" ? "Downtrend" : "Range / mixed";
+      const innerTitle = innerSide === "BUY"
+        ? majorSide === "SELL" ? "Upward pullback" : "Upward inner move"
+        : innerSide === "SELL"
+          ? majorSide === "BUY" ? "Downward pullback" : "Downward inner move"
+          : "Rest / sideways";
+      const regressionTitle = regressionSide === "BUY"
+        ? "History leans upward"
+        : regressionSide === "SELL"
+          ? "History leans downward"
+          : rawHistory.length ? "History is mixed" : "Building history";
+      const countSummary = rawHistory.length
+        ? counts.BUY + " up · " + counts.SELL + " down · " + counts.HOLD + " rest"
+        : "No completed candle history yet";
+      const explicitMarketStory = safeText(
+        behaviorContract.market_story
+          || directionalRead.summary
+          || directionalRead.reason
+          || safeList(directionalRead.reasons).join(" · "),
+        "",
+      );
+      const continuationConfidence = Number(continuationContract.confidence || 0);
+      const continuationSupport = Number(continuationContract.support || continuationContract.sample_count || 0);
+      const similaritySummary = Object.keys(continuationContract).length
+        ? "Historical continuation "
+          + (studyDirection(continuationContract) === "BUY" ? "leans up" : studyDirection(continuationContract) === "SELL" ? "leans down" : "is mixed")
+          + (continuationConfidence > 0 ? " at " + Math.round(clamp(continuationConfidence, 0, 1) * 100) + "% confidence" : "")
+          + (continuationSupport > 0 ? " from " + continuationSupport + " similar case" + (continuationSupport === 1 ? "" : "s") : "")
+          + "."
+        : "";
+      return {
+        major: {
+          side: majorSide,
+          title: majorTitle,
+          summary: studySourceSummary(
+            majorSource,
+            majorSide === "BUY"
+              ? "The larger studied structure is rising."
+              : majorSide === "SELL"
+                ? "The larger studied structure is falling."
+                : "The larger structure is balanced or still forming.",
+          ),
+        },
+        inner: {
+          side: innerSide,
+          title: innerTitle,
+          summary: studySourceSummary(
+            innerSource,
+            "The latest inner sequence is " + phase + ".",
+          ),
+        },
+        regression: {
+          side: regressionSide,
+          title: regressionTitle,
+          summary: explicitMarketStory || studySourceSummary(
+            regressionSource,
+            [countSummary + ".", similaritySummary, "Latest sequence: " + phase + "."].filter(Boolean).join(" "),
+          ),
+        },
+        phase: phase,
+      };
+    }
+
+    function renderDecision(payload) {
+      const market = safeObject(payload.market);
+      const freshness = safeObject(payload.freshness);
+      const currentMove = safeObject(payload.current_move);
+      const permission = safeObject(payload.permission);
+      const pressure = safeObject(payload.pressure_event);
+      const study = marketRegressionStudy(payload);
+      const action = normalizeAction(permission.action);
+      const setupWindowOpen = permission.window_open === true || action !== "WAIT";
+      const setupWindowVerifying = action === "WAIT" && setupWindowOpen;
+      const windowLabel = entryWindowLabel(permission);
+      const entryGuidance = entryLocationGuidance(permission, action);
+      const freshState = normalizeFreshness(freshness.state || freshness.status);
+      const freshnessLabel = safeText(
+        freshness.label,
+        freshState === "live" ? "Live observation" : titleCase(freshState),
+      );
+      const actionTone = action === "BUY NOW"
+        ? "buy"
+        : action === "SELL NOW"
+          ? "sell"
+          : freshState === "stale" || freshState === "offline" ? "blocked" : "hold";
+      const marketLabel = [
+        safeText(market.symbol || market.market, ""),
+        safeText(market.timeframe, ""),
+      ].filter(Boolean).join(" · ") || "Market not connected";
+      const observedAt = Number(freshness.observed_at || payload.observed_at || 0);
+      const entryPermissionTitle = setupWindowVerifying
+        ? "Setup window · verifying"
+        : action === "BUY NOW"
+          ? "Buy low · entry open"
+          : action === "SELL NOW"
+            ? "Sell high · entry open"
+            : "Entry closed";
+      const permissionMessage = safeText(
+        permission.message || permission.instruction || permission.reason || permission.summary,
+        action === "WAIT" ? "No verified entry window is open." : "A verified entry window is open.",
+      );
+
+      setText(els.storyStepOneLabel, "Major trend");
+      setText(els.storyStepTwoLabel, "Inner trend");
+      setText(els.storyStepThreeLabel, "Regression study");
+      els.beginnerDecisionShell.dataset.tone = actionTone;
+      setText(els.beginnerReadStatus, freshnessLabel);
+      setText(els.beginnerMarketContext, marketLabel);
+      setText(els.beginnerDecisionTitle, action === "WAIT" ? "CLOSED" : action);
+      setText(
+        els.beginnerConfidence,
+        setupWindowVerifying
+          ? "Permission refreshing"
+          : action === "WAIT"
+            ? "No entry permission"
+            : windowLabel || "Current window verified",
+      );
+      setText(
+        els.beginnerInstruction,
+        action === "WAIT" ? "No trade entry is open." : entryGuidance,
+        permissionMessage,
+      );
+      setText(
+        els.beginnerReason,
+        permissionMessage,
+        "Entry permission stays separate from the chart study.",
+      );
+      setText(
+        els.beginnerNextCondition,
+        setupWindowVerifying
+          ? "Wait for current-frame permission to finish refreshing."
+          : permission.next_condition,
+        action === "WAIT"
+          ? "A current chart must explicitly return BUY NOW or SELL NOW."
+          : "Use the verified price area and stop if live truth changes.",
+      );
+
+      setText(els.currentMoveTitle, study.major.title);
+      setText(els.beginnerNowRead, study.major.summary);
+      setText(els.forecastTitle, study.inner.title);
+      setText(els.beginnerNextRead, study.inner.summary);
+      setText(els.permissionTitle, study.regression.title);
+      setText(els.beginnerEntryRead, study.regression.summary);
+      setText(els.beginnerStoryTitle, study.major.title + " · " + study.inner.title);
+      setText(
+        els.beginnerStorySummary,
+        "The inner sequence is " + study.phase + ". Entry permission remains "
+          + (action === "WAIT" ? "closed" : "separately verified") + ".",
+      );
+
+      const pressureState = safeText(pressure.state, "NONE").toLowerCase();
+      const pressureSide = studyDirection(pressure.direction || pressure.side);
+      let pressureCopy = safeText(pressure.label || pressure.summary, "");
+      if (!pressureCopy) {
+        pressureCopy = pressureState === "active" && pressureSide !== "HOLD"
+          ? "Current " + (pressureSide === "BUY" ? "upward" : "downward") + " pressure is active."
+          : pressureState === "ended" && pressureSide !== "HOLD"
+            ? "Earlier " + (pressureSide === "BUY" ? "upward" : "downward") + " pressure ended."
+            : "No separate pressure event is current.";
+      }
+      els.pressureEvent.dataset.state = ["active", "ended", "stale"].includes(pressureState) ? pressureState : "none";
+      setText(els.pressureEvent, pressureCopy);
+      setText(els.beginnerEvidenceStory, "Major " + study.major.title.toLowerCase() + " · Inner " + study.inner.title.toLowerCase());
+      setText(els.beginnerEvidenceTiming, study.regression.title);
+      setText(
+        els.beginnerEvidenceSafety,
+        entryPermissionTitle + " · " + freshnessLabel + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
+      );
     }
 
     function updateVisualStatus(source, freshness, label) {
@@ -6587,6 +6924,14 @@
       renderOverlays();
     }
 
+    function exhaustiveLabelModeActive() {
+      return state.labelMode === "on" && state.overlayView === "all";
+    }
+
+    function syncExhaustiveLabelMode() {
+      els.body.classList.toggle("labels-show-all", exhaustiveLabelModeActive());
+    }
+
     function setFrameMode(mode, persist) {
       const next = mode === "chart" ? "chart" : "window";
       const changed = state.frameMode !== next;
@@ -6615,6 +6960,7 @@
       if (persist) {
         writeStoredValue("phoenixguard.labels", next);
       }
+      syncExhaustiveLabelMode();
       window.requestAnimationFrame(function () {
         resolveLabelCollisions(els.hotspotLayer);
       });
@@ -6628,6 +6974,7 @@
         state.activeFamilies = new Set(OVERLAY_PRESETS[next] || OVERLAY_PRESETS.live);
         state.showSavedOrderContext = ["all", "plan", "history"].includes(next);
       }
+      syncExhaustiveLabelMode();
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
         button.setAttribute("aria-pressed", button.dataset.overlayView === next ? "true" : "false");
       });
@@ -6683,6 +7030,9 @@
       const row = safeObject(overlay);
       const family = safeText(row.family || row.toggle_key, "").toLowerCase();
       const kind = safeText(row.kind, "").toLowerCase();
+      if (RETIRED_FORECAST_FAMILIES.has(family)) {
+        return true;
+      }
       if (family && !ALL_OVERLAY_FAMILIES.includes(family)) {
         return true;
       }
@@ -6856,6 +7206,7 @@
         });
         persistDisabledOverlayKinds();
         state.overlayView = "custom";
+        syncExhaustiveLabelMode();
         document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
           button.setAttribute("aria-pressed", "false");
         });
@@ -7228,6 +7579,7 @@
         persistDisabledOverlayKinds();
       }
       state.overlayView = "custom";
+      syncExhaustiveLabelMode();
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
         button.setAttribute("aria-pressed", "false");
       });
@@ -7262,6 +7614,7 @@
         state.disabledKinds.add(token);
       }
       state.overlayView = "custom";
+      syncExhaustiveLabelMode();
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
         button.setAttribute("aria-pressed", "false");
       });
@@ -7279,6 +7632,7 @@
         persistDisabledOverlayKinds();
       }
       state.overlayView = enabled ? "all" : "custom";
+      syncExhaustiveLabelMode();
       document.querySelectorAll("[data-overlay-view]").forEach(function (button) {
         button.setAttribute("aria-pressed", enabled && button.dataset.overlayView === "all" ? "true" : "false");
       });
@@ -7370,10 +7724,6 @@
           "targets",
           "invalidation",
           "council",
-          "two_candle",
-          "scene_forecaster",
-          "lstm",
-          "prediction",
         ].includes(family);
     }
 
@@ -8918,6 +9268,7 @@
       if (!root || state.labelMode === "off") {
         return;
       }
+      const showEveryLabel = exhaustiveLabelModeActive();
       const rootRect = root.getBoundingClientRect();
       const buttons = Array.from(root.querySelectorAll(".surface-hotspot")).sort(function (a, b) {
         return Number(b.dataset.priority || 0) - Number(a.dataset.priority || 0);
@@ -8941,7 +9292,7 @@
           button.classList.add("label-lane-end");
           rect = label.getBoundingClientRect();
         }
-        if (accepted.some(function (existing) { return rectsOverlap(rect, existing, 3); })) {
+        if (!showEveryLabel && accepted.some(function (existing) { return rectsOverlap(rect, existing, 3); })) {
           button.classList.add("label-collision-hidden");
         } else {
           accepted.push(rect);
@@ -9129,15 +9480,103 @@
       });
     }
 
+    function normalizeHistoryBehavior(value) {
+      const token = safeText(value, "").toUpperCase().replace(/[_-]+/g, " ");
+      if (/SAVED|ARCHIVE/.test(token)) {
+        return "STUDY SAVED";
+      }
+      if (/REST|PAUSE|RANGE|SIDEWAYS|CONSOLIDAT|HOLD|COMPRESSION/.test(token)) {
+        return "REST";
+      }
+      if (/CONTINU|EXTEND|FOLLOW THROUGH/.test(token)) {
+        return "CONTINUATION";
+      }
+      if (/REVERS|TURN|CHANGE|FLIP/.test(token)) {
+        return "DIRECTION CHANGE";
+      }
+      if (/SWING|MOVE|IMPULSE|EXPANSION/.test(token)) {
+        return "MOVEMENT";
+      }
+      return "";
+    }
+
     function normalizeHistoryItem(item, index) {
       const row = safeObject(item);
+      const rowStudy = safeObject(row.market_study_v3 || row.market_study || row.regression_study);
+      const rowRegression = safeObject(rowStudy.regression);
+      const rowBehavior = safeObject(rowStudy.behavior);
+      const rowDirectionalRead = safeObject(rowStudy.directional_read);
+      const summary = neutralPublicText(
+        rowBehavior.market_story || row.summary || row.label || row.message,
+        "Market observation",
+      );
       return {
         id: safeText(row.event_id || row.id || row.episode_id, "history-" + index + "-" + safeText(row.observed_at || row.timestamp, index)),
         observed_at: Number(row.observed_at || row.timestamp || row.created_at_epoch || 0),
-        side: directionalSide(row.side || row.direction || row.action),
-        summary: neutralPublicText(row.summary || row.label || row.message, "Market observation"),
+        side: studyDirection(row.actual_side || row.actual || row.side || row.direction || row.action),
+        majorSide: studyDirection(rowRegression.major_trend || row.major_trend || row.major_trend_context || safeObject(row.trends).major),
+        innerSide: studyDirection(rowRegression.inner_trend || row.inner_trend || row.local_trend || safeObject(row.trends).inner),
+        regressionSide: studyDirection(rowDirectionalRead || row.regression_direction || safeObject(row.regression).direction || row.predicted_direction),
+        agreement: typeof row.agreement === "boolean" ? row.agreement : typeof row.direction_agreement === "boolean" ? row.direction_agreement : null,
+        behaviorHint: normalizeHistoryBehavior(rowBehavior.current_state || rowBehavior.current_segment || row.behavior || row.movement_type || row.market_phase || row.phase || row.classification || summary),
+        summary: summary,
         state: safeText(row.state || row.lifecycle, "historical").toLowerCase(),
       };
+    }
+
+    function historyStudySummary(item) {
+      const summary = safeText(item.summary, "Market observation");
+      if (/^saved tracking study/i.test(summary)) {
+        const recorded = summary.match(/(\d+)\s+of\s+12\s+events?\s+recorded/i);
+        return recorded && Number(recorded[1]) > 0
+          ? "Regression study saved · " + recorded[1] + " completed candles recorded."
+          : "Regression study saved · no completed candle was recorded in this session.";
+      }
+      if (item.behavior === "REST" && /\b(wait|unconfirmed|unknown|not confirmed)\b/i.test(summary)) {
+        return "Rest / range behavior was recorded while direction remained unconfirmed.";
+      }
+      return summary;
+    }
+
+    function decorateHistoryItems(items) {
+      const counts = directionCounts(items);
+      const sessionMajor = dominantStudyDirection(counts, "HOLD");
+      let previousDirectional = "HOLD";
+      return items.map(function (item) {
+        const side = item.side;
+        const behavior = item.behaviorHint === "STUDY SAVED"
+          ? "STUDY SAVED"
+          : side === "HOLD"
+            ? "REST"
+            : item.behaviorHint
+              || (previousDirectional === side
+              ? "CONTINUATION"
+              : previousDirectional !== "HOLD" && previousDirectional !== side
+                ? "DIRECTION CHANGE"
+                : "MOVEMENT");
+        const majorSide = item.majorSide !== "HOLD" ? item.majorSide : sessionMajor;
+        const innerSide = item.innerSide !== "HOLD" ? item.innerSide : side;
+        const regressionLabel = item.agreement === true
+          ? "Regression match"
+          : item.agreement === false
+            ? "Regression differed"
+            : item.regressionSide === "BUY"
+              ? "Regression read · up"
+              : item.regressionSide === "SELL"
+                ? "Regression read · down"
+                : behavior === "STUDY SAVED" ? "Regression archive" : "Regression studied";
+        if (side !== "HOLD") {
+          previousDirectional = side;
+        }
+        const decorated = Object.assign({}, item, {
+          behavior: behavior,
+          majorSide: majorSide,
+          innerSide: innerSide,
+          regressionLabel: regressionLabel,
+        });
+        decorated.summary = historyStudySummary(decorated);
+        return decorated;
+      });
     }
 
     function recordCurrentMove(payload) {
@@ -9195,7 +9634,7 @@
         : safeList(payload.session_history);
       const durableRows = serverRows.concat(episodeEvents);
       const sourceRows = durableRows.length ? durableRows : state.localHistory;
-      const items = sourceRows.map(normalizeHistoryItem);
+      const items = decorateHistoryItems(sourceRows.map(normalizeHistoryItem));
       const byIdentity = new Map();
       items.forEach(function (item) {
         byIdentity.set(item.id, item);
@@ -9215,7 +9654,7 @@
       els.historyScrubber.dataset.items = JSON.stringify(history.map(function (item) { return item.id; }));
       if (!history.length) {
         state.historyItemNodes.clear();
-        els.historyList.innerHTML = '<div class="history-empty">Phoenix Guard will place time-ordered movement changes here as the chart is tracked.</div>';
+        els.historyList.innerHTML = '<div class="history-empty">Completed candle studies will appear here in time order.</div>';
         return;
       }
       const desiredIds = new Set();
@@ -9229,13 +9668,25 @@
           button.dataset.historyId = item.id;
           const time = document.createElement("span");
           time.className = "history-time";
+          const trends = document.createElement("span");
+          trends.className = "history-trends";
+          const major = document.createElement("strong");
+          major.className = "history-major-trend";
+          const inner = document.createElement("small");
+          inner.className = "history-inner-trend";
+          trends.append(major, inner);
           const side = document.createElement("span");
           side.className = "history-side";
+          const studyCopy = document.createElement("span");
+          studyCopy.className = "history-study-copy";
+          const regression = document.createElement("span");
+          regression.className = "history-regression";
           const copy = document.createElement("span");
           copy.className = "history-copy";
+          studyCopy.append(regression, copy);
           const lifecycle = document.createElement("span");
           lifecycle.className = "history-state";
-          button.append(time, side, copy, lifecycle);
+          button.append(time, trends, side, studyCopy, lifecycle);
           button.addEventListener("click", function () {
             selectHistoryItem(button.__historyItem);
           });
@@ -9247,9 +9698,19 @@
         button.setAttribute("aria-current", latest ? "true" : "false");
         const time = button.querySelector(".history-time");
         time.textContent = formatTime(item.observed_at);
+        const majorTrend = button.querySelector(".history-major-trend");
+        majorTrend.textContent = "Major · " + (item.majorSide === "BUY" ? "uptrend" : item.majorSide === "SELL" ? "downtrend" : "mixed / range");
+        const innerTrend = button.querySelector(".history-inner-trend");
+        innerTrend.textContent = "Inner · " + (item.innerSide === "BUY" ? "up" : item.innerSide === "SELL" ? "down" : "rest");
         const side = button.querySelector(".history-side");
         side.className = "history-side " + (item.side === "BUY" ? "buy" : item.side === "SELL" ? "sell" : "wait");
-        side.textContent = item.side === "BUY" ? "UP MOVE" : item.side === "SELL" ? "DOWN MOVE" : "WAIT";
+        side.textContent = item.behavior === "CONTINUATION"
+          ? (item.side === "BUY" ? "UP CONTINUE" : item.side === "SELL" ? "DOWN CONTINUE" : "CONTINUE")
+          : item.behavior === "MOVEMENT"
+            ? (item.side === "BUY" ? "UP MOVE" : item.side === "SELL" ? "DOWN MOVE" : "MOVE")
+            : item.behavior;
+        const regression = button.querySelector(".history-regression");
+        regression.textContent = item.regressionLabel;
         const copy = button.querySelector(".history-copy");
         copy.textContent = item.summary;
         const lifecycle = button.querySelector(".history-state");
@@ -9276,8 +9737,13 @@
         button.setAttribute("aria-current", button.dataset.historyId === item.id ? "true" : "false");
       });
       setOverlayView("history");
-      setText(els.mobileInspectorTitle, formatTime(item.observed_at) + " · " + (item.side === "BUY" ? "Up move" : item.side === "SELL" ? "Down move" : "Wait"));
-      setText(els.mobileInspectorCopy, item.summary + " This remains history and cannot be treated as a current signal.");
+      setText(
+        els.mobileInspectorTitle,
+        formatTime(item.observed_at) + " · Major "
+          + (item.majorSide === "BUY" ? "up" : item.majorSide === "SELL" ? "down" : "mixed")
+          + " · Inner " + (item.innerSide === "BUY" ? "up" : item.innerSide === "SELL" ? "down" : "rest"),
+      );
+      setText(els.mobileInspectorCopy, item.regressionLabel + ". " + item.behavior + ". " + item.summary + " History never grants entry permission.");
       if (state.experienceMode === "simple") {
         els.body.classList.add("has-selection");
       }
@@ -9480,6 +9946,7 @@
       render: renderOperatorState,
       refresh: refreshOperatorState,
       setView: setOverlayView,
+      toggleFamily: toggleOverlayFamily,
       getState: function () {
         return {
           experienceMode: state.experienceMode,
@@ -9525,12 +9992,14 @@
     els.trackingReset.addEventListener("click", function () {
       runTrackingEpisodeAction("reset");
     });
-    els.trackingPathRows.addEventListener("click", function (event) {
-      const button = event.target.closest("[data-path-id]");
-      if (button) {
-        setTrackingPathFocus(button.dataset.pathId);
-      }
-    });
+    if (els.trackingPathRows) {
+      els.trackingPathRows.addEventListener("click", function (event) {
+        const button = event.target.closest("[data-path-id]");
+        if (button) {
+          setTrackingPathFocus(button.dataset.pathId);
+        }
+      });
+    }
     els.trackingPlanToggle.addEventListener("click", function () {
       setTrackingPlanOpen(!state.trackingPlanOpen);
     });
@@ -9556,12 +10025,14 @@
     els.layersClear.addEventListener("click", function () {
       setAllOverlayFamilies(false);
     });
-    els.runForecast.addEventListener("click", function () {
-      runForecastAction("predict");
-    });
-    els.showFuturePath.addEventListener("click", function () {
-      runForecastAction("future");
-    });
+    if (els.runForecast && els.showFuturePath) {
+      els.runForecast.addEventListener("click", function () {
+        runForecastAction("predict");
+      });
+      els.showFuturePath.addEventListener("click", function () {
+        runForecastAction("future");
+      });
+    }
     document.querySelectorAll("[data-label-mode]").forEach(function (button) {
       button.addEventListener("click", function () {
         setLabelMode(button.dataset.labelMode, true);

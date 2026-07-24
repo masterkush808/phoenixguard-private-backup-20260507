@@ -678,7 +678,7 @@ def test_live_session_stream_coalesces_updates_into_atomic_operator_refreshes(
                 "method": "GET",
             }
         ]
-        assert page.locator("#beginner-reason").inner_text() == (
+        assert page.locator("#beginner-next-read").inner_text() == (
             "Live stream delivered the newest decision state."
         )
 
@@ -707,13 +707,9 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             "mode-raw",
             "layers-all",
             "layers-clear",
-            "run-forecast",
-            "show-future-path",
             "tracking-start",
             "tracking-stop",
             "tracking-reset",
-            "tracking-path-a",
-            "tracking-path-b",
             "tracking-plan-toggle",
             "zoom-out",
             "zoom-fit",
@@ -728,8 +724,8 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
                 "nodes => nodes.map(node => node.id)"
             )
         ) == static_button_ids
-        assert page.locator("button[data-overlay-view]").count() == 8
-        assert page.locator("button[data-overlay-family]").count() == 17
+        assert page.locator("button[data-overlay-view]").count() == 7
+        assert page.locator("button[data-overlay-family]").count() == 13
         assert page.locator("button[data-label-mode]").count() == 3
         assert page.locator("input[type=range]").count() == 2
 
@@ -768,7 +764,6 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             "structure",
             "zones",
             "plan",
-            "forecast",
             "history",
         ):
             control = page.locator(f'button[data-overlay-view="{view}"]')
@@ -786,7 +781,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         page.locator("#layers-all").click()
         assert (
             page.locator("button[data-overlay-family][aria-pressed=true]").count()
-            == 17
+            == 13
         )
         families = page.locator("button[data-overlay-family]").evaluate_all(
             "nodes => nodes.map(node => node.dataset.overlayFamily)"
@@ -797,16 +792,6 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             assert control.get_attribute("aria-pressed") == "false"
             control.click()
             assert control.get_attribute("aria-pressed") == "true"
-
-        for selector in ("#run-forecast", "#show-future-path"):
-            page.locator(selector).click()
-            page.wait_for_function(
-                "() => window.PhoenixGuardDashboard.getState().forecastActionBusy === false"
-            )
-            assert (
-                page.locator("#forecast-action-status").get_attribute("data-state")
-                == "success"
-            )
 
         for mode in ("hover", "off", "on"):
             control = page.locator(f'button[data-label-mode="{mode}"]')
@@ -870,6 +855,153 @@ def test_dashboard_label_collision_keeps_the_higher_priority_label(
         )
 
     assert result == {"lowHidden": True, "highHidden": False}
+
+
+def test_show_all_and_labels_on_reveals_collision_and_policy_hidden_labels(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+        page.locator("#layers-all").click()
+        page.locator('button[data-label-mode="on"]').click()
+        exhaustive = page.evaluate(
+            """
+            () => {
+              const root = document.querySelector('#hotspot-layer');
+              root.innerHTML = '';
+              function add(priority, label, left, policyHidden = false) {
+                const button = document.createElement('button');
+                button.className = 'surface-hotspot' + (policyHidden ? ' label-policy-hidden' : '');
+                button.dataset.priority = String(priority);
+                const span = document.createElement('span');
+                span.textContent = label;
+                span.getBoundingClientRect = () => ({
+                  left, top: 30, right: left + 90, bottom: 50, width: 90, height: 20,
+                });
+                button.appendChild(span);
+                root.appendChild(button);
+                return button;
+              }
+              const low = add(10, 'LOW', 20);
+              const high = add(200, 'HIGH', 20);
+              const policy = add(100, 'POLICY', 220, true);
+              window.resolveLabelCollisions(root);
+              return {
+                bodyClass: document.body.className,
+                lowHidden: low.classList.contains('label-collision-hidden'),
+                highHidden: high.classList.contains('label-collision-hidden'),
+                lowOpacity: Number(getComputedStyle(low.querySelector('span')).opacity),
+                highOpacity: Number(getComputedStyle(high.querySelector('span')).opacity),
+                policyOpacity: Number(getComputedStyle(policy.querySelector('span')).opacity),
+              };
+            }
+            """
+        )
+        assert "labels-show-all" in exhaustive["bodyClass"]
+        assert exhaustive["lowHidden"] is False
+        assert exhaustive["highHidden"] is False
+        assert exhaustive["lowOpacity"] > 0.5
+        assert exhaustive["highOpacity"] > 0.5
+        assert exhaustive["policyOpacity"] > 0.5
+
+        page.locator('button[data-label-mode="hover"]').click()
+        decluttered = page.evaluate(
+            """
+            () => {
+              const root = document.querySelector('#hotspot-layer');
+              window.resolveLabelCollisions(root);
+              const nodes = Array.from(root.querySelectorAll('.surface-hotspot'));
+              return {
+                bodyClass: document.body.className,
+                lowHidden: nodes[0].classList.contains('label-collision-hidden'),
+                highHidden: nodes[1].classList.contains('label-collision-hidden'),
+                policyOpacity: Number(getComputedStyle(nodes[2].querySelector('span')).opacity),
+              };
+            }
+            """
+        )
+        assert "labels-show-all" not in decluttered["bodyClass"]
+        assert decluttered["lowHidden"] is True
+        assert decluttered["highHidden"] is False
+        assert decluttered["policyOpacity"] == 0
+
+
+def test_market_story_and_history_prefer_v3_regression_study(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="WAIT")
+    market_study = {
+        "regression": {
+            "major_trend": {"side": "BUY", "slope": 0.18, "confidence": 0.88},
+            "inner_trend": {"side": "SELL", "slope": -0.09, "confidence": 0.79},
+        },
+        "behavior": {
+            "current_state": {
+                "state": "PULLBACK",
+                "direction": "SELL",
+                "candle_count": 2,
+            },
+            "current_segment": {
+                "state": "DOWN_SWING",
+                "next_state": "REST",
+                "candle_count": 2,
+            },
+            "market_story": (
+                "Major trend is up while the inner trend pulls back down; "
+                "two rests preceded the current continuation."
+            ),
+        },
+        "historical_similarity": {
+            "historical_continuation": {
+                "side": "BUY",
+                "confidence": 0.81,
+                "support": 14,
+                "status": "SUPPORTED",
+            }
+        },
+    }
+    payload["tracking"]["market_study_v3"] = market_study
+    payload["history"] = [
+        {
+            "id": "study-e1",
+            "observed_at": 4_102_444_300.0,
+            "direction": "BUY",
+            "state": "HISTORICAL",
+            "summary": "Upward swing began.",
+        },
+        {
+            "id": "study-e2",
+            "observed_at": 4_102_444_400.0,
+            "direction": "SELL",
+            "state": "HISTORICAL",
+            "summary": "Inner pullback moved down.",
+        },
+        {
+            "id": "study-e3",
+            "observed_at": 4_102_444_500.0,
+            "direction": "SELL",
+            "state": "CURRENT",
+            "agreement": True,
+            "market_study_v3": market_study,
+            "summary": "The downward inner move continued.",
+        },
+    ]
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#story-step-one-label").inner_text() == "MAJOR TREND"
+        assert page.locator("#story-step-two-label").inner_text() == "INNER TREND"
+        assert page.locator("#story-step-three-label").inner_text() == "REGRESSION STUDY"
+        assert page.locator("#current-move-title").inner_text() == "Uptrend"
+        assert page.locator("#forecast-title").inner_text() == "Downward pullback"
+        assert page.locator("#permission-title").inner_text() == "History leans upward"
+        assert "two rests" in page.locator("#beginner-entry-read").inner_text().lower()
+        assert "downward pullback" in page.locator("#beginner-story-summary").inner_text().lower()
+
+        latest = page.locator('[data-history-id="study-e3"]')
+        assert latest.locator(".history-major-trend").inner_text() == "Major · uptrend"
+        assert latest.locator(".history-inner-trend").inner_text() == "Inner · down"
+        assert latest.locator(".history-side").inner_text() == "DOWN CONTINUE"
+        assert latest.locator(".history-regression").inner_text() == "REGRESSION MATCH"
 
 
 @pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
@@ -1012,11 +1144,7 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
         assert page.locator("#tracking-start").is_visible()
         assert page.locator("#tracking-start").is_disabled()
         assert page.locator("#tracking-episode-state").inner_text() == "PREPARING"
-        assert page.locator("#run-forecast").is_disabled()
-        assert (
-            page.locator("#forecast-action-status").inner_text()
-            == "Start Tracking to publish a 12-step outlook"
-        )
+        assert page.locator("#run-forecast").count() == 0
 
         page.evaluate("payload => window.renderOperatorState(payload)", ready)
         page.wait_for_function(
@@ -1033,24 +1161,23 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
         )
         assert page.locator("#tracking-episode-progress").inner_text() == "4 of 12"
         assert page.locator("#tracking-anchor-title").inner_text() == "Starting climb"
-        assert page.locator("#tracking-forecast-title").inner_text() == "Mixed against the saved forecast"
+        assert page.locator("#tracking-forecast-title").inner_text() == "Regression leans upward"
         assert page.locator("#tracking-event-tape .tracking-event").count() == 12
         assert page.locator("#tracking-event-tape .tracking-event").nth(0).get_attribute("data-state") == "aligned"
-        assert page.locator("#tracking-event-tape .tracking-event").nth(0).locator("span").inner_text() == "Match · up"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(0).locator("span").inner_text() == "Up movement"
         assert page.locator("#tracking-event-tape .tracking-event").nth(1).get_attribute("data-state") == "opposed"
-        assert page.locator("#tracking-event-tape .tracking-event").nth(1).locator("span").inner_text() == "Miss · down"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(1).locator("span").inner_text() == "Down movement"
         assert page.locator("#tracking-event-tape .tracking-event").nth(2).get_attribute("data-state") == "recorded"
-        assert page.locator("#tracking-event-tape .tracking-event").nth(2).locator("span").inner_text() == "Unknown · unclear"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(2).locator("span").inner_text() == "Rest / range"
         assert page.locator("#tracking-event-tape .tracking-event").nth(4).get_attribute("data-state") == "forming"
-        assert page.locator("#tracking-event-tape .tracking-event").nth(5).locator("span").inner_text() == "Forecast up"
-        assert page.locator("#story-step-one-label").inner_text() == "BEFORE"
-        assert page.locator("#story-step-two-label").inner_text() == "NOW"
-        assert page.locator("#story-step-three-label").inner_text() == "TRACKING PLAN"
-        assert page.locator("#current-move-title").inner_text() == "Starting climb"
-        assert page.locator("#forecast-title").inner_text() == "Current pause"
-        assert page.locator("#permission-title").inner_text() == "Hold the original plan"
+        assert page.locator("#tracking-event-tape .tracking-event").nth(5).locator("span").inner_text() == "Pending close"
+        assert page.locator("#story-step-one-label").inner_text() == "MAJOR TREND"
+        assert page.locator("#story-step-two-label").inner_text() == "INNER TREND"
+        assert page.locator("#story-step-three-label").inner_text() == "REGRESSION STUDY"
+        assert page.locator("#current-move-title").inner_text() == "Uptrend"
+        assert page.locator("#forecast-title").inner_text() == "Upward inner move"
+        assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert page.locator("#history-count").inner_text() == "4 observations"
-        assert not page.locator("#run-forecast").is_disabled()
         assert page.locator("#tracking-stop").is_visible()
         assert page.locator("#tracking-reset").is_hidden()
 
@@ -1065,10 +1192,7 @@ def test_tracking_episode_start_stop_keeps_the_anchored_story_and_server_history
         assert page.locator("#tracking-start").is_hidden()
         assert page.locator("#tracking-reset").is_visible()
         assert not page.locator("#tracking-reset").is_disabled()
-        assert page.locator("#run-forecast").is_disabled()
-        assert "frozen and remains available" in page.locator(
-            "#forecast-action-status"
-        ).inner_text()
+        assert page.locator("#run-forecast").count() == 0
         assert page.locator("#history-count").inner_text() == "4 observations"
         requests = page.evaluate("window.__FETCH_REQUESTS.slice()")
         assert any(
@@ -1342,7 +1466,7 @@ def test_tracking_episode_chrome_updates_before_the_next_broker_image_decodes(
         )
         assert page.locator("#tracking-anchor-title").inner_text() == "Chosen buy entry"
         assert page.locator("#tracking-forecast-title").inner_text() == (
-            "Following the saved forecast"
+            "Regression leans upward"
         )
         assert page.locator("#tracking-event-tape .tracking-event").nth(0).get_attribute(
             "data-state"
@@ -1350,6 +1474,7 @@ def test_tracking_episode_chrome_updates_before_the_next_broker_image_decodes(
 
 
 @pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
+@pytest.mark.skip(reason="V3 retired the dual forecast-route presentation in favor of regression tracking.")
 def test_tracking_episode_compares_two_frozen_paths_without_hiding_the_alternate(
     chromium_browser: Browser,
     viewport: tuple[int, int],
@@ -1627,6 +1752,7 @@ def test_tracking_episode_compares_two_frozen_paths_without_hiding_the_alternate
         assert layout["pathBRight"] <= layout["viewportWidth"] + 1, (viewport, layout)
 
 
+@pytest.mark.skip(reason="V3 no longer presents route-lane verdict controls.")
 def test_tracking_episode_shows_server_too_close_and_clean_restart_states(
     chromium_browser: Browser,
 ) -> None:
@@ -1767,7 +1893,7 @@ def test_tracking_episode_exposes_reacquiring_without_inventing_completed_events
         assert page.locator("#tracking-episode-progress").inner_text() == "0 of 12"
 
 
-def test_tracking_plan_individual_controls_and_sequence_blocks_render_without_diagnostics(
+def test_tracking_plan_controls_render_studies_without_retired_forecast_diagnostics(
     chromium_browser: Browser,
 ) -> None:
     payload = _operator_payload()
@@ -1815,14 +1941,24 @@ def test_tracking_plan_individual_controls_and_sequence_blocks_render_without_di
         )
         assert page.locator("#tracking-plan-panel").is_visible()
         assert page.locator("#mode-overlay").get_attribute("aria-pressed") == "true"
-        assert page.locator("#tracking-plan-count").inner_text() == "8"
-        for family in ("trendlines", "market_context", "lstm", "history"):
+        assert int(page.locator("#tracking-plan-count").inner_text()) > 0
+        for family in ("trendlines", "market_context", "history"):
             assert (
                 page.locator(
                     f'[data-overlay-family="{family}"]'
                 ).get_attribute("aria-pressed")
                 == "true"
             )
+        active_families = page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
+        )
+        assert not {
+            "two_candle",
+            "scene_forecaster",
+            "lstm",
+            "prediction",
+        }.intersection(active_families)
+        assert page.locator('[data-overlay-family="lstm"]').count() == 0
         assert page.locator('polyline[data-overlay-id="support-current"]').count() == 1
 
         page.locator("#detailed-overlay-controls").evaluate("node => node.open = true")
@@ -1838,22 +1974,18 @@ def test_tracking_plan_individual_controls_and_sequence_blocks_render_without_di
         assert page.locator('[data-overlay-kind="transform_debug"]').count() == 0
         assert page.locator('[data-overlay-id="internal-transform-debug"]').count() == 0
 
-        page.locator('[data-overlay-view="forecast"]').click()
-        composite = page.locator(
-            'g.surface-forecast-composite.block-only[data-overlay-id="lstm-current"]'
-        )
-        assert composite.count() == 1
-        assert composite.get_attribute("data-display-mode") == "event-blocks"
-        assert composite.locator(".surface-forecast-event-block").count() == 12
-        assert composite.locator(".surface-forecast-candle-body").count() == 12
-        assert composite.locator(".surface-forecast-scenario").count() == 0
-        assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
+        page.locator("#layers-all").click()
+        assert page.locator(".surface-forecast-composite").count() == 0
+        assert page.locator(".surface-forecast-scenario").count() == 0
+        assert page.locator('[data-overlay-id="lstm-current"]').count() == 0
+        assert page.locator('[data-overlay-id="two-candle-current"]').count() == 0
         assert page.locator("polyline.family-lstm").count() == 0
         public_copy = page.locator("body").inner_text().lower()
         for proprietary_term in ("smc", "liquidity", "order block", "fair value gap", "lstm"):
             assert proprietary_term not in public_copy
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_episode_locked_future_blocks_remain_at_the_original_anchor_as_price_advances(
     chromium_browser: Browser,
 ) -> None:
@@ -1892,7 +2024,7 @@ def test_episode_locked_future_blocks_remain_at_the_original_anchor_as_price_adv
     sequence["baseline_locked"] = True
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             'g.surface-forecast-composite.block-only[data-overlay-id="lstm-current"]'
         )
@@ -1902,6 +2034,7 @@ def test_episode_locked_future_blocks_remain_at_the_original_anchor_as_price_adv
         assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_episode_owned_sequence_renders_all_blocks_without_a_live_sequence_contributor(
     chromium_browser: Browser,
 ) -> None:
@@ -1944,7 +2077,7 @@ def test_episode_owned_sequence_renders_all_blocks_without_a_live_sequence_contr
     payload["overlays"].append(episode_sequence)
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             'g.surface-forecast-composite.block-only[data-overlay-id="episode-owned-sequence"]'
         )
@@ -1961,6 +2094,7 @@ def test_episode_owned_sequence_renders_all_blocks_without_a_live_sequence_contr
         assert page.locator("polyline.family-lstm").count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_retained_episode_blocks_survive_a_poll_that_omits_the_live_sequence(
     chromium_browser: Browser,
 ) -> None:
@@ -1987,7 +2121,7 @@ def test_retained_episode_blocks_survive_a_poll_that_omits_the_live_sequence(
     }
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             'g.surface-forecast-composite.block-only'
             '[data-overlay-id="episode-outlook-episode-retained-blocks-1"]'
@@ -2002,6 +2136,7 @@ def test_retained_episode_blocks_survive_a_poll_that_omits_the_live_sequence(
         assert page.locator("polyline.family-lstm").count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_retained_episode_fallback_rejects_an_incomplete_block_sequence(
     chromium_browser: Browser,
 ) -> None:
@@ -2026,7 +2161,7 @@ def test_retained_episode_fallback_rejects_an_incomplete_block_sequence(
     }
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         assert page.locator("g.surface-forecast-composite.block-only").count() == 0
         assert page.locator(".surface-forecast-event-block").count() == 0
 
@@ -2093,6 +2228,7 @@ def test_overlay_explorer_updates_aria_state_locally_from_the_atomic_all_pool(
         assert page.locator("#overlay-explorer").is_visible()
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_inflight_atomic_all_refresh_survives_local_forecast_toggle(
     chromium_browser: Browser,
 ) -> None:
@@ -2116,7 +2252,7 @@ def test_inflight_atomic_all_refresh_survives_local_forecast_toggle(
             arg=request_count,
         )
 
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         assert (
             page.evaluate("window.PhoenixGuardDashboard.getState().overlayView")
             == "forecast"
@@ -2152,6 +2288,7 @@ def test_inflight_atomic_all_refresh_survives_local_forecast_toggle(
         ]
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_same_visual_poll_updates_permission_without_rerendering_overlays(
     chromium_browser: Browser,
 ) -> None:
@@ -2159,7 +2296,7 @@ def test_same_visual_poll_updates_permission_without_rerendering_overlays(
     refreshed_message = "Wait: permission refreshed without changing chart geometry."
     cast(dict[str, Any], updated["permission"])["message"] = refreshed_message
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         page.evaluate(
             """
             () => {
@@ -2185,7 +2322,7 @@ def test_same_visual_poll_updates_permission_without_rerendering_overlays(
             updated,
         )
 
-        assert page.locator("#beginner-instruction").inner_text() == refreshed_message
+        assert page.locator("#beginner-reason").inner_text() == refreshed_message
         result = page.evaluate(
             """
             () => ({
@@ -2243,6 +2380,7 @@ def _assert_clean_multimodal_forecast(
     assert page.locator('polyline[data-overlay-id="lstm-current"]').count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_no_edge_composite_forecast_renders_clean_multimodal_paths(
     chromium_browser: Browser,
 ) -> None:
@@ -2251,7 +2389,7 @@ def test_no_edge_composite_forecast_renders_clean_multimodal_paths(
         row["line_points"] for row in payload["overlays"] if row.get("family") == "lstm"
     )
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         _assert_clean_multimodal_forecast(page, source_line, status="NO_EDGE")
 
         composite = page.locator(
@@ -2281,6 +2419,7 @@ def test_no_edge_composite_forecast_renders_clean_multimodal_paths(
         assert "not a guaranteed path or entry permission" in inspector_copy
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_low_confidence_composite_stays_visible_and_never_looks_authorized(
     chromium_browser: Browser,
 ) -> None:
@@ -2294,7 +2433,7 @@ def test_low_confidence_composite_stays_visible_and_never_looks_authorized(
         row["forecast_authorized"] = False
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -2314,6 +2453,7 @@ def test_low_confidence_composite_stays_visible_and_never_looks_authorized(
         assert "forecast-authorized" not in (composite.get_attribute("class") or "").split()
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_authorized_composite_is_the_only_state_that_renders_predicted_ranges(
     chromium_browser: Browser,
 ) -> None:
@@ -2329,7 +2469,7 @@ def test_authorized_composite_is_the_only_state_that_renders_predicted_ranges(
         row["interval"]["calibrated"] = True
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -2347,6 +2487,7 @@ def test_authorized_composite_is_the_only_state_that_renders_predicted_ranges(
         assert "not a guaranteed path or entry permission" in inspector_copy
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_missing_trade_status_never_reads_as_authorized(
     chromium_browser: Browser,
 ) -> None:
@@ -2360,7 +2501,7 @@ def test_missing_trade_status_never_reads_as_authorized(
         row.pop("trade_authorization_status", None)
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').click()
         inspector_copy = page.locator("#inspector-explanation").inner_text()
         composite = page.locator(
@@ -2372,6 +2513,7 @@ def test_missing_trade_status_never_reads_as_authorized(
         assert "AUTHORIZED" not in inspector_copy
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_authorized_but_uncalibrated_forecast_hides_the_range_band(
     chromium_browser: Browser,
 ) -> None:
@@ -2386,7 +2528,7 @@ def test_authorized_but_uncalibrated_forecast_hides_the_range_band(
         row["interval"]["calibrated"] = False
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -2400,6 +2542,7 @@ def test_authorized_but_uncalibrated_forecast_hides_the_range_band(
         assert composite.locator(".surface-forecast-band").count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 @pytest.mark.parametrize("neutral_side", ["HOLD", "NEUTRAL"])
 def test_neutral_primary_suppresses_compact_path_and_keeps_directional_alternatives(
     chromium_browser: Browser,
@@ -2435,7 +2578,7 @@ def test_neutral_primary_suppresses_compact_path_and_keeps_directional_alternati
         row["interval"]["calibrated"] = True
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -2460,6 +2603,7 @@ def test_neutral_primary_suppresses_compact_path_and_keeps_directional_alternati
         )
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 @pytest.mark.parametrize("candidate_side", ["BUY", "SELL"])
 def test_reacquiring_hold_renders_verified_closed_candle_candidate_path(
     chromium_browser: Browser,
@@ -2594,7 +2738,7 @@ def test_reacquiring_hold_renders_verified_closed_candle_candidate_path(
     )
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -2622,24 +2766,15 @@ def test_reacquiring_hold_renders_verified_closed_candle_candidate_path(
         assert composite.locator(".surface-forecast-endpoint-label").count() == 0
 
 
-def test_forecast_legend_and_foreground_hierarchy_explain_uncertainty_locally(
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
+def test_forecast_legend_is_removed_while_internal_geometry_keeps_stable_hierarchy(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
         request_count = page.evaluate("window.__FETCH_URLS.length")
         page.locator('[data-overlay-view="all"]').click()
 
-        legend = page.locator("#forecast-path-legend")
-        assert legend.is_visible()
-        assert legend.get_attribute("aria-label") == "Forecast path legend"
-        assert legend.locator('[role="listitem"]').all_inner_texts() == [
-            "Selected visual route",
-            "Bullish route",
-            "Bearish route",
-        ]
-        legend_copy = legend.inner_text().lower()
-        assert "alternative studied routes, not odds" in legend_copy
-        assert "wider route separation means less agreement" in legend_copy
+        assert page.locator("#forecast-path-legend").count() == 0
 
         svg_order = page.locator("#surface-line-svg > *").evaluate_all(
             "nodes => nodes.map(node => ({"
@@ -2666,6 +2801,7 @@ def test_forecast_legend_and_foreground_hierarchy_explain_uncertainty_locally(
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_composite_without_scenarios_suppresses_the_flat_line_and_hotspot(
     chromium_browser: Browser,
 ) -> None:
@@ -2677,7 +2813,7 @@ def test_composite_without_scenarios_suppresses_the_flat_line_and_hotspot(
         row["line_points"] = [[x, 0.50] for x, _ in row["line_points"]]
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         composite = page.locator(
             '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -2692,16 +2828,29 @@ def test_composite_without_scenarios_suppresses_the_flat_line_and_hotspot(
         )
 
 
-def test_forecast_studies_copy_promises_complete_events_without_calibrated_odds(
+def test_forecast_studies_controls_are_absent_from_v3_operator_surface(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
-        helper_copy = page.locator("#forecast-action-status").text_content()
-        assert helper_copy == (
-            "Tracking is active. Publish the 12-step outlook when the current frame is ready."
+        assert page.locator("#forecast-action-status").count() == 0
+        assert page.locator("#run-forecast").count() == 0
+        assert page.locator("#show-future-path").count() == 0
+        page.evaluate(
+            "localStorage.setItem('phoenixguard.overlay.preset.v1', 'forecast')"
         )
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => window.PhoenixGuardDashboard?.getState().revision === 42"
+        )
+        assert page.evaluate(
+            "window.PhoenixGuardDashboard.getState().overlayView"
+        ) == "live"
+        assert page.evaluate(
+            "localStorage.getItem('phoenixguard.overlay.preset.v1')"
+        ) == "live"
 
 
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_run_forecast_posts_action_keeps_forecast_view_and_refreshes_atomically(
     chromium_browser: Browser,
 ) -> None:
@@ -2757,11 +2906,12 @@ def test_run_forecast_posts_action_keeps_forecast_view_and_refreshes_atomically(
         assert "/v1/mobile/operator/state/v1/" in requests[-1]["href"]
 
 
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_run_forecast_uses_current_composite_without_recomputing(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         assert (
             page.locator(
                 '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
@@ -2794,11 +2944,12 @@ def test_run_forecast_uses_current_composite_without_recomputing(
         )
 
 
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_show_future_uses_current_composite_without_recomputing(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         assert (
             page.locator(
                 '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
@@ -2838,6 +2989,7 @@ def test_show_future_uses_current_composite_without_recomputing(
         ("#show-future-path", "current future path"),
     ],
 )
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_forecast_actions_reuse_current_scene_only_geometry_without_network(
     chromium_browser: Browser,
     action_selector: str,
@@ -2877,6 +3029,7 @@ def test_forecast_actions_reuse_current_scene_only_geometry_without_network(
         ).count() == 1
 
 
+@pytest.mark.skip(reason="Manual scene-forecast controls were removed from the V3 operator surface.")
 def test_scene_only_geometry_has_truthful_count_and_independent_toggle(
     chromium_browser: Browser,
 ) -> None:
@@ -2898,7 +3051,7 @@ def test_scene_only_geometry_has_truthful_count_and_independent_toggle(
     payload["overlays"].append(scene)
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         request_count = page.evaluate("window.__FETCH_URLS.length")
         assert page.locator('[data-layer-count="scene_forecaster"]').inner_text() == "1"
         assert page.locator('[data-layer-count="prediction"]').inner_text() == "0"
@@ -2906,11 +3059,14 @@ def test_scene_only_geometry_has_truthful_count_and_independent_toggle(
 
         page.locator('[data-overlay-family="prediction"]').click()
         assert page.locator('[data-overlay-id="scene-current"]').count() >= 1
-        page.locator('[data-overlay-family="scene_forecaster"]').click()
+        page.evaluate(
+            "() => window.PhoenixGuardDashboard.toggleFamily('scene_forecaster')"
+        )
         assert page.locator('[data-overlay-id="scene-current"]').count() == 0
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
 
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_show_future_does_not_treat_uncertainty_band_as_center_path(
     chromium_browser: Browser,
 ) -> None:
@@ -2934,6 +3090,7 @@ def test_show_future_does_not_treat_uncertainty_band_as_center_path(
         )
 
 
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_show_future_keeps_completed_snapshot_when_live_chart_advances(
     chromium_browser: Browser,
 ) -> None:
@@ -2993,6 +3150,7 @@ def test_show_future_keeps_completed_snapshot_when_live_chart_advances(
         )
 
 
+@pytest.mark.skip(reason="Manual forecast controls were removed from the V3 operator surface.")
 def test_forecast_action_maps_backend_failure_to_safe_beginner_copy(
     chromium_browser: Browser,
 ) -> None:
@@ -3056,6 +3214,7 @@ def test_live_read_preserves_geometry_while_backend_label_policy_declutters_text
         )
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_pool(
     chromium_browser: Browser,
 ) -> None:
@@ -3088,8 +3247,8 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
             )
         )
         assert expected.issubset(visible)
-        assert page.locator('[data-layer-count="scene_forecaster"]').inner_text() == "1"
-        assert page.locator('[data-layer-count="lstm"]').inner_text() == "1"
+        assert page.locator('[data-overlay-family="scene_forecaster"]').count() == 0
+        assert page.locator('[data-overlay-family="lstm"]').count() == 0
 
         request_count = page.evaluate("window.__FETCH_URLS.length")
         page.locator('[data-overlay-family="market_context"]').click()
@@ -3109,12 +3268,14 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
         )
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
-        page.locator('[data-overlay-family="scene_forecaster"]').click()
+        page.evaluate(
+            "() => window.PhoenixGuardDashboard.toggleFamily('scene_forecaster')"
+        )
         assert page.locator('[data-overlay-id="scene-current"]').count() == 0
         assert page.locator('[data-overlay-id="lstm-current"]').count() >= 1
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
-        page.locator('[data-overlay-family="lstm"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.toggleFamily('lstm')")
         assert (
             page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').count()
             == 0
@@ -3132,8 +3293,10 @@ def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_po
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
         page.locator('[data-overlay-family="market_context"]').click()
-        page.locator('[data-overlay-family="scene_forecaster"]').click()
-        page.locator('[data-overlay-family="lstm"]').click()
+        page.evaluate(
+            "() => window.PhoenixGuardDashboard.toggleFamily('scene_forecaster')"
+        )
+        page.evaluate("() => window.PhoenixGuardDashboard.toggleFamily('lstm')")
         assert (
             page.locator('.surface-hotspot[data-overlay-id="smc-order-block"]').count()
             == 1
@@ -3881,9 +4044,11 @@ def test_show_all_and_clear_switch_every_public_family_atomically(
             "support-current",
             "past-sell",
             "smc-order-block",
-            "two-candle-current",
-            "lstm-current",
         }.issubset(ids)
+        assert "two-candle-current" not in ids
+        assert "lstm-current" not in ids
+        assert page.locator(".surface-forecast-composite").count() == 0
+        assert page.locator(".surface-forecast-scenario").count() == 0
         assert "broker" not in " ".join(ids).lower()
         assert "diagnostic" not in " ".join(ids).lower()
 
@@ -3895,7 +4060,7 @@ def test_custom_overlay_mix_survives_reload_without_network_refetch_per_toggle(
         page.locator("#layers-all").click()
         request_count = page.evaluate("window.__FETCH_URLS.length")
         page.locator('[data-overlay-family="market_context"]').click()
-        page.locator('[data-overlay-family="lstm"]').click()
+        page.locator('[data-overlay-family="history"]').click()
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
         expected_families = page.evaluate(
             "window.PhoenixGuardDashboard.getState().activeFamilies"
@@ -3918,16 +4083,12 @@ def test_custom_overlay_mix_survives_reload_without_network_refetch_per_toggle(
             page.locator('[data-overlay-family="market_context"]').get_attribute("aria-pressed")
             == "false"
         )
-        assert (
-            page.locator('[data-overlay-family="lstm"]').get_attribute("aria-pressed")
-            == "false"
+        restored_families = page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
         )
-        assert (
-            page.locator('[data-overlay-family="two_candle"]').get_attribute(
-                "aria-pressed"
-            )
-            == "true"
-        )
+        assert "lstm" not in restored_families
+        assert "two_candle" not in restored_families
+        assert "history" not in restored_families
 
 
 def test_scene_split_migration_runs_once_and_preserves_independent_reload_choice(
@@ -3948,17 +4109,28 @@ def test_scene_split_migration_runs_once_and_preserves_independent_reload_choice
             "expected => window.PhoenixGuardDashboard?.getState().revision === expected",
             arg=42,
         )
-        assert set(
-            page.evaluate("window.PhoenixGuardDashboard.getState().activeFamilies")
-        ) == {"scene_forecaster"}
+        migrated_families = page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
+        )
+        assert not {
+            "two_candle",
+            "scene_forecaster",
+            "lstm",
+            "prediction",
+        }.intersection(migrated_families)
         assert page.evaluate(
             "localStorage.getItem('phoenixguard.overlay.layers.scene-split-migration.v1')"
         ) == "1"
 
-        page.locator('[data-overlay-family="lstm"]').click()
-        assert page.locator('[data-overlay-family="lstm"]').get_attribute(
-            "aria-pressed"
-        ) == "true"
+        stored_families = page.evaluate(
+            "JSON.parse(localStorage.getItem('phoenixguard.overlay.layers.v1') || '[]')"
+        )
+        assert not {
+            "two_candle",
+            "scene_forecaster",
+            "lstm",
+            "prediction",
+        }.intersection(stored_families)
 
 
 def test_existing_live_preset_migrates_order_positioning_without_touching_custom_choice(
@@ -4010,13 +4182,14 @@ def test_existing_live_preset_migrates_order_positioning_without_touching_custom
         assert page.evaluate(
             "localStorage.getItem('phoenixguard.overlay.layers.order-positioning-migration.v1')"
         ) == "1"
-        page.locator('[data-overlay-family="scene_forecaster"]').click()
-        assert page.locator(
-            '[data-overlay-family="scene_forecaster"]'
-        ).get_attribute("aria-pressed") == "true"
-        assert page.locator('[data-overlay-family="lstm"]').get_attribute(
-            "aria-pressed"
-        ) == "false"
+        page.evaluate(
+            "() => window.PhoenixGuardDashboard.toggleFamily('scene_forecaster')"
+        )
+        active_families = page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
+        )
+        assert active_families == ["trendlines"]
+        assert "lstm" not in active_families
 
         page.reload(wait_until="domcontentloaded")
         page.wait_for_function(
@@ -4025,13 +4198,7 @@ def test_existing_live_preset_migrates_order_positioning_without_touching_custom
         )
         assert page.evaluate(
             "window.PhoenixGuardDashboard.getState().activeFamilies"
-        ) == ["trendlines", "scene_forecaster"]
-        assert page.locator(
-            '[data-overlay-family="scene_forecaster"]'
-        ).get_attribute("aria-pressed") == "true"
-        assert page.locator('[data-overlay-family="lstm"]').get_attribute(
-            "aria-pressed"
-        ) == "false"
+        ) == ["trendlines"]
 
 
 def test_all_overlay_toggles_are_local_and_reuse_detached_semantic_nodes(
@@ -4053,7 +4220,7 @@ def test_all_overlay_toggles_are_local_and_reuse_detached_semantic_nodes(
         page.locator('[data-overlay-family="history"]').click()
         assert page.locator('[data-overlay-id="past-sell"]').count() == 0
         page.locator('[data-overlay-family="history"]').click()
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('live')")
         page.locator('[data-overlay-view="all"]').click()
         page.locator("#mode-raw").click()
         page.locator("#mode-overlay").click()
@@ -4087,27 +4254,31 @@ def test_mobile_overlay_library_has_tappable_controls_without_page_overflow(
             "#layers-all",
             "#layers-clear",
             '[data-overlay-family="market_context"]',
-            '[data-overlay-family="lstm"]',
-            "#run-forecast",
-            "#show-future-path",
+            '[data-overlay-family="major_swings"]',
+            '[data-overlay-family="local_swings"]',
+            '[data-overlay-family="history"]',
         ):
             control = page.locator(selector)
             control.scroll_into_view_if_needed()
             assert control.is_visible()
             box = control.bounding_box()
             assert box is not None and box["height"] >= 40, (viewport, selector, box)
+        assert page.locator('[data-overlay-family="lstm"]').count() == 0
+        assert page.locator('[data-overlay-family="scene_forecaster"]').count() == 0
+        assert page.locator("#run-forecast").count() == 0
+        assert page.locator("#show-future-path").count() == 0
         assert page.evaluate(
             "document.documentElement.scrollWidth <= window.innerWidth + 1"
         )
 
 
-def test_ended_sell_pressure_and_current_up_move_render_wait_not_current_sell(
+def test_ended_sell_pressure_and_current_up_move_keep_entry_closed_and_study_uptrend(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload(action="WAIT")) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "WAIT"
-        assert page.locator("#current-move-title").inner_text() == "Moving up"
-        assert "moving up" in page.locator("#beginner-now-read").inner_text().lower()
+        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#current-move-title").inner_text() == "Uptrend"
+        assert "rising" in page.locator("#beginner-now-read").inner_text().lower()
         pressure = page.locator("#pressure-event")
         assert pressure.get_attribute("data-state") == "ended"
         pressure_text = pressure.inner_text().lower()
@@ -4123,7 +4294,10 @@ def test_fresh_explicit_buy_permission_renders_buy_now(
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload(action="BUY_NOW")) as page:
         assert page.locator("#beginner-decision-title").inner_text() == "BUY NOW"
-        assert page.locator("#permission-title").inner_text() == "Buy low · entry open"
+        assert page.locator("#permission-title").inner_text() == "History leans upward"
+        assert "Buy low · entry open" in (
+            page.locator("#beginner-evidence-safety").text_content() or ""
+        )
         assert (
             page.locator("#beginner-confidence").inner_text()
             == "About 12 minutes remaining"
@@ -4132,9 +4306,7 @@ def test_fresh_explicit_buy_permission_renders_buy_now(
         assert "lower price" in instruction
         assert "verified demand or retest area" in instruction
         assert "do not chase highs" in instruction
-        entry_read = page.locator("#beginner-entry-read").inner_text().lower()
-        assert "about 12 minutes remaining" in entry_read
-        assert "closes early if live truth changes" in entry_read
+        assert "latest sequence" in page.locator("#beginner-entry-read").inner_text().lower()
         assert (
             page.locator("#beginner-decision-shell").get_attribute("data-tone") == "buy"
         )
@@ -4147,8 +4319,9 @@ def test_fresh_explicit_sell_permission_renders_sell_high(
         chromium_browser, _operator_payload(action="SELL_NOW")
     ) as page:
         assert page.locator("#beginner-decision-title").inner_text() == "SELL NOW"
-        assert (
-            page.locator("#permission-title").inner_text() == "Sell high · entry open"
+        assert page.locator("#permission-title").inner_text() == "History leans upward"
+        assert "Sell high · entry open" in (
+            page.locator("#beginner-evidence-safety").text_content() or ""
         )
         assert (
             page.locator("#beginner-confidence").inner_text()
@@ -4164,29 +4337,28 @@ def test_fresh_explicit_sell_permission_renders_sell_high(
         )
 
 
-def test_open_setup_wait_renders_verifying_without_false_closed_state(
+def test_open_setup_wait_keeps_entry_closed_while_permission_refreshes(
     chromium_browser: Browser,
 ) -> None:
     payload = _operator_payload(action="WAIT", window_open=True)
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "WAIT"
-        assert (
-            page.locator("#permission-title").inner_text() == "Setup window · verifying"
-        )
+        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert (
             page.locator("#beginner-confidence").inner_text()
-            == "About 12 minutes remaining"
+            == "Permission refreshing"
         )
         instruction = page.locator("#beginner-instruction").inner_text().lower()
-        assert "setup window remains open" in instruction
-        assert "current-frame permission is refreshing" in instruction
-        entry_read = page.locator("#beginner-entry-read").inner_text().lower()
-        assert "about 12 minutes remaining" in entry_read
-        assert "do not enter until buy now or sell now returns" in entry_read
-        assert (
-            "entry closed" not in page.locator("#permission-title").inner_text().lower()
+        assert instruction == "no trade entry is open."
+        reason = page.locator("#beginner-reason").inner_text().lower()
+        assert "setup window remains open" in reason
+        assert "current-frame permission is refreshing" in reason
+        assert "wait for current-frame permission" in page.locator(
+            "#beginner-next-condition"
+        ).inner_text().lower()
+        assert "Setup window · verifying" in (
+            page.locator("#beginner-evidence-safety").text_content() or ""
         )
-        assert "no verified entry window" not in instruction
 
 
 def test_visual_badge_discloses_interactive_source_and_live_freshness(
@@ -4358,9 +4530,6 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
                 () => {
                   const image = document.querySelector('#surface-raw').getBoundingClientRect();
                   const box = document.querySelector('[data-overlay-id="demand-current"]').getBoundingClientRect();
-                  const blocks = Array.from(document.querySelectorAll(
-                    'g[data-overlay-id="lstm-current"] .surface-forecast-event-block'
-                  ));
                   return {
                     box: [
                       (box.left - image.left) / image.width,
@@ -4368,10 +4537,9 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
                       box.width / image.width,
                       box.height / image.height,
                     ],
-                    blockGeometry: blocks.map(node => [
-                      node.getAttribute('x'), node.getAttribute('y'),
-                      node.getAttribute('width'), node.getAttribute('height')
-                    ]),
+                    forecastCount: document.querySelectorAll(
+                      '.surface-forecast-composite, .surface-forecast-scenario'
+                    ).length,
                     viewBox: document.querySelector('#surface-line-svg').getAttribute('viewBox'),
                   };
                 }
@@ -4379,7 +4547,7 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
             )
 
         baseline = geometry()
-        assert len(baseline["blockGeometry"]) == 12
+        assert baseline["forecastCount"] == 0
         page.locator("#zoom-in").click()
         page.locator("#zoom-in").click()
         page.wait_for_timeout(250)
@@ -4408,7 +4576,7 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
         changed = geometry()
         for actual, expected in zip(changed["box"], baseline["box"], strict=True):
             assert abs(float(actual) - float(expected)) <= 0.002
-        assert changed["blockGeometry"] == baseline["blockGeometry"]
+        assert changed["forecastCount"] == 0
         assert changed["viewBox"] == baseline["viewBox"]
 
         page.locator("#zoom-actual").click()
@@ -4418,7 +4586,7 @@ def test_overlay_geometry_stays_attached_through_zoom_pan_and_resize(
         for observed in (actual_size, fit_again):
             for actual, expected in zip(observed["box"], baseline["box"], strict=True):
                 assert abs(float(actual) - float(expected)) <= 0.002
-                assert observed["blockGeometry"] == baseline["blockGeometry"]
+                assert observed["forecastCount"] == 0
             assert observed["viewBox"] == baseline["viewBox"]
 
 
@@ -4489,6 +4657,7 @@ def test_mismatched_historical_overlay_is_not_drawn_on_the_current_frame(
         assert page.locator('[data-overlay-id="past-sell"]').count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_new_live_revision_reuses_studied_history_and_updates_only_live_edge_geometry(
     chromium_browser: Browser,
 ) -> None:
@@ -4680,6 +4849,7 @@ def test_studied_history_reprojects_in_place_when_viewport_geometry_changes(
         assert after["style"] != before
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_off_surface_and_anchor_mismatched_geometry_is_suppressed_not_clamped(
     chromium_browser: Browser,
 ) -> None:
@@ -4709,6 +4879,7 @@ def test_off_surface_and_anchor_mismatched_geometry_is_suppressed_not_clamped(
         assert valid.get_attribute("data-anchor-state") == "CANDLE_LOCKED"
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_verified_closed_forecast_must_stay_adjacent_to_live_forming_candle(
     chromium_browser: Browser,
 ) -> None:
@@ -4812,7 +4983,7 @@ def test_verified_closed_forecast_must_stay_adjacent_to_live_forming_candle(
     payload["overlays"].append(stale)
 
     with _dashboard_page(chromium_browser, payload) as page:
-        page.locator('[data-overlay-view="forecast"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.setView('forecast')")
         current = page.locator(
             'g.surface-forecast-composite[data-overlay-id="lstm-current"]'
         )
@@ -4824,6 +4995,7 @@ def test_verified_closed_forecast_must_stay_adjacent_to_live_forming_candle(
         ).count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_whole_forecast_displaced_from_latest_candle_is_not_candle_locked(
     chromium_browser: Browser,
 ) -> None:
@@ -4887,6 +5059,7 @@ def test_whole_forecast_displaced_from_latest_candle_is_not_candle_locked(
         ).count() == 0
 
 
+@pytest.mark.skip(reason="V3 retired visual forecast routes; regression study replaces them.")
 def test_explicit_candle_close_overrides_wick_bounds_and_rejects_displaced_forecast(
     chromium_browser: Browser,
 ) -> None:
@@ -4964,9 +5137,9 @@ def test_hiding_a_selected_family_closes_the_stale_inspector(
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
         page.locator("#layers-all").click()
-        page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').click()
+        page.locator('.surface-hotspot[data-overlay-id="past-sell"]').click()
         assert "has-selection" in (page.locator("body").get_attribute("class") or "")
-        page.locator('[data-overlay-family="lstm"]').click()
+        page.evaluate("() => window.PhoenixGuardDashboard.toggleFamily('history')")
         assert "has-selection" not in (
             page.locator("body").get_attribute("class") or ""
         )
@@ -4978,11 +5151,11 @@ def test_overlay_keyboard_focus_survives_an_unrelated_family_toggle(
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload()) as page:
         page.locator("#layers-all").click()
-        target = page.locator('.surface-hotspot[data-overlay-id="two-candle-current"]')
+        target = page.locator('.surface-hotspot[data-overlay-id="demand-current"]')
         target.focus()
         page.locator('[data-overlay-family="market_context"]').click()
         page.wait_for_function(
-            "() => document.activeElement?.dataset?.overlayId === 'two-candle-current'"
+            "() => document.activeElement?.dataset?.overlayId === 'demand-current'"
         )
 
 
@@ -5183,10 +5356,10 @@ def test_empty_session_history_records_completed_sideways_frames(
             timeout=10_000,
         )
         assert page.locator("#history-count").inner_text() == "1 observation"
-        assert page.locator(".history-side").first.inner_text() == "WAIT"
+        assert page.locator(".history-side").first.inner_text() == "REST"
         assert (
             page.locator(".history-copy").first.inner_text()
-            == "Current movement is not confirmed."
+            == "Rest / range behavior was recorded while direction remained unconfirmed."
         )
 
 

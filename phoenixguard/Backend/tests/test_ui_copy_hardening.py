@@ -100,7 +100,8 @@ def test_tracker_pressure_uses_server_authoritative_temporal_event() -> None:
     assert "pressure_event" in dashboard
     assert 'pressureState === "ended"' in dashboard
     assert "directionalSide(pressure.direction || pressure.side)" in dashboard
-    assert "Past observations stay in history. They never overwrite the current move" in dashboard
+    assert "Regression study · candle by candle" in dashboard
+    assert "History never grants entry permission." in dashboard
 
 
 def test_tracker_dashboard_separates_current_outlook_and_entry_permission() -> None:
@@ -125,10 +126,10 @@ def test_tracker_dashboard_separates_current_outlook_and_entry_permission() -> N
     assert "/v1/mobile/operator/state/v1/" in dashboard
     assert "function highFrequencyForecast" not in dashboard
     assert "function derivedHighFrequencyForecast" not in dashboard
-    assert 'data-overlay-family="lstm"' in dashboard
-    assert 'data-overlay-family="scene_forecaster"' in dashboard
-    assert "This visual outlook shows the full-chart study's candle-anchored 12-event route" in dashboard
-    assert "This sequence outlook shows 12 future event blocks" in dashboard
+    assert 'aria-label="Major trend, inner trend, and regression study"' in dashboard
+    assert "Trend and regression describe the chart. Entry permission remains separate." in dashboard
+    assert 'data-overlay-family="lstm"' not in dashboard
+    assert 'data-overlay-family="scene_forecaster"' not in dashboard
     assert "/v1/mobile/live/state/v3/" not in dashboard
 
 
@@ -215,8 +216,8 @@ def test_tracker_dashboard_does_not_expose_overlay_tuning_editor() -> None:
     assert 'data-overlay-family="market_context"' in dashboard
     assert '>Reaction map <' in dashboard
     assert 'data-overlay-family="playbook"' not in dashboard
-    assert 'data-overlay-family="two_candle"' in dashboard
-    assert 'data-overlay-family="lstm"' in dashboard
+    assert 'data-overlay-family="two_candle"' not in dashboard
+    assert 'data-overlay-family="lstm"' not in dashboard
     assert 'data-label-mode="on"' in dashboard
     assert 'data-label-mode="hover"' in dashboard
     assert 'data-label-mode="off"' in dashboard

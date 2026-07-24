@@ -4186,6 +4186,73 @@ def _episode_owned_lstm_composite(
     }
 
 
+def _episode_study_contract(value: object) -> dict[str, object]:
+    source = _mapping(value)
+    if not source or source.get("study_only") is not True:
+        return {}
+    behavior = _mapping(source.get("behavior"))
+    directional = _mapping(source.get("directional_read"))
+    return {
+        "schema_version": "PG_TRACKING_STUDY_SNAPSHOT_V3",
+        "status": _safe_public_text(source.get("status"), "PENDING", limit=40),
+        "study_only": True,
+        "execution_authority": False,
+        "major_trend": _study_trend_contract(source.get("major_trend")),
+        "inner_trend": _study_trend_contract(source.get("inner_trend")),
+        "current_pressure": _study_trend_contract(source.get("current_pressure")),
+        "directional_read": {
+            "side": _side(directional.get("side")),
+            "confidence": _confidence(directional.get("confidence")) or 0.0,
+            "status": _safe_public_text(
+                directional.get("status"), "INSUFFICIENT_EVIDENCE", limit=48
+            ),
+        },
+        "behavior": {
+            "state": _safe_public_text(behavior.get("state"), "Unknown", limit=32),
+            "direction": _side(behavior.get("direction")),
+            "candle_count": _integer(behavior.get("candle_count")),
+            "duration_seconds": _integer(behavior.get("duration_seconds")),
+            "market_story": _safe_public_text(
+                behavior.get("market_story"), "", limit=240
+            ),
+        },
+    }
+
+
+def _study_history_summary(
+    *,
+    prefix: str,
+    study: Mapping[str, object],
+    movement_side: str = "NEUTRAL",
+) -> str:
+    def direction_word(value: object) -> str:
+        side = _side(value)
+        return "up" if side == "BUY" else "down" if side == "SELL" else "sideways"
+
+    major = _mapping(study.get("major_trend"))
+    inner = _mapping(study.get("inner_trend"))
+    behavior = _mapping(study.get("behavior"))
+    read = _mapping(study.get("directional_read"))
+    major_side = _side(major.get("side"))
+    inner_side = _side(inner.get("side"))
+    read_side = _side(read.get("side"))
+    state = _safe_public_text(behavior.get("state"), "unknown", limit=32).replace("_", " ").lower()
+    candles = _integer(behavior.get("candle_count"))
+    movement = (
+        "the completed candle moved up"
+        if movement_side == "BUY"
+        else "the completed candle moved down"
+        if movement_side == "SELL"
+        else "the completed candle was recorded"
+    )
+    return (
+        f"{prefix}: major trend {direction_word(major_side)}, "
+        f"inner trend {direction_word(inner_side)}, {state} for "
+        f"{candles} candle{'s' if candles != 1 else ''}; regression read "
+        f"{direction_word(read_side)}; {movement}."
+    )
+
+
 def _episode_event_contract(
     event: Mapping[str, Any],
     *,
@@ -4207,8 +4274,15 @@ def _episode_event_contract(
     result_available = event.get("result_available")
     if not isinstance(result_available, bool):
         result_available = observation_kind != "UNKNOWN_GAP"
+    study = _episode_study_contract(event.get("market_study_v3"))
     movement_word = "up" if actual_side == "BUY" else "down" if actual_side == "SELL" else "without a confirmed direction"
-    if result_available is False:
+    if study:
+        summary = _study_history_summary(
+            prefix=f"E{step}",
+            study=study,
+            movement_side=actual_side,
+        )
+    elif result_available is False:
         agreement = None
         summary = (
             f"E{step}: the chart observation was unavailable; the saved "
@@ -4281,6 +4355,11 @@ def _episode_event_contract(
         },
         "state": "HISTORICAL",
         "summary": summary,
+        "market_study_v3": study,
+        "major_trend": _mapping(study.get("major_trend")),
+        "inner_trend": _mapping(study.get("inner_trend")),
+        "regression_read": _mapping(study.get("directional_read")),
+        "behavior": _mapping(study.get("behavior")),
     }
 
 
@@ -4744,6 +4823,9 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
     if events:
         cursor = max(cursor, len(events))
     plan_side = _episode_direction(episode)
+    baseline_market_study_v3 = _episode_study_contract(
+        _mapping(episode.get("anchor")).get("market_study_v3")
+    )
     pair = _safe_public_text(episode.get("pair"), "Market", limit=32)
     timeframe = _safe_public_text(episode.get("timeframe"), "", limit=16)
     market_label = " · ".join(part for part in (pair, timeframe) if part)
@@ -4816,8 +4898,21 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
         "baseline": (
             {
                 "title": f"{market_label or 'Market'} baseline",
-                "summary": f"The original {plan_word} plan was frozen when tracking started.",
-                "direction": plan_side,
+                "summary": (
+                    _study_history_summary(
+                        prefix="Regression baseline",
+                        study=baseline_market_study_v3,
+                    )
+                    if baseline_market_study_v3
+                    else f"The original {plan_word} plan was frozen when tracking started."
+                ),
+                "direction": _side(
+                    _mapping(
+                        baseline_market_study_v3.get("directional_read")
+                    ).get("side"),
+                    plan_side,
+                ),
+                "market_study_v3": baseline_market_study_v3,
             }
             if has_episode
             else {}
@@ -4842,6 +4937,7 @@ def _tracking_episode_contract(payload: Mapping[str, Any]) -> dict[str, object]:
         ),
         "change_summary": current_summary if has_episode else "",
         "future_blocks": _episode_future_blocks(episode) if has_episode else [],
+        "baseline_market_study_v3": baseline_market_study_v3,
         "events": events,
         "terminal_reason": (
             "CONTEXT_CHANGED"
@@ -4885,7 +4981,16 @@ def _archived_episode_history_contract(value: Mapping[str, Any]) -> dict[str, ob
     state = _text(value.get("state"), "COMPLETED", limit=24).upper()
     if state not in {"COMPLETED", "INVALIDATED", "STOPPED", "FAILED"}:
         state = "COMPLETED"
-    if observations:
+    study = _episode_study_contract(
+        value.get("final_market_study_v3")
+        or value.get("baseline_market_study_v3")
+    )
+    if study:
+        result_summary = (
+            _study_history_summary(prefix="Saved regression study", study=study)
+            + f" {cursor} of 12 completed candles recorded."
+        )
+    elif observations:
         result_summary = (
             f"Saved tracking study: {cursor} of 12 events recorded; "
             f"{agreements} of {observations} directional blocks matched."
@@ -4897,10 +5002,18 @@ def _archived_episode_history_contract(value: Mapping[str, Any]) -> dict[str, ob
         "episode_id": episode_id,
         "event_index": cursor,
         "observed_at": _epoch(value.get("ended_at"), value.get("updated_at")),
-        "direction": "NEUTRAL",
+        "direction": _side(
+            _mapping(study.get("directional_read")).get("side"),
+            _mapping(study.get("major_trend")).get("side"),
+        ),
         "state": "ENDED" if state != "FAILED" else "STALE",
         "summary": result_summary,
         "frame_id": _frame_id(value.get("anchor_frame_id")),
+        "market_study_v3": study,
+        "major_trend": _mapping(study.get("major_trend")),
+        "inner_trend": _mapping(study.get("inner_trend")),
+        "regression_read": _mapping(study.get("directional_read")),
+        "behavior": _mapping(study.get("behavior")),
     }
 
 
@@ -4932,7 +5045,14 @@ def _archived_episode_event_contracts(
             if actual_side == "SELL"
             else "without a confirmed direction"
         )
-        if agreement is True:
+        study = _episode_study_contract(event.get("market_study_v3"))
+        if study:
+            summary = _study_history_summary(
+                prefix=f"E{step}",
+                study=study,
+                movement_side=actual_side,
+            )
+        elif agreement is True:
             summary = (
                 f"E{step}: price moved {movement_word} and matched the saved future block."
             )
@@ -4959,6 +5079,11 @@ def _archived_episode_event_contracts(
                 "state": "HISTORICAL",
                 "summary": summary,
                 "frame_id": _frame_id(event.get("frame_id")),
+                "market_study_v3": study,
+                "major_trend": _mapping(study.get("major_trend")),
+                "inner_trend": _mapping(study.get("inner_trend")),
+                "regression_read": _mapping(study.get("directional_read")),
+                "behavior": _mapping(study.get("behavior")),
             }
         )
     return output
@@ -5107,6 +5232,344 @@ def _history_contract(
     )
 
 
+def _study_trend_contract(value: object) -> dict[str, object]:
+    row = _mapping(value)
+    return {
+        "side": _side(row.get("side"), row.get("direction"), row.get("label")),
+        "label": _safe_public_text(row.get("label"), "Unknown", limit=32),
+        "slope": round(_number(row.get("slope", row.get("normalized_slope"))) or 0.0, 8),
+        "confidence": _confidence(row.get("confidence"), row.get("strength")) or 0.0,
+        "window_candles": _integer(row.get("window_candles"), row.get("candle_count")),
+    }
+
+
+def _public_count_map(value: object, *, limit: int = 10) -> dict[str, int]:
+    source = _mapping(value)
+    rows = sorted(
+        (
+            (_safe_public_text(key, "Unknown", limit=64), _integer(count))
+            for key, count in source.items()
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return dict(rows[:limit])
+
+
+def _market_study_contract(value: object) -> dict[str, object]:
+    """Project the bounded observation-only study into the operator DTO."""
+
+    source = _mapping(value)
+    if not source or source.get("study_only") is not True:
+        return {}
+    regression = _mapping(source.get("regression"))
+    candle_study = _mapping(source.get("candle_intelligence"))
+    latest_candle = _mapping(candle_study.get("latest"))
+    ratios = _mapping(latest_candle.get("ratios"))
+    interaction = _mapping(latest_candle.get("interaction"))
+    behavior = _mapping(source.get("behavior"))
+    current_state = _mapping(behavior.get("current_state"))
+    current_segment = _mapping(behavior.get("current_segment"))
+    similarity = _mapping(source.get("historical_similarity"))
+    continuation = _mapping(similarity.get("historical_continuation"))
+    similarity_graph = _mapping(similarity.get("similarity_graph"))
+    directional = _mapping(source.get("directional_read"))
+    pair_dna = _mapping(source.get("pair_dna"))
+    pair_candle = _mapping(pair_dna.get("candle"))
+    pair_behavior = _mapping(pair_dna.get("behavior"))
+    pair_associations = _rows(pair_dna.get("outcome_associations"))[:12]
+    candle_ledger = _mapping(source.get("candle_ledger"))
+    object_graph = _mapping(source.get("object_relationship_graph"))
+    maturation = _mapping(source.get("outcome_maturation"))
+    matches: list[dict[str, object]] = []
+    for row in _rows(similarity.get("matches"))[:5]:
+        outcome = _mapping(row.get("outcome"))
+        matches.append(
+            {
+                "sequence_id": _safe_identifier(row.get("sequence_id"), "historical-sequence"),
+                "similarity": _confidence(row.get("similarity")) or 0.0,
+                "regime": _safe_public_text(row.get("regime"), "Unknown", limit=48),
+                "outcome_direction": _safe_public_text(
+                    outcome.get("direction"), "Unknown", limit=16
+                ),
+            }
+        )
+    result: dict[str, object] = {
+        "schema_version": "PG_MARKET_STUDY_V3",
+        "status": _safe_public_text(source.get("status"), "PENDING", limit=40).upper(),
+        "reason": _safe_public_text(source.get("reason"), "", limit=240),
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+        "symbol": _safe_public_text(source.get("symbol"), "Unknown", limit=64),
+        "timeframe": _safe_public_text(source.get("timeframe"), "Unknown", limit=32),
+        "closed_candle_sequence": _integer(source.get("closed_candle_sequence")),
+        "closed_candle_key": _safe_identifier(
+            source.get("closed_candle_key"), ""
+        ),
+        "regression": {
+            "schema_version": "PG_REGRESSION_STUDY_V3",
+            "regime": _safe_public_text(regression.get("regime"), "Unknown", limit=40),
+            "major_trend": _study_trend_contract(
+                regression.get("major_trend") or behavior.get("major_trend")
+            ),
+            "inner_trend": _study_trend_contract(
+                regression.get("inner_trend") or behavior.get("inner_trend")
+            ),
+            "current_pressure": _study_trend_contract(
+                regression.get("current_pressure")
+            ),
+            "study_only": True,
+            "execution_authority": False,
+        },
+        "candle_intelligence": {
+            "status": _safe_public_text(candle_study.get("status"), "PENDING", limit=40),
+            "studied_count": _integer(candle_study.get("studied_count")),
+            "summary": {
+                "direction_counts": _public_count_map(
+                    _mapping(candle_study.get("summary")).get("direction_counts")
+                ),
+                "type_counts": _public_count_map(
+                    _mapping(candle_study.get("summary")).get("type_counts")
+                ),
+                "personality_counts": _public_count_map(
+                    _mapping(candle_study.get("summary")).get("personality_counts")
+                ),
+                "rejection_rate": _confidence(
+                    _mapping(candle_study.get("summary")).get("rejection_rate")
+                )
+                or 0.0,
+                "acceptance_rate": _confidence(
+                    _mapping(candle_study.get("summary")).get("acceptance_rate")
+                )
+                or 0.0,
+            },
+            "latest": {
+                "direction": _safe_public_text(latest_candle.get("direction"), "Unknown", limit=20),
+                "type": _safe_public_text(latest_candle.get("type"), "Unknown", limit=64),
+                "personality": _safe_public_text(
+                    latest_candle.get("personality"), "Unknown", limit=64
+                ),
+                "regime": _safe_public_text(latest_candle.get("regime"), "Unknown", limit=40),
+                "relationship": _safe_public_text(
+                    latest_candle.get("relation_to_previous"), "Unknown", limit=64
+                ),
+                "ratios": {
+                    key: round(_number(ratios.get(key)) or 0.0, 6)
+                    for key in (
+                        "body_to_range",
+                        "upper_wick_to_range",
+                        "lower_wick_to_range",
+                        "close_location_in_range",
+                        "range_vs_sequence_median",
+                    )
+                },
+                "rejection": {
+                    "detected": _mapping(interaction.get("rejection")).get("detected") is True,
+                    "side": _safe_public_text(
+                        _mapping(interaction.get("rejection")).get("side"),
+                        "None",
+                        limit=16,
+                    ),
+                },
+                "acceptance": {
+                    "detected": _mapping(interaction.get("acceptance")).get("detected") is True,
+                    "side": _safe_public_text(
+                        _mapping(interaction.get("acceptance")).get("side"),
+                        "None",
+                        limit=16,
+                    ),
+                },
+            },
+        },
+        "behavior": {
+            "status": _safe_public_text(behavior.get("status"), "PENDING", limit=40),
+            "major_trend": _study_trend_contract(behavior.get("major_trend")),
+            "inner_trend": _study_trend_contract(behavior.get("inner_trend")),
+            "current_state": {
+                "state": _safe_public_text(current_state.get("state"), "Unknown", limit=32),
+                "direction": _safe_public_text(current_state.get("direction"), "Unknown", limit=20),
+                "candle_count": _integer(current_state.get("candle_count")),
+                "duration_seconds": _integer(current_state.get("duration_seconds")),
+            },
+            "current_segment": {
+                "state": _safe_public_text(current_segment.get("state"), "Unknown", limit=32),
+                "candle_count": _integer(current_segment.get("candle_count")),
+                "duration_seconds": _integer(current_segment.get("duration_seconds")),
+                "next_state": _safe_public_text(current_segment.get("next_state"), "Unknown", limit=32),
+            },
+            "swing_summary": {
+                key: {
+                    "segment_count": _integer(_mapping(row).get("segment_count")),
+                    "average_candles": round(_number(_mapping(row).get("average_candles")) or 0.0, 3),
+                    "maximum_candles": _integer(_mapping(row).get("maximum_candles")),
+                    "average_duration_seconds": round(
+                        _number(_mapping(row).get("average_duration_seconds")) or 0.0,
+                        2,
+                    ),
+                }
+                for key, row in _mapping(behavior.get("swing_summary")).items()
+            },
+            "rest_summary": {
+                key: value
+                for key, value in _mapping(behavior.get("rest_summary")).items()
+                if key
+                in {
+                    "segment_count",
+                    "average_candles",
+                    "maximum_candles",
+                    "average_duration_seconds",
+                    "breakout_up_count",
+                    "breakout_down_count",
+                    "unresolved_count",
+                }
+                and isinstance(value, (int, float))
+            },
+            "market_story": _safe_public_text(behavior.get("market_story"), "", limit=280),
+        },
+        "historical_similarity": {
+            "status": _safe_public_text(similarity.get("status"), "NO_MATCHES", limit=40),
+            "match_count": _integer(similarity.get("match_count")),
+            "historical_continuation": {
+                "status": _safe_public_text(
+                    continuation.get("status"), "INSUFFICIENT_OUTCOME_SUPPORT", limit=48
+                ),
+                "side": _side(continuation.get("direction")),
+                "direction": _safe_public_text(
+                    continuation.get("direction"), "Unknown", limit=16
+                ),
+                "confidence": _confidence(continuation.get("confidence")) or 0.0,
+                "support": _integer(continuation.get("support")),
+                "minimum_support": _integer(continuation.get("minimum_support")),
+            },
+            "matches": matches,
+            "similarity_graph": {
+                "status": _safe_public_text(
+                    similarity_graph.get("status"), "EMPTY", limit=32
+                ),
+                "graph_kind": _safe_public_text(
+                    similarity_graph.get("graph_kind"),
+                    "BOUNDED_HISTORICAL_SEQUENCE_SIMILARITY",
+                    limit=64,
+                ),
+                "directed": False,
+                "node_count": _integer(similarity_graph.get("node_count")),
+                "edge_count": _integer(similarity_graph.get("edge_count")),
+                "edges": [
+                    {
+                        "source": _safe_identifier(row.get("source"), "node"),
+                        "target": _safe_identifier(row.get("target"), "node"),
+                        "similarity": _confidence(row.get("similarity")) or 0.0,
+                    }
+                    for row in _rows(similarity_graph.get("edges"))[:24]
+                ],
+                "study_only": True,
+                "execution_authority": False,
+            },
+        },
+        "pair_dna": {
+            "observation_count": _integer(pair_dna.get("observation_count")),
+            "candle_count": _integer(pair_dna.get("candle_count")),
+            "candle": {
+                "direction_counts": _public_count_map(pair_candle.get("direction_counts")),
+                "type_counts": _public_count_map(pair_candle.get("type_counts")),
+                "personality_counts": _public_count_map(pair_candle.get("personality_counts")),
+                "averages": {
+                    key: round(_number(value) or 0.0, 6)
+                    for key, value in _mapping(pair_candle.get("averages")).items()
+                },
+            },
+            "behavior": {
+                "state_candle_counts": _public_count_map(
+                    pair_behavior.get("state_candle_counts")
+                ),
+                "major_trend_counts": _public_count_map(
+                    pair_behavior.get("major_trend_counts")
+                ),
+                "inner_trend_counts": _public_count_map(
+                    pair_behavior.get("inner_trend_counts")
+                ),
+            },
+            "regime_counts": _public_count_map(pair_dna.get("regime_counts")),
+            "object_type_counts": _public_count_map(pair_dna.get("object_type_counts")),
+            "outcome_association_contract": {
+                "causal": False,
+                "note": "Counts describe historical association and do not prove causation.",
+            },
+            "outcome_associations": [
+                {
+                    "feature": _safe_public_text(
+                        row.get("feature"), "Unknown", limit=160
+                    ),
+                    "support": _integer(row.get("support")),
+                    "direction_probabilities": {
+                        key: _confidence(value) or 0.0
+                        for key, value in _mapping(
+                            row.get("direction_probabilities")
+                        ).items()
+                        if str(key).upper() in {"UP", "DOWN", "REST"}
+                    },
+                }
+                for row in pair_associations
+            ],
+        },
+        "candle_ledger": {
+            "status": _safe_public_text(candle_ledger.get("status"), "UNKNOWN", limit=40),
+            "pair_id": _safe_identifier(candle_ledger.get("pair_id"), ""),
+            "unique_candle_count": _integer(candle_ledger.get("unique_candle_count")),
+            "total_observation_count": _integer(
+                candle_ledger.get("total_observation_count")
+            ),
+            "study_only": True,
+            "execution_authority": False,
+        },
+        "object_relationship_graph": {
+            "status": _safe_public_text(object_graph.get("status"), "EMPTY", limit=40),
+            "latest_candle_id": _safe_identifier(
+                object_graph.get("latest_candle_id"), ""
+            ),
+            "selected_counts": _public_count_map(
+                object_graph.get("selected_counts"), limit=8
+            ),
+            "relation_counts": _public_count_map(
+                object_graph.get("relation_counts"), limit=8
+            ),
+            "truncated": object_graph.get("truncated") is True,
+            "observation_only": True,
+            "study_only": True,
+            "execution_authority": False,
+        },
+        "outcome_maturation": {
+            "status": _safe_public_text(maturation.get("status"), "UNKNOWN", limit=64),
+            "matched_candle_id": _safe_identifier(
+                maturation.get("matched_candle_id"), ""
+            ),
+            "coordinate_space": _safe_public_text(
+                maturation.get("coordinate_space"), "Unknown", limit=40
+            ),
+            "study_only": True,
+            "execution_authority": False,
+        },
+        "directional_read": {
+            "side": _side(directional.get("side")),
+            "confidence": _confidence(directional.get("confidence")) or 0.0,
+            "status": _safe_public_text(
+                directional.get("status"), "INSUFFICIENT_EVIDENCE", limit=48
+            ),
+            "reasons": [
+                _safe_public_text(reason, "", limit=120)
+                for reason in cast(Sequence[object], directional.get("reasons", []))[:6]
+                if isinstance(reason, str) and reason.strip()
+            ]
+            if isinstance(directional.get("reasons"), Sequence)
+            and not isinstance(directional.get("reasons"), (str, bytes, bytearray))
+            else [],
+            "study_only": True,
+            "execution_authority": False,
+        },
+    }
+    return result
+
+
 def build_operator_workspace_v1(
     payload: Mapping[str, object],
     *,
@@ -5215,6 +5678,10 @@ def build_operator_workspace_v1(
     )
     history = _history_contract(source, current_move, pressure_event)
     tracking_summary = _mapping(source.get("tracking_summary"))
+    market_study_v3 = _market_study_contract(
+        tracking_summary.get("market_study_v3")
+        or _mapping(source.get("latest_signal")).get("market_study_v3")
+    )
     tracking_flag = _explicit_bool(source.get("tracking_enabled"))
     if tracking_flag is True:
         tracking_state = (
@@ -5287,6 +5754,7 @@ def build_operator_workspace_v1(
             "updated_at": observed_at,
             "history_count": len(history),
             "episode": tracking_episode,
+            "market_study_v3": market_study_v3,
         },
         "freshness": freshness,
         "current_move": current_move,

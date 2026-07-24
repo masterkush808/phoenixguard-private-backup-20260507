@@ -3404,6 +3404,7 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
                 "capture_started_epoch",
                 "pipeline_latency_sec",
                 "signal_id",
+                "market_study_v3",
             )
             if key in latest_signal_row
         }
@@ -3423,6 +3424,7 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
                 "chart_region",
                 "display_region",
                 "pipeline_timing",
+                "market_study_v3",
             )
             if key in tracking_summary_row
         }
@@ -3861,6 +3863,590 @@ def _bounded_operator_projection_context(
                     output[key] = nested
         return output
 
+    def bounded_market_study(value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        source = cast(Mapping[str, object], value)
+        if source.get("study_only") is not True or source.get("execution_authority") is not False:
+            return {}
+
+        # The generic depth limiter is deliberately too shallow for the
+        # evidence tree below (for example latest.interaction.rejection and
+        # matches[].outcome).  Project an explicit allowlist instead of
+        # increasing that limiter and accidentally exposing OHLC, pixel
+        # geometry, fingerprints, model inputs, or persistence metadata.
+        def selected(
+            nested_value: object,
+            keys: Sequence[str],
+            *,
+            text_limit: int = 512,
+        ) -> dict[str, object]:
+            if not isinstance(nested_value, Mapping):
+                return {}
+            nested_source = cast(Mapping[str, object], nested_value)
+            output: dict[str, object] = {}
+            for key in keys:
+                nested = nested_source.get(key)
+                if isinstance(nested, str):
+                    if nested:
+                        output[key] = nested[:text_limit]
+                elif nested is not None and isinstance(
+                    nested,
+                    (int, float, bool),
+                ):
+                    output[key] = nested
+            return output
+
+        def count_map(nested_value: object, *, limit: int = 12) -> dict[str, object]:
+            if not isinstance(nested_value, Mapping):
+                return {}
+            output: dict[str, object] = {}
+            for raw_key, nested in list(
+                cast(Mapping[object, object], nested_value).items()
+            )[:limit]:
+                if isinstance(nested, (int, float)) and not isinstance(
+                    nested,
+                    bool,
+                ):
+                    output[str(raw_key)[:96]] = nested
+            return output
+
+        def trend(nested_value: object) -> dict[str, object]:
+            return selected(
+                nested_value,
+                (
+                    "side",
+                    "direction",
+                    "label",
+                    "slope",
+                    "normalized_slope",
+                    "confidence",
+                    "strength",
+                    "window_candles",
+                    "candle_count",
+                ),
+            )
+
+        result = selected(
+            source,
+            (
+                "schema_version",
+                "status",
+                "reason",
+                "study_only",
+                "execution_authority",
+                "can_grant_entry_permission",
+                "symbol",
+                "timeframe",
+                "closed_candle_key",
+                "closed_candle_sequence",
+                "sequence_id",
+                "observed_at",
+            ),
+        )
+
+        regression_source = source.get("regression")
+        regression = selected(
+            regression_source,
+            (
+                "schema_version",
+                "status",
+                "regime",
+                "study_only",
+                "execution_authority",
+            ),
+        )
+        if isinstance(regression_source, Mapping):
+            regression_mapping = cast(Mapping[str, object], regression_source)
+            for key in ("major_trend", "inner_trend", "current_pressure"):
+                bounded_trend = trend(regression_mapping.get(key))
+                if bounded_trend:
+                    regression[key] = bounded_trend
+        if regression:
+            result["regression"] = regression
+        for key in ("major_trend", "inner_trend", "current_pressure"):
+            bounded_snapshot_trend = trend(source.get(key))
+            if bounded_snapshot_trend:
+                result[key] = bounded_snapshot_trend
+
+        candle_source = source.get("candle_intelligence")
+        candle = selected(
+            candle_source,
+            (
+                "schema_version",
+                "status",
+                "study_only",
+                "execution_authority",
+                "studied_count",
+                "truncated_count",
+            ),
+        )
+        if isinstance(candle_source, Mapping):
+            candle_mapping = cast(Mapping[str, object], candle_source)
+            raw_summary = candle_mapping.get("summary")
+            summary = selected(
+                raw_summary,
+                ("rejection_rate", "acceptance_rate"),
+            )
+            if isinstance(raw_summary, Mapping):
+                summary_mapping = cast(Mapping[str, object], raw_summary)
+                for key in (
+                    "direction_counts",
+                    "type_counts",
+                    "personality_counts",
+                ):
+                    counts = count_map(summary_mapping.get(key), limit=10)
+                    if counts:
+                        summary[key] = counts
+            if summary:
+                candle["summary"] = summary
+
+            raw_latest = candle_mapping.get("latest")
+            latest = selected(
+                raw_latest,
+                (
+                    "candle_id",
+                    "timestamp",
+                    "closed",
+                    "coordinate_space",
+                    "direction",
+                    "type",
+                    "personality",
+                    "regime",
+                    "relation_to_previous",
+                    "sequence_position",
+                ),
+            )
+            if isinstance(raw_latest, Mapping):
+                latest_mapping = cast(Mapping[str, object], raw_latest)
+                ratios = selected(
+                    latest_mapping.get("ratios"),
+                    (
+                        "body_to_range",
+                        "upper_wick_to_range",
+                        "lower_wick_to_range",
+                        "close_location_in_range",
+                        "range_vs_sequence_median",
+                    ),
+                )
+                if ratios:
+                    latest["ratios"] = ratios
+                raw_interaction = latest_mapping.get("interaction")
+                if isinstance(raw_interaction, Mapping):
+                    interaction_mapping = cast(
+                        Mapping[str, object],
+                        raw_interaction,
+                    )
+                    interaction: dict[str, object] = {}
+                    rejection = selected(
+                        interaction_mapping.get("rejection"),
+                        (
+                            "detected",
+                            "side",
+                            "upper_wick_swept_previous_high",
+                            "lower_wick_swept_previous_low",
+                        ),
+                    )
+                    acceptance = selected(
+                        interaction_mapping.get("acceptance"),
+                        ("detected", "side"),
+                    )
+                    if rejection:
+                        interaction["rejection"] = rejection
+                    if acceptance:
+                        interaction["acceptance"] = acceptance
+                    if interaction:
+                        latest["interaction"] = interaction
+            if latest:
+                candle["latest"] = latest
+        if candle:
+            result["candle_intelligence"] = candle
+
+        behavior_source = source.get("behavior")
+        behavior = selected(
+            behavior_source,
+            (
+                "schema_version",
+                "status",
+                "study_only",
+                "execution_authority",
+                "state",
+                "direction",
+                "candle_count",
+                "duration_seconds",
+                "timeframe_seconds",
+                "market_story",
+            ),
+            text_limit=512,
+        )
+        if isinstance(behavior_source, Mapping):
+            behavior_mapping = cast(Mapping[str, object], behavior_source)
+            for key in ("major_trend", "inner_trend"):
+                bounded_trend = trend(behavior_mapping.get(key))
+                if bounded_trend:
+                    behavior[key] = bounded_trend
+            for key in ("current_state", "current_segment"):
+                bounded_state = selected(
+                    behavior_mapping.get(key),
+                    (
+                        "state",
+                        "direction",
+                        "candle_count",
+                        "duration_seconds",
+                        "started_at_index",
+                        "next_state",
+                    ),
+                )
+                if bounded_state:
+                    behavior[key] = bounded_state
+            raw_swing_summary = behavior_mapping.get("swing_summary")
+            swing_summary: dict[str, object] = {}
+            if isinstance(raw_swing_summary, Mapping):
+                for raw_key, raw_metric in list(
+                    cast(Mapping[object, object], raw_swing_summary).items()
+                )[:6]:
+                    metric = selected(
+                        raw_metric,
+                        (
+                            "segment_count",
+                            "average_candles",
+                            "maximum_candles",
+                            "average_duration_seconds",
+                        ),
+                    )
+                    if metric:
+                        swing_summary[str(raw_key)[:32]] = metric
+            if swing_summary:
+                behavior["swing_summary"] = swing_summary
+            rest_summary = selected(
+                behavior_mapping.get("rest_summary"),
+                (
+                    "segment_count",
+                    "average_candles",
+                    "maximum_candles",
+                    "average_duration_seconds",
+                    "breakout_up_count",
+                    "breakout_down_count",
+                    "unresolved_count",
+                ),
+            )
+            if rest_summary:
+                behavior["rest_summary"] = rest_summary
+        if behavior:
+            result["behavior"] = behavior
+
+        similarity_source = source.get("historical_similarity")
+        similarity = selected(
+            similarity_source,
+            (
+                "schema_version",
+                "status",
+                "study_only",
+                "execution_authority",
+                "query_fingerprint_id",
+                "match_count",
+            ),
+        )
+        if isinstance(similarity_source, Mapping):
+            similarity_mapping = cast(Mapping[str, object], similarity_source)
+            raw_continuation = similarity_mapping.get("historical_continuation")
+            continuation = selected(
+                raw_continuation,
+                (
+                    "status",
+                    "support",
+                    "minimum_support",
+                    "direction",
+                    "confidence",
+                    "mean_similarity",
+                    "execution_authority",
+                ),
+            )
+            if isinstance(raw_continuation, Mapping):
+                probabilities = count_map(
+                    cast(Mapping[str, object], raw_continuation).get(
+                        "probabilities"
+                    ),
+                    limit=3,
+                )
+                if probabilities:
+                    continuation["probabilities"] = probabilities
+            if continuation:
+                similarity["historical_continuation"] = continuation
+
+            raw_matches = similarity_mapping.get("matches")
+            matches: list[dict[str, object]] = []
+            if isinstance(raw_matches, Sequence) and not isinstance(
+                raw_matches,
+                (str, bytes, bytearray),
+            ):
+                for raw_match in list(cast(Sequence[object], raw_matches))[:8]:
+                    match = selected(
+                        raw_match,
+                        ("sequence_id", "similarity", "regime"),
+                    )
+                    if not isinstance(raw_match, Mapping):
+                        continue
+                    raw_match_mapping = cast(Mapping[str, object], raw_match)
+                    outcome = selected(
+                        raw_match_mapping.get("outcome"),
+                        (
+                            "direction",
+                            "realized_return",
+                            "success",
+                            "horizon_candles",
+                            "coordinate_continuity",
+                        ),
+                    )
+                    if outcome:
+                        match["outcome"] = outcome
+                    if match:
+                        matches.append(match)
+            if matches:
+                similarity["matches"] = matches
+
+            raw_graph = similarity_mapping.get("similarity_graph")
+            graph = selected(
+                raw_graph,
+                (
+                    "schema_version",
+                    "status",
+                    "graph_kind",
+                    "directed",
+                    "study_only",
+                    "execution_authority",
+                    "node_count",
+                    "edge_count",
+                ),
+            )
+            if isinstance(raw_graph, Mapping):
+                raw_edges = cast(Mapping[str, object], raw_graph).get("edges")
+                edges: list[dict[str, object]] = []
+                if isinstance(raw_edges, Sequence) and not isinstance(
+                    raw_edges,
+                    (str, bytes, bytearray),
+                ):
+                    for raw_edge in list(cast(Sequence[object], raw_edges))[:24]:
+                        edge = selected(
+                            raw_edge,
+                            ("source", "target", "similarity"),
+                        )
+                        if edge:
+                            edges.append(edge)
+                if edges:
+                    graph["edges"] = edges
+            if graph:
+                similarity["similarity_graph"] = graph
+        if similarity:
+            result["historical_similarity"] = similarity
+
+        pair_source = source.get("pair_dna")
+        pair_dna = selected(
+            pair_source,
+            (
+                "schema_version",
+                "pair_id",
+                "symbol",
+                "timeframe",
+                "observation_count",
+                "candle_count",
+                "first_observed_at",
+                "last_observed_at",
+                "study_only",
+                "execution_authority",
+            ),
+        )
+        if isinstance(pair_source, Mapping):
+            pair_mapping = cast(Mapping[str, object], pair_source)
+            raw_pair_candle = pair_mapping.get("candle")
+            pair_candle: dict[str, object] = {}
+            if isinstance(raw_pair_candle, Mapping):
+                pair_candle_mapping = cast(
+                    Mapping[str, object],
+                    raw_pair_candle,
+                )
+                for key in (
+                    "direction_counts",
+                    "type_counts",
+                    "personality_counts",
+                ):
+                    counts = count_map(pair_candle_mapping.get(key), limit=10)
+                    if counts:
+                        pair_candle[key] = counts
+                averages = count_map(
+                    pair_candle_mapping.get("averages"),
+                    limit=12,
+                )
+                if averages:
+                    pair_candle["averages"] = averages
+            if pair_candle:
+                pair_dna["candle"] = pair_candle
+            raw_pair_behavior = pair_mapping.get("behavior")
+            pair_behavior: dict[str, object] = {}
+            if isinstance(raw_pair_behavior, Mapping):
+                pair_behavior_mapping = cast(
+                    Mapping[str, object],
+                    raw_pair_behavior,
+                )
+                for key in (
+                    "state_candle_counts",
+                    "major_trend_counts",
+                    "inner_trend_counts",
+                ):
+                    counts = count_map(pair_behavior_mapping.get(key), limit=10)
+                    if counts:
+                        pair_behavior[key] = counts
+            if pair_behavior:
+                pair_dna["behavior"] = pair_behavior
+            for key in ("regime_counts", "object_type_counts"):
+                counts = count_map(pair_mapping.get(key), limit=10)
+                if counts:
+                    pair_dna[key] = counts
+            association_contract = selected(
+                pair_mapping.get("outcome_association_contract"),
+                ("analysis_kind", "causal", "note"),
+                text_limit=240,
+            )
+            if association_contract:
+                pair_dna["outcome_association_contract"] = association_contract
+            raw_associations = pair_mapping.get("outcome_associations")
+            associations: list[dict[str, object]] = []
+            if isinstance(raw_associations, Sequence) and not isinstance(
+                raw_associations,
+                (str, bytes, bytearray),
+            ):
+                for raw_association in list(
+                    cast(Sequence[object], raw_associations)
+                )[:12]:
+                    association = selected(
+                        raw_association,
+                        (
+                            "feature",
+                            "support",
+                            "success_rate",
+                            "average_realized_return",
+                        ),
+                        text_limit=160,
+                    )
+                    if not isinstance(raw_association, Mapping):
+                        continue
+                    probabilities = count_map(
+                        cast(Mapping[str, object], raw_association).get(
+                            "direction_probabilities"
+                        ),
+                        limit=3,
+                    )
+                    if probabilities:
+                        association["direction_probabilities"] = probabilities
+                    if association:
+                        associations.append(association)
+            if associations:
+                pair_dna["outcome_associations"] = associations
+        if pair_dna:
+            result["pair_dna"] = pair_dna
+
+        ledger = selected(
+            source.get("candle_ledger"),
+            (
+                "schema_version",
+                "status",
+                "study_only",
+                "execution_authority",
+                "pair_id",
+                "symbol",
+                "timeframe",
+                "inserted_count",
+                "updated_count",
+                "changed_count",
+                "skipped_unstable_count",
+                "unique_candle_count",
+                "total_observation_count",
+            ),
+        )
+        if ledger:
+            result["candle_ledger"] = ledger
+
+        object_graph_source = source.get("object_relationship_graph")
+        object_graph = selected(
+            object_graph_source,
+            (
+                "schema_version",
+                "status",
+                "study_only",
+                "observation_only",
+                "execution_authority",
+                "latest_candle_id",
+                "truncated",
+            ),
+        )
+        if isinstance(object_graph_source, Mapping):
+            object_graph_mapping = cast(Mapping[str, object], object_graph_source)
+            for key in ("input_counts", "selected_counts", "caps", "truncated_counts", "relation_counts"):
+                counts = count_map(object_graph_mapping.get(key), limit=12)
+                if counts:
+                    object_graph[key] = counts
+            relationship_contract = selected(
+                object_graph_mapping.get("relationship_contract"),
+                (
+                    "observation_scope",
+                    "observed_with_is_anchor",
+                    "anchor_requires_explicit_matching_candle_identity",
+                    "overlap_requires_normalized_rectangle_intersection",
+                    "object_co_occurrence_is_causal",
+                ),
+            )
+            if relationship_contract:
+                object_graph["relationship_contract"] = relationship_contract
+        if object_graph:
+            result["object_relationship_graph"] = object_graph
+
+        maturation = selected(
+            source.get("outcome_maturation"),
+            (
+                "status",
+                "previous_sequence_id",
+                "matched_candle_id",
+                "matched_timestamp",
+                "coordinate_space",
+                "previous_coordinate_space",
+                "current_coordinate_space",
+                "study_only",
+                "execution_authority",
+            ),
+        )
+        if maturation:
+            result["outcome_maturation"] = maturation
+
+        directional_source = source.get("directional_read")
+        directional = selected(
+            directional_source,
+            (
+                "side",
+                "confidence",
+                "status",
+                "study_only",
+                "execution_authority",
+            ),
+        )
+        if isinstance(directional_source, Mapping):
+            raw_reasons = cast(Mapping[str, object], directional_source).get(
+                "reasons"
+            )
+            if isinstance(raw_reasons, Sequence) and not isinstance(
+                raw_reasons,
+                (str, bytes, bytearray),
+            ):
+                reasons = [
+                    reason[:160]
+                    for reason in list(cast(Sequence[object], raw_reasons))[:6]
+                    if isinstance(reason, str) and reason
+                ]
+                if reasons:
+                    directional["reasons"] = reasons
+        if directional:
+            result["directional_read"] = directional
+        return result
+
     def bounded_episode_rows(
         value: object,
         keys: Sequence[str],
@@ -4124,6 +4710,21 @@ def _bounded_operator_projection_context(
         if observation_state:
             output["observation_state"] = observation_state
 
+        raw_anchor = episode.get("anchor")
+        if isinstance(raw_anchor, Mapping):
+            anchor_mapping = cast(Mapping[str, object], raw_anchor)
+            anchor = bounded_scalar_fields(
+                anchor_mapping,
+                ("frame_id", "captured_at", "pair", "timeframe"),
+            )
+            anchor_study = bounded_market_study(
+                anchor_mapping.get("market_study_v3")
+            )
+            if anchor_study:
+                anchor["market_study_v3"] = anchor_study
+            if anchor:
+                output["anchor"] = anchor
+
         path_comparison = bounded_path_comparison(episode.get("path_comparison"))
         if path_comparison:
             output["path_comparison"] = path_comparison
@@ -4186,6 +4787,11 @@ def _bounded_operator_projection_context(
                 )
                 if entry_progress:
                     event["entry_location_progress"] = entry_progress
+                event_study = bounded_market_study(
+                    raw_event_mapping.get("market_study_v3")
+                )
+                if event_study:
+                    event["market_study_v3"] = event_study
                 if event:
                     events.append(event)
         if events:
@@ -4235,8 +4841,35 @@ def _bounded_operator_projection_context(
                     "frame_id",
                 ),
             )
+            raw_archive_events = item_mapping.get("events")
+            if (
+                events
+                and isinstance(raw_archive_events, Sequence)
+                and not isinstance(raw_archive_events, (str, bytes, bytearray))
+            ):
+                for event, raw_event in zip(
+                    events,
+                    cast(Sequence[object], raw_archive_events),
+                    strict=False,
+                ):
+                    if not isinstance(raw_event, Mapping):
+                        continue
+                    event_study = bounded_market_study(
+                        cast(Mapping[str, object], raw_event).get(
+                            "market_study_v3"
+                        )
+                    )
+                    if event_study:
+                        event["market_study_v3"] = event_study
             if events:
                 archive["events"] = events
+            for study_key in (
+                "baseline_market_study_v3",
+                "final_market_study_v3",
+            ):
+                study = bounded_market_study(item_mapping.get(study_key))
+                if study:
+                    archive[study_key] = study
             if archive:
                 output.append(archive)
         return output
@@ -4361,13 +4994,33 @@ def _bounded_operator_projection_context(
             "focus_region",
             "candle_movement_context",
             "candle_movement_context_v3",
+            "market_study_v3",
         ):
             if key in raw_tracking_mapping:
-                tracking[key] = bounded_value(
-                    raw_tracking_mapping[key], sequence_limit=24
-                )
+                if key == "market_study_v3":
+                    bounded_study = bounded_market_study(
+                        raw_tracking_mapping[key]
+                    )
+                    if bounded_study:
+                        tracking[key] = bounded_study
+                else:
+                    tracking[key] = bounded_value(
+                        raw_tracking_mapping[key], sequence_limit=24
+                    )
         if tracking:
             context["tracking_summary"] = tracking
+
+    raw_latest_signal = live_state.get("latest_signal")
+    if isinstance(raw_latest_signal, Mapping):
+        latest_study = bounded_market_study(
+            cast(Mapping[str, object], raw_latest_signal).get(
+                "market_study_v3"
+            )
+        )
+        if latest_study:
+            context["latest_signal"] = {
+                "market_study_v3": latest_study,
+            }
 
     history_rows: list[object] = []
     for history_key in ("recent_studies", "history"):
@@ -5517,6 +6170,7 @@ def create_app(
                 "broker_source",
                 "broker_source_lock",
                 "promotion_failure_audit_v3",
+                "market_study_v3",
             },
         )
         compact["tracking_summary"] = compact_mapping(
@@ -5534,6 +6188,7 @@ def create_app(
                 "broker_source_lock",
                 "broker_surface",
                 "pipeline_timing",
+                "market_study_v3",
             },
         )
         model_result = _mapping_to_plain_dict(compact.get("model_council_result"))

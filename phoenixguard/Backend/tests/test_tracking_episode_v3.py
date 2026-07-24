@@ -32,6 +32,7 @@ from phoenixguard.tracking.tracking_episode_v3 import (
     reset_tracking_episode_v1,
     start_tracking_episode_v1,
     stop_tracking_episode_v1,
+    tracking_episode_history_entry_v1,
     tracking_episode_readiness_v1,
     tracking_reprojection_anchors_v3,
     update_tracking_episode_history_v1,
@@ -2011,6 +2012,136 @@ def test_public_episode_redacts_continuity_telemetry_and_never_infers_agreement(
     assert "surface_transform_identity" not in serialized_bounded
     assert "chart_transform_identity" not in serialized_bounded
     assert '"distance"' not in serialized_bounded
+
+
+def test_reacquired_batch_attaches_study_only_to_exact_candle_identity() -> None:
+    def market_study(
+        closed_candle_key: str,
+        closed_candle_sequence: int,
+        *,
+        major_side: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_MARKET_STUDY_V3",
+            "status": "STUDIED",
+            "study_only": True,
+            "execution_authority": False,
+            "closed_candle_key": closed_candle_key,
+            "closed_candle_sequence": closed_candle_sequence,
+            "regression": {
+                "major_trend": {
+                    "side": major_side,
+                    "confidence": 0.81,
+                    "window_candles": 18,
+                },
+                "inner_trend": {
+                    "side": "SELL" if major_side == "BUY" else "BUY",
+                    "confidence": 0.48,
+                    "window_candles": 8,
+                },
+                "current_pressure": {
+                    "side": major_side,
+                    "confidence": 0.57,
+                    "window_candles": 4,
+                },
+            },
+            "behavior": {
+                "current_state": {
+                    "state": "UP_SWING" if major_side == "BUY" else "DOWN_SWING",
+                    "direction": major_side,
+                    "candle_count": 2,
+                    "duration_seconds": 600,
+                },
+                "market_story": f"Exact study for {closed_candle_key}.",
+            },
+            "directional_read": {
+                "side": major_side,
+                "confidence": 0.72,
+                "status": "DIRECTIONAL_STUDY",
+            },
+        }
+
+    session = _ready_session()
+    cast(dict[str, Any], session["tracking_summary"])[
+        "market_study_v3"
+    ] = market_study("stale-baseline", 10, major_side="SELL")
+    cast(dict[str, Any], session["latest_signal"])[
+        "market_study_v3"
+    ] = market_study("closed-0", 10, major_side="BUY")
+    started = start_tracking_episode_v1(
+        {},
+        session,
+        episode_id="episode-study-identity",
+        now_iso="2026-07-18T00:00:00+00:00",
+    )
+    assert started["anchor"]["market_study_v3"]["closed_candle_key"] == "closed-0"
+    recovered = _recovered_gap_session(session)
+    scene = cast(
+        dict[str, Any],
+        cast(dict[str, Any], recovered["forecast_snapshot_v3"])[
+            "scene_forecast_contribution"
+        ],
+    )
+    identity_state = cast(
+        dict[str, Any],
+        scene["closed_candle_identity_state"],
+    )
+    batch = cast(list[dict[str, Any]], identity_state["confirmed_event_batch"])
+    batch[0]["market_study_v3"] = market_study(
+        "closed-1",
+        11,
+        major_side="SELL",
+    )
+    # A sequence-only coincidence or a different key is not sufficient proof.
+    batch[1]["market_study_v3"] = market_study(
+        "wrong-closed-2",
+        12,
+        major_side="SELL",
+    )
+    latest_study = market_study("closed-3", 13, major_side="BUY")
+    cast(dict[str, Any], recovered["tracking_summary"])[
+        "market_study_v3"
+    ] = latest_study
+    cast(dict[str, Any], recovered["latest_signal"])[
+        "market_study_v3"
+    ] = latest_study
+
+    advanced = advance_tracking_episode_v1(
+        started,
+        recovered,
+        now_iso="2026-07-18T00:15:00+00:00",
+    )
+    events = cast(list[dict[str, Any]], advanced["events"])
+
+    assert [event["actual_block"]["side"] for event in events] == [
+        "BUY",
+        "SELL",
+        "BUY",
+    ]
+    assert events[0]["market_study_v3"]["closed_candle_key"] == "closed-1"
+    assert events[0]["market_study_v3"]["closed_candle_sequence"] == 11
+    assert "market_study_v3" not in events[1]
+    assert events[2]["market_study_v3"]["closed_candle_key"] == "closed-3"
+    assert events[2]["market_study_v3"]["closed_candle_sequence"] == 13
+    assert events[2]["market_study_v3"]["major_trend"]["side"] == "BUY"
+
+    stopped = stop_tracking_episode_v1(
+        advanced,
+        session_id="episode-test",
+        now_iso="2026-07-18T00:16:00+00:00",
+        reason="test_complete",
+    )
+    history = tracking_episode_history_entry_v1(stopped)
+    history_events = cast(list[dict[str, Any]], history["events"])
+    assert [event["actual_side"] for event in history_events] == [
+        "BUY",
+        "SELL",
+        "BUY",
+    ]
+    assert history_events[0]["market_study_v3"]["closed_candle_key"] == "closed-1"
+    assert "market_study_v3" not in history_events[1]
+    assert history_events[2]["market_study_v3"]["closed_candle_key"] == "closed-3"
+    assert history["final_market_study_v3"]["closed_candle_key"] == "closed-3"
 
 
 def test_active_episode_exposes_reacquiring_state_without_advancing() -> None:

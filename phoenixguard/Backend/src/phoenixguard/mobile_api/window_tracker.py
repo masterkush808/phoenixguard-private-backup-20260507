@@ -67,6 +67,11 @@ from phoenixguard.runtime.realtime_performance_v3 import (
     CaptureWorkerV3Health,
     SessionAtomicWriterV3,
 )
+from phoenixguard.study.market_study_service_v3 import (
+    MarketStudyServiceV3,
+    pending_market_study_v3,
+)
+from phoenixguard.study.candle_intelligence_v3 import adapt_tracker_candle_v3
 from phoenixguard.tracking.market_object_tracker_v3 import (
     build_market_object_registry_v3,
     derive_trendline_overlays,
@@ -1564,6 +1569,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "market_selector_pair_changed",
         "market_selector_visual_changed",
         "market_source",
+        "market_study_v3",
         "micro_candle_forecast",
         "model_action",
         "no_trade_reason",
@@ -2847,6 +2853,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "market_selector_visual_changed",
         "market_selector_visual_fingerprint",
         "market_source",
+        "market_study_v3",
         "high_frequency_forecast",
         "impulse_delta",
         "impulse_direction",
@@ -11793,7 +11800,7 @@ class PocketOptionBrokerExecutionBackend:
 
 
 class PhoenixGuardWindowTrackingAdapter:
-    def __init__(self) -> None:
+    def __init__(self, *, market_study_root: Path | None = None) -> None:
         # Live captures share one adapter, so keep the already-studied candle
         # field in memory and only rescan the right edge when the historical
         # pixels prove that the chart has not panned or rescaled.  The cache is
@@ -11815,6 +11822,19 @@ class PhoenixGuardWindowTrackingAdapter:
             ForecastBeliefConfigV3()
         )
         self._scene_belief_restore_attempted = False
+        self._market_study_config_lock = threading.RLock()
+        self._market_study_service = (
+            MarketStudyServiceV3(market_study_root)
+            if market_study_root is not None
+            else None
+        )
+
+    def configure_market_study_root(self, root_dir: Path) -> None:
+        """Attach the durable V3 Pair DNA store before live capture starts."""
+
+        with self._market_study_config_lock:
+            if self._market_study_service is None:
+                self._market_study_service = MarketStudyServiceV3(root_dir)
 
     @staticmethod
     def memory_precision_payload(
@@ -18453,6 +18473,12 @@ class PhoenixGuardWindowTrackingAdapter:
                 identity_resolution["closed_candle_sequence"]
             )
             identity_state = _mapping_to_dict(identity_resolution.get("state", {}))
+            prior_close_reobservation = _mapping_to_dict(
+                identity_resolution.get("prior_close_reobservation", {})
+            )
+            confirmed_closed_candle_batch = _sequence_of_mappings(
+                identity_state.get("confirmed_event_batch", [])
+            )
             self._scene_candle_identity_states[context_key] = identity_state
             self._scene_event_sequences[context_key] = (
                 closed_key,
@@ -18475,6 +18501,14 @@ class PhoenixGuardWindowTrackingAdapter:
                 cached = None
             if cached is not None:
                 result = copy.deepcopy(cached)
+                if prior_close_reobservation.get("status") != "CONFIRMED":
+                    prior_close_reobservation = _mapping_to_dict(
+                        result.get("prior_close_reobservation", {})
+                    )
+                if not confirmed_closed_candle_batch:
+                    confirmed_closed_candle_batch = _sequence_of_mappings(
+                        result.get("confirmed_closed_candle_batch", [])
+                    )
                 computed_frame_id = int(
                     result.get(
                         "forecast_computed_frame_id",
@@ -18602,6 +18636,12 @@ class PhoenixGuardWindowTrackingAdapter:
                         ),
                         "closed_candle_identity_state": copy.deepcopy(
                             identity_state
+                        ),
+                        "prior_close_reobservation": copy.deepcopy(
+                            prior_close_reobservation
+                        ),
+                        "confirmed_closed_candle_batch": copy.deepcopy(
+                            confirmed_closed_candle_batch
                         ),
                     }
                 )
@@ -18780,6 +18820,12 @@ class PhoenixGuardWindowTrackingAdapter:
                         _mapping_to_dict(identity_resolution.get("match_scores", {}))
                     ),
                     "closed_candle_identity_state": copy.deepcopy(identity_state),
+                    "prior_close_reobservation": copy.deepcopy(
+                        prior_close_reobservation
+                    ),
+                    "confirmed_closed_candle_batch": copy.deepcopy(
+                        confirmed_closed_candle_batch
+                    ),
                     "same_event_cache_rebuild_required": False,
                     "detector_coverage_rebase_applied": same_event_cache_rebuild,
                     "cache_replaced_for_detector_coverage_rebase": cache_entry_replaced,
@@ -18831,6 +18877,477 @@ class PhoenixGuardWindowTrackingAdapter:
             market_play_label=market_play_label,
             chart_image=chart_image,
         )
+
+    @staticmethod
+    def _market_study_objects_v3(
+        *groups: Sequence[Mapping[str, Any]],
+        image_size: tuple[int, int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Reduce detected chart objects to bounded, explainable study evidence."""
+
+        image_width = max(0, int(image_size[0])) if image_size else 0
+        image_height = max(0, int(image_size[1])) if image_size else 0
+
+        def normalized_bounds(value: object) -> list[float]:
+            if not isinstance(value, Sequence) or isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return []
+            coordinates = list(cast(Sequence[Any], value))
+            if len(coordinates) != 4:
+                return []
+            try:
+                parsed = [float(item) for item in coordinates]
+            except (TypeError, ValueError):
+                return []
+            if (
+                not all(math.isfinite(item) and 0.0 <= item <= 1.0 for item in parsed)
+                or parsed[0] >= parsed[2]
+                or parsed[1] >= parsed[3]
+            ):
+                return []
+            return [round(item, 8) for item in parsed]
+
+        def normalized_pixel_bounds(value: object) -> list[float]:
+            if image_width <= 0 or image_height <= 0:
+                return []
+            if not isinstance(value, Sequence) or isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return []
+            coordinates = list(cast(Sequence[Any], value))
+            if len(coordinates) != 4:
+                return []
+            try:
+                left, top, right, bottom = [float(item) for item in coordinates]
+            except (TypeError, ValueError):
+                return []
+            if (
+                not all(math.isfinite(item) for item in (left, top, right, bottom))
+                or left < 0.0
+                or top < 0.0
+                or right > float(image_width)
+                or bottom > float(image_height)
+                or left >= right
+                or top >= bottom
+            ):
+                return []
+            return [
+                round(left / float(image_width), 8),
+                round(top / float(image_height), 8),
+                round(right / float(image_width), 8),
+                round(bottom / float(image_height), 8),
+            ]
+
+        def normalized_points(value: object) -> list[list[float]]:
+            if not isinstance(value, Sequence) or isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return []
+            result: list[list[float]] = []
+            for raw_point in list(cast(Sequence[Any], value))[:16]:
+                if not isinstance(raw_point, Sequence) or isinstance(
+                    raw_point, (str, bytes, bytearray)
+                ):
+                    continue
+                point = list(cast(Sequence[Any], raw_point))
+                if len(point) != 2:
+                    continue
+                try:
+                    x_value, y_value = float(point[0]), float(point[1])
+                except (TypeError, ValueError):
+                    continue
+                if not (
+                    math.isfinite(x_value)
+                    and math.isfinite(y_value)
+                    and 0.0 <= x_value <= 1.0
+                    and 0.0 <= y_value <= 1.0
+                ):
+                    continue
+                result.append([round(x_value, 8), round(y_value, 8)])
+            return result
+
+        def normalized_pixel_points(value: object) -> list[list[float]]:
+            if image_width <= 0 or image_height <= 0:
+                return []
+            if not isinstance(value, Sequence) or isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return []
+            result: list[list[float]] = []
+            for raw_point in list(cast(Sequence[Any], value))[:16]:
+                if not isinstance(raw_point, Sequence) or isinstance(
+                    raw_point, (str, bytes, bytearray)
+                ):
+                    continue
+                point = list(cast(Sequence[Any], raw_point))
+                if len(point) != 2:
+                    continue
+                try:
+                    x_value, y_value = float(point[0]), float(point[1])
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    not math.isfinite(x_value)
+                    or not math.isfinite(y_value)
+                    or not 0.0 <= x_value <= float(image_width)
+                    or not 0.0 <= y_value <= float(image_height)
+                ):
+                    continue
+                result.append(
+                    [
+                        round(x_value / float(image_width), 8),
+                        round(y_value / float(image_height), 8),
+                    ]
+                )
+            return result
+
+        def explicit_identity(row: Mapping[str, Any]) -> str:
+            for name in (
+                "track_id",
+                "zone_id",
+                "object_id",
+                "id",
+                "key",
+                "zone_stack_id",
+            ):
+                value = row.get(name)
+                if value is None or isinstance(value, bool):
+                    continue
+                text = str(value).strip()
+                if text:
+                    return text
+            return ""
+
+        def bounded_scalar(value: object, *, maximum: int = 128) -> object:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int):
+                return max(-1_000_000_000, min(1_000_000_000, value))
+            if isinstance(value, float):
+                return round(value, 8) if math.isfinite(value) else ""
+            text = str(value or "").strip()
+            return text[:maximum] if text else ""
+
+        objects: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for group_index, group in enumerate(groups):
+            for row_index, raw in enumerate(group):
+                row = _mapping_to_dict(raw)
+                object_type = str(
+                    row.get("object_type")
+                    or row.get("kind")
+                    or row.get("zone_family")
+                    or row.get("role")
+                    or row.get("label")
+                    or row.get("type")
+                    or ""
+                ).strip().upper().replace(" ", "_")
+                if not object_type:
+                    continue
+                identity = explicit_identity(row)
+                identity_scope = "EXPLICIT"
+                if not identity:
+                    identity = f"observation-{group_index + 1}-{row_index + 1}"
+                    identity_scope = "OBSERVATION_ONLY"
+                token = (object_type, identity)
+                if token in seen:
+                    continue
+                seen.add(token)
+                evidence: dict[str, Any] = {
+                    "object_type": object_type[:96],
+                    "object_id": identity[:128],
+                    "identity_scope": identity_scope,
+                    "direction": _upper_action(
+                        row.get("direction", row.get("side", "HOLD"))
+                    ),
+                    "confidence": _clip01(
+                        row.get("confidence")
+                        if row.get("confidence") is not None
+                        else row.get(
+                            "authority_score",
+                            row.get("historical_significance", 0.0),
+                        )
+                    ),
+                }
+                bounds = normalized_bounds(row.get("bounds")) or normalized_pixel_bounds(
+                    row.get("bbox")
+                )
+                points = normalized_points(row.get("points"))
+                if not points:
+                    points = normalized_pixel_points(
+                        row.get("anchor_wick_points") or row.get("touch_points")
+                    )
+                if bounds:
+                    evidence["bounds"] = bounds
+                    evidence["coordinate_space"] = "NORMALIZED"
+                if points:
+                    evidence["points"] = points
+                    evidence["coordinate_space"] = "NORMALIZED"
+                for source_name, public_name in (
+                    ("lifecycle", "lifecycle"),
+                    ("state", "lifecycle"),
+                    ("first_seen", "first_seen"),
+                    ("last_seen", "last_seen"),
+                    ("age_frames", "age_frames"),
+                    ("duration_candles", "duration_candles"),
+                    ("candle_id", "candle_id"),
+                    ("anchor_candle_id", "candle_id"),
+                ):
+                    if public_name in evidence:
+                        continue
+                    bounded = bounded_scalar(row.get(source_name))
+                    if bounded not in (None, ""):
+                        evidence[public_name] = bounded
+                objects.append(evidence)
+                if len(objects) >= 64:
+                    return objects
+        return objects
+
+    def _build_market_study_v3(
+        self,
+        *,
+        candles: Sequence[Mapping[str, Any]],
+        market: str,
+        timeframe: str,
+        market_identity_confirmed: bool,
+        timeframe_identity_confirmed: bool,
+        scene_forecast: Mapping[str, Any],
+        global_direction: str,
+        local_direction: str,
+        impulse_direction: str,
+        global_slope: float,
+        local_slope: float,
+        current_slope: float,
+        global_window: int,
+        recent_window: int,
+        current_window: int,
+        major_trend_context: Mapping[str, Any],
+        consolidation_score: float,
+        image_size: tuple[int, int],
+        structure_boxes: Sequence[Mapping[str, Any]],
+        historical_structure: Sequence[Mapping[str, Any]],
+        support_resistance_zones: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Build the study-only V3 intelligence lane from proven candle closes."""
+
+        if not (market_identity_confirmed and timeframe_identity_confirmed):
+            return pending_market_study_v3(
+                "Pair and timeframe identity are still being confirmed.",
+                symbol=market,
+                timeframe=timeframe,
+            )
+        closed_key = str(scene_forecast.get("closed_candle_key") or "").strip()
+        if not closed_key:
+            return pending_market_study_v3(
+                "The latest completed-candle identity is not proven yet.",
+                symbol=market,
+                timeframe=timeframe,
+            )
+        service = self._market_study_service
+        if service is None:
+            return pending_market_study_v3(
+                "The durable V3 market-study store is not configured.",
+                symbol=market,
+                timeframe=timeframe,
+                status="UNAVAILABLE",
+            )
+
+        closed_sequence = int(
+            scene_forecast.get("closed_candle_sequence", 0) or 0
+        )
+        resolver_marks: dict[int, tuple[str, int]] = {}
+        identity_state = _mapping_to_dict(
+            scene_forecast.get("closed_candle_identity_state", {})
+        )
+        if (
+            identity_state.get("schema_version")
+            == "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+            and str(identity_state.get("event_key") or "") == closed_key
+            and int(identity_state.get("event_sequence", -1) or 0)
+            == closed_sequence
+        ):
+            latest_observation = _mapping_to_dict(
+                identity_state.get("latest_closed", {})
+            )
+            latest_index_value = latest_observation.get("index")
+            latest_index = (
+                int(latest_index_value)
+                if latest_index_value is not None
+                else -1
+            )
+            if latest_index >= 0:
+                resolver_marks[latest_index] = (closed_key, closed_sequence)
+
+        for batch_row in _sequence_of_mappings(
+            scene_forecast.get("confirmed_closed_candle_batch", [])
+        ):
+            observation = _mapping_to_dict(batch_row.get("observation", {}))
+            row_index_value = observation.get("index")
+            row_index = int(row_index_value) if row_index_value is not None else -1
+            event_key = str(batch_row.get("closed_candle_key") or "").strip()
+            event_sequence_value = batch_row.get("closed_candle_sequence")
+            event_sequence = (
+                int(event_sequence_value)
+                if event_sequence_value is not None
+                else -1
+            )
+            if (
+                row_index >= 0
+                and event_key
+                and 0 <= event_sequence <= closed_sequence
+            ):
+                resolver_marks[row_index] = (event_key, event_sequence)
+
+        prior_reobservation = _mapping_to_dict(
+            scene_forecast.get("prior_close_reobservation", {})
+        )
+        prior_key = str(
+            prior_reobservation.get("prior_closed_candle_key") or ""
+        ).strip()
+        prior_sequence_value = prior_reobservation.get(
+            "prior_closed_candle_sequence"
+        )
+        prior_sequence = (
+            int(prior_sequence_value)
+            if prior_sequence_value is not None
+            else -1
+        )
+        prior_index_value = prior_reobservation.get("current_row_index")
+        prior_index = (
+            int(prior_index_value) if prior_index_value is not None else -1
+        )
+        if (
+            prior_reobservation.get("status") == "CONFIRMED"
+            and prior_reobservation.get("proof_source")
+            == "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+            and prior_key
+            and prior_index >= 0
+            and 0 <= prior_sequence < closed_sequence
+        ):
+            resolver_marks[prior_index] = (prior_key, prior_sequence)
+
+        closed_candles: list[dict[str, Any]] = []
+        candle_count = len(candles)
+        for index, raw in enumerate(candles):
+            row = dict(raw)
+            if not self._candle_is_closed(row, index=index, total=candle_count):
+                continue
+            resolver_mark = resolver_marks.get(index)
+            if resolver_mark is not None:
+                stable_identity, stable_sequence = resolver_mark
+                row.update(
+                    {
+                        "identity_stable": True,
+                        "stable_candle_identity": stable_identity,
+                        "identity_proof_source": (
+                            "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+                        ),
+                        "closed_candle_sequence": stable_sequence,
+                    }
+                )
+            candle_id = str(
+                row.get("candle_id")
+                or row.get("track_id")
+                or row.get("id")
+                or index
+            )
+            try:
+                closed_candles.append(
+                    adapt_tracker_candle_v3(
+                        row,
+                        closure_proof={
+                            "proven_closed": True,
+                            "event_key": f"{closed_key}:visible-history:{candle_id}",
+                            "candle_id": candle_id,
+                        },
+                    )
+                )
+            except ValueError as exc:
+                LOGGER.debug(
+                    "Skipping malformed closed candle %s in V3 market study: %s",
+                    candle_id,
+                    exc,
+                )
+        if len(closed_candles) < 4:
+            return pending_market_study_v3(
+                "At least four proven completed candles are required for the regression study.",
+                symbol=market,
+                timeframe=timeframe,
+                status="INSUFFICIENT_HISTORY",
+            )
+
+        major_side = _upper_action(
+            major_trend_context.get("side", global_direction),
+            fallback=global_direction,
+        )
+        if consolidation_score >= 0.65:
+            regime = "SIDEWAYS"
+        elif major_side == "BUY" or _upper_action(global_direction) == "BUY":
+            regime = "UPTREND"
+        elif major_side == "SELL" or _upper_action(global_direction) == "SELL":
+            regime = "DOWNTREND"
+        else:
+            regime = "TRANSITION"
+        regression = {
+            "schema_version": "PG_REGRESSION_STUDY_V3",
+            "timeframe_seconds": _timeframe_seconds(timeframe, default=300),
+            "major_trend": {
+                "side": major_side,
+                "direction": major_side,
+                "slope": round(float(global_slope), 8),
+                "confidence": _clip01(
+                    major_trend_context.get(
+                        "confidence",
+                        min(1.0, abs(float(global_slope)) * 8.0),
+                    )
+                ),
+                "window_candles": int(global_window),
+            },
+            "inner_trend": {
+                "side": _upper_action(local_direction),
+                "direction": _upper_action(local_direction),
+                "slope": round(float(local_slope), 8),
+                "confidence": _clip01(abs(float(local_slope)) * 8.0),
+                "window_candles": int(recent_window),
+            },
+            "current_pressure": {
+                "side": _upper_action(impulse_direction),
+                "direction": _upper_action(impulse_direction),
+                "slope": round(float(current_slope), 8),
+                "confidence": _clip01(abs(float(current_slope)) * 10.0),
+                "window_candles": int(current_window),
+            },
+            "regime": regime,
+            "study_only": True,
+            "execution_authority": False,
+        }
+        objects = self._market_study_objects_v3(
+            structure_boxes,
+            historical_structure,
+            support_resistance_zones,
+            image_size=image_size,
+        )
+        try:
+            return service.study(
+                closed_candles,
+                symbol=market,
+                timeframe=timeframe,
+                closed_candle_key=closed_key,
+                closed_candle_sequence=closed_sequence,
+                regime=regime,
+                regression=regression,
+                objects=objects,
+                observed_at=_now_iso(),
+            )
+        except Exception as exc:  # Study failure must not interrupt live safety.
+            LOGGER.exception("PhoenixGuard V3 market study degraded: %s", exc)
+            return pending_market_study_v3(
+                f"Market study degraded: {exc}",
+                symbol=market,
+                timeframe=timeframe,
+                status="DEGRADED",
+            )
 
     def _build_signal_payloads(
         self,
@@ -18903,6 +19420,12 @@ class PhoenixGuardWindowTrackingAdapter:
             and timeframe_confidence >= min_timeframe_identity_confidence
         )
         if len(candles) < 5:
+            market_study_v3 = pending_market_study_v3(
+                "Waiting for at least four proven completed candles.",
+                symbol=market,
+                timeframe=timeframe,
+                status="INSUFFICIENT_HISTORY",
+            )
             tracking = _default_tracking_summary(message="Waiting for more visible candle structure.")
             tracking["chart_region"] = dict(chart_region)
             tracking["display_region"] = dict(chart_region)
@@ -18926,6 +19449,7 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["market_selector_pair_changed"] = market_selector_pair_changed
             tracking["market_identity_confirmed"] = market_identity_confirmed
             tracking["timeframe_identity_confirmed"] = timeframe_identity_confirmed
+            tracking["market_study_v3"] = market_study_v3
             signal = _default_signal(
                 message="Waiting for more visible candle structure inside the locked focus region.",
                 status="warming",
@@ -18947,6 +19471,7 @@ class PhoenixGuardWindowTrackingAdapter:
             signal["market_selector_pair_changed"] = market_selector_pair_changed
             signal["market_identity_confirmed"] = market_identity_confirmed
             signal["timeframe_identity_confirmed"] = timeframe_identity_confirmed
+            signal["market_study_v3"] = market_study_v3
             return tracking, signal
 
         proxies = [float(item.get("price_proxy", 0.0)) for item in candles]
@@ -19407,6 +19932,29 @@ class PhoenixGuardWindowTrackingAdapter:
             candle_statistics=candle_statistics,
             decision_kernel=decision_kernel,
         )
+        market_study_v3 = self._build_market_study_v3(
+            candles=candles,
+            market=market,
+            timeframe=timeframe,
+            market_identity_confirmed=market_identity_confirmed,
+            timeframe_identity_confirmed=timeframe_identity_confirmed,
+            scene_forecast=scene_forecast_contribution,
+            global_direction=global_direction,
+            local_direction=local_direction,
+            impulse_direction=impulse_direction,
+            global_slope=global_slope,
+            local_slope=local_slope,
+            current_slope=current_slope,
+            global_window=global_window,
+            recent_window=recent_window,
+            current_window=current_window,
+            major_trend_context=major_trend_context,
+            consolidation_score=consolidation_score,
+            image_size=chart_image.size,
+            structure_boxes=structure_boxes,
+            historical_structure=historical_structure,
+            support_resistance_zones=support_resistance_zones,
+        )
 
         tracking_summary: dict[str, Any] = {
             "chart_valid": True,
@@ -19479,6 +20027,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "control_horizon_candles": int(control_state.get("estimated_control_candles", 0) or 0),
             "major_trend_direction": major_trend_side,
             "major_trend_confidence": major_trend_confidence,
+            "market_study_v3": market_study_v3,
         }
         candle_movement_context = build_candle_movement_context_v3(tracking_summary)
         tracking_summary["candle_movement_context_v3"] = candle_movement_context
@@ -19496,6 +20045,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "major_trend_context": dict(major_trend_context),
             "major_trend_direction": major_trend_side,
             "major_trend_confidence": major_trend_confidence,
+            "market_study_v3": market_study_v3,
             "execution_confidence": confidence if execution_action != "HOLD" else confidence * 0.65,
             "confidence": confidence,
             "effective_confidence": confidence,
@@ -21408,14 +21958,38 @@ class PhoenixGuardWindowTrackingAdapter:
             x0, y0, x1, y1 = [_float_or(value) for value in bbox[:4]]
             top = min(y0, y1)
             bottom = max(y0, y1)
-            center_y = _float_or(item.get("center_y", (top + bottom) * 0.5), (top + bottom) * 0.5)
-            candle_range = max(1.0, bottom - top)
             direction = str(item.get("direction", "HOLD") or "HOLD").upper()
             direction_value = 1 if direction == "BUY" else -1 if direction == "SELL" else 0
-            open_y = bottom if direction == "BUY" else top if direction == "SELL" else center_y
-            close_y = top if direction == "BUY" else bottom if direction == "SELL" else center_y
-            high_proxy = _clip01(1.0 - ((top - fit_top) / fit_height))
-            low_proxy = _clip01(1.0 - ((bottom - fit_top) / fit_height))
+            measured_body_pct = _clip01(item.get("body_height_pct", item.get("body_pct", 0.0)))
+            measured_upper_wick_pct = _clip01(item.get("upper_wick_pct", 0.0))
+            measured_lower_wick_pct = _clip01(item.get("lower_wick_pct", 0.0))
+            measured_total = measured_body_pct + measured_upper_wick_pct + measured_lower_wick_pct
+            geometry_measured = bool(measured_total >= 0.72)
+            wick_top_y = min(
+                bottom,
+                max(top, _float_or(item.get("wick_top_px", top), top)),
+            )
+            wick_bottom_y = max(
+                wick_top_y,
+                min(bottom, _float_or(item.get("wick_bottom_px", bottom), bottom)),
+            )
+            body_top_y = min(
+                wick_bottom_y,
+                max(wick_top_y, _float_or(item.get("body_top_px", top), top)),
+            )
+            body_bottom_y = max(
+                body_top_y,
+                min(wick_bottom_y, _float_or(item.get("body_bottom_px", bottom), bottom)),
+            )
+            center_y = _float_or(
+                item.get("center_y", (wick_top_y + wick_bottom_y) * 0.5),
+                (wick_top_y + wick_bottom_y) * 0.5,
+            )
+            candle_range = max(1.0, wick_bottom_y - wick_top_y)
+            open_y = body_bottom_y if direction == "BUY" else body_top_y if direction == "SELL" else center_y
+            close_y = body_top_y if direction == "BUY" else body_bottom_y if direction == "SELL" else center_y
+            high_proxy = _clip01(1.0 - ((wick_top_y - fit_top) / fit_height))
+            low_proxy = _clip01(1.0 - ((wick_bottom_y - fit_top) / fit_height))
             open_proxy = _clip01(1.0 - ((open_y - fit_top) / fit_height))
             close_proxy = _clip01(1.0 - ((close_y - fit_top) / fit_height))
             range_norm = float(candle_range / max(1.0, median_range))
@@ -21434,6 +22008,20 @@ class PhoenixGuardWindowTrackingAdapter:
                 if range_norm <= 0.78
                 else "normal"
             )
+            if geometry_measured:
+                body_pct = measured_body_pct / measured_total
+                upper_wick_pct = measured_upper_wick_pct / measured_total
+                lower_wick_pct = measured_lower_wick_pct / measured_total
+            else:
+                body_pct = _clip01(
+                    0.46 + min(0.34, max(0.0, range_norm - 0.75) * 0.32)
+                )
+                upper_wick_pct = _clip01(
+                    0.18 if direction == "BUY" else 0.34 if direction == "SELL" else 0.26
+                )
+                lower_wick_pct = _clip01(
+                    0.34 if direction == "BUY" else 0.18 if direction == "SELL" else 0.26
+                )
             distance_to_sniper = self._normalized_distance_to_y_zone(center_y, zones.get("sniper"), fit_height)
             distance_to_trigger = self._normalized_distance_to_y_zone(center_y, zones.get("trigger"), fit_height)
             distance_to_target = self._normalized_distance_to_y_zone(center_y, zones.get("target"), fit_height)
@@ -21450,6 +22038,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 distance_to_sniper=distance_to_sniper,
                 distance_to_invalidation=distance_to_invalidation,
                 volatility_state=volatility_state,
+                body_pct=body_pct,
+                upper_wick_pct=upper_wick_pct,
+                lower_wick_pct=lower_wick_pct,
             )
             token: dict[str, Any] = {
                 "index": int(index),
@@ -21457,14 +22048,23 @@ class PhoenixGuardWindowTrackingAdapter:
                 "direction": direction,
                 "direction_value": int(direction_value),
                 "bbox": [int(round(x0)), int(round(top)), int(round(x1)), int(round(bottom))],
-                "ohlc_source": "bbox_estimate",
+                "ohlc_source": "measured_wick_body_geometry" if geometry_measured else "bbox_estimate",
                 "open_proxy": open_proxy,
                 "high_proxy": high_proxy,
                 "low_proxy": low_proxy,
                 "close_proxy": close_proxy,
-                "body_pct": _clip01(0.46 + min(0.34, max(0.0, range_norm - 0.75) * 0.32)),
-                "upper_wick_pct": _clip01(0.18 if direction == "BUY" else 0.34 if direction == "SELL" else 0.26),
-                "lower_wick_pct": _clip01(0.34 if direction == "BUY" else 0.18 if direction == "SELL" else 0.26),
+                "body_pct": body_pct,
+                "upper_wick_pct": upper_wick_pct,
+                "lower_wick_pct": lower_wick_pct,
+                "wick_to_body_ratio": float(
+                    (upper_wick_pct + lower_wick_pct) / max(1e-6, body_pct)
+                ),
+                "wick_imbalance": float(lower_wick_pct - upper_wick_pct),
+                "geometry_measured": geometry_measured,
+                "body_top_px": body_top_y,
+                "body_bottom_px": body_bottom_y,
+                "wick_top_px": wick_top_y,
+                "wick_bottom_px": wick_bottom_y,
                 "range_norm": float(range_norm),
                 "close_position": close_position,
                 "breaks_prev_high": bool(breaks_prev_high),
@@ -21530,14 +22130,37 @@ class PhoenixGuardWindowTrackingAdapter:
         distance_to_sniper: float,
         distance_to_invalidation: float,
         volatility_state: str,
+        body_pct: float = 0.0,
+        upper_wick_pct: float = 0.0,
+        lower_wick_pct: float = 0.0,
     ) -> str:
         candidate = str(candidate_action or "HOLD").upper()
+        body = _clip01(body_pct)
+        upper_wick = _clip01(upper_wick_pct)
+        lower_wick = _clip01(lower_wick_pct)
+        bullish_wick_reclaim = bool(
+            candidate == "BUY"
+            and lower_wick >= max(0.28, body * 0.72, upper_wick * 1.30)
+            and close_position >= 0.58
+        )
+        bearish_wick_reclaim = bool(
+            candidate == "SELL"
+            and upper_wick >= max(0.28, body * 0.72, lower_wick * 1.30)
+            and close_position <= 0.42
+        )
+        if bullish_wick_reclaim and breaks_prev_low:
+            return "bullish_wick_sweep_reclaim"
+        if bearish_wick_reclaim and breaks_prev_high:
+            return "bearish_wick_sweep_reclaim"
         if inside_bar and volatility_state == "contracting":
             return "compression_inside_bar"
         if inside_bar:
             return "sideways_pause"
         if direction == candidate and distance_to_sniper <= 0.08 and (
-            (candidate == "BUY" and close_position >= 0.62) or (candidate == "SELL" and close_position <= 0.38)
+            bullish_wick_reclaim
+            or bearish_wick_reclaim
+            or (candidate == "BUY" and close_position >= 0.62)
+            or (candidate == "SELL" and close_position <= 0.38)
         ):
             return "bullish_rejection" if candidate == "BUY" else "bearish_rejection"
         if direction == candidate and range_norm >= 1.16 and (
@@ -21550,7 +22173,7 @@ class PhoenixGuardWindowTrackingAdapter:
             return "reversal_attempt"
         if outside_bar and direction != candidate:
             return "failed_breakout"
-        if range_norm <= 0.72:
+        if body <= 0.18 or range_norm <= 0.72:
             return "pause_doji_like"
         if volatility_state == "expanding" and direction != candidate:
             return "exhaustion_against_bias"
@@ -23615,6 +24238,7 @@ class ContinuousWindowTrackerService:
         focus_selector_backend: FocusSelectionBackend | None = None,
         execution_backend: BrokerExecutionBackend | None = None,
         tracking_episode_archive_root: Path | None = None,
+        market_study_root: Path | None = None,
     ) -> None:
         self.observer_service = observer_service
         self.root_dir = Path(root_dir or (RUNTIME.data_dir / "window_tracker"))
@@ -23624,9 +24248,18 @@ class ContinuousWindowTrackerService:
             tracking_episode_archive_root
         )
         self.tracking_episode_archive_root.mkdir(parents=True, exist_ok=True)
+        self.market_study_root = self._resolve_market_study_root(market_study_root)
+        self.market_study_root.mkdir(parents=True, exist_ok=True)
         self._durable_tracking_episode_retention_lock = threading.RLock()
         self.capture_backend = cast(WindowCaptureBackend, capture_backend or WindowsWindowCaptureBackend())
         self.tracking_adapter = cast(WindowTrackingAdapter, tracking_adapter or PhoenixGuardWindowTrackingAdapter())
+        configure_market_study = getattr(
+            self.tracking_adapter,
+            "configure_market_study_root",
+            None,
+        )
+        if callable(configure_market_study):
+            configure_market_study(self.market_study_root)
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
         self.execution_backend = execution_backend or PocketOptionBrokerExecutionBackend()
         self._lock = threading.RLock()
@@ -23699,6 +24332,37 @@ class ContinuousWindowTrackerService:
         # Isolated/test service roots receive a sibling mirror, allowing a new
         # ephemeral root to reuse the same explicit archive during restart tests.
         return self.root_dir.parent / "tracking_episode_archive_v1"
+
+    def _resolve_market_study_root(self, configured_root: Path | None) -> Path:
+        """Keep lifelong Pair DNA outside launcher-cleaned live runtime data."""
+
+        explicit = str(
+            configured_root
+            or os.getenv("PHOENIXGUARD_MARKET_STUDY_DIR", "")
+            or ""
+        ).strip()
+        if explicit:
+            return Path(explicit).expanduser()
+        runtime_roots = [PROJECT_ROOT / "runtime" / "live"]
+        configured_runtime = str(
+            os.getenv("PHOENIXGUARD_RUNTIME_DIR", "") or ""
+        ).strip()
+        if configured_runtime:
+            runtime_roots.append(Path(configured_runtime).expanduser())
+        root_resolved = self.root_dir.expanduser().resolve()
+        for runtime_root in runtime_roots:
+            try:
+                root_resolved.relative_to(runtime_root.expanduser().resolve())
+            except ValueError:
+                continue
+            return (
+                PROJECT_ROOT
+                / "data"
+                / "mobile_api"
+                / "window_tracker"
+                / "market_study_v3"
+            )
+        return self.root_dir.parent / "market_study_v3"
 
     def _start_memory_projection_warmup(self) -> None:
         """Start one non-blocking process-local memory-bank warmup when supported."""
