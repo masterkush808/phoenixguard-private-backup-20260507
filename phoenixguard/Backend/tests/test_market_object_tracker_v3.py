@@ -296,6 +296,41 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
     assert registry.sequence_context.invalidation_zones
 
 
+def test_registry_overlays_bind_confirmed_pair_timeframe_and_selector_identity() -> None:
+    payload = _sample_payload()
+    payload["tracking_summary"].update(
+        {
+            "detected_market": "GBP/USD OTC",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+        }
+    )
+    payload["latest_signal"].update(
+        {
+            "market": "GBP/USD OTC",
+            "focus_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+        }
+    )
+
+    overlays = build_market_object_registry_v3(payload).as_dict()["overlay_objects"]
+
+    assert overlays
+    assert all(row["symbol"] == "GBP/USD OTC" for row in overlays)
+    assert all(row["timeframe"] == "M5" for row in overlays)
+    assert all(
+        row["market_selector_visual_fingerprint"] == "selector_v2_gbp_usd"
+        for row in overlays
+    )
+    assert all(row["instrument_identity_status"] == "LOCKED" for row in overlays)
+    assert all(row["anchor_quality"]["matches_symbol_timeframe"] is True for row in overlays)
+    assert all(row["anchor_quality"]["matches_selector_fingerprint"] is True for row in overlays)
+
+
 def test_market_object_registry_turns_historical_progression_into_path_geometry() -> None:
     payload = deepcopy(_sample_payload())
     historical = payload["tracking_summary"]["historical_structure"]

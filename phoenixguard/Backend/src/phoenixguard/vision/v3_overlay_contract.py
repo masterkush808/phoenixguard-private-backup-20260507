@@ -276,6 +276,7 @@ class AnchorQuality(TypedDict, total=False):
     has_sequence_anchor: bool
     inside_plot_area: bool
     matches_symbol_timeframe: bool
+    matches_selector_fingerprint: bool
     chart_transform_valid: bool
     floating_risk: float
     reason: str
@@ -2040,7 +2041,15 @@ def _anchor_quality_for_overlay(
     has_sequence_anchor = bool(sequence_id and sequence_id != "sequence_pending")
     inside_plot_area = _bounds_inside_plot_area(bounds)
     chart_transform_valid = bool(chart_transform_id and chart_transform_id != "chart_transform_pending")
-    matches_symbol_timeframe = not any(
+    symbol = _text(raw.get("symbol") or raw.get("asset") or raw.get("pair") or raw.get("market"))
+    timeframe = _text(
+        raw.get("timeframe")
+        or raw.get("tf")
+        or (raw.get("interval") if not isinstance(raw.get("interval"), Mapping) else "")
+    )
+    selector_fingerprint = _text(raw.get("market_selector_visual_fingerprint"))
+    identity_status = _text(raw.get("instrument_identity_status")).upper()
+    has_identity_mismatch = any(
         bool(raw.get(key))
         for key in (
             "wrong_pair",
@@ -2049,7 +2058,19 @@ def _anchor_quality_for_overlay(
             "symbol_mismatch",
             "timeframe_mismatch",
             "pair_mismatch",
+            "selector_fingerprint_mismatch",
         )
+    )
+    matches_symbol_timeframe = bool(
+        symbol
+        and timeframe
+        and not has_identity_mismatch
+        and identity_status in {"LOCKED", "CONFIRMED", "MATCHED"}
+    )
+    matches_selector_fingerprint = bool(
+        selector_fingerprint
+        and not bool(raw.get("selector_fingerprint_mismatch"))
+        and identity_status in {"LOCKED", "CONFIRMED", "MATCHED"}
     )
     evidence_valid = bool(anchor_evidence.get("valid") is True)
     score = 0.0
@@ -2100,6 +2121,7 @@ def _anchor_quality_for_overlay(
         "has_sequence_anchor": has_sequence_anchor,
         "inside_plot_area": inside_plot_area,
         "matches_symbol_timeframe": matches_symbol_timeframe,
+        "matches_selector_fingerprint": matches_selector_fingerprint,
         "chart_transform_valid": chart_transform_valid,
         "floating_risk": round(float(1.0 - score), 4),
         "reason": _anchor_quality_reason(score, missing),
@@ -2918,7 +2940,7 @@ def normalize_v3_overlay_object(
         "short_label": display_label,
         "display_label_status": display_label_status,
         "unmapped_display_label": unmapped_display_label,
-        "symbol": _text(raw.get("symbol") or raw.get("asset") or raw.get("pair")),
+        "symbol": _text(raw.get("symbol") or raw.get("asset") or raw.get("pair") or raw.get("market")),
         "timeframe": _text(
             raw.get("timeframe")
             or raw.get("tf")
@@ -2928,6 +2950,8 @@ def normalize_v3_overlay_object(
                 else ""
             )
         ),
+        "market_selector_visual_fingerprint": _text(raw.get("market_selector_visual_fingerprint")),
+        "instrument_identity_status": _text(raw.get("instrument_identity_status"), "UNPROVEN").upper(),
         "layer": resolved_layer,
         "role": (
             TYPE_ROLE_MAP[overlay_type]

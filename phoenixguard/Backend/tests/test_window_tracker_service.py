@@ -5265,9 +5265,19 @@ def test_execution_opportunity_window_survives_session_persistence_and_snapshot_
     assert snapshot["execution_opportunity_window_v3"] == authority
 
 
-def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
+@pytest.mark.parametrize(
+    ("previous_symbol", "expected_opportunity_id", "expected_side"),
+    (
+        ("EUR/USD OTC", "pgepisode-sell-existing", "SELL"),
+        ("CAD/CHF OTC", "pgepisode-buy-attempt", "BUY"),
+    ),
+)
+def test_countertrend_thesis_block_only_restores_same_instrument_opportunity_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    previous_symbol: str,
+    expected_opportunity_id: str,
+    expected_side: str,
 ) -> None:
     now_epoch = 1_800_000_100.0
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: now_epoch)
@@ -5280,7 +5290,7 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
         "opportunity_key": "pgopp-sell-existing",
         "opportunity_id": "pgepisode-sell-existing",
         "session_id": session_id,
-        "symbol": "EUR/USD OTC",
+        "symbol": previous_symbol,
         "timeframe": "M5",
         "side": "SELL",
         "candidate_id": "pgcand-sell-existing",
@@ -5297,6 +5307,7 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
         **previous_authority,
         "opportunity_key": "pgopp-buy-attempt",
         "opportunity_id": "pgepisode-buy-attempt",
+        "symbol": "EUR/USD OTC",
         "side": "BUY",
         "candidate_id": "pgcand-buy-attempt",
         "opened_epoch_sec": now_epoch,
@@ -5343,9 +5354,19 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
     )
     signal_theses[session_id] = active_sell_thesis
     overlay_audit = dict(cast(Mapping[str, Any], packet["overlay_truth_audit"]))
-    tracking_summary: dict[str, Any] = {"overlay_truth_audit": overlay_audit}
+    tracking_summary: dict[str, Any] = {
+        "overlay_truth_audit": overlay_audit,
+        "detected_market": "EUR/USD OTC",
+        "detected_timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+    }
     latest_signal: dict[str, Any] = {
         "overlay_truth_audit": overlay_audit,
+        "market": "EUR/USD OTC",
+        "focus_timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
         "execution_action": "BUY",
         "action": "BUY",
     }
@@ -5367,10 +5388,8 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
     assert result["execution_packet_present"] is False
     assert result["model_council"]["true_blocker"] == "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
     for container in (result, payload, latest_signal, tracking_summary):
-        assert container["execution_opportunity_window_v3"]["opportunity_id"] == (
-            previous_authority["opportunity_id"]
-        )
-        assert container["execution_opportunity_window_v3"]["side"] == "SELL"
+        assert container["execution_opportunity_window_v3"]["opportunity_id"] == expected_opportunity_id
+        assert container["execution_opportunity_window_v3"]["side"] == expected_side
 
 
 def testpublic_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
@@ -10837,6 +10856,265 @@ def test_real_tracking_adapter_falls_back_when_fast_resize_merges_candles(
     assert int(result.tracking_summary["visible_candle_count"]) >= 8
     assert len(cast(Sequence[Mapping[str, Any]], result.tracking_summary["support_resistance_zones"])) > 0
     assert len(cast(Sequence[Mapping[str, Any]], result.tracking_summary["historical_structure"])) >= 2
+
+
+def test_full_resolution_fallback_cannot_resurrect_stale_lane_after_resized_right_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy", width=1280, height=720)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "480")
+
+    def extract_resolution_dependent_lane(image_arg: Image.Image) -> list[dict[str, Any]]:
+        if image_arg.width < image.width:
+            adapter._record_candle_lane_selection_audit(  # noqa: SLF001
+                {
+                    "schema_version": "phoenixguard.candle_lane_selection_audit.v1",
+                    "selected_lane": "ambiguous_fail_closed",
+                    "selection_reason": "disjoint_right_lane_track_underflow_fail_closed",
+                    "right_candidate_disjoint": True,
+                    "right_candidate_ambiguous": True,
+                    "right_candidate_track_count": 7,
+                }
+            )
+            return []
+        adapter._record_candle_lane_selection_audit(  # noqa: SLF001
+            {
+                "schema_version": "phoenixguard.candle_lane_selection_audit.v1",
+                "selected_lane": "default",
+                "selection_reason": "right_candidate_track_underflow",
+                "default_track_count": 27,
+            }
+        )
+        return [
+            {
+                "track_id": index,
+                "bbox": [30 + index * 8, 170, 35 + index * 8, 230],
+                "center_x": 32.5 + index * 8,
+                "center_y": 200.0,
+                "direction": "BUY" if index % 2 == 0 else "SELL",
+                "color": "green" if index % 2 == 0 else "red",
+            }
+            for index in range(27)
+        ]
+
+    monkeypatch.setattr(adapter, "_extract_candle_tracks", extract_resolution_dependent_lane)
+    result = adapter.study(
+        image,
+        session_payload={
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+            "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+            "tracking_summary": {
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.93,
+                "detected_market": "GBP/USD OTC",
+                "market_confidence": 0.91,
+                "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
+            },
+            "latest_signal": {
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.93,
+                "market": "GBP/USD OTC",
+                "market_confidence": 0.91,
+            },
+        },
+    )
+
+    extraction = cast(Mapping[str, Any], result.tracking_summary["candle_extraction"])
+    assert extraction["mode"] == "fast_resized"
+    assert extraction["full_resolution_fallback_count"] >= 8
+    assert extraction["full_resolution_fallback_accepted"] is False
+    assert extraction["full_resolution_fallback_rejection_reason"] == (
+        "full_resolution_lane_did_not_preserve_resized_disjoint_right_evidence"
+    )
+    assert extraction["final_track_count"] == 0
+    assert extraction["causal_lane_selection"]["selected_lane"] == "ambiguous_fail_closed"
+    assert extraction["resized_causal_lane_selection"]["selected_lane"] == "ambiguous_fail_closed"
+    assert extraction["full_resolution_causal_lane_selection"]["selected_lane"] == "default"
+    assert result.tracking_summary["visible_candle_count"] == 0
+
+
+def test_causal_right_lane_wins_over_longer_historical_lane_and_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    scan_bounds: list[tuple[float, float] | None] = []
+
+    def tracks(start_x: int, count: int, spacing: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "track_id": index,
+                "bbox": [start_x + index * spacing - 3, 180, start_x + index * spacing + 3, 230],
+                "center_x_px": float(start_x + index * spacing),
+                "center_y_px": 205.0,
+                "direction": "BUY" if index % 2 == 0 else "SELL",
+                "color": "green" if index % 2 == 0 else "red",
+            }
+            for index in range(count)
+        ]
+
+    def fake_adaptive_extract(
+        _image: NDArray[np.uint8],
+        *,
+        x_bounds: tuple[float, float] | None = None,
+        minimum_track_length: int = 6,
+    ) -> list[dict[str, Any]]:
+        del minimum_track_length
+        scan_bounds.append(x_bounds)
+        if x_bounds == (0.40, 0.92):
+            return tracks(500, 12, 10)
+        return tracks(40, 27, 8)
+
+    monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
+    image = Image.new("RGB", (960, 508), color=(20, 26, 38))
+    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+        image,
+        cache_key="pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508",
+    )
+
+    lane_audit = cast(Mapping[str, Any], metadata["causal_lane_selection"])
+    assert scan_bounds == [None, (0.40, 0.92)]
+    assert len(rows) == 12
+    assert max(float(row["center_x"]) for row in rows) == 610.0
+    assert lane_audit["selected_lane"] == "causal_right"
+    assert lane_audit["default_track_count"] == 27
+    assert lane_audit["right_candidate_track_count"] == 12
+    cached = adapter._live_candle_cache[  # noqa: SLF001
+        "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
+    ]
+    assert max(float(row["center_x"]) for row in cached["tracks"]) == 610.0
+    assert cast(Mapping[str, Any], cached["lane_selection"])["selected_lane"] == "causal_right"
+
+
+def test_disjoint_right_lane_underflow_fails_closed_instead_of_publishing_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    def tracks(start_x: int, count: int, spacing: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "track_id": index,
+                "bbox": [start_x + index * spacing - 3, 180, start_x + index * spacing + 3, 230],
+                "center_x_px": float(start_x + index * spacing),
+                "center_y_px": 205.0,
+                "direction": "BUY" if index % 2 == 0 else "SELL",
+                "color": "green" if index % 2 == 0 else "red",
+            }
+            for index in range(count)
+        ]
+
+    def fake_adaptive_extract(
+        _image: NDArray[np.uint8],
+        *,
+        x_bounds: tuple[float, float] | None = None,
+        minimum_track_length: int = 6,
+    ) -> list[dict[str, Any]]:
+        del minimum_track_length
+        if x_bounds == (0.40, 0.92):
+            return tracks(500, 7, 15)
+        return tracks(40, 27, 8)
+
+    monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
+    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+        Image.new("RGB", (960, 508), color=(20, 26, 38)),
+        cache_key="pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508",
+    )
+
+    audit = cast(Mapping[str, Any], metadata["causal_lane_selection"])
+    assert rows == []
+    assert audit["selected_lane"] == "ambiguous_fail_closed"
+    assert audit["right_candidate_disjoint"] is True
+    assert audit["right_candidate_ambiguous"] is True
+    assert audit["selection_reason"] == "disjoint_right_lane_track_underflow_fail_closed"
+    assert adapter._live_candle_cache[  # noqa: SLF001
+        "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
+    ]["tracks"] == []
+
+
+def test_pair_a_to_pair_b_full_refresh_keeps_pair_b_on_causal_right_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    phase = {"pair": "A"}
+
+    def tracks(start_x: int, count: int, spacing: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "track_id": index,
+                "bbox": [start_x + index * spacing - 3, 180, start_x + index * spacing + 3, 230],
+                "center_x_px": float(start_x + index * spacing),
+                "center_y_px": 205.0,
+                "direction": "BUY" if index % 2 == 0 else "SELL",
+                "color": "green" if index % 2 == 0 else "red",
+            }
+            for index in range(count)
+        ]
+
+    def fake_adaptive_extract(
+        _image: NDArray[np.uint8],
+        *,
+        x_bounds: tuple[float, float] | None = None,
+        minimum_track_length: int = 6,
+    ) -> list[dict[str, Any]]:
+        del minimum_track_length
+        if phase["pair"] == "A":
+            return tracks(520, 12, 8)
+        if x_bounds == (0.40, 0.92):
+            return tracks(500, 12, 10)
+        return tracks(40, 27, 8)
+
+    monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
+    image = Image.new("RGB", (960, 508), color=(20, 26, 38))
+    pair_a_key = "pocket-live|M5|CAD/CHF OTC|selector_v2_pair_a|960x508"
+    pair_b_key = "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
+
+    pair_a_rows, _ = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+        image,
+        cache_key=pair_a_key,
+    )
+    phase["pair"] = "B"
+    pair_b_rows, first_b_metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+        image,
+        cache_key=pair_b_key,
+    )
+    refreshed_b_rows, refreshed_b_metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+        image,
+        cache_key=pair_b_key,
+    )
+
+    assert max(float(row["center_x"]) for row in pair_a_rows) > 600.0
+    assert max(float(row["center_x"]) for row in pair_b_rows) == 610.0
+    assert first_b_metadata["causal_lane_selection"]["selected_lane"] == "causal_right"
+    assert refreshed_b_metadata["full_refresh_reason"] == "insufficient_cached_history"
+    assert refreshed_b_metadata["causal_lane_selection"]["selected_lane"] == "causal_right"
+    assert max(float(row["center_x"]) for row in refreshed_b_rows) == 610.0
+    assert max(float(row["center_x"]) for row in adapter._live_candle_cache[pair_b_key]["tracks"]) == 610.0  # noqa: SLF001
+
+
+def test_compact_live_state_preserves_confirmed_instrument_identity_flags() -> None:
+    identity = {
+        "detected_market": "GBP/USD OTC",
+        "detected_timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+    }
+    compact_market = window_tracker_module._compact_live_state_market_payload(identity)  # noqa: SLF001
+    compact_signal = window_tracker_module._compact_live_state_latest_signal_payload(  # noqa: SLF001
+        {
+            "market": "GBP/USD OTC",
+            "focus_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+        }
+    )
+
+    assert compact_market["market_identity_confirmed"] is True
+    assert compact_market["timeframe_identity_confirmed"] is True
+    assert compact_signal["market_identity_confirmed"] is True
+    assert compact_signal["timeframe_identity_confirmed"] is True
 
 
 def test_live_incremental_extraction_reuses_static_history_but_refreshes_latest_edge(

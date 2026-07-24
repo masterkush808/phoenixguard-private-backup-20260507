@@ -2075,6 +2075,38 @@ class _RegistryBuilder:
         frame_id = _frame_id(payload)
         tracking = _mapping(payload.get("tracking_summary"))
         signal = _mapping(payload.get("latest_signal"))
+        instrument_symbol = _text(
+            signal.get("symbol")
+            or signal.get("pair")
+            or signal.get("market")
+            or tracking.get("detected_market")
+            or payload.get("market")
+        ).upper()
+        instrument_timeframe = _text(
+            signal.get("timeframe")
+            or signal.get("focus_timeframe")
+            or tracking.get("detected_timeframe")
+            or payload.get("timeframe")
+        ).upper()
+        selector_fingerprint = _text(
+            signal.get("market_selector_visual_fingerprint")
+            or tracking.get("market_selector_visual_fingerprint")
+            or payload.get("market_selector_visual_fingerprint")
+        )
+        market_identity_confirmed = _explicit_bool(
+            signal.get("market_identity_confirmed", tracking.get("market_identity_confirmed"))
+        )
+        timeframe_identity_confirmed = _explicit_bool(
+            signal.get("timeframe_identity_confirmed", tracking.get("timeframe_identity_confirmed"))
+        )
+        instrument_identity_status = (
+            "LOCKED"
+            if instrument_symbol
+            and instrument_timeframe
+            and market_identity_confirmed is True
+            and timeframe_identity_confirmed is True
+            else "UNPROVEN"
+        )
         candles = _sequence_of_mappings(tracking.get("tracked_candles"))
         missing: list[str] = []
         if not tracking:
@@ -2216,6 +2248,27 @@ class _RegistryBuilder:
             )
             objects.append(obj)
             overlay_raw = dict(raw)
+            raw_symbol = _text(
+                raw.get("symbol") or raw.get("pair") or raw.get("market") or raw.get("asset")
+            ).upper()
+            raw_timeframe = _text(raw.get("timeframe") or raw.get("tf") or raw.get("interval")).upper()
+            raw_selector_fingerprint = _text(raw.get("market_selector_visual_fingerprint"))
+            pair_identity_mismatch = bool(
+                raw_symbol and instrument_symbol and raw_symbol != instrument_symbol
+            )
+            timeframe_identity_mismatch = bool(
+                raw_timeframe and instrument_timeframe and raw_timeframe != instrument_timeframe
+            )
+            selector_identity_mismatch = bool(
+                raw_selector_fingerprint
+                and selector_fingerprint
+                and raw_selector_fingerprint != selector_fingerprint
+            )
+            raw_identity_mismatch = bool(
+                pair_identity_mismatch
+                or timeframe_identity_mismatch
+                or selector_identity_mismatch
+            )
             overlay_raw.update(
                 {
                     "overlay_id": stable_overlay_id(session_id, frame_id, object_id),
@@ -2226,6 +2279,15 @@ class _RegistryBuilder:
                     "source_agent": "market_object_tracker_v3",
                     "source_path": source_path,
                     "source_key": source_key,
+                    "symbol": raw_symbol or instrument_symbol,
+                    "timeframe": raw_timeframe or instrument_timeframe,
+                    "market_selector_visual_fingerprint": raw_selector_fingerprint or selector_fingerprint,
+                    "instrument_identity_status": (
+                        "MISMATCH" if raw_identity_mismatch else instrument_identity_status
+                    ),
+                    "pair_mismatch": pair_identity_mismatch,
+                    "timeframe_mismatch": timeframe_identity_mismatch,
+                    "selector_fingerprint_mismatch": selector_identity_mismatch,
                     "frame_id": frame_id,
                     "sequence_id": sequence_id,
                     "chart_transform_id": chart_transform_id,
@@ -2272,9 +2334,17 @@ class _RegistryBuilder:
                 chart_transform_id=chart_transform_id,
                 source_agent="market_object_tracker_v3",
             )
+            final_anchor_quality = dict(anchor_quality)
+            normalized_anchor_quality = _mapping(normalized_overlay.get("anchor_quality"))
+            for identity_key in (
+                "matches_symbol_timeframe",
+                "matches_selector_fingerprint",
+            ):
+                if identity_key in normalized_anchor_quality:
+                    final_anchor_quality[identity_key] = normalized_anchor_quality[identity_key]
             normalized_overlay.update(
                 {
-                    "anchor_quality": dict(anchor_quality),
+                    "anchor_quality": final_anchor_quality,
                     "anchor_evidence_status": _text(anchor_quality.get("status"), "UNKNOWN"),
                     "display_state": overlay_raw.get("display_state", normalized_overlay.get("display_state", "COMPACT")),
                     "visual_weight": overlay_raw.get("visual_weight", normalized_overlay.get("visual_weight", 0.55)),

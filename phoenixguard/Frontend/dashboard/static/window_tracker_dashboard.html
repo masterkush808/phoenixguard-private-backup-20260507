@@ -4159,6 +4159,7 @@
       imageUrl: "",
       imageFallbackUrl: "",
       imageSpace: "window",
+      imageSemanticIdentity: "",
       surfaceViewport: null,
       triedFallback: false,
       pendingPayload: null,
@@ -4166,6 +4167,7 @@
       pendingImageFallbackUrl: "",
       pendingImageSpace: "window",
       pendingImageFallbackSpace: "chart",
+      pendingSurfaceSemanticIdentity: "",
       pendingSurfaceViewport: null,
       pendingTriedFallback: false,
       queuedSurfacePayload: null,
@@ -6742,20 +6744,67 @@
       const surfaceFrame = safeText(safeObject(payload && payload.surface).frame_id, "");
       const visualVersion = surfaceFrame || String(revisionValue(payload));
       const separator = url.includes("?") ? "&" : "?";
-      return url + separator + "surface_frame=" + encodeURIComponent(visualVersion);
+      return url
+        + separator + "surface_frame=" + encodeURIComponent(visualVersion)
+        + "&surface_identity=" + encodeURIComponent(surfaceSemanticIdentity(payload));
+    }
+
+    function absoluteSurfaceUrl(url) {
+      try {
+        return new URL(safeText(url, ""), window.location.href).href;
+      } catch (_error) {
+        return safeText(url, "");
+      }
+    }
+
+    function clearVisualNamespaceForSurfaceChange() {
+      state.selectedOverlayId = "";
+      state.focusedOverlayId = "";
+      state.overlays = [];
+      state.lastVisualBundleKey = "";
+      state.projectedGeometryCache.clear();
+      state.controlGeometryCache.clear();
+      reconcileRenderedChildren(els.hotspotLayer, []);
+      reconcileRenderedChildren(els.surfaceLineSvg, []);
+      // Reconciliation normally retains detached semantic nodes for cheap
+      // same-surface reuse. A pair/timeframe boundary is a new namespace, so
+      // discard those nodes only after the old DOM has been detached.
+      state.detachedOverlayNodes.clear();
+      closeOverlayInspector();
+      syncOverlayButtons([], {loading: true});
     }
 
     function loadSurface(payload, options) {
       const config = options || {};
       const surface = currentSurface(payload);
+      const nextSemanticIdentity = surfaceSemanticIdentity(payload);
       const primaryUrl = versionedUrl(surface.primaryUrl, payload);
       const fallbackUrl = versionedUrl(surface.fallbackUrl, payload);
+      const pendingPairChanged = Boolean(
+        state.pendingPayload
+        && state.pendingSurfaceSemanticIdentity
+        && nextSemanticIdentity !== state.pendingSurfaceSemanticIdentity
+      );
+      const committedPairChanged = Boolean(
+        !state.pendingPayload
+        && state.imageSemanticIdentity
+        && nextSemanticIdentity !== state.imageSemanticIdentity
+      );
+      if (pendingPairChanged || committedPairChanged) {
+        // A symbol/timeframe switch is a hard visual namespace boundary. Do
+        // not let the old pair's in-flight bitmap or reusable overlay IDs
+        // survive long enough to be reconciled against the new chart.
+        clearVisualNamespaceForSurfaceChange();
+        state.queuedSurfacePayload = null;
+      }
       if (!primaryUrl) {
         state.pendingPayload = null;
         state.pendingImageUrl = "";
         state.pendingImageFallbackUrl = "";
+        state.pendingSurfaceSemanticIdentity = "";
         state.imageUrl = "";
         state.imageFallbackUrl = "";
+        state.imageSemanticIdentity = nextSemanticIdentity;
         state.surfaceViewport = null;
         state.naturalWidth = 0;
         state.naturalHeight = 0;
@@ -6766,7 +6815,7 @@
         commitOperatorState(payload);
         return;
       }
-      if (!config.force && state.pendingPayload) {
+      if (!config.force && state.pendingPayload && !pendingPairChanged) {
         // Operator polling can finish faster than a full broker/chart image.
         // Replacing an in-flight src on every poll starves the image forever,
         // especially on the larger Chart focus PNG. Keep one atomic load and
@@ -6778,7 +6827,12 @@
         syncOverlayButtons(state.overlays, {loading: true});
         return;
       }
-      if (primaryUrl === state.imageUrl && els.surfaceImage.complete && els.surfaceImage.naturalWidth > 0) {
+      if (
+        primaryUrl === state.imageUrl
+        && nextSemanticIdentity === state.imageSemanticIdentity
+        && els.surfaceImage.complete
+        && els.surfaceImage.naturalWidth > 0
+      ) {
         // The bitmap may stay immutable while the backend publishes a refined
         // chart viewport/geometry revision. Keep semantic nodes, but reproject
         // them immediately against the new transform.
@@ -6798,6 +6852,7 @@
       state.pendingImageFallbackUrl = fallbackUrl;
       state.pendingImageSpace = surface.primarySpace;
       state.pendingImageFallbackSpace = surface.fallbackSpace;
+      state.pendingSurfaceSemanticIdentity = nextSemanticIdentity;
       state.pendingSurfaceViewport = surface.viewport;
       state.pendingTriedFallback = false;
       state.queuedSurfacePayload = null;
@@ -6817,11 +6872,24 @@
       if (!state.pendingPayload) {
         return;
       }
+      const expectedUrl = state.pendingTriedFallback
+        ? state.pendingImageFallbackUrl
+        : state.pendingImageUrl;
+      if (
+        expectedUrl
+        && absoluteSurfaceUrl(els.surfaceImage.currentSrc || els.surfaceImage.src)
+          !== absoluteSurfaceUrl(expectedUrl)
+      ) {
+        // A superseded pair/frame can still finish decoding after its src was
+        // replaced. Its load event must never commit the current payload.
+        return;
+      }
       state.imageUrl = state.pendingTriedFallback
         ? state.pendingImageFallbackUrl
         : state.pendingImageUrl;
       state.imageFallbackUrl = state.pendingImageFallbackUrl;
       state.imageSpace = state.pendingImageSpace;
+      state.imageSemanticIdentity = state.pendingSurfaceSemanticIdentity;
       state.surfaceViewport = state.pendingSurfaceViewport;
       state.triedFallback = state.pendingTriedFallback;
       state.naturalWidth = Number(els.surfaceImage.naturalWidth || 0);
@@ -6842,13 +6910,27 @@
       const desiredSurface = currentSurface(queuedPayload || payload);
       const desiredPrimaryUrl = versionedUrl(desiredSurface.primaryUrl, queuedPayload || payload);
       const desiredFallbackUrl = versionedUrl(desiredSurface.fallbackUrl, queuedPayload || payload);
+      const desiredSemanticIdentity = surfaceSemanticIdentity(queuedPayload || payload);
       const queuedMatchesImage = Boolean(
         queuedPayload
+        && desiredSemanticIdentity === state.imageSemanticIdentity
         && (
           (desiredSurface.primarySpace === state.imageSpace && desiredPrimaryUrl === state.imageUrl)
           || (desiredSurface.fallbackSpace === state.imageSpace && desiredFallbackUrl === state.imageUrl)
         )
       );
+      if (queuedMatchesImage) {
+        // The queued observation may refine the chart-to-window transform
+        // without changing the already decoded bitmap. Commit its viewport
+        // and the exact matched plane before projecting its geometry.
+        state.surfaceViewport = desiredSurface.viewport;
+        state.imageSpace = (
+          desiredSurface.primarySpace === state.imageSpace
+          && desiredPrimaryUrl === state.imageUrl
+        )
+          ? desiredSurface.primarySpace
+          : desiredSurface.fallbackSpace;
+      }
       commitOperatorState(queuedMatchesImage ? queuedPayload : payload);
       if (queuedPayload && !queuedMatchesImage) {
         // Polling or an explicit Full broker / Chart focus switch may queue a
@@ -6871,6 +6953,7 @@
       }
       state.pendingPayload = null;
       state.queuedSurfacePayload = null;
+      state.pendingSurfaceSemanticIdentity = "";
       els.surfaceCanvas.classList.remove("ready");
       els.surfaceCanvas.classList.remove("updating");
       els.surfaceCanvas.setAttribute("aria-busy", "false");
@@ -9026,14 +9109,24 @@
         }).filter(function (entry) { return Boolean(entry[0]); }),
       );
       const desiredKeys = new Set();
+      const desiredNodes = new Set();
       desired.forEach(function (candidate, index) {
         const key = safeText(candidate.dataset.renderKey, "");
         desiredKeys.add(key);
-        let node = existing.get(key) || state.detachedOverlayNodes.get(key) || null;
+        const existingNode = existing.get(key) || null;
+        const detachedNode = state.detachedOverlayNodes.get(key) || null;
+        let node = existingNode || detachedNode;
         const sameElementType = node
           && node.namespaceURI === candidate.namespaceURI
           && node.localName === candidate.localName;
         if (!sameElementType) {
+          if (existingNode) {
+            existingNode.remove();
+          }
+          if (detachedNode) {
+            detachedNode.remove();
+            state.detachedOverlayNodes.delete(key);
+          }
           node = candidate;
           state.overlayRenderStats.createdNodes += 1;
         } else {
@@ -9044,6 +9137,7 @@
           }
           state.overlayRenderStats.reusedNodes += 1;
         }
+        desiredNodes.add(node);
         const currentAtIndex = container.children[index] || null;
         if (currentAtIndex !== node) {
           container.insertBefore(node, currentAtIndex);
@@ -9051,9 +9145,11 @@
       });
       Array.from(container.children).forEach(function (node) {
         const key = safeText(node.dataset.renderKey, "");
-        if (!desiredKeys.has(key)) {
-          if (key) {
+        if (!desiredNodes.has(node)) {
+          if (key && !desiredKeys.has(key)) {
             state.detachedOverlayNodes.set(key, node);
+          } else if (key && state.detachedOverlayNodes.get(key) === node) {
+            state.detachedOverlayNodes.delete(key);
           }
           node.remove();
         }

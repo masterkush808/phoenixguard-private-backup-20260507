@@ -5813,6 +5813,12 @@ def create_app(
             "source_path",
             "source_key",
             "broker_source_lock_id",
+            "symbol",
+            "timeframe",
+            "market_selector_visual_fingerprint",
+            "instrument_identity_status",
+            "matches_symbol_timeframe",
+            "matches_selector_fingerprint",
             "anchor_candles",
             "anchor_candle_indices",
             "anchor_price_band",
@@ -5881,6 +5887,26 @@ def create_app(
                 for key in overlay_object_fields
                 if key in row and (key in required_overlay_fields or row.get(key) not in (None, "", [], {}))
             }
+            # ``normalize_v3_overlay_object`` deliberately supplies
+            # ``UNPROVEN`` when the source did not carry an instrument lock.
+            # That default is useful inside the vision contract, but emitting
+            # it here would turn a legacy/minimal compact payload into an
+            # explicit negative identity assertion.  Preserve identity proof
+            # only when the source overlay actually supplied it, and retain
+            # explicit boolean match evidence (including ``False``).
+            for identity_key in (
+                "instrument_identity_status",
+                "matches_symbol_timeframe",
+                "matches_selector_fingerprint",
+            ):
+                if identity_key not in raw_row:
+                    compact_row.pop(identity_key, None)
+                    continue
+                identity_value = raw_row.get(identity_key)
+                if identity_value in (None, "", [], {}):
+                    compact_row.pop(identity_key, None)
+                    continue
+                compact_row[identity_key] = identity_value
             compact_row.setdefault("anchor_candles", compact_anchor_candles())
             bounds = row.get("bounds") or row.get("bbox")
             if bounds not in (None, "", [], {}):
@@ -6045,6 +6071,12 @@ def create_app(
             "decision_version",
             "chart_transform_id",
             "broker_source_lock_id",
+            "symbol",
+            "timeframe",
+            "market_selector_visual_fingerprint",
+            "instrument_identity_status",
+            "market_identity_confirmed",
+            "timeframe_identity_confirmed",
             "sequence_id",
             "overlay_object_frame_id",
             "overlay_state_version",
@@ -6149,8 +6181,14 @@ def create_app(
                 compact["study_packet_status"] = dict(cast(Mapping[str, object], study))
             if isinstance(execution, Mapping):
                 compact["execution_packet_status"] = dict(cast(Mapping[str, object], execution))
+        compact_latest_signal_source = _mapping_to_plain_dict(
+            live_state.get("latest_signal")
+        )
+        compact_latest_signal_source.update(
+            _mapping_to_plain_dict(compact.get("latest_signal"))
+        )
         compact["latest_signal"] = compact_mapping(
-            compact.get("latest_signal"),
+            compact_latest_signal_source,
             {
                 "session_id",
                 "signal_id",
@@ -6164,7 +6202,14 @@ def create_app(
                 "execution_lane",
                 "symbol",
                 "pair",
+                "market",
                 "timeframe",
+                "focus_timeframe",
+                "market_selector_visual_fingerprint",
+                "market_identity_confirmed",
+                "timeframe_identity_confirmed",
+                "market_selector_rebind_required",
+                "market_selector_studying_new_pair",
                 "published_epoch",
                 "signal_age_sec",
                 "broker_source",
@@ -6173,12 +6218,23 @@ def create_app(
                 "market_study_v3",
             },
         )
+        compact_tracking_source = _mapping_to_plain_dict(
+            live_state.get("tracking_summary")
+        )
+        compact_tracking_source.update(
+            _mapping_to_plain_dict(compact.get("tracking_summary"))
+        )
         compact["tracking_summary"] = compact_mapping(
-            compact.get("tracking_summary"),
+            compact_tracking_source,
             {
                 "session_id",
                 "detected_market",
                 "detected_timeframe",
+                "market_selector_visual_fingerprint",
+                "market_identity_confirmed",
+                "timeframe_identity_confirmed",
+                "market_selector_rebind_required",
+                "market_selector_studying_new_pair",
                 "status",
                 "frame_index",
                 "capture_count",
@@ -6529,7 +6585,13 @@ def create_app(
                 identity["chart_transform_id"] = chart_transform_id
             if broker_source_lock_id:
                 identity["broker_source_lock_id"] = broker_source_lock_id
-            for key in ("symbol", "timeframe", "sequence_id"):
+            for key in (
+                "symbol",
+                "timeframe",
+                "sequence_id",
+                "market_selector_visual_fingerprint",
+                "instrument_identity_status",
+            ):
                 value = str(overlay.get(key) or "").strip()
                 if value:
                     identity[key] = value

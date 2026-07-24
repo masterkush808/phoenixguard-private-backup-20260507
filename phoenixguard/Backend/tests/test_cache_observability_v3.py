@@ -1060,17 +1060,45 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
             {
                 "session_id": "pocket-live-8788",
                 "status": "running",
-                "tracking_enabled": True,
-                "capture_count": 1,
-                "last_capture_epoch": time.time(),
-                "tracking_summary": {
+                    "tracking_enabled": True,
+                    "capture_count": 1,
+                    "frame_index": 1,
+                    "display_frame_id": 1,
+                    "last_capture_epoch": time.time(),
+                    "tracking_summary": {
                     "detected_market": "EUR/USD",
                     "detected_timeframe": "M5",
+                    "market_selector_visual_fingerprint": "selector_v2_eurusd",
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_selector_rebind_required": False,
+                    "market_selector_studying_new_pair": False,
                     "high_frequency_study_timeframe": "M5",
-                },
+                        "chart_region": {
+                            "pixel_bbox": [0, 0, 960, 508],
+                            "width": 960,
+                            "height": 508,
+                        },
+                        "tracked_candles": [
+                            {
+                                "track_id": index,
+                                "bbox": [760 + index * 18, 220, 770 + index * 18, 330],
+                                "center_x": 765 + index * 18,
+                                "center_y": 275,
+                                "direction": "BUY" if index % 2 == 0 else "SELL",
+                                "confidence": 0.88,
+                            }
+                            for index in range(8)
+                        ],
+                    },
                 "latest_signal": {
                     "market": "EUR/USD",
                     "focus_timeframe": "M5",
+                    "market_selector_visual_fingerprint": "selector_v2_eurusd",
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_selector_rebind_required": False,
+                    "market_selector_studying_new_pair": False,
                     "high_frequency_study_timeframe": "M5",
                     "lstm_contribution": {
                         "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
@@ -1140,6 +1168,33 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     compact = compact_response.json()
     assert compact["shooter"]["available"] is False
     assert isinstance(compact["overlays"]["objects"], list)
+    assert compact["tracking_summary"]["detected_market"] == "EUR/USD"
+    assert compact["tracking_summary"]["detected_timeframe"] == "M5"
+    assert (
+        compact["tracking_summary"]["market_selector_visual_fingerprint"]
+        == "selector_v2_eurusd"
+    )
+    assert compact["tracking_summary"]["market_identity_confirmed"] is True
+    assert compact["tracking_summary"]["timeframe_identity_confirmed"] is True
+    assert compact["tracking_summary"]["market_selector_rebind_required"] is False
+    assert compact["tracking_summary"]["market_selector_studying_new_pair"] is False
+    assert compact["latest_signal"]["market"] == "EUR/USD"
+    assert compact["latest_signal"]["focus_timeframe"] == "M5"
+    assert compact["latest_signal"]["market_selector_rebind_required"] is False
+    assert compact["latest_signal"]["market_selector_studying_new_pair"] is False
+    assert (
+        compact["latest_signal"]["market_selector_visual_fingerprint"]
+        == "selector_v2_eurusd"
+    )
+    compact_objects = cast(list[dict[str, Any]], compact["overlays"]["objects"])
+    assert compact_objects
+    assert all(row["symbol"] == "EUR/USD" for row in compact_objects)
+    assert all(row["timeframe"] == "M5" for row in compact_objects)
+    assert all(
+        row["market_selector_visual_fingerprint"] == "selector_v2_eurusd"
+        for row in compact_objects
+    )
+    assert all(row["instrument_identity_status"] == "LOCKED" for row in compact_objects)
     assert "all_objects" not in compact["overlays"]
     assert "live_visual_state" not in compact
     assert "overlay_objects" not in compact
@@ -1427,6 +1482,15 @@ def test_live_state_v3_thin_direct_sources_load_locked_registry_context(
                     "capture_plane": {"width": 400, "height": 240},
                 },
                 "tracking_summary": {
+                    "detected_market": "EUR/USD",
+                    "detected_timeframe": "M5",
+                    "market_confidence": 0.94,
+                    "timeframe_confidence": 0.92,
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_selector_visual_fingerprint": "selector_v2_eurusd",
+                    "market_selector_rebind_required": False,
+                    "market_selector_studying_new_pair": False,
                     "chart_region": {
                         "pixel_bbox": [0, 0, 400, 240],
                         "width": 400,
@@ -1442,7 +1506,17 @@ def test_live_state_v3_thin_direct_sources_load_locked_registry_context(
                         }
                     ]
                 },
-                "latest_signal": {},
+                "latest_signal": {
+                    "market": "EUR/USD",
+                    "focus_timeframe": "M5",
+                    "market_confidence": 0.94,
+                    "timeframe_confidence": 0.92,
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_selector_visual_fingerprint": "selector_v2_eurusd",
+                    "market_selector_rebind_required": False,
+                    "market_selector_studying_new_pair": False,
+                },
             }
         ),
         encoding="utf-8",
@@ -1550,13 +1624,32 @@ def test_live_state_v3_compact_preserves_overlay_snap_scene_graph(
                     },
                     "detected_market": "CAD/JPY OTC",
                     "detected_timeframe": "M5",
+                    "market_confidence": 0.94,
+                    "timeframe_confidence": 0.92,
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_selector_visual_fingerprint": "selector_v2_cadjpyotc",
+                    "market_selector_rebind_required": False,
+                    "market_selector_studying_new_pair": False,
                     "local_direction": "BUY",
                     "tracked_candles": [
                         {"track_id": "candle-122", "bbox": [880, 340, 895, 456], "direction": "SELL", "confidence": 0.88},
                         {"track_id": "candle-123", "bbox": [902, 316, 918, 440], "direction": "BUY", "confidence": 0.91},
                     ],
                 },
-                "latest_signal": {"side": "BUY", "action": "BUY", "timeframe": "M5", "symbol": "CAD/JPY OTC"},
+                "latest_signal": {
+                    "side": "BUY",
+                    "action": "BUY",
+                    "market": "CAD/JPY OTC",
+                    "focus_timeframe": "M5",
+                    "market_confidence": 0.94,
+                    "timeframe_confidence": 0.92,
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_selector_visual_fingerprint": "selector_v2_cadjpyotc",
+                    "market_selector_rebind_required": False,
+                    "market_selector_studying_new_pair": False,
+                },
                 "signal_thesis_v3": {
                     "active": True,
                     "thesis_id": "snap-test",
@@ -2308,7 +2401,12 @@ def test_compact_live_state_does_not_reuse_studying_new_pair_cache_after_overlay
     client = TestClient(create_app())
     stale_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
     assert stale_response.status_code == 200
-    assert stale_response.json()["provider_status"]["compact_studying_new_pair_fast_path_v3"] is True
+    stale_payload = stale_response.json()
+    assert stale_payload["provider_status"]["compact_studying_new_pair_fast_path_v3"] is True
+    assert stale_payload["tracking_summary"]["market_selector_rebind_required"] is True
+    assert stale_payload["tracking_summary"]["market_selector_studying_new_pair"] is True
+    assert stale_payload["latest_signal"]["market_selector_rebind_required"] is True
+    assert stale_payload["latest_signal"]["market_selector_studying_new_pair"] is True
 
     recovered_session = {
         **base_session,

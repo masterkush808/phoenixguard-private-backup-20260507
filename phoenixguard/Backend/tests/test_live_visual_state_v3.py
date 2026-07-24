@@ -1,13 +1,16 @@
 from __future__ import annotations
-import pytest
 
 from pathlib import Path
 from typing import Any, Mapping
 
 from PIL import Image
+import pytest
 
 from phoenixguard.mobile_api.live_state_v3 import (
     LIVE_STATE_SCHEMA_VERSION,
+    _bind_overlay_instrument_identity,  # pyright: ignore[reportPrivateUsage]
+    _dashboard_overlay_object,  # pyright: ignore[reportPrivateUsage]
+    _instrument,  # pyright: ignore[reportPrivateUsage]
     _overlay_from_active_object,  # pyright: ignore[reportPrivateUsage]
     _overlay_semantic_geometry_key,  # pyright: ignore[reportPrivateUsage]
     _rescale_registry_overlay_to_current_chart,  # pyright: ignore[reportPrivateUsage]
@@ -23,6 +26,204 @@ def _png(path: Path, size: tuple[int, int] = (320, 180)) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, color=(20, 24, 32)).save(path)
     return path
+
+
+def _lock_test_instrument_identity(
+    session: dict[str, Any],
+    *,
+    market: str = "EUR/USD OTC",
+    timeframe: str = "M5",
+) -> None:
+    selector = "selector_v2_" + "".join(
+        character.lower() for character in market if character.isalnum()
+    )
+    tracking = session.setdefault("tracking_summary", {})
+    tracking.update(
+        {
+            "detected_market": market,
+            "detected_timeframe": timeframe,
+            "market_confidence": 0.93,
+            "timeframe_confidence": 0.91,
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": selector,
+            "market_selector_rebind_required": False,
+            "market_selector_studying_new_pair": False,
+        }
+    )
+    latest = session.setdefault("latest_signal", {})
+    latest.update(
+        {
+            "market": market,
+            "focus_timeframe": timeframe,
+            "market_confidence": 0.93,
+            "timeframe_confidence": 0.91,
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": selector,
+            "market_selector_rebind_required": False,
+            "market_selector_studying_new_pair": False,
+        }
+    )
+
+
+def test_overlay_identity_binding_uses_stable_selector_and_rejects_previous_pair() -> None:
+    session = {
+        "execution_controls": {
+            "min_market_confidence": 0.42,
+            "min_timeframe_confidence": 0.42,
+        },
+        "tracking_summary": {
+            "detected_market": "GBP/USD OTC",
+            "detected_timeframe": "M5",
+            "market_confidence": 0.5596,
+            "timeframe_confidence": 0.9001,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+            "market_selector_rebind_required": False,
+            "market_selector_studying_new_pair": False,
+        },
+        "latest_signal": {
+            "market": "GBP/USD OTC",
+            "focus_timeframe": "M5",
+            "market_confidence": 0.5596,
+            "timeframe_confidence": 0.9001,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+        },
+    }
+    current = {
+        "overlay_id": "current-demand",
+        "type": "DEMAND_ZONE",
+        "source_agent": "market_object_tracker_v3",
+        "frame_id": 227,
+        "sequence_id": "seq-227",
+        "chart_transform_id": "ct-227",
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "bbox": [100, 200, 300, 240],
+        "anchor_candles": [8, 9],
+        "confidence": 0.82,
+    }
+    stale = {
+        **current,
+        "overlay_id": "stale-demand",
+        "symbol": "CAD/CHF OTC",
+        "timeframe": "M5",
+        "market_selector_visual_fingerprint": "selector_v2_cad_chf",
+        "instrument_identity_status": "LOCKED",
+    }
+
+    accepted, rejected = _bind_overlay_instrument_identity([current, stale], session)
+
+    assert len(accepted) == 1
+    assert accepted[0]["symbol"] == "GBP/USD OTC"
+    assert accepted[0]["timeframe"] == "M5"
+    assert accepted[0]["market_selector_visual_fingerprint"] == "selector_v2_gbp_usd"
+    assert accepted[0]["instrument_identity_status"] == "LOCKED"
+    assert [row["overlay_id"] for row in rejected] == ["stale-demand"]
+    compact = _dashboard_overlay_object(accepted[0], compact=True)
+    assert compact["symbol"] == "GBP/USD OTC"
+    assert compact["timeframe"] == "M5"
+    assert compact["market_selector_visual_fingerprint"] == "selector_v2_gbp_usd"
+    assert compact["instrument_identity_status"] == "LOCKED"
+    assert compact["anchor_quality"]["matches_symbol_timeframe"] is True
+
+
+@pytest.mark.parametrize(
+    (
+        "signal_patch",
+        "tracking_patch",
+        "expected_transition",
+        "expected_disagreement_key",
+    ),
+    (
+        (
+            {"market_selector_rebind_required": True},
+            {},
+            True,
+            "",
+        ),
+        (
+            {},
+            {"market_selector_studying_new_pair": True},
+            True,
+            "",
+        ),
+        (
+            {},
+            {"detected_market": "CAD/CHF OTC"},
+            False,
+            "market_identity_disagreement",
+        ),
+        (
+            {},
+            {"detected_timeframe": "M1"},
+            False,
+            "timeframe_identity_disagreement",
+        ),
+        (
+            {},
+            {"market_selector_visual_fingerprint": "selector_v2_cad_chf"},
+            False,
+            "selector_fingerprint_disagreement",
+        ),
+    ),
+    ids=(
+        "signal-rebind",
+        "tracking-studying",
+        "market-mismatch",
+        "timeframe-mismatch",
+        "selector-mismatch",
+    ),
+)
+def test_overlay_identity_binding_rejects_stale_explicit_true_identity(
+    signal_patch: Mapping[str, Any],
+    tracking_patch: Mapping[str, Any],
+    expected_transition: bool,
+    expected_disagreement_key: str,
+) -> None:
+    signal: dict[str, Any] = {
+        "market": "GBP/USD OTC",
+        "focus_timeframe": "M5",
+        "market_confidence": 0.91,
+        "timeframe_confidence": 0.93,
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+    }
+    tracking: dict[str, Any] = {
+        "detected_market": "GBP/USD OTC",
+        "detected_timeframe": "M5",
+        "market_confidence": 0.91,
+        "timeframe_confidence": 0.93,
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+    }
+    signal.update(signal_patch)
+    tracking.update(tracking_patch)
+    session = {"latest_signal": signal, "tracking_summary": tracking}
+    overlay = {
+        "overlay_id": "current-demand",
+        "type": "DEMAND_ZONE",
+        "source_agent": "market_object_tracker_v3",
+        "frame_id": 227,
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "bbox": [100, 200, 300, 240],
+    }
+
+    instrument = _instrument(session)
+    accepted, rejected = _bind_overlay_instrument_identity([overlay], session)
+
+    assert instrument["identity_locked"] is False
+    assert instrument["market_identity_confirmed"] is False
+    assert instrument["timeframe_identity_confirmed"] is False
+    assert instrument["identity_transition_pending"] is expected_transition
+    if expected_disagreement_key:
+        assert instrument[expected_disagreement_key] is True
+        assert instrument["identity_disagreement"] is True
+    else:
+        assert instrument["identity_disagreement"] is False
+    assert accepted == []
+    assert [row["overlay_id"] for row in rejected] == ["current-demand"]
 
 
 def test_public_forecast_reader_prefers_current_identity_pending_tombstone() -> None:
@@ -320,6 +521,7 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
             "plain_language": "Tracking the active BUY idea.",
         },
     }
+    _lock_test_instrument_identity(session, market="EUR/JPY OTC")
     study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_type": "STUDY_PACKET",
@@ -370,6 +572,14 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
     assert state["instrument"]["market"] == "EUR/JPY OTC"
     assert state["instrument"]["timeframe"] == "M5"
     assert state["instrument"]["identity_locked"] is True
+    assert state["live_visual_state"]["symbol"] == "EUR/JPY OTC"
+    assert state["live_visual_state"]["timeframe"] == "M5"
+    assert state["live_visual_state"]["market_selector_visual_fingerprint"].startswith(
+        "selector_v2_"
+    )
+    assert state["live_visual_state"]["instrument_identity_status"] == "LOCKED"
+    assert state["live_visual_state"]["market_identity_confirmed"] is True
+    assert state["live_visual_state"]["timeframe_identity_confirmed"] is True
     assert state["model_council"]["side"] == "BUY"
     assert state["signal_thesis_v3"]["active"] is True
     assert state["live_visual_state"]["signal_thesis_v3"]["side"] == "BUY"
@@ -545,6 +755,7 @@ def test_live_state_keeps_locked_overlay_objects_when_surface_authority_matches(
         },
         "latest_signal": {"side": "BUY", "execution_action": "BUY"},
     }
+    _lock_test_instrument_identity(session)
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "sniper-54",
@@ -602,6 +813,7 @@ def test_live_state_keeps_current_frame_objects_when_overlay_artifact_is_stale(t
         },
         "latest_signal": {"side": "BUY", "execution_action": "BUY"},
     }
+    _lock_test_instrument_identity(session)
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "support-182",
@@ -692,6 +904,7 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
         "tracking_enabled": True,
         "tracking_summary": {"chart_region": {"pixel_bbox": [0, 0, 560, 260]}},
     }
+    _lock_test_instrument_identity(session)
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "history-locked",
@@ -769,6 +982,7 @@ def test_live_state_prefers_v3_historical_path_over_fallback_rectangle(tmp_path:
             ],
         },
     }
+    _lock_test_instrument_identity(session)
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "legacy-history-rectangle",
@@ -820,6 +1034,7 @@ def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(t
         "tracking_enabled": True,
         "tracking_summary": {"chart_region": {"pixel_bbox": [0, 0, 560, 260]}},
     }
+    _lock_test_instrument_identity(session)
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "unknown-leftover",
@@ -920,7 +1135,7 @@ class _FakeTrackerService:
         self.artifacts = dict(artifacts)
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        return {
+        session: dict[str, Any] = {
             "session_id": session_id,
             "status": "running",
             "tracking_enabled": True,
@@ -934,6 +1149,8 @@ class _FakeTrackerService:
             },
             "latest_signal": {"side": "SELL", "confidence": 0.81},
         }
+        _lock_test_instrument_identity(session, market="GBP/JPY OTC")
+        return session
 
     def latest_artifact_path(self, _session_id: str, kind: str) -> Path:
         if kind not in self.artifacts:

@@ -1562,6 +1562,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "major_trend_direction",
         "market",
         "market_confidence",
+        "market_identity_confirmed",
         "market_selector_visual_fingerprint",
         "market_selector_rebind_required",
         "market_selector_studying_new_pair",
@@ -1598,6 +1599,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "symbol",
         "timestamp",
         "timeframe",
+        "timeframe_identity_confirmed",
         "timing_signal",
         "two_candle_study",
     }
@@ -2846,6 +2848,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "major_trend_direction",
         "market",
         "market_confidence",
+        "market_identity_confirmed",
         "market_selector_rebind_required",
         "market_selector_studying_new_pair",
         "market_selector_identity_rebound",
@@ -2885,6 +2888,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "symbol",
         "timeframe",
         "timeframe_confidence",
+        "timeframe_identity_confirmed",
         "timeframe_source",
         "tracked_candles",
         "trend_context",
@@ -11808,6 +11812,10 @@ class PhoenixGuardWindowTrackingAdapter:
         # precise enough to be geometry authority after a restart.
         self._live_candle_cache_lock = threading.RLock()
         self._live_candle_cache: dict[str, dict[str, Any]] = {}
+        # Candle extraction can run from capture workers concurrently.  Keep
+        # the lane-selection audit beside the calling thread instead of on one
+        # shared "last result" attribute.
+        self._candle_lane_audit_state = threading.local()
         # A forecast is an event study, not a frame animation. Cache the full
         # suite reading against the latest completed candle so forming-candle
         # pixels cannot make the public BUY/SELL path flip every refresh.
@@ -12662,7 +12670,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 cache_key=incremental_cache_key,
             )
         else:
+            self._reset_candle_lane_selection_audit()
             analysis_tracks = self._extract_candle_tracks(candle_image)
+            incremental_extraction["causal_lane_selection"] = self._candle_lane_selection_audit()
         tracked_candles = _rescale_candle_tracks(
             analysis_tracks,
             scale_x=candle_scale_x,
@@ -12673,13 +12683,20 @@ class PhoenixGuardWindowTrackingAdapter:
             tracked_candles,
             broker_exclusion_boxes,
         )
+        resized_lane_selection = dict(incremental_extraction.get("causal_lane_selection", {}))
+        incremental_extraction["resized_causal_lane_selection"] = dict(resized_lane_selection)
         full_resolution_broker_chrome_filtered_count = 0
+        full_resolution_lane_selection: dict[str, Any] = {}
+        full_resolution_fallback_accepted = False
+        full_resolution_fallback_rejection_reason = ""
         if (
             fast_locked_context
             and candle_image_resized
             and len(tracked_candles) < _PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS
         ):
+            self._reset_candle_lane_selection_audit()
             full_resolution_tracks = self._extract_candle_tracks(chart_image)
+            full_resolution_lane_selection = self._candle_lane_selection_audit()
             full_resolution_tracks, full_resolution_broker_chrome_filtered_count = (
                 self._filter_candle_tracks_against_broker_exclusions(
                     full_resolution_tracks,
@@ -12687,10 +12704,32 @@ class PhoenixGuardWindowTrackingAdapter:
                 )
             )
             full_resolution_fallback_count = len(full_resolution_tracks)
-            if len(full_resolution_tracks) > len(tracked_candles):
+            incremental_extraction["full_resolution_causal_lane_selection"] = dict(
+                full_resolution_lane_selection
+            )
+            resized_selected_lane = str(resized_lane_selection.get("selected_lane") or "").strip().lower()
+            full_resolution_selected_lane = str(
+                full_resolution_lane_selection.get("selected_lane") or ""
+            ).strip().lower()
+            resized_has_disjoint_right_evidence = resized_selected_lane in {
+                "causal_right",
+                "ambiguous_fail_closed",
+            }
+            full_resolution_preserves_causal_lane = full_resolution_selected_lane == "causal_right"
+            fallback_lane_is_safe = bool(
+                not resized_has_disjoint_right_evidence
+                or full_resolution_preserves_causal_lane
+            )
+            if len(full_resolution_tracks) > len(tracked_candles) and fallback_lane_is_safe:
                 tracked_candles = full_resolution_tracks
                 candle_extraction_mode = "full_resolution_fallback"
                 broker_chrome_filtered_count = full_resolution_broker_chrome_filtered_count
+                incremental_extraction["causal_lane_selection"] = full_resolution_lane_selection
+                full_resolution_fallback_accepted = True
+            elif len(full_resolution_tracks) > len(tracked_candles) and not fallback_lane_is_safe:
+                full_resolution_fallback_rejection_reason = (
+                    "full_resolution_lane_did_not_preserve_resized_disjoint_right_evidence"
+                )
         if fast_locked_context:
             try:
                 live_controls = _normalize_execution_controls(
@@ -12736,8 +12775,13 @@ class PhoenixGuardWindowTrackingAdapter:
             "broker_exclusion_count": int(len(broker_exclusion_boxes)),
             "broker_chrome_filtered_count": int(broker_chrome_filtered_count),
             "full_resolution_broker_chrome_filtered_count": int(full_resolution_broker_chrome_filtered_count),
+            "full_resolution_fallback_accepted": bool(full_resolution_fallback_accepted),
+            "full_resolution_fallback_rejection_reason": full_resolution_fallback_rejection_reason,
             "final_track_count": int(len(tracked_candles)),
             "min_precision_track_count": int(_PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS),
+            "causal_lane_selection": dict(incremental_extraction.get("causal_lane_selection", {})),
+            "resized_causal_lane_selection": dict(resized_lane_selection),
+            "full_resolution_causal_lane_selection": dict(full_resolution_lane_selection),
             "incremental_history": dict(incremental_extraction),
         }
         tracking_summary["candle_extraction"] = dict(candle_extraction_summary)
@@ -15854,10 +15898,109 @@ class PhoenixGuardWindowTrackingAdapter:
     def _extract_candle_tracks(self, image: Image.Image) -> list[dict[str, Any]]:
         arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
         if arr.ndim != 3 or arr.shape[0] < 32 or arr.shape[1] < 32:
+            self._record_candle_lane_selection_audit(
+                {
+                    "schema_version": "phoenixguard.candle_lane_selection_audit.v1",
+                    "selected_lane": "none",
+                    "selection_reason": "image_too_small",
+                    "default_track_count": 0,
+                    "right_candidate_track_count": 0,
+                }
+            )
             return []
-        shared_tracks = extract_candle_tracks_adaptive_v3(
+        default_tracks = extract_candle_tracks_adaptive_v3(
             arr,
             minimum_track_length=6,
+        )
+        image_width = max(1, int(arr.shape[1]))
+
+        def latest_center_x(rows: Sequence[Mapping[str, Any]]) -> float:
+            centers: list[float] = []
+            for item in rows:
+                raw_bbox = cast(Sequence[Any], item.get("bbox", []))
+                fallback = (
+                    (float(raw_bbox[0]) + float(raw_bbox[2])) * 0.5
+                    if len(raw_bbox) >= 4
+                    else 0.0
+                )
+                centers.append(float(item.get("center_x_px", item.get("center_x", fallback)) or fallback))
+            return max(centers, default=0.0)
+
+        default_latest_x = latest_center_x(default_tracks)
+        right_scan_attempted = bool(not default_tracks or default_latest_x < float(image_width) * 0.45)
+        right_tracks: list[dict[str, Any]] = []
+        if right_scan_attempted:
+            right_tracks = extract_candle_tracks_adaptive_v3(
+                arr,
+                x_bounds=(0.40, 0.92),
+                minimum_track_length=6,
+            )
+        right_latest_x = latest_center_x(right_tracks)
+        right_candidate_disjoint = bool(
+            right_tracks
+            and right_latest_x >= float(image_width) * 0.50
+            and (
+                not default_tracks
+                or right_latest_x - default_latest_x > float(image_width) * 0.12
+            )
+        )
+        right_candidate_valid = bool(
+            len(right_tracks) >= 8
+            and right_candidate_disjoint
+        )
+        # A visibly later lane is causal evidence even when too few candles
+        # are available to authorize geometry.  In that case the older,
+        # smoother left lane is known not to be current and must not be
+        # published as a fallback.
+        right_candidate_ambiguous = bool(
+            right_candidate_disjoint
+            and 0 < len(right_tracks) < 8
+        )
+        shared_tracks = (
+            right_tracks
+            if right_candidate_valid
+            else []
+            if right_candidate_ambiguous
+            else default_tracks
+        )
+        selected_lane = (
+            "causal_right"
+            if right_candidate_valid
+            else "ambiguous_fail_closed"
+            if right_candidate_ambiguous
+            else "default"
+        )
+        if right_candidate_valid:
+            selection_reason = "coherent_right_lane_ahead_of_historical_lane"
+        elif not right_scan_attempted:
+            selection_reason = "default_lane_reaches_current_chart_edge"
+        elif right_candidate_ambiguous:
+            selection_reason = "disjoint_right_lane_track_underflow_fail_closed"
+        elif len(right_tracks) < 8:
+            selection_reason = "right_candidate_track_underflow"
+        elif right_latest_x < float(image_width) * 0.50:
+            selection_reason = "right_candidate_does_not_reach_current_region"
+        else:
+            selection_reason = "right_candidate_not_far_enough_ahead"
+        self._record_candle_lane_selection_audit(
+            {
+                "schema_version": "phoenixguard.candle_lane_selection_audit.v1",
+                "selected_lane": selected_lane,
+                "selection_reason": selection_reason,
+                "right_scan_attempted": right_scan_attempted,
+                "default_track_count": int(len(default_tracks)),
+                "default_latest_x_px": round(default_latest_x, 3),
+                "default_latest_x_norm": round(default_latest_x / float(image_width), 6),
+                "right_candidate_bounds": [0.40, 0.92],
+                "right_candidate_track_count": int(len(right_tracks)),
+                "right_candidate_latest_x_px": round(right_latest_x, 3),
+                "right_candidate_latest_x_norm": round(right_latest_x / float(image_width), 6),
+                "right_candidate_disjoint": right_candidate_disjoint,
+                "right_candidate_ambiguous": right_candidate_ambiguous,
+                "minimum_right_track_count": 8,
+                "minimum_right_endpoint_norm": 0.50,
+                "minimum_endpoint_lead_norm": 0.12,
+            }
         )
         tracks: list[dict[str, Any]] = []
         height = max(1, int(image.height))
@@ -15885,6 +16028,15 @@ class PhoenixGuardWindowTrackingAdapter:
             )
             tracks.append(row)
         return tracks
+
+    def _record_candle_lane_selection_audit(self, payload: Mapping[str, Any]) -> None:
+        self._candle_lane_audit_state.payload = dict(payload)
+
+    def _reset_candle_lane_selection_audit(self) -> None:
+        self._candle_lane_audit_state.payload = {}
+
+    def _candle_lane_selection_audit(self) -> dict[str, Any]:
+        return dict(getattr(self._candle_lane_audit_state, "payload", {}) or {})
 
     @staticmethod
     def _rebase_candle_tracks_x(
@@ -15954,6 +16106,7 @@ class PhoenixGuardWindowTrackingAdapter:
         gray: ArrayND,
         tracks: Sequence[Mapping[str, Any]],
         reuse_count: int,
+        lane_selection: Mapping[str, Any] | None = None,
     ) -> None:
         if not cache_key:
             return
@@ -15961,6 +16114,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "gray": np.asarray(gray, dtype=np.uint8).copy(),
             "tracks": [dict(row) for row in tracks],
             "reuse_count": max(0, int(reuse_count)),
+            "lane_selection": dict(lane_selection or {}),
             "updated_epoch": _now_epoch(),
         }
         with self._live_candle_cache_lock:
@@ -16000,14 +16154,18 @@ class PhoenixGuardWindowTrackingAdapter:
         }
 
         def full_refresh(reason: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            self._reset_candle_lane_selection_audit()
             rows = self._extract_candle_tracks(image)
+            lane_selection = self._candle_lane_selection_audit()
             metadata["full_refresh_reason"] = reason
             metadata["full_track_count"] = int(len(rows))
+            metadata["causal_lane_selection"] = dict(lane_selection)
             self._remember_live_candle_field(
                 cache_key,
                 gray=current_gray,
                 tracks=rows,
                 reuse_count=0,
+                lane_selection=lane_selection,
             )
             return rows, metadata
 
@@ -16017,6 +16175,8 @@ class PhoenixGuardWindowTrackingAdapter:
             cached = dict(self._live_candle_cache.get(cache_key, {}))
         cached_gray = cached.get("gray")
         cached_tracks = [dict(row) for row in _sequence_of_mappings(cached.get("tracks", []))]
+        cached_lane_selection = _mapping_to_dict(cached.get("lane_selection", {}))
+        metadata["causal_lane_selection"] = dict(cached_lane_selection)
         reuse_count = max(0, int(cached.get("reuse_count", 0) or 0))
         try:
             full_refresh_every = max(
@@ -16173,6 +16333,7 @@ class PhoenixGuardWindowTrackingAdapter:
             gray=current_gray,
             tracks=merged,
             reuse_count=reuse_count + 1,
+            lane_selection=cached_lane_selection,
         )
         return merged, metadata
 
@@ -26206,6 +26367,19 @@ class ContinuousWindowTrackerService:
             payload.get("execution_opportunity_window_v3")
             or previous_execution_packet.get("execution_opportunity_window_v3")
         )
+        current_opportunity_symbol = str(snapshot.get("symbol") or "").strip().upper()
+        current_opportunity_timeframe = str(snapshot.get("timeframe") or "").strip().upper()
+        previous_opportunity_matches_instrument = bool(
+            previous_opportunity_window
+            and str(previous_opportunity_window.get("session_id") or "").strip().upper()
+            == str(session_id).strip().upper()
+            and str(previous_opportunity_window.get("symbol") or "").strip().upper()
+            == current_opportunity_symbol
+            and str(previous_opportunity_window.get("timeframe") or "").strip().upper()
+            == current_opportunity_timeframe
+            and bool(current_opportunity_symbol)
+            and bool(current_opportunity_timeframe)
+        )
         packet = _model_council_packet_from_payload(
             result_payload,
             require_live_overlay_truth=True,
@@ -26451,6 +26625,7 @@ class ContinuousWindowTrackerService:
             and str(execution_opportunity_window.get("state") or "").strip().upper()
             in {"OPEN", "PENDING_OPEN"}
             and execution_opportunity_window.get("anchor_reused") is False
+            and previous_opportunity_matches_instrument
         ):
             execution_opportunity_window = previous_opportunity_window
         for container in (result_payload, study_packet, packet):

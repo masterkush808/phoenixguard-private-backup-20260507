@@ -3252,6 +3252,45 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
     surface = _mapping(payload.get("surface"))
     artifacts = _mapping(payload.get("artifacts"))
     tracking_summary = _mapping(payload.get("tracking_summary"))
+    latest_signal = _mapping(payload.get("latest_signal"))
+    current_symbol = _text(
+        payload.get("symbol")
+        or latest_signal.get("market")
+        or latest_signal.get("symbol")
+        or tracking_summary.get("detected_market")
+    ).upper()
+    current_timeframe = _text(
+        payload.get("timeframe")
+        or latest_signal.get("focus_timeframe")
+        or latest_signal.get("timeframe")
+        or tracking_summary.get("detected_timeframe")
+    ).upper()
+    current_selector_fingerprint = _text(
+        payload.get("market_selector_visual_fingerprint")
+        or latest_signal.get("market_selector_visual_fingerprint")
+        or tracking_summary.get("market_selector_visual_fingerprint")
+    )
+    current_identity_locked = bool(
+        _text(payload.get("instrument_identity_status")).upper() == "LOCKED"
+        and _explicit_bool(payload.get("market_identity_confirmed")) is True
+        and _explicit_bool(payload.get("timeframe_identity_confirmed")) is True
+        and bool(current_symbol)
+        and bool(current_timeframe)
+        and current_selector_fingerprint.startswith("selector_v2_")
+    )
+    enforce_instrument_identity_contract = any(
+        key in payload
+        for key in (
+            "instrument_identity_status",
+            "market_identity_confirmed",
+            "timeframe_identity_confirmed",
+            "market_selector_visual_fingerprint",
+        )
+    )
+
+    def canonical_instrument_token(value: object) -> str:
+        return "".join(character for character in _text(value).upper() if character.isalnum())
+
     artifact_integrity = _mapping(tracking_summary.get("artifact_integrity"))
     scene_graph = _mapping(
         payload.get("scene_graph")
@@ -3313,6 +3352,22 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         primary_positioning_rows,
         reference_positioning_rows,
     )
+    trusted_positioning_object_ids = {id(row) for row in positioning_rows}
+    tracking_episode = _mapping(payload.get("tracking_episode"))
+    episode_anchor = _mapping(tracking_episode.get("anchor"))
+    episode_pair = _text(tracking_episode.get("pair")).upper()
+    episode_timeframe = _text(tracking_episode.get("timeframe")).upper()
+    episode_selector_fingerprint = _text(
+        tracking_episode.get("market_selector_visual_fingerprint")
+        or episode_anchor.get("market_selector_visual_fingerprint")
+    )
+    episode_identity_matches = bool(
+        canonical_instrument_token(episode_pair)
+        == canonical_instrument_token(current_symbol)
+        and episode_timeframe == current_timeframe
+        and bool(episode_selector_fingerprint)
+        and episode_selector_fingerprint == current_selector_fingerprint
+    )
     approved_reference_object_ids = {
         id(row) for row in reference_positioning_rows
     }
@@ -3321,8 +3376,63 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         *_overlay_rows(payload),
     ]
     for index, overlay in enumerate(source_rows[:256]):
+        source_object_id = id(overlay)
         raw_type = _text(overlay.get("type") or overlay.get("overlay_type") or overlay.get("kind"), "").upper()
         layer = _text(overlay.get("layer"), "").lower()
+        trusted_positioning_row = bool(
+            source_object_id in trusted_positioning_object_ids
+            and raw_type in _ORDER_POSITIONING_TYPES
+            and (episode_state != "ACTIVE" or episode_identity_matches)
+        )
+        overlay_symbol = _text(
+            overlay.get("symbol") or overlay.get("pair") or overlay.get("market")
+        ).upper()
+        overlay_timeframe = _text(overlay.get("timeframe") or overlay.get("tf")).upper()
+        overlay_selector_fingerprint = _text(
+            overlay.get("market_selector_visual_fingerprint")
+        )
+        overlay_identity_locked = _text(
+            overlay.get("instrument_identity_status")
+        ).upper() == "LOCKED"
+        positioning_identity_mismatch = bool(
+            (overlay_symbol and canonical_instrument_token(overlay_symbol) != canonical_instrument_token(current_symbol))
+            or (overlay_timeframe and overlay_timeframe != current_timeframe)
+            or (
+                overlay_selector_fingerprint
+                and current_selector_fingerprint
+                and overlay_selector_fingerprint != current_selector_fingerprint
+            )
+        )
+        if (
+            trusted_positioning_row
+            and current_identity_locked
+            and not positioning_identity_mismatch
+        ):
+            overlay = dict(overlay)
+            overlay.update(
+                {
+                    "symbol": current_symbol,
+                    "timeframe": current_timeframe,
+                    "market_selector_visual_fingerprint": current_selector_fingerprint,
+                    "instrument_identity_status": "LOCKED",
+                }
+            )
+            overlay_symbol = current_symbol
+            overlay_timeframe = current_timeframe
+            overlay_selector_fingerprint = current_selector_fingerprint
+            overlay_identity_locked = True
+        if enforce_instrument_identity_contract and not (
+            current_identity_locked
+            and overlay_identity_locked
+            and canonical_instrument_token(overlay_symbol)
+            == canonical_instrument_token(current_symbol)
+            and overlay_timeframe == current_timeframe
+            and (
+                not current_selector_fingerprint
+                or overlay_selector_fingerprint == current_selector_fingerprint
+            )
+        ):
+            continue
         source_positioning_mode = _text(
             overlay.get("positioning_mode"),
             "",
@@ -3340,7 +3450,7 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 source_positioning_mode not in allowed_modes
                 or (
                     source_positioning_mode == "REFERENCE"
-                    and id(overlay) not in approved_reference_object_ids
+                    and source_object_id not in approved_reference_object_ids
                 )
             ):
                 continue
@@ -3595,6 +3705,13 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             "frame_id": overlay_frame,
             "coordinate_space": _coordinate_space(overlay),
             "coordinate_units": coordinate_units,
+            "symbol": overlay_symbol,
+            "timeframe": overlay_timeframe,
+            "market_selector_visual_fingerprint": overlay_selector_fingerprint,
+            "instrument_identity_status": (
+                "LOCKED" if overlay_identity_locked else "UNPROVEN"
+            ),
+            "anchor_quality": _mapping(overlay.get("anchor_quality")),
         }
         if raw_type in _ORDER_POSITIONING_TYPES:
             positioning_status = _text(

@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any, Callable, Mapping, cast
 
 from phoenixguard.decision import model_council_v3 as model_council_module
+from phoenixguard.decision.model_council import legacy_engine as legacy_engine_module
 from phoenixguard.decision.model_council_v3 import (
     MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
     PG_EXECUTION_PACKET_SCHEMA_VERSION,
@@ -1813,6 +1814,175 @@ def test_contained_candidate_flip_cannot_replace_persisted_opportunity_window() 
     assert sell_packet["execution_opportunity_window_v3"]["opportunity_id"] != buy_opportunity_id
 
 
+def test_pair_change_hard_resets_non_executable_persisted_opportunity() -> None:
+    previous = {
+        "schema_version": "phoenixguard.execution_opportunity_window.v3",
+        "opportunity_key": "pgopp_old_cad_chf",
+        "opportunity_id": "pgepisode_old_cad_chf",
+        "session_id": "pocket-live-8788",
+        "symbol": "CAD/CHF OTC",
+        "timeframe": "M5",
+        "side": "SELL",
+        "candidate_id": "cad-chf-sell",
+        "opened_epoch": NOW - 2.0,
+        "opened_frame_id": 4,
+        "last_seen_epoch": NOW - 1.0,
+        "last_seen_frame_id": 205,
+        "last_seen_capture_count": 205,
+        "duration_sec": 30.0,
+        "valid_until_epoch": NOW + 28.0,
+        "remaining_sec": 28.0,
+        "state": "OPEN",
+    }
+
+    resolved = legacy_engine_module._resolve_execution_opportunity_window_v3(  # noqa: SLF001
+        {"execution_opportunity_window_v3": previous},
+        None,
+        candidate_id="gbp-usd-buy",
+        candidate_side="BUY",
+        entry_window={"duration_sec": 30.0},
+        executable=False,
+        naturally_disarmed=False,
+        now_epoch=NOW,
+        frame_id=206,
+        capture_count=206,
+        session_id="pocket-live-8788",
+        symbol="GBP/USD OTC",
+        timeframe="M5",
+    )
+
+    assert resolved == {}
+
+    executable = legacy_engine_module._resolve_execution_opportunity_window_v3(  # noqa: SLF001
+        {"execution_opportunity_window_v3": previous},
+        None,
+        candidate_id="gbp-usd-buy",
+        candidate_side="BUY",
+        entry_window={"duration_sec": 30.0},
+        executable=True,
+        naturally_disarmed=False,
+        now_epoch=NOW,
+        frame_id=207,
+        capture_count=207,
+        session_id="pocket-live-8788",
+        symbol="GBP/USD OTC",
+        timeframe="M5",
+    )
+    assert executable["symbol"] == "GBP/USD OTC"
+    assert executable["side"] == "BUY"
+    assert executable["opportunity_id"] != previous["opportunity_id"]
+
+
+def test_inactive_old_pair_thesis_cannot_age_a_new_pair_opportunity() -> None:
+    resolved = legacy_engine_module._resolve_execution_opportunity_window_v3(  # noqa: SLF001
+        {
+            "active_signal_thesis": {
+                "schema_version": "PG_SIGNAL_THESIS_V3",
+                "active": False,
+                "status": "PAIR_SWITCH_RESET",
+                "session_id": "pocket-live-8788",
+                "symbol": "CAD/CHF OTC",
+                "timeframe": "M5",
+                "side": "SELL",
+                "created_epoch_sec": NOW - 40.0,
+                "entry_frame_id": 90,
+                "entry_capture_count": 90,
+            }
+        },
+        None,
+        candidate_id="gbp-usd-sell",
+        candidate_side="SELL",
+        entry_window={"duration_sec": 30.0},
+        executable=True,
+        naturally_disarmed=False,
+        now_epoch=NOW,
+        frame_id=208,
+        capture_count=208,
+        session_id="pocket-live-8788",
+        symbol="GBP/USD OTC",
+        timeframe="M5",
+    )
+
+    assert resolved["reset_reason"] == "NEW_OPPORTUNITY_IDENTITY"
+    assert resolved["opened_epoch_sec"] == NOW
+    assert resolved["opened_frame_id"] == 208
+    assert resolved["symbol"] == "GBP/USD OTC"
+    assert resolved["state"] == "PENDING_OPEN"
+
+
+def test_facade_never_restores_working_snapshot_opportunity_from_previous_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_window = {
+        "schema_version": "phoenixguard.execution_opportunity_window.v3",
+        "opportunity_key": "pgopp_old_cad_chf",
+        "opportunity_id": "pgepisode_old_cad_chf",
+        "session_id": "pocket-live-8788",
+        "symbol": "CAD/CHF OTC",
+        "timeframe": "M5",
+        "side": "SELL",
+        "candidate_id": "cad-chf-sell",
+        "state": "OPEN",
+        "anchor_reused": True,
+    }
+    new_window = {
+        **old_window,
+        "opportunity_key": "pgopp_new_gbp_usd",
+        "opportunity_id": "pgepisode_new_gbp_usd",
+        "symbol": "GBP/USD OTC",
+        "side": "BUY",
+        "candidate_id": "gbp-usd-buy",
+        "anchor_reused": False,
+    }
+
+    def fake_evaluate(
+        _snapshot: Mapping[str, Any],
+        *,
+        previous_state: Mapping[str, Any] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        del now
+        assert previous_state is None
+        return {
+            "execution": {"enabled": False, "state": "WATCHING", "side": "BUY"},
+            "execution_opportunity_window_v3": dict(new_window),
+            "model_council": {
+                "final_state": "WATCHING",
+                "execution_opportunity_window_v3": dict(new_window),
+            },
+            "promotion_trace": {
+                "execution_opportunity_window_v3": dict(new_window),
+            },
+        }
+
+    monkeypatch.setattr(
+        legacy_engine_module,
+        "evaluate_model_council_v3",
+        fake_evaluate,
+    )
+    council = ModelCouncilV3()
+    council._stable_context_key = "CAD/CHF OTC|M5"  # noqa: SLF001
+    snapshot = _strong_snapshot("BUY", frame_id=208)
+    snapshot.update(
+        {
+            "symbol": "GBP/USD OTC",
+            "market": "GBP/USD OTC",
+            "execution_opportunity_window_v3": old_window,
+            "instrument_context": {
+                "display_symbol": "GBP/USD OTC",
+                "timeframe": "M5",
+                "session_id": "pocket-live-8788",
+            },
+        }
+    )
+
+    result = council.evaluate(snapshot, now_epoch=NOW)
+
+    assert "execution_opportunity_window_v3" not in result
+    assert "execution_opportunity_window_v3" not in result["model_council"]
+    assert "execution_opportunity_window_v3" not in result["promotion_trace"]
+
+
 def test_persisted_opportunity_deadline_is_schema_checked_and_never_extended() -> None:
     def snapshot(frame_id: int) -> dict[str, Any]:
         payload = _strong_snapshot("BUY", frame_id=frame_id)
@@ -1899,11 +2069,15 @@ def test_existing_signal_thesis_keeps_setup_open_beyond_transport_ttl_without_de
         payload["timing"]["expiry_seconds"] = 30
         payload["active_signal_thesis"] = {
             "schema_version": "PG_SIGNAL_THESIS_V3",
+            "active": True,
+            "status": "TRACKING",
+            "session_id": payload["session_id"],
+            "symbol": payload["symbol"],
+            "timeframe": payload["timeframe"],
             "side": "BUY",
             "created_epoch": NOW - 40.0,
             "entry_frame_id": 80,
             "entry_capture_count": 82,
-            "state": "ACTIVE",
         }
         return payload
 

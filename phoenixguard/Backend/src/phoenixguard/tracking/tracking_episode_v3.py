@@ -160,13 +160,6 @@ def _direction(*values: Any) -> str:
     return "HOLD"
 
 
-def _explicit_bool(values: Sequence[Any], *, fallback: bool) -> bool:
-    for value in values:
-        if isinstance(value, bool):
-            return value
-    return fallback
-
-
 def _json_safe(value: Any, *, depth: int = 0, field_name: str = "") -> Any:
     """Return a bounded, path-free JSON value for durable public episode state."""
 
@@ -507,6 +500,7 @@ def default_tracking_episode_v1(*, session_id: str = "") -> dict[str, Any]:
         "terminal_reason": "",
         "pair": "",
         "timeframe": "",
+        "market_selector_visual_fingerprint": "",
         "anchor": {},
         "committed_plan": {},
         "positioning_plan": {},
@@ -562,6 +556,7 @@ def normalize_tracking_episode_v1(
         "terminal_reason",
         "pair",
         "timeframe",
+        "market_selector_visual_fingerprint",
         "last_processed_closed_candle_key",
     ):
         normalized[key] = _text(source.get(key))
@@ -636,22 +631,43 @@ def _identity(session: Mapping[str, Any]) -> dict[str, Any]:
     tracking = _mapping(session.get("tracking_summary"))
     external = _mapping(session.get("external_frame_feed"))
     identity_state = _mapping(scene.get("closed_candle_identity_state"))
+    # ``forecast_snapshot_v3`` and its scene can legitimately lag one frame
+    # while the selector is binding a new pair.  Live signal/tracking identity
+    # therefore owns the current frame; frozen forecast identity is only a
+    # compatibility fallback when those current surfaces are empty.
+    latest_pair = _text(
+        latest.get("market"),
+        latest.get("symbol"),
+        latest.get("pair"),
+    ).upper()
+    tracking_pair = _text(
+        tracking.get("detected_market"),
+        tracking.get("market"),
+        tracking.get("symbol"),
+        tracking.get("pair"),
+    ).upper()
     pair = _text(
+        latest_pair,
+        tracking_pair,
         snapshot.get("pair"),
         scene.get("pair"),
-        latest.get("pair"),
-        latest.get("symbol"),
-        latest.get("market"),
-        tracking.get("detected_market"),
         external.get("symbol"),
         session.get("market"),
     ).upper()
+    latest_timeframe = _text(
+        latest.get("focus_timeframe"),
+        latest.get("timeframe"),
+    ).upper()
+    tracking_timeframe = _text(
+        tracking.get("detected_timeframe"),
+        tracking.get("focus_timeframe"),
+        tracking.get("timeframe"),
+    ).upper()
     timeframe = _text(
+        latest_timeframe,
+        tracking_timeframe,
         snapshot.get("timeframe"),
         scene.get("timeframe"),
-        latest.get("timeframe"),
-        latest.get("focus_timeframe"),
-        tracking.get("detected_timeframe"),
         external.get("timeframe"),
     ).upper()
     closed_key = _text(
@@ -674,23 +690,95 @@ def _identity(session: Mapping[str, Any]) -> dict[str, Any]:
     )
     match_scores = _mapping(scene.get("closed_candle_match_scores"))
     reacquisition = _mapping(identity_state.get("reacquisition"))
-    market_confirmed = _explicit_bool(
-        (
-            snapshot.get("market_identity_confirmed"),
-            scene.get("market_identity_confirmed"),
-        ),
-        fallback=bool(pair),
+    def canonical_identity(value: Any) -> str:
+        return "".join(
+            character
+            for character in _text(value).upper()
+            if character.isalnum()
+        )
+
+    live_pair_disagreement = bool(
+        latest_pair
+        and tracking_pair
+        and canonical_identity(latest_pair) != canonical_identity(tracking_pair)
     )
-    timeframe_confirmed = _explicit_bool(
-        (
-            snapshot.get("timeframe_identity_confirmed"),
-            scene.get("timeframe_identity_confirmed"),
-        ),
-        fallback=bool(timeframe),
+    live_timeframe_disagreement = bool(
+        latest_timeframe
+        and tracking_timeframe
+        and canonical_identity(latest_timeframe)
+        != canonical_identity(tracking_timeframe)
+    )
+    latest_fingerprint = _text(latest.get("market_selector_visual_fingerprint"))
+    tracking_fingerprint = _text(
+        tracking.get("market_selector_visual_fingerprint")
+    )
+    live_fingerprint_disagreement = bool(
+        latest_fingerprint
+        and tracking_fingerprint
+        and latest_fingerprint != tracking_fingerprint
+    )
+    identity_transition_pending = any(
+        value is True
+        or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+        for value in (
+            latest.get("market_selector_rebind_required"),
+            tracking.get("market_selector_rebind_required"),
+            latest.get("market_selector_studying_new_pair"),
+            tracking.get("market_selector_studying_new_pair"),
+        )
+    )
+    identity_consistent = not (
+        identity_transition_pending
+        or live_pair_disagreement
+        or live_timeframe_disagreement
+        or live_fingerprint_disagreement
+    )
+
+    def effective_confirmation(field: str, *, fallback: bool) -> bool:
+        live_explicit = [
+            value
+            for value in (latest.get(field), tracking.get(field))
+            if isinstance(value, bool)
+        ]
+        if live_explicit:
+            return False not in live_explicit
+        legacy_explicit = [
+            value
+            for value in (snapshot.get(field), scene.get(field))
+            if isinstance(value, bool)
+        ]
+        if legacy_explicit:
+            return False not in legacy_explicit
+        return fallback
+
+    market_confirmed = bool(
+        identity_consistent
+        and effective_confirmation(
+            "market_identity_confirmed",
+            # Older persisted IDLE sessions predate explicit confirmation
+            # fields.  A non-empty, contradiction-free live identity remains
+            # the bounded compatibility path for their preview/reference rows.
+            fallback=bool(pair),
+        )
+    )
+    timeframe_confirmed = bool(
+        identity_consistent
+        and effective_confirmation(
+            "timeframe_identity_confirmed",
+            fallback=bool(timeframe),
+        )
     )
     return {
         "pair": pair,
         "timeframe": timeframe,
+        "market_selector_visual_fingerprint": _text(
+            latest_fingerprint,
+            tracking_fingerprint,
+            snapshot.get("market_selector_visual_fingerprint"),
+            scene.get("market_selector_visual_fingerprint"),
+            identity_state.get("market_selector_visual_fingerprint"),
+            session.get("market_selector_visual_fingerprint"),
+        ),
         "market_identity_confirmed": market_confirmed,
         "timeframe_identity_confirmed": timeframe_confirmed,
         "closed_candle_key": closed_key,
@@ -746,6 +834,10 @@ def tracking_episode_readiness_v1(session: Mapping[str, Any]) -> dict[str, Any]:
         reasons.append("Wait for confirmed market identity.")
     if not identity["timeframe"] or not bool(identity["timeframe_identity_confirmed"]):
         reasons.append("Wait for confirmed timeframe identity.")
+    if not _text(identity.get("market_selector_visual_fingerprint")).startswith(
+        "selector_v2_"
+    ):
+        reasons.append("Wait for confirmed market selector identity.")
     if not identity["closed_candle_key"]:
         reasons.append("Wait for a confirmed closed-candle event.")
     if len(scene_steps) != TRACKING_EPISODE_HORIZON and len(lstm_steps) != TRACKING_EPISODE_HORIZON:
@@ -853,6 +945,7 @@ _CANONICAL_ANCHOR_QUALITY_FIELDS: Final = frozenset(
         "has_sequence_anchor",
         "inside_plot_area",
         "matches_symbol_timeframe",
+        "matches_selector_fingerprint",
         "chart_transform_valid",
     }
 )
@@ -869,6 +962,10 @@ _POSITIONING_SOURCE_EXPORT_FIELDS: Final = frozenset(
         "sequence_id",
         "chart_transform_id",
         "broker_source_lock_id",
+        "symbol",
+        "timeframe",
+        "market_selector_visual_fingerprint",
+        "instrument_identity_status",
         "coordinate_mode",
         "bounds",
         "bbox",
@@ -997,8 +1094,45 @@ def _canonical_positioning_source(
     *,
     stable_source_lock_id: str,
     image_size: Sequence[Any] | None,
+    identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     source = dict(row)
+    expected_symbol = _text(identity.get("pair")).upper()
+    expected_timeframe = _text(identity.get("timeframe")).upper()
+    expected_fingerprint = _text(identity.get("market_selector_visual_fingerprint"))
+    source_symbol = _text(
+        source.get("symbol"),
+        source.get("pair"),
+        source.get("market"),
+    ).upper()
+    source_timeframe = _text(source.get("timeframe"), source.get("tf")).upper()
+    source_fingerprint = _text(source.get("market_selector_visual_fingerprint"))
+    if (
+        not expected_symbol
+        or not expected_timeframe
+        or not expected_fingerprint.startswith("selector_v2_")
+        or identity.get("market_identity_confirmed") is not True
+        or identity.get("timeframe_identity_confirmed") is not True
+        or (source_symbol and source_symbol != expected_symbol)
+        or (source_timeframe and source_timeframe != expected_timeframe)
+        or (
+            source_fingerprint
+            and expected_fingerprint
+            and source_fingerprint != expected_fingerprint
+        )
+    ):
+        return {}
+    source.update(
+        {
+            "symbol": expected_symbol,
+            "timeframe": expected_timeframe,
+            "market_selector_visual_fingerprint": expected_fingerprint,
+            "instrument_identity_status": "LOCKED",
+            "pair_mismatch": False,
+            "timeframe_mismatch": False,
+            "selector_fingerprint_mismatch": False,
+        }
+    )
     quality = _mapping(source.get("anchor_quality"))
     if not _CANONICAL_ANCHOR_QUALITY_FIELDS.issubset(quality):
         # The market-object registry intentionally replaces the public V3
@@ -1086,6 +1220,15 @@ def order_positioning_source_rows_v3(
 
     frame_id = _current_positioning_frame_id(session)
     stable_source_lock_id = _stable_broker_source_lock_id(session)
+    identity = _identity(session)
+    if (
+        identity.get("market_identity_confirmed") is not True
+        or identity.get("timeframe_identity_confirmed") is not True
+        or not _text(
+            identity.get("market_selector_visual_fingerprint")
+        ).startswith("selector_v2_")
+    ):
+        return []
     dimensions = _source_image_dimensions(_scene_forecast(session))
     image_size: Sequence[Any] | None = dimensions
 
@@ -1119,6 +1262,7 @@ def order_positioning_source_rows_v3(
             raw,
             stable_source_lock_id=stable_source_lock_id,
             image_size=image_size,
+            identity=identity,
         )
         if not row or not _positioning_source_is_current(row, frame_id=frame_id):
             continue
@@ -2868,6 +3012,9 @@ def start_tracking_episode_v1(
         ),
         "pair": str(identity["pair"]),
         "timeframe": str(identity["timeframe"]),
+        "market_selector_visual_fingerprint": _text(
+            identity.get("market_selector_visual_fingerprint")
+        ),
         "market_identity_confirmed": bool(
             identity["market_identity_confirmed"]
         ),
@@ -2922,6 +3069,9 @@ def start_tracking_episode_v1(
         "terminal_reason": "",
         "pair": str(identity["pair"]),
         "timeframe": str(identity["timeframe"]),
+        "market_selector_visual_fingerprint": _text(
+            identity.get("market_selector_visual_fingerprint")
+        ),
         "anchor": _safe_mapping(anchor),
         "committed_plan": _committed_plan(session),
         "positioning_plan": _safe_mapping(positioning_plan),
@@ -3649,18 +3799,39 @@ def advance_tracking_episode_v1(
     identity = _identity(session)
     pair = str(identity["pair"])
     timeframe = str(identity["timeframe"])
+    selector_fingerprint = _text(
+        identity.get("market_selector_visual_fingerprint")
+    )
+    frozen_selector_fingerprint = _text(
+        normalized.get("market_selector_visual_fingerprint"),
+        _mapping(normalized.get("anchor")).get(
+            "market_selector_visual_fingerprint"
+        ),
+    )
+    pair_or_timeframe_changed = bool(
+        pair != normalized["pair"] or timeframe != normalized["timeframe"]
+    )
+    selector_changed = bool(
+        selector_fingerprint
+        and frozen_selector_fingerprint
+        and selector_fingerprint != frozen_selector_fingerprint
+    )
     if (
         pair
         and timeframe
         and bool(identity["market_identity_confirmed"])
         and bool(identity["timeframe_identity_confirmed"])
-        and (pair != normalized["pair"] or timeframe != normalized["timeframe"])
+        and (pair_or_timeframe_changed or selector_changed)
     ):
         normalized["state"] = "INVALIDATED"
         normalized["revision"] = int(normalized["revision"]) + 1
         normalized["updated_at"] = str(now_iso)
         normalized["completed_at"] = str(now_iso)
-        normalized["terminal_reason"] = "PAIR_OR_TIMEFRAME_CHANGED"
+        normalized["terminal_reason"] = (
+            "PAIR_OR_TIMEFRAME_CHANGED"
+            if pair_or_timeframe_changed
+            else "MARKET_SELECTOR_CHANGED"
+        )
         normalized["candidate_revision"] = _candidate_revision(session, identity)
         observation_state = _episode_observation_state(
             normalized,
@@ -3669,11 +3840,19 @@ def advance_tracking_episode_v1(
             now_iso=now_iso,
         )
         observation_state["status"] = "STOPPED"
-        observation_state["reason"] = "MARKET_CONTEXT_CHANGED"
+        observation_state["reason"] = (
+            "MARKET_CONTEXT_CHANGED"
+            if pair_or_timeframe_changed
+            else "MARKET_SELECTOR_CHANGED"
+        )
         normalized["observation_state"] = observation_state
         normalized["permission"] = _episode_permission(
             active=False,
-            reason="Pair or timeframe changed; start a new tracking episode after identity stabilizes.",
+            reason=(
+                "Pair or timeframe changed; start a new tracking episode after identity stabilizes."
+                if pair_or_timeframe_changed
+                else "Market selector changed; start a new tracking episode after identity stabilizes."
+            ),
         )
         return normalized
     if (

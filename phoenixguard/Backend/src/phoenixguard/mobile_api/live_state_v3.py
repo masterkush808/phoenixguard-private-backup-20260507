@@ -662,17 +662,249 @@ def _model_council_summary(session: Mapping[str, Any], study_packet: Mapping[str
 def _instrument(session: Mapping[str, Any]) -> dict[str, Any]:
     tracking = _mapping(session.get("tracking_summary"))
     signal = _mapping(session.get("latest_signal"))
-    market = _text(signal.get("market") or tracking.get("detected_market") or session.get("market"))
-    timeframe = _text(signal.get("focus_timeframe") or tracking.get("detected_timeframe"))
+    signal_market = _text(
+        signal.get("market") or signal.get("symbol") or signal.get("pair")
+    ).upper()
+    tracking_market = _text(
+        tracking.get("detected_market")
+        or tracking.get("market")
+        or tracking.get("symbol")
+        or tracking.get("pair")
+    ).upper()
+    signal_timeframe = _text(
+        signal.get("focus_timeframe") or signal.get("timeframe")
+    ).upper()
+    tracking_timeframe = _text(
+        tracking.get("detected_timeframe")
+        or tracking.get("focus_timeframe")
+        or tracking.get("timeframe")
+    ).upper()
+    market = _text(signal_market or tracking_market or session.get("market"))
+    timeframe = _text(signal_timeframe or tracking_timeframe)
+    market_confidence = _float(signal.get("market_confidence", tracking.get("market_confidence", 0.0)), 0.0)
+    timeframe_confidence = _float(signal.get("timeframe_confidence", tracking.get("timeframe_confidence", 0.0)), 0.0)
+    signal_fingerprint = _text(
+        signal.get("market_selector_visual_fingerprint")
+    )
+    tracking_fingerprint = _text(
+        tracking.get("market_selector_visual_fingerprint")
+    )
+    selector_fingerprint = _text(
+        signal_fingerprint
+        or tracking_fingerprint
+        or session.get("market_selector_visual_fingerprint")
+    )
+    controls = _mapping(session.get("execution_controls"))
+    min_market_confidence = _float(controls.get("min_market_confidence"), 0.42)
+    min_timeframe_confidence = _float(controls.get("min_timeframe_confidence"), 0.42)
+
+    def canonical_identity(value: Any) -> str:
+        return "".join(
+            character
+            for character in _text(value).upper()
+            if character.isalnum()
+        )
+
+    def distinct_identity(values: Sequence[Any]) -> bool:
+        tokens = {
+            canonical_identity(value)
+            for value in values
+            if _text(value)
+        }
+        return len(tokens) > 1
+
+    market_disagreement = distinct_identity(
+        (
+            signal.get("market"),
+            signal.get("symbol"),
+            signal.get("pair"),
+            tracking.get("detected_market"),
+            tracking.get("market"),
+            tracking.get("symbol"),
+            tracking.get("pair"),
+        )
+    )
+    timeframe_disagreement = distinct_identity(
+        (
+            signal.get("focus_timeframe"),
+            signal.get("timeframe"),
+            tracking.get("detected_timeframe"),
+            tracking.get("focus_timeframe"),
+            tracking.get("timeframe"),
+        )
+    )
+    fingerprint_disagreement = bool(
+        signal_fingerprint
+        and tracking_fingerprint
+        and signal_fingerprint != tracking_fingerprint
+    )
+    identity_transition_pending = bool(
+        _bool(signal.get("market_selector_rebind_required"), False)
+        or _bool(tracking.get("market_selector_rebind_required"), False)
+        or _bool(signal.get("market_selector_studying_new_pair"), False)
+        or _bool(tracking.get("market_selector_studying_new_pair"), False)
+    )
+    identity_disagreement = bool(
+        market_disagreement
+        or timeframe_disagreement
+        or fingerprint_disagreement
+    )
+    identity_safe = not identity_transition_pending and not identity_disagreement
+    derived_identity_confirmation = bool(
+        market
+        and timeframe
+        and selector_fingerprint.startswith("selector_v2_")
+        and identity_safe
+        and market_confidence >= min_market_confidence
+        and timeframe_confidence >= min_timeframe_confidence
+    )
+    market_confirmation_values = (
+        signal.get("market_identity_confirmed"),
+        tracking.get("market_identity_confirmed"),
+    )
+    timeframe_confirmation_values = (
+        signal.get("timeframe_identity_confirmed"),
+        tracking.get("timeframe_identity_confirmed"),
+    )
+
+    def effective_confirmation(values: Sequence[Any]) -> bool:
+        explicit = [value for value in values if isinstance(value, bool)]
+        if not identity_safe or False in explicit:
+            return False
+        if explicit:
+            return True
+        return derived_identity_confirmation
+
+    market_confirmed = effective_confirmation(market_confirmation_values)
+    timeframe_confirmed = effective_confirmation(timeframe_confirmation_values)
+    explicit_confirmation_present = bool(
+        any(isinstance(value, bool) for value in market_confirmation_values)
+        and any(isinstance(value, bool) for value in timeframe_confirmation_values)
+    )
+    if not identity_safe:
+        identity_confirmation_source = "REJECTED_TRANSITION_OR_DISAGREEMENT"
+    elif explicit_confirmation_present:
+        identity_confirmation_source = "EXPLICIT"
+    elif derived_identity_confirmation:
+        identity_confirmation_source = "STABLE_SELECTOR_CONFIDENCE"
+    else:
+        identity_confirmation_source = "UNPROVEN"
     return {
         "market": market,
         "timeframe": timeframe,
-        "market_confidence": _float(signal.get("market_confidence", tracking.get("market_confidence", 0.0)), 0.0),
-        "timeframe_confidence": _float(signal.get("timeframe_confidence", tracking.get("timeframe_confidence", 0.0)), 0.0),
-        "identity_locked": bool(market and timeframe),
+        "market_confidence": market_confidence,
+        "timeframe_confidence": timeframe_confidence,
+        "market_identity_confirmed": market_confirmed,
+        "timeframe_identity_confirmed": timeframe_confirmed,
+        "market_selector_visual_fingerprint": selector_fingerprint,
+        "identity_confirmation_source": identity_confirmation_source,
+        "identity_transition_pending": identity_transition_pending,
+        "identity_disagreement": identity_disagreement,
+        "market_identity_disagreement": market_disagreement,
+        "timeframe_identity_disagreement": timeframe_disagreement,
+        "selector_fingerprint_disagreement": fingerprint_disagreement,
+        "identity_locked": bool(market and timeframe and market_confirmed and timeframe_confirmed),
         "instrument_context": _mapping(tracking.get("instrument_context") or signal.get("instrument_context")),
         "symbol_context": _mapping(tracking.get("symbol_context") or signal.get("symbol_context")),
     }
+
+
+_TRUSTED_CURRENT_FRAME_OVERLAY_SOURCES = {
+    "broker_scene_graph_v3",
+    "live_state_v3_council_overlay",
+    "live_state_v3_study_overlay",
+    "lstm_candle_sequence_v3",
+    "market_object_tracker_v3",
+    "market_registry",
+    "scene_forecaster_v3",
+    "signal_thesis_tracker",
+}
+
+
+def _bind_overlay_instrument_identity(
+    overlays: Sequence[Mapping[str, Any]],
+    session: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Bind current-frame geometry to one confirmed pair/timeframe selector.
+
+    Explicit stale identity never gets overwritten.  It is marked as a
+    mismatch and removed before precision/rendering, while trusted producers
+    for this atomic frame can inherit the confirmed current identity.
+    """
+
+    instrument = _instrument(session)
+    current_symbol = _text(instrument.get("market")).upper()
+    current_timeframe = _text(instrument.get("timeframe")).upper()
+    current_fingerprint = _text(instrument.get("market_selector_visual_fingerprint"))
+    identity_locked = bool(instrument.get("identity_locked"))
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for raw in overlays:
+        row = dict(raw)
+        overlay_symbol = _text(
+            row.get("symbol") or row.get("asset") or row.get("pair") or row.get("market")
+        ).upper()
+        overlay_timeframe = _text(
+            row.get("timeframe") or row.get("tf") or row.get("interval")
+        ).upper()
+        overlay_fingerprint = _text(row.get("market_selector_visual_fingerprint"))
+        source_agent = _text(row.get("source_agent")).lower()
+        symbol_mismatch = bool(
+            row.get("pair_mismatch")
+            or row.get("symbol_mismatch")
+            or (overlay_symbol and current_symbol and overlay_symbol != current_symbol)
+        )
+        timeframe_mismatch = bool(
+            row.get("timeframe_mismatch")
+            or (overlay_timeframe and current_timeframe and overlay_timeframe != current_timeframe)
+        )
+        fingerprint_mismatch = bool(
+            row.get("selector_fingerprint_mismatch")
+            or (
+                overlay_fingerprint
+                and current_fingerprint
+                and overlay_fingerprint != current_fingerprint
+            )
+        )
+        identity_mismatch = bool(symbol_mismatch or timeframe_mismatch or fingerprint_mismatch)
+        trusted_current_frame = source_agent in _TRUSTED_CURRENT_FRAME_OVERLAY_SOURCES
+        explicit_identity_matches = bool(
+            overlay_symbol == current_symbol
+            and overlay_timeframe == current_timeframe
+            and (not current_fingerprint or not overlay_fingerprint or overlay_fingerprint == current_fingerprint)
+        )
+        can_bind = bool(identity_locked and not identity_mismatch and (trusted_current_frame or explicit_identity_matches))
+        if can_bind:
+            row.update(
+                {
+                    "symbol": current_symbol,
+                    "timeframe": current_timeframe,
+                    "market_selector_visual_fingerprint": current_fingerprint,
+                    "instrument_identity_status": "LOCKED",
+                    "pair_mismatch": False,
+                    "timeframe_mismatch": False,
+                    "selector_fingerprint_mismatch": False,
+                }
+            )
+            accepted.append(row)
+            continue
+
+        row.update(
+            {
+                "instrument_identity_status": "MISMATCH" if identity_mismatch else "UNPROVEN",
+                "pair_mismatch": symbol_mismatch,
+                "timeframe_mismatch": timeframe_mismatch,
+                "selector_fingerprint_mismatch": fingerprint_mismatch,
+                "identity_rejection_reason": (
+                    "overlay_instrument_identity_mismatch"
+                    if identity_mismatch
+                    else "current_instrument_identity_unproven"
+                ),
+                "precision_rejected": True,
+            }
+        )
+        rejected.append(row)
+    return accepted, rejected
 
 
 def _overlay_from_active_object(
@@ -1092,6 +1324,10 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "source_path",
         "source_key",
         "broker_source_lock_id",
+        "symbol",
+        "timeframe",
+        "market_selector_visual_fingerprint",
+        "instrument_identity_status",
         "frame_id",
         "sequence_id",
         "chart_transform_id",
@@ -1208,6 +1444,7 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "anchor_time_span",
         "anchor_evidence",
         "anchor_evidence_status",
+        "anchor_quality",
         "lifecycle_state",
         "ttl_ms",
         "reason",
@@ -4304,15 +4541,21 @@ def build_live_state_v3(
         broker_source_lock_id=_text(broker_source.get("lock_id")),
         now_ms=now_ms,
     )
-    precision_input_overlays = raw_overlays + thesis_overlays + study_overlays + council_overlays + broker_control_overlays
+    unbound_precision_input_overlays = (
+        raw_overlays + thesis_overlays + study_overlays + council_overlays + broker_control_overlays
+    )
+    precision_input_overlays, instrument_identity_rejections = _bind_overlay_instrument_identity(
+        unbound_precision_input_overlays,
+        session,
+    )
     if source_block_reason:
         precision_overlays = []
         precision_audit: dict[str, Any] = {
             "schema_version": OVERLAY_PRECISION_AUDIT_SCHEMA_VERSION,
             "frame_id": registry.frame_id,
-            "overlay_count": len(precision_input_overlays),
+            "overlay_count": len(unbound_precision_input_overlays),
             "rendered_count": 0,
-            "rejected_count": len(precision_input_overlays),
+            "rejected_count": len(unbound_precision_input_overlays),
             "precision_report": {
                 "unanchored_boxes": 0,
                 "oversized_boxes": 0,
@@ -4325,6 +4568,7 @@ def build_live_state_v3(
                 "outside_rejected": 0,
                 "unanchored_inputs_fixed": 0,
                 "broker_source_rejected": len(precision_input_overlays),
+                "instrument_identity_rejected": len(instrument_identity_rejections),
             },
             "source_block_reason": source_block_reason,
         }
@@ -4336,6 +4580,19 @@ def build_live_state_v3(
             current_side=current_side,
             frame_id=registry.frame_id,
         )
+        precision_report = _mapping(precision_audit.get("precision_report"))
+        precision_report["instrument_identity_rejected"] = len(instrument_identity_rejections)
+        precision_audit["precision_report"] = precision_report
+        precision_audit["instrument_identity_rejections"] = [
+            {
+                "overlay_id": _text(row.get("overlay_id") or row.get("id")),
+                "type": _text(row.get("type")).upper(),
+                "symbol": _text(row.get("symbol")),
+                "timeframe": _text(row.get("timeframe")),
+                "reason": _text(row.get("identity_rejection_reason")),
+            }
+            for row in instrument_identity_rejections[:32]
+        ]
     layer_manager = OverlayLayerManagerV3(active_overlay_mode, now_ms=visibility_now_ms)
     clean_overlays_only = str(os.getenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "0") or "0").strip().lower() not in {
         "0",
@@ -4362,9 +4619,14 @@ def build_live_state_v3(
         _dashboard_overlay_object(overlay, compact=clean_overlays_only)
         for overlay in overlay_source
     ]
-    total_overlay_count = len(precision_input_overlays) if source_block_reason else len(precision_overlays)
-    rejected_overlay_count = len(precision_input_overlays) if source_block_reason else len(
-        [overlay for overlay in precision_overlays if overlay.get("precision_rejected")]
+    total_overlay_count = (
+        len(unbound_precision_input_overlays)
+        if source_block_reason
+        else len(precision_overlays) + len(instrument_identity_rejections)
+    )
+    rejected_overlay_count = len(unbound_precision_input_overlays) if source_block_reason else (
+        len(instrument_identity_rejections)
+        + len([overlay for overlay in precision_overlays if overlay.get("precision_rejected")])
     )
     renderable_overlay_count = len(overlays)
     hidden_overlay_count = max(0, total_overlay_count - renderable_overlay_count - rejected_overlay_count)
@@ -4493,6 +4755,18 @@ def build_live_state_v3(
         "broker_source_lock_id": broker_source_lock_id,
         "symbol": symbol,
         "timeframe": timeframe,
+        "market_selector_visual_fingerprint": _text(
+            instrument_payload.get("market_selector_visual_fingerprint")
+        ),
+        "instrument_identity_status": (
+            "LOCKED" if instrument_payload.get("identity_locked") else "UNPROVEN"
+        ),
+        "market_identity_confirmed": bool(
+            instrument_payload.get("market_identity_confirmed")
+        ),
+        "timeframe_identity_confirmed": bool(
+            instrument_payload.get("timeframe_identity_confirmed")
+        ),
         "requested_mode": requested_overlay_mode,
         "active_mode": active_overlay_mode,
         "visible_layers": visible_layers,
@@ -4627,6 +4901,18 @@ def build_live_state_v3(
         "broker_source_lock_id": live_visual_state["broker_source_lock_id"],
         "symbol": live_visual_state["symbol"],
         "timeframe": live_visual_state["timeframe"],
+        "market_selector_visual_fingerprint": live_visual_state[
+            "market_selector_visual_fingerprint"
+        ],
+        "instrument_identity_status": live_visual_state[
+            "instrument_identity_status"
+        ],
+        "market_identity_confirmed": live_visual_state[
+            "market_identity_confirmed"
+        ],
+        "timeframe_identity_confirmed": live_visual_state[
+            "timeframe_identity_confirmed"
+        ],
         "requested_mode": live_visual_state["requested_mode"],
         "active_mode": live_visual_state["active_mode"],
         "visible_layers": live_visual_state["visible_layers"],

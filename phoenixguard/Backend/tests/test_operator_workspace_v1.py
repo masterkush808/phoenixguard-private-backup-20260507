@@ -619,6 +619,16 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload(side="BUY")
+    payload.update(
+        {
+            "symbol": "EUR/USD",
+            "timeframe": "M5",
+            "market_selector_visual_fingerprint": "selector_v2_eurusd",
+            "instrument_identity_status": "LOCKED",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        }
+    )
     payload["tracking_episode"] = {
         "schema_version": "PG_TRACKING_EPISODE_V1",
         "state": "IDLE",
@@ -636,6 +646,10 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
                 "bounds": [0.61, 0.46, 0.66, 0.50],
                 "frame_id": 14,
                 "coordinate_mode": "CHART_NORMALIZED",
+                "symbol": "EUR/USD",
+                "timeframe": "M5",
+                "market_selector_visual_fingerprint": "selector_v2_eurusd",
+                "instrument_identity_status": "LOCKED",
             },
             {
                 "overlay_id": "adaptive-target",
@@ -645,6 +659,10 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
                 "bounds": [0.62, 0.20, 0.72, 0.27],
                 "frame_id": 14,
                 "coordinate_mode": "CHART_NORMALIZED",
+                "symbol": "EUR/USD",
+                "timeframe": "M5",
+                "market_selector_visual_fingerprint": "selector_v2_eurusd",
+                "instrument_identity_status": "LOCKED",
             },
         ]
     }
@@ -717,6 +735,13 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
     assert all(row["coordinate_units"] == "normalized" for row in positioning_rows)
     assert all(row["lifecycle"] == "current" for row in positioning_rows)
     assert all(row["label_hidden"] is False for row in positioning_rows)
+    assert all(row["symbol"] == "EUR/USD" for row in positioning_rows)
+    assert all(row["timeframe"] == "M5" for row in positioning_rows)
+    assert all(
+        row["market_selector_visual_fingerprint"] == "selector_v2_eurusd"
+        for row in positioning_rows
+    )
+    assert all(row["instrument_identity_status"] == "LOCKED" for row in positioning_rows)
     assert {
         row.get("geometry_role") for row in positioning_rows
     } == {"FORWARD_REACTION_WINDOW"}
@@ -1263,7 +1288,12 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
 ) -> None:
     payload = _fresh_payload(side="BUY")
     episode = _mutable_mapping(payload["tracking_episode"])
-    episode["anchor"] = {"frame_id": 9, "closed_candle_key": "closed-9"}
+    episode["anchor"] = {
+        "frame_id": 9,
+        "closed_candle_key": "closed-9",
+        "market_selector_visual_fingerprint": "selector_v2_eurusd",
+    }
+    episode["market_selector_visual_fingerprint"] = "selector_v2_eurusd"
     positioning_plan: dict[str, object] = {
         "schema_version": "PG_ORDER_POSITIONING_PLAN_V3",
         "frozen": True,
@@ -1326,6 +1356,7 @@ def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_
     episode["positioning_plan"] = positioning_plan
     tracking = _mutable_mapping(payload["tracking_summary"])
     tracking["tracked_candles"] = _positioning_anchor_rows()
+    tracking["market_selector_visual_fingerprint"] = "selector_v2_eurusd"
     payload["overlays"] = {
         "objects": [
             {
@@ -4090,6 +4121,11 @@ def test_compact_live_chain_preserves_bounded_tracker_close_for_operator(
         "tracking_summary": {
             "detected_market": "EUR/USD OTC",
             "detected_timeframe": "M5",
+            "market_confidence": 0.93,
+            "timeframe_confidence": 0.91,
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_eurusdotc",
             "artifact_integrity": {
                 "matches_selected_plane": True,
                 "chart": {"width": 1000, "height": 700},
@@ -4107,6 +4143,11 @@ def test_compact_live_chain_preserves_bounded_tracker_close_for_operator(
         "latest_signal": {
             "market": "EUR/USD OTC",
             "focus_timeframe": "M5",
+            "market_confidence": 0.93,
+            "timeframe_confidence": 0.91,
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_eurusdotc",
             "action": "BUY",
             "side": "BUY",
             "published_epoch": 100.0,
@@ -5155,6 +5196,12 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
         "model_vote_frame_id": 22,
         "model_capture_epoch": 199.0,
         "tracking_enabled": True,
+        "symbol": "GBP/USD",
+        "timeframe": "M5",
+        "market_selector_visual_fingerprint": "selector_v2_gbpusd",
+        "instrument_identity_status": "LOCKED",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
         "execution_controls": snapshot["execution_controls"],
         "tracking_summary": {
             "detected_market": "GBP/USD",
@@ -5198,6 +5245,10 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
                     "source_agent": "model_council_v3",
                     "source_version": "PG_V3_OVERLAY_OBJECT_V1",
                     "broker_source_lock_id": "broker-lock-22",
+                    "symbol": "GBP/USD",
+                    "timeframe": "M5",
+                    "market_selector_visual_fingerprint": "selector_v2_gbpusd",
+                    "instrument_identity_status": "LOCKED",
                     "source_path": r"C:\private\overlay.json",
                 }
             ]
@@ -5214,10 +5265,14 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
                 "type": overlay_type,
                 "layer": layer,
                 "bounds": [12 + index, 22, 42 + index, 62],
-                "frame_id": 22,
-                "coordinate_mode": "CHART_IMAGE_SPACE",
-                "lifecycle_state": lifecycle,
-            }
+                    "frame_id": 22,
+                    "coordinate_mode": "CHART_IMAGE_SPACE",
+                    "lifecycle_state": lifecycle,
+                    "symbol": "GBP/USD",
+                    "timeframe": "M5",
+                    "market_selector_visual_fingerprint": "selector_v2_gbpusd",
+                    "instrument_identity_status": "LOCKED",
+                }
             for index, (overlay_id, overlay_type, layer, lifecycle) in enumerate(
                 (
                     ("route-bounds", "CHART_BOUNDS", "chart_bounds", "ACTIVE"),

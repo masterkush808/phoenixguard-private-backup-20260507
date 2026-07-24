@@ -359,6 +359,30 @@ def _resolve_execution_opportunity_window_v3(
     previous_key = str(previous.get("opportunity_key") or "").strip()
     previous_frame_id = _int(previous.get("last_seen_frame_id"), 0)
     previous_capture_count = _int(previous.get("last_seen_capture_count"), 0)
+    # A short non-executable flicker may retain an opportunity only inside the
+    # same instrument context.  Pair/timeframe changes are hard boundaries:
+    # carrying an old deadline across them can publish (or execute) a valid
+    # opportunity for the chart that is no longer on screen.
+    previous_instrument_context_matches = bool(
+        previous
+        and str(previous.get("session_id") or "").strip().upper()
+        == str(session_id or "").strip().upper()
+        and str(previous.get("symbol") or "").strip().upper()
+        == str(symbol or "").strip().upper()
+        and str(previous.get("timeframe") or "").strip().upper()
+        == str(timeframe or "").strip().upper()
+        and bool(str(session_id or "").strip())
+        and bool(str(symbol or "").strip())
+        and bool(str(timeframe or "").strip())
+    )
+    if previous and not previous_instrument_context_matches:
+        # Treat a confirmed instrument transition as an empty prior state.  A
+        # non-executable read remains empty, while an executable read may open
+        # a brand-new opportunity for the chart that is actually visible.
+        previous = {}
+        previous_key = ""
+        previous_frame_id = 0
+        previous_capture_count = 0
     lineage_not_advanced = bool(
         previous
         and (
@@ -483,7 +507,33 @@ def _resolve_execution_opportunity_window_v3(
             or active_thesis.get("opened_epoch"),
             0.0,
         )
-        if not previous and thesis_side == _side(candidate_side) and 0.0 < thesis_opened_epoch <= float(now_epoch):
+        def normalize_symbol(value: Any) -> str:
+            return "".join(
+                character
+                for character in str(value or "").strip().upper()
+                if character.isalnum()
+            )
+
+        thesis_session = str(active_thesis.get("session_id") or "").strip().upper()
+        thesis_symbol = normalize_symbol(
+            active_thesis.get("symbol") or active_thesis.get("symbol_key")
+        )
+        thesis_timeframe = str(active_thesis.get("timeframe") or "").strip().upper()
+        active_thesis_matches_context = bool(
+            active_thesis.get("active") is True
+            and thesis_session
+            and thesis_session == str(session_id or "").strip().upper()
+            and thesis_symbol
+            and thesis_symbol == normalize_symbol(symbol)
+            and thesis_timeframe
+            and thesis_timeframe == str(timeframe or "").strip().upper()
+        )
+        if (
+            not previous
+            and active_thesis_matches_context
+            and thesis_side == _side(candidate_side)
+            and 0.0 < thesis_opened_epoch <= float(now_epoch)
+        ):
             return open_window(
                 reset_reason="MIGRATED_FROM_ACTIVE_SIGNAL_THESIS",
                 opened_epoch_override=thesis_opened_epoch,
@@ -8133,9 +8183,28 @@ class ModelCouncilV3:
                 str(current_window.get("state") or "").upper() == "OPEN"
                 and current_window.get("anchor_reused") is False
             ):
-                previous_window = _execution_opportunity_window_from_state(self._previous_result) or _execution_opportunity_window_from_state(
-                    working
-                )
+                current_session_id = str(working.get("session_id") or "").strip().upper()
+
+                def matches_current_instrument(window: Mapping[str, Any]) -> bool:
+                    return bool(
+                        window
+                        and current_session_id
+                        and context_symbol_for_switch
+                        and context_timeframe
+                        and str(window.get("session_id") or "").strip().upper()
+                        == current_session_id
+                        and str(window.get("symbol") or "").strip().upper()
+                        == context_symbol_for_switch
+                        and str(window.get("timeframe") or "").strip().upper()
+                        == context_timeframe
+                    )
+
+                previous_window: dict[str, Any] = {}
+                for source_state in (self._previous_result, working):
+                    candidate_window = _execution_opportunity_window_from_state(source_state)
+                    if matches_current_instrument(candidate_window):
+                        previous_window = candidate_window
+                        break
                 if previous_window:
                     result["execution_opportunity_window_v3"] = previous_window
                 else:

@@ -28,6 +28,7 @@ from phoenixguard.tracking.tracking_episode_v3 import (
     build_tracking_order_reference_map_v3,
     build_tracking_order_positioning_candidate_v3,
     default_tracking_episode_v1,
+    normalize_tracking_episode_v1,
     order_positioning_source_rows_v3,
     reset_tracking_episode_v1,
     start_tracking_episode_v1,
@@ -86,12 +87,16 @@ def _scene(key: str = "closed-0", sequence: int = 10, side: str = "BUY") -> dict
         "timeframe": "M5",
         "market_identity_confirmed": True,
         "timeframe_identity_confirmed": True,
+        "frame_id": sequence,
+        "display_frame_id": sequence,
+        "geometry_frame_match_verified": True,
         "closed_candle_key": key,
         "closed_candle_sequence": sequence,
         "source_image_size": [1000, 500],
         "closed_candle_identity_state": {
             "event_key": key,
             "event_sequence": sequence,
+            "market_selector_visual_fingerprint": "selector_v2_eurusd_otc",
             "latest_closed": {
                 "track_id": str(sequence),
                 "side": side,
@@ -196,6 +201,7 @@ def _ready_session(
     return {
         "session_id": "episode-test",
         "market": "EURUSD_OTC",
+        "market_selector_visual_fingerprint": "selector_v2_eurusd_otc",
         "tracking_enabled": True,
         "frame_index": sequence,
         "display_frame_id": sequence,
@@ -213,6 +219,7 @@ def _ready_session(
         "forecast_snapshot_v3": {
             "pair": "EURUSD_OTC",
             "timeframe": "M5",
+            "market_selector_visual_fingerprint": "selector_v2_eurusd_otc",
             "market_identity_confirmed": True,
             "timeframe_identity_confirmed": True,
             "scene_forecast_contribution": scene,
@@ -226,6 +233,7 @@ def _ready_session(
         "latest_signal": {
             "market": "EURUSD_OTC",
             "focus_timeframe": "M5",
+            "market_selector_visual_fingerprint": "selector_v2_eurusd_otc",
             "action": side,
             "execution_action": "HOLD",
             "execution_permission": "WAIT",
@@ -236,6 +244,7 @@ def _ready_session(
         "tracking_summary": {
             "detected_market": "EURUSD_OTC",
             "detected_timeframe": "M5",
+            "market_selector_visual_fingerprint": "selector_v2_eurusd_otc",
             "tracked_candles": [
                 {
                     "track_id": str(sequence),
@@ -399,6 +408,7 @@ def _positioning_overlay(
             "has_sequence_anchor": True,
             "inside_plot_area": True,
             "matches_symbol_timeframe": True,
+            "matches_selector_fingerprint": True,
             "chart_transform_valid": True,
         },
     }
@@ -545,6 +555,128 @@ def test_current_positioning_snapshot_prevents_registry_rebuild(
     rows = order_positioning_source_rows_v3(session)
 
     assert [row["track_id"] for row in rows] == ["current-snapshot-source"]
+
+
+def test_idle_positioning_rows_prefer_current_confirmed_identity_over_stale_forecast() -> None:
+    session = _ready_session(side="BUY")
+    session["tracking_episode_v1"] = default_tracking_episode_v1(
+        session_id="episode-test"
+    )
+    latest = cast(dict[str, Any], session["latest_signal"])
+    latest.update(
+        {
+            "market": "GBP/USD OTC",
+            "focus_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+        }
+    )
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking.update(
+        {
+            "detected_market": "GBP/USD OTC",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
+            "order_positioning_sources_v3": {
+                "frame_id": 10,
+                "objects": [
+                    _positioning_overlay(
+                        "DEMAND_ZONE",
+                        "BUY",
+                        [300.0, 300.0, 650.0, 340.0],
+                        track_id="idle-current-preview",
+                    )
+                ],
+            },
+        }
+    )
+    snapshot = cast(dict[str, Any], session["forecast_snapshot_v3"])
+    snapshot.update(
+        {
+            "pair": "CAD/CHF OTC",
+            "market_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_cad_chf",
+        }
+    )
+    stale_scene = cast(dict[str, Any], snapshot["scene_forecast_contribution"])
+    stale_scene.update(
+        {
+            "pair": "CAD/CHF OTC",
+            "market_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_cad_chf",
+        }
+    )
+
+    rows = order_positioning_source_rows_v3(session)
+
+    assert session["tracking_episode_v1"]["state"] == "IDLE"
+    assert [row["track_id"] for row in rows] == ["idle-current-preview"]
+    assert rows[0]["symbol"] == "GBP/USD OTC"
+    assert rows[0]["timeframe"] == "M5"
+    assert (
+        rows[0]["market_selector_visual_fingerprint"]
+        == "selector_v2_gbp_usd"
+    )
+
+
+def test_positioning_rows_fail_closed_when_live_confirmation_flags_conflict() -> None:
+    session = _ready_session(side="BUY")
+    latest = cast(dict[str, Any], session["latest_signal"])
+    latest.update(
+        {
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        }
+    )
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    tracking.update(
+        {
+            "market_identity_confirmed": False,
+            "timeframe_identity_confirmed": True,
+            "order_positioning_sources_v3": {
+                "frame_id": 10,
+                "objects": [
+                    _positioning_overlay(
+                        "DEMAND_ZONE",
+                        "BUY",
+                        [300.0, 300.0, 650.0, 340.0],
+                        track_id="conflicting-confirmation-preview",
+                    )
+                ],
+            },
+        }
+    )
+
+    assert order_positioning_source_rows_v3(session) == []
+
+
+def test_positioning_and_episode_readiness_require_v2_selector_identity() -> None:
+    session = _ready_session(side="BUY")
+    latest = cast(dict[str, Any], session["latest_signal"])
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    snapshot = cast(dict[str, Any], session["forecast_snapshot_v3"])
+    for current in (latest, tracking, snapshot):
+        current["market_selector_visual_fingerprint"] = "selector_v1_legacy"
+    tracking["order_positioning_sources_v3"] = {
+        "frame_id": 10,
+        "objects": [
+            _positioning_overlay(
+                "DEMAND_ZONE",
+                "BUY",
+                [300.0, 300.0, 650.0, 340.0],
+                track_id="legacy-selector-preview",
+            )
+        ],
+    }
+
+    readiness = tracking_episode_readiness_v1(session)
+
+    assert order_positioning_source_rows_v3(session) == []
+    assert readiness["ready"] is False
+    assert "Wait for confirmed market selector identity." in readiness["reasons"]
 
 
 def test_reprojection_anchors_use_scene_closed_tail_when_compact_rows_omit_state() -> None:
@@ -1204,6 +1336,58 @@ def test_tracking_episode_is_idempotent_and_advances_only_on_new_closed_events()
     assert first_event["events"][0]["direction_agreement"] is True
     assert first_event["baseline_forecasts"] == started["baseline_forecasts"]
     assert first_event["committed_plan"] == started["committed_plan"]
+
+
+def test_tracking_episode_persists_and_compares_opening_selector_fingerprint() -> None:
+    idle = default_tracking_episode_v1(session_id="episode-test")
+    assert idle["market_selector_visual_fingerprint"] == ""
+
+    session = _ready_session()
+    latest = cast(dict[str, Any], session["latest_signal"])
+    tracking = cast(dict[str, Any], session["tracking_summary"])
+    for current in (latest, tracking):
+        current["market_selector_visual_fingerprint"] = "selector_v2_eurusd"
+
+    started = start_tracking_episode_v1(
+        idle,
+        session,
+        episode_id="episode-selector-provenance",
+        now_iso="2026-07-18T00:00:00+00:00",
+    )
+    restored = normalize_tracking_episode_v1(
+        deepcopy(started),
+        session_id="episode-test",
+    )
+
+    assert started["market_selector_visual_fingerprint"] == "selector_v2_eurusd"
+    assert (
+        started["anchor"]["market_selector_visual_fingerprint"]
+        == "selector_v2_eurusd"
+    )
+    assert (
+        restored["market_selector_visual_fingerprint"]
+        == "selector_v2_eurusd"
+    )
+    assert (
+        restored["anchor"]["market_selector_visual_fingerprint"]
+        == "selector_v2_eurusd"
+    )
+
+    rebound = deepcopy(session)
+    cast(dict[str, Any], rebound["latest_signal"])[
+        "market_selector_visual_fingerprint"
+    ] = "selector_v2_rebound"
+    cast(dict[str, Any], rebound["tracking_summary"])[
+        "market_selector_visual_fingerprint"
+    ] = "selector_v2_rebound"
+    invalidated = advance_tracking_episode_v1(
+        restored,
+        rebound,
+        now_iso="2026-07-18T00:00:01+00:00",
+    )
+
+    assert invalidated["state"] == "INVALIDATED"
+    assert invalidated["terminal_reason"] == "MARKET_SELECTOR_CHANGED"
 
 
 def test_start_freezes_latest_closed_candle_and_two_real_distinct_paths() -> None:
@@ -2217,6 +2401,10 @@ def test_tracking_episode_rejects_stale_closed_sequence_and_invalidates_identity
     )
     changed = _next_closed_event(session, step=1)
     cast(dict[str, Any], changed["forecast_snapshot_v3"])["pair"] = "GBPUSD_OTC"
+    cast(dict[str, Any], changed["latest_signal"])["market"] = "GBPUSD_OTC"
+    cast(dict[str, Any], changed["tracking_summary"])[
+        "detected_market"
+    ] = "GBPUSD_OTC"
     cast(
         dict[str, Any],
         cast(dict[str, Any], changed["forecast_snapshot_v3"])[

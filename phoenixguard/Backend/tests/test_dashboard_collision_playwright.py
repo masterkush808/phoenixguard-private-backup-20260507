@@ -4242,6 +4242,57 @@ def test_all_overlay_toggles_are_local_and_reuse_detached_semantic_nodes(
         }
 
 
+def test_reused_render_key_replaces_a_detached_node_when_svg_type_changes(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    initial_support = next(
+        row for row in initial["overlays"] if row["id"] == "support-current"
+    )
+    initial_support["forecast_role"] = "band_90"
+
+    updated = copy.deepcopy(initial)
+    updated["revision"] = 43
+    updated["freshness"]["observed_at"] += 1
+    for overlay in updated["overlays"]:
+        if overlay["id"] == "support-current":
+            overlay["forecast_role"] = "upper_90"
+
+    with _dashboard_page(chromium_browser, initial) as page:
+        page.locator("#layers-all").click()
+        selector = '#surface-line-svg [data-overlay-id="support-current"]'
+        page.wait_for_function(
+            "selector => document.querySelector(selector)?.localName === 'polygon'",
+            arg=selector,
+        )
+        page.evaluate(
+            """
+            () => {
+              window.__oldTypedLineNode = document.querySelector(
+                '#surface-line-svg [data-overlay-id="support-current"]'
+              );
+              window.PhoenixGuardDashboard.toggleFamily('trendlines');
+            }
+            """
+        )
+        assert page.locator(selector).count() == 0
+
+        page.evaluate("payload => window.renderOperatorState(payload)", updated)
+        page.evaluate("() => window.PhoenixGuardDashboard.toggleFamily('trendlines')")
+        page.wait_for_function(
+            "selector => document.querySelector(selector)?.localName === 'polyline'",
+            arg=selector,
+        )
+
+        assert page.locator(selector).count() == 1
+        assert page.locator(selector).evaluate("node => node.localName") == "polyline"
+        assert page.evaluate("() => window.__oldTypedLineNode.isConnected") is False
+        page.evaluate("() => window.PhoenixGuardDashboard.toggleFamily('trendlines')")
+        page.evaluate("() => window.PhoenixGuardDashboard.toggleFamily('trendlines')")
+        assert page.locator(selector).count() == 1
+        assert page.locator(selector).evaluate("node => node.localName") == "polyline"
+
+
 @pytest.mark.parametrize("viewport", [(390, 844), (360, 800)])
 def test_mobile_overlay_library_has_tappable_controls_without_page_overflow(
     chromium_browser: Browser,
@@ -5259,6 +5310,78 @@ def test_chart_and_new_frame_overlays_swap_only_after_the_image_is_ready(
         assert page.locator('[data-overlay-id="new-demand"]').count() == 0
 
 
+def test_queued_same_image_viewport_refinement_projects_the_queued_geometry(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    pending = copy.deepcopy(initial)
+    pending["revision"] = 43
+    pending["surface"].update(
+        {
+            "semantic_identity": "surface-eur-usd-m5-frame-43",
+            "frame_id": 43,
+            "primary_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=43",
+            "fallback_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+            "focus_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+            "overlay_viewport": {
+                "source_space": "chart",
+                "target_space": "window",
+                "coordinate_units": "normalized",
+                "bounds": [0.10, 0.12, 0.90, 0.92],
+            },
+        }
+    )
+    for overlay in pending["overlays"]:
+        overlay["frame_id"] = 43
+
+    queued = copy.deepcopy(pending)
+    queued["revision"] = 44
+    queued["surface"]["overlay_viewport"]["bounds"] = [0.20, 0.22, 0.80, 0.82]
+
+    with _dashboard_page(
+        chromium_browser,
+        initial,
+        delayed_artifact_frames={43: 0.25},
+    ) as page:
+        page.locator("#layers-all").click()
+        page.evaluate(
+            "payloads => { window.renderOperatorState(payloads[0]); window.renderOperatorState(payloads[1]); }",
+            [pending, queued],
+        )
+        page.wait_for_function(
+            """
+            () => document.querySelector('#surface-canvas').getAttribute('aria-busy') === 'false'
+              && document.querySelector('#surface-raw').src.includes('frame_id=43')
+            """,
+            timeout=10_000,
+        )
+        projected = page.evaluate(
+            """
+            () => {
+              const image = document.querySelector('#surface-raw').getBoundingClientRect();
+              const box = document.querySelector(
+                '[data-overlay-id="demand-current"]'
+              ).getBoundingClientRect();
+              return [
+                (box.left - image.left) / image.width,
+                (box.top - image.top) / image.height,
+                box.width / image.width,
+                box.height / image.height,
+              ];
+            }
+            """
+        )
+        # Queued viewport [0.20, 0.22, 0.80, 0.82] applied to the demand
+        # bounds [0.08, 0.18, 0.46, 0.72]. The pending viewport would yield
+        # [0.164, 0.264, 0.304, 0.432] and must never be used here.
+        for actual, expected in zip(
+            projected,
+            (0.248, 0.328, 0.228, 0.324),
+            strict=True,
+        ):
+            assert abs(float(actual) - expected) <= 0.003
+
+
 def test_nonvisual_operator_revision_does_not_reload_the_same_broker_frame(
     chromium_browser: Browser,
 ) -> None:
@@ -5406,3 +5529,121 @@ def test_pair_switch_resets_local_history_namespace(
         assert page.locator(".history-copy").all_inner_texts() == [
             "GBP/USD first local upward move."
         ]
+
+
+def test_pair_switch_supersedes_inflight_surface_and_clears_old_geometry(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    initial["surface"]["semantic_identity"] = "surface-eur-usd-m5"
+
+    next_eur_frame = copy.deepcopy(initial)
+    next_eur_frame["revision"] = 43
+    next_eur_frame["freshness"]["observed_at"] += 1
+    next_eur_frame["surface"].update(
+        {
+            "frame_id": 43,
+            "primary_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=43",
+            "fallback_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+            "focus_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+        }
+    )
+    for overlay in next_eur_frame["overlays"]:
+        overlay["frame_id"] = 43
+        if overlay["id"] == "demand-current":
+            overlay["id"] = "eur-demand-frame-43"
+
+    switched = copy.deepcopy(next_eur_frame)
+    switched["revision"] = 44
+    switched["market"]["symbol"] = "GBP/USD"
+    switched["freshness"]["observed_at"] += 1
+    switched["surface"].update(
+        {
+            "semantic_identity": "surface-gbp-usd-m5",
+            "frame_id": 44,
+            "primary_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=44",
+            "fallback_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=44",
+            "focus_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=44",
+        }
+    )
+    for overlay in switched["overlays"]:
+        overlay["frame_id"] = 44
+        if overlay["id"] == "eur-demand-frame-43":
+            overlay.update(
+                {
+                    # Reuse the committed old-pair semantic id deliberately.
+                    # The pair namespace boundary must still create a fresh
+                    # node rather than reviving its detached predecessor.
+                    "id": "demand-current",
+                    "bounds": [0.55, 0.20, 0.85, 0.35],
+                }
+            )
+
+    with _dashboard_page(
+        chromium_browser,
+        initial,
+        delayed_artifact_frames={43: 0.35},
+    ) as page:
+        page.locator("#layers-all").click()
+        transition = page.evaluate(
+            """
+            payloads => {
+              window.__oldPairOverlayNode = document.querySelector(
+                '[data-overlay-id="demand-current"]'
+              );
+              window.renderOperatorState(payloads[0]);
+              window.renderOperatorState(payloads[1]);
+              const image = document.querySelector('#surface-raw');
+              return {
+                busy: document.querySelector('#surface-canvas').getAttribute('aria-busy'),
+                source: image.src,
+                oldCommittedGeometry: document.querySelector(
+                  '[data-overlay-id="demand-current"]'
+                ) !== null,
+                supersededGeometry: document.querySelector(
+                  '[data-overlay-id="eur-demand-frame-43"]'
+                ) !== null,
+                nextPairGeometryBeforeDecode: document.querySelector(
+                  '[data-overlay-id="demand-current"]'
+                ) !== null,
+              };
+            }
+            """,
+            [next_eur_frame, switched],
+        )
+        assert transition["busy"] == "true"
+        assert "frame_id=44" in transition["source"]
+        assert "surface_identity=surface-gbp-usd-m5" in transition["source"]
+        assert transition["oldCommittedGeometry"] is False
+        assert transition["supersededGeometry"] is False
+        assert transition["nextPairGeometryBeforeDecode"] is False
+
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-id=\"demand-current\"]') !== null",
+            timeout=10_000,
+        )
+        assert page.locator('[data-overlay-id="eur-demand-frame-43"]').count() == 0
+        assert page.evaluate(
+            """
+            () => document.querySelector('[data-overlay-id="demand-current"]')
+              !== window.__oldPairOverlayNode
+            """
+        ) is True
+        projected = page.evaluate(
+            """
+            () => {
+              const image = document.querySelector('#surface-raw').getBoundingClientRect();
+              const box = document.querySelector(
+                '[data-overlay-id="demand-current"]'
+              ).getBoundingClientRect();
+              return [
+                (box.left - image.left) / image.width,
+                (box.top - image.top) / image.height,
+                box.width / image.width,
+                box.height / image.height,
+              ];
+            }
+            """
+        )
+        for actual, expected in zip(projected, (0.54, 0.28, 0.24, 0.12), strict=True):
+            assert abs(float(actual) - expected) <= 0.003
