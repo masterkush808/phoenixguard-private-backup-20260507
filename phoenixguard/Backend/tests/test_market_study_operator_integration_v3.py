@@ -6,6 +6,7 @@ import json
 from typing import Any, cast
 
 from phoenixguard.mobile_api.live_state_v3 import (
+    _compact_live_poll_session_payload,
     _compact_latest_signal,
     _compact_tracking_summary,
 )
@@ -117,6 +118,107 @@ def _market_study() -> dict[str, object]:
             "behavior": {"major_trend_counts": {"UP": 16}},
             "regime_counts": {"UPTREND": 250},
             "object_type_counts": {"LIQUIDITY_POOL": 12},
+            "retracement_confluence": {
+                "schema_version": "PG_PAIR_DNA_RETRACEMENT_AGGREGATES_V3",
+                "study_only": True,
+                "observation_only": True,
+                "execution_authority": False,
+                "completed_study_count": 10,
+                "level_support": [
+                    {"level_id": "OTE_70_5", "completed_study_count": 7},
+                    {"level_id": "CUSTOM_71_8", "completed_study_count": 3},
+                ],
+                "partitions_truncated_count": 0,
+                "level_catalog": {
+                    "OTE_70_5": {
+                        "level_ratio": 0.705,
+                        "classification": "ICT_STYLE_OTE_REFERENCE",
+                        "experimental": False,
+                        "user_defined": False,
+                        "standard_fibonacci": False,
+                    },
+                    "CUSTOM_71_8": {
+                        "level_ratio": 0.718,
+                        "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+                        "experimental": True,
+                        "user_defined": True,
+                        "standard_fibonacci": False,
+                    },
+                },
+                "empirical_partitions": [
+                    {
+                        "bucket_id": "private-bucket-705",
+                        "partition": {
+                            "symbol": "CAD/JPY OTC",
+                            "timeframe": "M5",
+                            "regime": "UPTREND",
+                            "side": "BUY",
+                            "coordinate_space": "PRICE",
+                            "level_id": "OTE_70_5",
+                            "level_ratio": 0.705,
+                            "classification": "ICT_STYLE_OTE_REFERENCE",
+                            "experimental": False,
+                            "user_defined": False,
+                            "standard_fibonacci": False,
+                            "object_type": "REACTION_ZONE",
+                        },
+                        "support": {
+                            "completed_studies": 7,
+                            "directional_alignment_label_count": 6,
+                            "side_adjusted_return_count": 4,
+                        },
+                        "counts": {
+                            "relations": {
+                                "RETRACEMENT_LEVEL_OVERLAPS_OBJECT": 7
+                            },
+                            "outcome_directions": {"UP": 4, "DOWN": 2},
+                            "directional_alignment_count": 4,
+                        },
+                        "empirical_rates": {
+                            "direction_frequency": {
+                                "UP": 0.666667,
+                                "DOWN": 0.333333,
+                            },
+                            "directional_alignment_rate": 0.666667,
+                            "average_side_adjusted_return": 0.125,
+                        },
+                    },
+                    {
+                        "bucket_id": "private-bucket-718",
+                        "partition": {
+                            "symbol": "CAD/JPY OTC",
+                            "timeframe": "M5",
+                            "regime": "DOWNTREND",
+                            "side": "SELL",
+                            "coordinate_space": "PRICE",
+                            "level_id": "CUSTOM_71_8",
+                            "level_ratio": 0.718,
+                            "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+                            "experimental": True,
+                            "user_defined": True,
+                            "standard_fibonacci": False,
+                            "object_type": "PRICE_IMBALANCE",
+                        },
+                        "support": {
+                            "completed_studies": 3,
+                            "directional_alignment_label_count": 2,
+                            "side_adjusted_return_count": 2,
+                        },
+                        "counts": {
+                            "relations": {
+                                "RETRACEMENT_LEVEL_NEAR_TOUCHES_OBJECT": 3
+                            },
+                            "outcome_directions": {"DOWN": 2},
+                            "directional_alignment_count": 1,
+                        },
+                        "empirical_rates": {
+                            "direction_frequency": {"DOWN": 1.0},
+                            "directional_alignment_rate": 0.5,
+                            "average_side_adjusted_return": -0.04,
+                        },
+                    },
+                ],
+            },
         },
         "candle_ledger": {
             "schema_version": "PG_CANDLE_LEDGER_V3",
@@ -138,6 +240,79 @@ def _market_study() -> dict[str, object]:
             "relation_counts": {"OBSERVED_WITH": 4, "CO_OCCURS": 5},
             "truncated": False,
             "nodes": [{"private_geometry": [0.1, 0.2, 0.3, 0.4]}],
+            "retracement_study": {
+                "schema_version": "PG_RETRACEMENT_CONFLUENCE_STUDY_V3",
+                "status": "STUDIED",
+                "study_only": True,
+                "observation_only": True,
+                "execution_authority": False,
+                "counts": {"observations": 3, "relations": 3},
+                "truncated": False,
+                "level_catalog": [
+                    {
+                        "level_id": "OTE_70_5",
+                        "level_ratio": 0.705,
+                        "classification": "ICT_STYLE_OTE_REFERENCE",
+                    },
+                    {
+                        "level_id": "CUSTOM_71_8",
+                        "level_ratio": 0.718,
+                        "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+                    },
+                ],
+                "observations": [
+                    {
+                        "study_id": "private-study-705-a",
+                        "status": "COMPLETED",
+                        "identity_stable": True,
+                        "swing_id": "private-swing-a",
+                        "regime": "UPTREND",
+                        "side": "BUY",
+                        "coordinate_space": "PRICE",
+                        "level_id": "OTE_70_5",
+                        "level_ratio": 0.705,
+                        "object_type": "REACTION_ZONE",
+                        "object_id": "private-object-a",
+                        "level_value": 151.125,
+                        "object_value_bounds": {"low": 151.1, "high": 151.2},
+                        "relation": "RETRACEMENT_LEVEL_OVERLAPS_OBJECT",
+                        "observational_confluence": True,
+                        "causal": False,
+                    },
+                    {
+                        "study_id": "private-study-705-b",
+                        "status": "COMPLETED",
+                        "identity_stable": True,
+                        "swing_id": "private-swing-b",
+                        "regime": "UPTREND",
+                        "side": "BUY",
+                        "coordinate_space": "PRICE",
+                        "level_id": "OTE_70_5",
+                        "level_ratio": 0.705,
+                        "object_type": "PRICE_IMBALANCE",
+                        "object_id": "private-object-b",
+                        "relation": "RETRACEMENT_LEVEL_NEAR_TOUCHES_OBJECT",
+                        "observational_confluence": True,
+                        "causal": False,
+                    },
+                    {
+                        "study_id": "private-study-718",
+                        "status": "COMPLETED",
+                        "identity_stable": True,
+                        "swing_id": "private-swing-c",
+                        "regime": "DOWNTREND",
+                        "side": "SELL",
+                        "coordinate_space": "PRICE",
+                        "level_id": "CUSTOM_71_8",
+                        "level_ratio": 0.718,
+                        "object_type": "REACTION_ZONE",
+                        "object_id": "private-object-c",
+                        "relation": "RETRACEMENT_LEVEL_OVERLAPS_OBJECT",
+                        "observational_confluence": True,
+                        "causal": False,
+                    },
+                ],
+            },
         },
         "outcome_maturation": {
             "status": "MATURED",
@@ -188,6 +363,11 @@ def test_market_study_survives_both_live_state_compaction_paths() -> None:
     assert _compact_latest_signal(signal)["market_study_v3"] == study
     assert _compact_live_state_market_payload(tracking)["market_study_v3"] == study
     assert _compact_live_state_latest_signal_payload(signal)["market_study_v3"] == study
+    compact_poll = _compact_live_poll_session_payload(
+        {"tracking_summary": tracking, "latest_signal": signal}
+    )
+    assert compact_poll["tracking_summary"]["market_study_v3"] == study
+    assert compact_poll["latest_signal"]["market_study_v3"] == study
 
 
 def test_operator_workspace_exposes_study_separately_from_permission() -> None:
@@ -213,6 +393,42 @@ def test_operator_workspace_exposes_study_separately_from_permission() -> None:
     assert study["behavior"]["current_state"]["state"] == "REST"
     assert study["directional_read"]["side"] == "BUY"
     assert study["execution_authority"] is False
+    retracement = study["retracement_study"]
+    assert retracement["study_only"] is True
+    assert retracement["observation_only"] is True
+    assert retracement["execution_authority"] is False
+    assert retracement["can_grant_entry_permission"] is False
+    assert retracement["graph_completed_observation_count"] == 3
+    assert retracement["pair_dna_completed_study_count"] == 10
+    assert retracement["empirical_partitions_truncated_count"] == 0
+    levels = {row["level_id"]: row for row in retracement["levels"]}
+    assert levels["OTE_70_5"]["graph_support"] == 2
+    assert levels["OTE_70_5"]["pair_dna_support"] == 7
+    assert levels["CUSTOM_71_8"] == {
+        "level_id": "CUSTOM_71_8",
+        "level_ratio": 0.718,
+        "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+        "label": "71.8% custom experimental nonstandard retracement",
+        "experimental": True,
+        "user_defined": True,
+        "standard_fibonacci": False,
+        "graph_support": 1,
+        "pair_dna_support": 3,
+    }
+    partitions = retracement["empirical_partitions"]
+    assert partitions[0]["completed_study_count"] == 7
+    assert partitions[0]["observation_regime"] == "UPTREND"
+    assert partitions[0]["regime_basis"] == (
+        "CURRENT_STUDY_FRAME_AT_CONFLUENCE_OBSERVATION"
+    )
+    assert "regime" not in partitions[0]
+    assert "70.5% ICT-style OTE reference" in partitions[0][
+        "partition_label"
+    ]
+    assert partitions[0]["directional_alignment_label_count"] == 6
+    assert partitions[0]["directional_alignment_count"] == 4
+    assert partitions[0]["directional_alignment_rate"] == 0.666667
+    assert partitions[1]["average_side_adjusted_return"] == -0.04
     assert operator_any["permission"]["allowed"] is False
 
 
@@ -427,6 +643,43 @@ def test_operator_projection_keeps_nested_study_evidence_without_private_payload
         "CO_OCCURS": 5,
     }
     assert bounded_study["outcome_maturation"]["status"] == "MATURED"
+    bounded_retracement = bounded_study["retracement_study"]
+    assert bounded_retracement["graph_completed_observation_count"] == 3
+    assert bounded_retracement["pair_dna_completed_study_count"] == 10
+    assert len(bounded_retracement["levels"]) == 2
+    assert len(bounded_retracement["empirical_partitions"]) == 2
+    assert bounded_retracement["can_grant_entry_permission"] is False
+    assert bounded_study["object_relationship_graph"]["retracement_study"] == {
+        "schema_version": "PG_RETRACEMENT_CONFLUENCE_STUDY_V3",
+        "status": "STUDIED",
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "truncated": False,
+        "completed_observation_count": 3,
+        "level_support": [
+            {
+                "level_id": "OTE_70_5",
+                "level_ratio": 0.705,
+                "classification": "ICT_STYLE_OTE_REFERENCE",
+                "label": "70.5% ICT-style OTE reference",
+                "experimental": False,
+                "user_defined": False,
+                "standard_fibonacci": False,
+                "completed_observation_count": 2,
+            },
+            {
+                "level_id": "CUSTOM_71_8",
+                "level_ratio": 0.718,
+                "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+                "label": "71.8% custom experimental nonstandard retracement",
+                "experimental": True,
+                "user_defined": True,
+                "standard_fibonacci": False,
+                "completed_observation_count": 1,
+            },
+        ],
+    }
 
     serialized = json.dumps(bounded_study).lower()
     assert "source_path" not in serialized
@@ -437,6 +690,12 @@ def test_operator_projection_keeps_nested_study_evidence_without_private_payload
     assert "private_embedding" not in serialized
     assert "private_rows" not in serialized
     assert "private_geometry" not in serialized
+    assert "private-study" not in serialized
+    assert "private-swing" not in serialized
+    assert "private-object" not in serialized
+    assert "private-bucket" not in serialized
+    assert "object_value_bounds" not in serialized
+    assert "level_value" not in serialized
 
     latest_only = cast(
         dict[str, Any],
@@ -472,3 +731,94 @@ def test_operator_projection_keeps_nested_study_evidence_without_private_payload
         "OBSERVED_WITH"
     ] == 4
     assert public_study["outcome_maturation"]["status"] == "MATURED"
+    assert public_study["retracement_study"] == bounded_retracement
+
+
+def test_retracement_projection_is_bounded_and_ignores_spoofed_top_level() -> None:
+    study = cast(dict[str, Any], _market_study())
+    study["retracement_study"] = {
+        "graph_completed_observation_count": 999_999,
+        "pair_dna_completed_study_count": 999_999,
+        "can_grant_entry_permission": True,
+    }
+    pair_dna = cast(dict[str, Any], study["pair_dna"])
+    retracement = cast(dict[str, Any], pair_dna["retracement_confluence"])
+    source_partition = cast(
+        list[dict[str, Any]], retracement["empirical_partitions"]
+    )[0]
+    retracement["empirical_partitions"] = [
+        {
+            **source_partition,
+            "bucket_id": f"private-bucket-{index}",
+            "partition": {
+                **cast(dict[str, Any], source_partition["partition"]),
+                "level_id": "OTE_70_5" if index % 2 == 0 else "CUSTOM_71_8",
+                "level_ratio": 0.705 if index % 2 == 0 else 0.718,
+                "object_type": f"REACTION_ZONE_{index:02d}",
+            },
+            "support": {
+                "completed_studies": 24 - index,
+                "directional_alignment_label_count": 1,
+                "side_adjusted_return_count": 1,
+            },
+            "counts": {
+                "relations": {f"RELATION_{offset}": 1 for offset in range(12)},
+                "outcome_directions": {"UP": 1},
+                "directional_alignment_count": 1,
+            },
+        }
+        for index in range(24)
+    ]
+    retracement["partitions_truncated_count"] = 8
+
+    bounded = _bounded_operator_projection_context(
+        {"tracking_summary": {"market_study_v3": study}}
+    )
+    bounded_study = cast(
+        dict[str, Any],
+        cast(dict[str, Any], bounded["tracking_summary"])["market_study_v3"],
+    )
+    projected = bounded_study["retracement_study"]
+    assert projected["graph_completed_observation_count"] == 3
+    assert projected["pair_dna_completed_study_count"] == 10
+    assert projected["empirical_partitions_truncated_count"] == 8
+    assert projected["can_grant_entry_permission"] is False
+    assert len(projected["levels"]) == 2
+    assert len(projected["empirical_partitions"]) == 16
+    bounded_pair = bounded_study["pair_dna"]["retracement_confluence"]
+    assert bounded_pair["level_support"] == [
+        {"level_id": "OTE_70_5", "completed_study_count": 7},
+        {"level_id": "CUSTOM_71_8", "completed_study_count": 3},
+    ]
+    assert all(
+        len(row["relation_counts"]) <= 8
+        for row in projected["empirical_partitions"]
+    )
+    assert "999999" not in json.dumps(projected)
+    assert "private-bucket" not in json.dumps(projected).lower()
+
+
+def test_retracement_projection_fails_closed_without_observation_contracts() -> None:
+    study = cast(dict[str, Any], _market_study())
+    pair_dna = cast(dict[str, Any], study["pair_dna"])
+    pair_retracement = cast(
+        dict[str, Any], pair_dna["retracement_confluence"]
+    )
+    pair_retracement["execution_authority"] = True
+    graph = cast(dict[str, Any], study["object_relationship_graph"])
+    graph_retracement = cast(dict[str, Any], graph["retracement_study"])
+    graph_retracement["observation_only"] = False
+
+    bounded = _bounded_operator_projection_context(
+        {"tracking_summary": {"market_study_v3": study}}
+    )
+    bounded_study = cast(
+        dict[str, Any],
+        cast(dict[str, Any], bounded["tracking_summary"])["market_study_v3"],
+    )
+    assert "retracement_study" not in bounded_study
+    assert "retracement_confluence" not in bounded_study["pair_dna"]
+    assert (
+        "retracement_study"
+        not in bounded_study["object_relationship_graph"]
+    )

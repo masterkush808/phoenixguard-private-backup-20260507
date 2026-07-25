@@ -1,8 +1,8 @@
 # PhoenixGuard V3 Market Study Blueprint
 
 - Status: implemented V3 architecture and operating contract
-- Updated: 2026-07-24
-- Scope: candle intelligence, exact candle memory, behavioral regression, Pair DNA, object relationships, historical similarity, and operator presentation
+- Updated: 2026-07-25
+- Scope: candle intelligence, exact candle memory, behavioral regression, Pair DNA, object relationships, retracement confluence, historical similarity, and operator presentation
 - Version boundary: **V3 only. This is not a V4 proposal.**
 
 This document is the implementation blueprint for PhoenixGuard's new candlestick-by-candlestick
@@ -30,6 +30,7 @@ only `WAIT`. The frontend instead presents:
 - major trend;
 - inner trend;
 - current behavior: swing, rest, continuation, or direction change;
+- completed-swing 70.5%/71.8% object confluence as explicitly non-executing study evidence;
 - historical regression/directional study;
 - entry permission as a separate compact safety status.
 
@@ -45,6 +46,8 @@ These invariants apply to every module and payload described below.
 | One authoritative close | Each completed market-study call submits exactly its latest proven close to the exact candle ledger. The durable primary key is `(symbol, timeframe, candle identity)`; an overlapping or restarted observation upserts that row instead of creating another candle. |
 | Exact geometry | Use measured OHLC when available. Otherwise preserve normalized proxy or pixel-proxy coordinates and disclose that coordinate space. Never present pixels as broker prices or pips. |
 | Coordinate isolation | One fingerprint cannot mix `PRICE`, `NORMALIZED_PRICE_PROXY`, and `PIXEL_PRICE_PROXY` candles. Pair DNA partitions behavior aggregates by coordinate space. |
+| Retracement coordinate proof | A completed swing and an object's explicit value bounds must use the exact same `PRICE`, `NORMALIZED_PRICE_PROXY`, or `PIXEL_PRICE_PROXY` axis. Normalized screen rectangles are never treated as market values. |
+| Experimental-level honesty | `CUSTOM_71_8` is a user-defined, nonstandard experimental level. It is never represented as a classic Fibonacci ratio, a hidden equilibrium fact, or proof of institutional activity. |
 | Study-only output | Every study contract carries `study_only: true` and `execution_authority: false`. The market study also carries `can_grant_entry_permission: false`. |
 | Bounded resources | Candle windows, object lists, caches, stores, graph nodes, and result lists have explicit limits. |
 | Durable publication | JSON stores are validated, finite, size-bounded, locked, written to a same-directory temporary file, `fsync`ed, and atomically replaced. The exact candle ledger separately requires SQLite WAL, `synchronous=FULL`, and an immediate transaction. |
@@ -69,6 +72,10 @@ flowchart TD
     J --> I
     G --> W[Bounded candle/object relationship graph]
     J --> W
+    G --> X[Completed-swing retracement study]
+    J --> X
+    X --> W
+    X --> M
     I --> K[Same-pair historical search]
     K --> L[Outcome-supported continuation summary]
     G --> M[Pair DNA cumulative profile]
@@ -100,8 +107,8 @@ candle as closed.
 | Candle intelligence | `Backend/src/phoenixguard/study/candle_intelligence_v3.py` | Exact body/wick geometry, taxonomy, personality, prior-candle relation, rejection/acceptance, sequence tokens. |
 | Exact candle ledger | `Backend/src/phoenixguard/study/candle_ledger_v3.py` | SQLite WAL store with one canonical micro-feature row per stable pair/timeframe/candle identity. |
 | Behavioral sequence | `Backend/src/phoenixguard/study/behavioral_sequence_v3.py` | Major/inner regression, swing/rest segmentation, durations, path efficiency, transitions, market story. |
-| Pair DNA | `Backend/src/phoenixguard/study/pair_dna_v3.py` | Durable pair/timeframe aggregates, bounded recent identities, object/candle outcome associations. |
-| Object relationship graph | `Backend/src/phoenixguard/study/object_relationship_graph_v3.py` | Bounded observation graph with explicit candle anchors, co-presence, co-occurrence, and proven normalized overlap. |
+| Pair DNA | `Backend/src/phoenixguard/study/pair_dna_v3.py` | Durable pair/timeframe aggregates, bounded recent identities, object/candle outcome associations, and partitioned retracement-confluence outcomes. |
+| Object relationship graph | `Backend/src/phoenixguard/study/object_relationship_graph_v3.py` | Bounded observation graph with explicit candle anchors, co-presence, co-occurrence, proven normalized overlap, and completed-swing retracement/object evidence. |
 | Historical similarity | `Backend/src/phoenixguard/study/historical_similarity_v3.py` | Explainable fixed-size fingerprints, deterministic similarity, bounded library, graphs, supported outcomes. |
 | Live study coordinator | `Backend/src/phoenixguard/study/market_study_service_v3.py` | One idempotent study per proven close, prior-outcome maturation, compact public study, directional read. |
 | Tracker integration | `Backend/src/phoenixguard/mobile_api/window_tracker.py` | Identity gates, close adaptation, regression context, object reduction, study invocation, safe degradation. |
@@ -148,8 +155,8 @@ into the study lane only when all of the following are present and consistent:
 - the proof source is exactly `PG_CLOSED_CANDLE_IDENTITY_STATE_V3`;
 - the resolver supplies a non-empty stable closed-candle event key;
 - the resolver supplies a non-negative monotonic event sequence for the same pair/timeframe;
-- the row belongs to the resolver's current confirmed event or its confirmed event batch; and
-- a prior event is marked stable only after the resolver uniquely re-observes it at the exact
+- the row appears in the resolver's current `stable_visible_candle_bindings` contract; and
+- a prior event appears there only after the resolver uniquely re-observes it at the exact
   predecessor position implied by the confirmed transition count on the current candle axis.
 
 The unique prior match must clear the resolver's similarity and separation checks and form a
@@ -157,7 +164,20 @@ contiguous X-axis chain into its successor. An arbitrary shifted window, a detec
 or a merely similar positional candle cannot manufacture this proof. The bridge adds
 `identity_stable`, `stable_candle_identity`, `identity_proof_source`, and
 `closed_candle_sequence` only to rows covered by that proof. All other positional rows remain valid
-for bounded visual analysis but cannot enter lifelong candle counting or mature an outcome.
+for bounded visual analysis but cannot enter lifelong candle counting or mature an outcome. The
+binding list is sorted by event sequence and capped at 32 current-frame rows. Duplicate indexes,
+keys, sequences, malformed proof metrics, a stale pair/timeframe context, an unsupported proof
+source, or an omitted/ambiguous/off-screen row fails closed; the tracker never backfills it from
+position. A pair or timeframe change resets the resolver history to one latest-close baseline at
+sequence zero.
+
+A changed immutable source ID is not automatically one candle. A source forming-bar identity that
+becomes the current closed bar proves one transition. Numeric source time identities may also prove
+one transition only when their delta equals exactly one declared timeframe after seconds,
+milliseconds, microseconds, or nanoseconds normalization. A larger/backward/malformed timestamp or
+an arbitrary changed bar ID remains `SOURCE_BAR_GAP_UNPROVEN` unless the visible reacquisition chain
+enumerates every intervening close. Its event sequence does not advance, so it cannot mature an
+`N -> N+1` outcome.
 
 ### 5.3 What can and cannot be persisted
 
@@ -354,6 +374,7 @@ prevents CAD/JPY M5 behavior from being silently mixed with CAD/JPY M1 or anothe
 | Source truth | Coordinate-space counts and coordinate-partitioned behavioral metrics. |
 | Objects | Counts of bounded detected object types. |
 | Outcomes | Marginal and pairwise feature association support, direction counts, success counts, and realized-return sums. |
+| Retracement confluence | Completed-study counts and bounded empirical buckets partitioned by current observation regime, swing side, coordinate space, level, and object type. |
 | Bounded recency | Recent sequence summaries and recently seen sequence IDs. |
 | Exact incremental boundary | One locked candle order domain, its monotonic high-water mark, completed-segment boundary high-water mark, current open segment, accepted counts, and audited skip/conflict counts. |
 | Whole-sequence replay protection | Bounded exact recent ring plus segmented SHA-256 Bloom state. |
@@ -407,9 +428,68 @@ per object, and 4,096 input rows of either kind. The live service deliberately u
 reduced its object evidence to at most 64 rows. Omitted objects, candle anchors, and edges are
 counted, and the graph reports `READY_TRUNCATED` rather than pretending it is complete.
 
+### 8.3.1 Completed-swing retracement and object confluence
+
+Schema: `PG_RETRACEMENT_CONFLUENCE_STUDY_V3`
+
+This is a study inside the V3 object relationship graph, not a forecast lane and not another route.
+It evaluates two deliberately distinct ratios:
+
+| Level | Classification | Contract |
+| --- | --- | --- |
+| `OTE_70_5` / `0.705` | ICT-style OTE reference | A non-classic community reference studied alongside PhoenixGuard's disclosed 61.8%-78.6% band. It is not labeled a standard Fibonacci ratio or the exact midpoint of those two boundaries. |
+| `CUSTOM_71_8` / `0.718` | User-defined experimental, nonstandard | Preserved exactly so PhoenixGuard can measure the user's hypothesis. It carries `experimental: true`, `user_defined: true`, and `standard_fibonacci: false`. |
+
+The catalog also discloses 61.8% and 78.6% as reference-band boundaries; the current confluence
+study does not silently substitute either boundary for 70.5% or 71.8%. In particular, 71.8% is not
+half an impulse move (`0.5`) and it is not half of `1.618` (`0.809`). PhoenixGuard therefore learns
+its observed association instead of embedding an unsupported success claim.
+
+A swing is eligible only when all included candles are explicitly closed, their identities and
+sequence order are proven, their value coordinate space is uniform, and a later closed candle
+confirms the ending pivot. A latest/forming candle cannot confirm its own pivot. Ambiguous outside
+candles that are simultaneously local highs and lows are excluded because their intrabar order is
+unknown. The resulting swing carries stable start, end, and confirmation candle identities plus
+the exact completion proof.
+
+For swing range `R = high - low`, the evaluated value is:
+
+- upward swing: `end_value - ratio * R`;
+- downward swing: `end_value + ratio * R`.
+
+An object participates only when it is an identity-stable Order Block, Fair Value Gap/price
+imbalance, or crowded/consolidation area with explicit one-dimensional `value_bounds`. Its
+`value_coordinate_space` must exactly match the swing. For screenshot geometry the tracker maps
+the original pixel box from `[top, bottom]` to `[-bottom, -top]`, the same disclosed
+`PIXEL_PRICE_PROXY` axis used by candle intelligence. It still retains normalized rectangles only
+for screen overlap; it never treats normalized screen Y as broker price.
+
+The graph records `RETRACEMENT_LEVEL_OVERLAPS_OBJECT` when the value lies inside the object bounds,
+or `RETRACEMENT_LEVEL_NEAR_TOUCHES_OBJECT` when the nearest boundary is within the configured
+fraction of the completed swing range. Every completed observation preserves the level, swing,
+object family, coordinate space, distance, tolerance, regime, side, and stable evidence digest.
+It also states `causal: false`, `study_only: true`, `observation_only: true`, and
+`execution_authority: false`.
+
+Pair DNA accepts only those completed, stable observations after the existing one-candle outcome
+matures. It partitions them by exact `(pair, timeframe, observation regime, swing side, coordinate
+space, level, object type)` so real-price observations never mix with screenshot proxies and 70.5%
+never mixes with 71.8%. The regime dimension is explicitly
+`CURRENT_STUDY_FRAME_AT_CONFLUENCE_OBSERVATION`: it describes the regime when PhoenixGuard recorded
+the object-confluence observation, not a reconstructed claim about the older swing's event-time
+regime. Derived reads therefore expose `observation_regime` and `regime_basis` rather than silently
+presenting today's frame classification as historical swing truth. They always publish support
+beside empirical direction frequencies, labeled
+next-candle alignment rates, and average side-adjusted return. A bullish completed swing treats an
+`UP` outcome as aligned; a bearish completed swing treats `DOWN` as aligned, and bearish signed
+returns are multiplied by `-1` before aggregation. The unrelated overall directional-study
+`success` label is never presented as retracement success. These are historical frequencies, not calibrated
+forecast probabilities. A separate segmented Bloom identity prevents the same confluence from
+being counted again through overlapping windows or service restarts.
+
 ### 8.4 Exact incremental counting, replay protection, and bounds
 
-Pair DNA has two independent idempotency layers:
+Pair DNA has three independent idempotency layers:
 
 1. **Whole-sequence replay protection.** The newest 512 exact sequence IDs remain in a bounded
    ring. All accepted sequence IDs also enter a SHA-256 segmented Bloom design: 20 sealed segments,
@@ -429,6 +509,10 @@ Pair DNA has two independent idempotency layers:
    proves its end boundary and both start/end markers resolve in that same locked domain. The open
    segment and completed-boundary high-water mark prevent the same duration, transition, or swing/
    rest segment from being counted again in the next rolling window.
+3. **Retracement-study replay protection.** Completed confluences have stable study IDs derived from
+   the proven swing, exact level, and stable object. A separate segmented SHA-256 Bloom plus bounded
+   recent-ID ring prevents an overlapping window or restart from incrementing the same empirical
+   bucket twice. Capacity fails closed instead of forgetting old confluence identities.
 
 `observation_count` counts accepted unique study envelopes. `candle_count` and candle distributions
 count only causally new stable closes selected by the monotonic boundary ledger, never repeated rows
@@ -536,7 +620,8 @@ For pair/timeframe close `N`:
 5. Label it `UP` above `+0.04`, `DOWN` below `-0.04`, otherwise `REST`.
 6. Set horizon to one candle and record whether the prior BUY/SELL study matched the actual side.
 7. Enrich the prior historical fingerprint and merge the prior completed study into Pair DNA with
-   that matured outcome.
+   that matured outcome, including any stable completed retracement/object observations from that
+   prior study.
 8. Add the current fingerprint as unlabeled, ready to mature at `N+1`.
 
 If the prior close is not re-observed on the current frame, its identity is ambiguous, or coordinate
@@ -638,15 +723,23 @@ forecast routes.
 regression slopes, major trend context, consolidation, structure boxes, historical structure, and
 support/resistance zones have been calculated.
 
-The tracker reduces chart objects to at most 64 rows. Every row starts with object type, bounded ID,
-direction, and confidence. Real source `key`, `zone_id`, `object_id`, and equivalent explicit keys
-remain distinct identities instead of collapsing under role/type. With the exact captured image
+The tracker reduces chart objects to at most 64 rows, including production Smart Money Context
+Order Blocks and Fair Value Gaps plus qualified crowded/liquidity-pool zones. Every row starts with
+object type, bounded ID, direction, and confidence. Real source `key`, `zone_id`, `object_id`, and
+equivalent keys remain distinct display identities instead of collapsing under role/type, but the
+presence of a key does not itself prove lifelong stability. An object becomes identity-stable only
+when all of its source candle indexes resolve through the current stable-binding contract, or when
+an upstream source explicitly supplies a non-positional stable-identity proof. The tracker hashes
+the object type, direction, and stable candle anchors into the durable object identity. With the exact captured image
 width and height, pixel `bbox`, touch points, and anchor-wick points are normalized once into
 bounded `[0, 1]` evidence and raw pixel geometry is stripped. Without those dimensions the tracker
-does not guess a normalization. Anonymous objects receive an observation-local ordinal with
-`identity_scope: OBSERVATION_ONLY`; they are never advertised as stable across frames. When
-actually present, rows also preserve lifecycle/first/last-seen/duration evidence and an explicit
-candle or anchor-candle identity. The tracker never manufactures those fields. All graph edges are
+does not guess a normalization. A valid pixel box separately publishes bounded `value_bounds` on
+the negated-Y `PIXEL_PRICE_PROXY` axis so it can be compared only with candles measured on that
+same captured chart axis. Anonymous objects receive an observation-local ordinal with
+`identity_scope: OBSERVATION_ONLY`; keyed-but-unproven objects receive the same scope and are never
+advertised as stable across frames. When actually present, rows also preserve
+lifecycle/first/last-seen/duration evidence. Stable candle associations are published only from
+the verified resolver anchors. All graph edges are
 study-only observations, never causal or executable. The tracker derives regime as
 sideways, uptrend, downtrend, or transition. The completed study is placed in both:
 
@@ -663,7 +756,10 @@ The app does not apply the old generic recursive depth limiter to this evidence 
 allowlist first requires `study_only: true` and `execution_authority: false`, then selects only
 bounded identity/regression fields, candle summary and latest ratios/interactions, behavior,
 support-gated historical matches/continuation, bounded similarity edges, Pair DNA counts and 12
-associations, and the directional read. Raw OHLC/source pixel geometry, full fingerprints, model
+associations, the directional read, and a compact retracement summary. That summary exposes only
+the two fixed level definitions, current graph support, full Pair DNA per-level support, and at most
+16 empirical partitions; it strips swing/object IDs, value bounds, raw buckets, and dedupe state.
+Raw OHLC/source pixel geometry, full fingerprints, model
 inputs, persistence metadata, and arbitrary nested keys do not cross the public app boundary.
 
 The operator workspace keeps its established fixed top-level schema and publishes the live study
@@ -779,6 +875,10 @@ deliberate, versioned rebuild/migration.
 | Candle missing closure proof | Validation failure | Candle excluded/rejected; never silently marked closed by the study module. |
 | Contradictory/non-finite geometry | Validation failure | Candle excluded or entire direct call rejected. |
 | Mixed coordinate spaces | Validation failure | Fingerprint refused. |
+| Retracement candles lack stable closed identities or a later pivot confirmation | `NO_PROVEN_COMPLETED_SWINGS` | The chart study continues, but no retracement/object observation is invented or persisted. |
+| Source timestamp jumps more than one timeframe or a changed source ID has no exact rollover chain | `SOURCE_BAR_GAP_UNPROVEN` | Resolver sequence remains unchanged; no purported one-candle outcome or retracement Pair DNA row matures. |
+| Retracement object lacks explicit value bounds | `NO_COMPARABLE_OBJECTS` when none remain | Normalized screen geometry is not guessed into price or price-proxy values. |
+| Retracement swing/object value spaces differ | Validation failure, then `DEGRADED` at tracker boundary | Cross-scale confluence is rejected; permission remains independent and fail-safe. |
 | Stable ledger identity absent/synthetic | `SKIPPED_UNSTABLE_IDENTITY` at direct ledger boundary | Exact ledger remains unchanged; the service itself writes only a proven close key. |
 | SQLite WAL unavailable, schema incompatible, lock timeout, or ledger capacity exceeded | `DEGRADED` at tracker boundary | The ledger transaction rolls back; capture, dashboard, and independent permission continue fail-safe. |
 | Positional tracker ID offered as stable history identity | `SKIPPED_UNSTABLE_IDENTITY` or audited unstable-candle skip | Display analysis may continue; no ledger or lifelong Pair DNA mutation derives from the position. |
@@ -792,6 +892,8 @@ deliberate, versioned rebuild/migration.
 | Possible Bloom duplicate | `POSSIBLE_DUPLICATE_IGNORED` | Counts unchanged to protect lifelong integrity. |
 | Pair DNA candle timestamp does not advance, or segment boundary is unstable/incomplete | `RECORDED` envelope with audited skip counts | No duplicate candle, duration, segment, or transition aggregate is added. |
 | Pair DNA segmented Bloom reaches 10,240 sequence identities | Capacity validation failure | Store fails closed and requests sharding; no lifelong profile is silently evicted. |
+| Retracement study repeats through an overlapping window/restart | Existing empirical bucket remains unchanged | Stable confluence ID is rejected by the dedicated dedupe Bloom. |
+| Retracement empirical partition capacity is reached | Capacity validation failure | Existing lifelong buckets remain intact; explicit sharding or a bounded limit increase is required. |
 | More than 2,048 association keys | Profile remains valid | Established associations remain; unseen keys increment `association_overflow_count`. |
 | Object graph exceeds live caps | `READY_TRUNCATED` | Deterministic highest-priority proven edges remain and every omission is counted. |
 | Object graph has unsafe/conflicting geometry or identity | Validation failure, then `DEGRADED` at tracker boundary | No guessed anchor/overlap is published; independent capture and permission continue. |
@@ -811,12 +913,12 @@ deliberate, versioned rebuild/migration.
 | `test_candle_micro_geometry_v3.py` | Tracker behavior tokens retain measured candle geometry and wick micro-events. |
 | `test_candle_ledger_v3.py` | Rolling-window upserts, stable identity, pair/timeframe isolation, exact proxy/pixel evidence, restart/WAL, cross-process safety, and atomic capacity rollback. |
 | `test_behavioral_sequence_service_v3.py` | Swing/rest segmentation, transitions, duration, major/inner trend, insufficient history. |
-| `test_pair_dna_store_service_v3.py` | Monotonic unique-candle high-water, timestamp/resolver-event order-domain locking and conflict skips, stable completed-segment dedupe, Bloom probability/capacity, legacy migration, corruption and concurrent writes. |
-| `test_object_relationship_graph_v3.py` | Proven anchors/overlap, non-causal co-presence, deterministic caps/truncation, unsafe geometry failure, and stripped trade instructions. |
+| `test_pair_dna_store_service_v3.py` | Monotonic unique-candle high-water, timestamp/resolver-event order-domain locking and conflict skips, stable completed-segment dedupe, retracement partitions and replay protection, Bloom probability/capacity, legacy migration, corruption and concurrent writes. |
+| `test_object_relationship_graph_v3.py` | Proven anchors/overlap, confirmed-pivot retracement math in both directions, 70.5%/experimental-71.8% object confluence, coordinate rejection, deterministic caps/truncation, unsafe geometry failure, and stripped trade instructions. |
 | `test_historical_similarity_service_v3.py` | Fingerprint validation, scoring, bounded storage/graph, supported continuation, and correlation statistics. |
-| `test_market_study_service_v3.py` | Idempotent close-key caching, exact candle-ledger integration, exact `+1` horizon enforcement, restart maturation, current-frame pixel-axis proof/skip, bounded pending journal, and no execution authority. |
-| `test_market_study_tracker_bridge_v3.py` | Live resolver-to-study promotion: positional IDs stay unstable, one proven rollover creates one resolver-ordered Pair DNA candle, and an arbitrary reacquired pixel window cannot false-mature. |
-| `test_market_study_operator_integration_v3.py` | Live/operator explicit nested allowlist, privacy boundary, and fixed V3 schema integration. |
+| `test_market_study_service_v3.py` | Idempotent close-key caching, exact candle-ledger integration, exact `+1` horizon enforcement, delayed retracement maturation, restart maturation, current-frame pixel-axis proof/skip, bounded pending journal, and no execution authority. |
+| `test_market_study_tracker_bridge_v3.py` | Live resolver-to-study promotion: positional IDs stay unstable, stable history accumulates across source and screenshot rollovers, production objects require stable candle anchors, object boxes publish the exact candle-compatible pixel-value axis, spoofed caller stability cannot promote an object, and an arbitrary reacquired pixel window cannot false-mature. |
+| `test_market_study_operator_integration_v3.py` | Live/operator explicit nested allowlist, bounded retracement summary, experimental-level disclosure, privacy boundary, and fixed V3 schema integration. |
 | Focused `test_window_tracker_service.py` cases | Real source keys remain distinct and pixel bounds/points normalize against exact image dimensions before the study graph. |
 | `test_tracking_episode_v3.py` | Exact key/sequence study attribution for live and reacquired events; unknown gaps never inherit the newest study. |
 | `test_dashboard_static_contract.py` | Required V3 study and label-mode DOM/static contracts. |
@@ -839,8 +941,9 @@ Run focused tests first, then the complete repository suite. The final acceptanc
 6. segmented Bloom design remains below its declared union false-positive ceiling and fails closed
    at 10,240 identities;
 7. corrupt, oversized, non-finite, incompatible-schema, and capacity-bound stores fail closed;
-8. real object keys remain distinct; exact image dimensions normalize pixel bounds/points;
-   anonymous objects stay `OBSERVATION_ONLY`; graph anchors/overlaps require explicit proof and all
+8. real object keys remain distinct display identities; exact image dimensions normalize pixel
+   bounds/points; anonymous and keyed-but-unproven objects stay `OBSERVATION_ONLY`; graph
+   anchors/overlaps require explicit proof and all
    edges remain bounded, study-only, and non-causal;
 9. live-state and operator APIs expose the same current study identity through the explicit app
    allowlist without raw geometry/fingerprint leakage;
@@ -853,6 +956,8 @@ Run focused tests first, then the complete repository suite. The final acceptanc
 16. session history describes directional/rest behavior rather than defaulting every row to `WAIT`;
 17. canonical `.venv-live` launch keeps one API/tracker topology and writes study data outside the
     launcher-cleaned runtime tree.
+18. a multi-rollover current-frame binding chain produces a proven completed swing and production
+    object confluence, while spoofed caller stability flags cannot promote an object.
 
 Useful focused command:
 
@@ -863,10 +968,12 @@ $env:PYTHONPATH='Backend/src;Backend'
   Backend/tests/test_candle_micro_geometry_v3.py `
   Backend/tests/test_candle_ledger_v3.py `
   Backend/tests/test_behavioral_sequence_service_v3.py `
+  Backend/tests/test_scene_forecast_contributor_v3.py `
   Backend/tests/test_pair_dna_store_service_v3.py `
   Backend/tests/test_object_relationship_graph_v3.py `
   Backend/tests/test_historical_similarity_service_v3.py `
   Backend/tests/test_market_study_service_v3.py `
+  Backend/tests/test_market_study_tracker_bridge_v3.py `
   Backend/tests/test_market_study_operator_integration_v3.py `
   Backend/tests/test_dashboard_static_contract.py `
   -q
@@ -895,7 +1002,20 @@ smoke because preserved operator artifacts were already present. Full-launch top
 covered by the V3 launcher/integrity and window-tracker tests, while the smoke used the production
 `.venv-live` application and real HTTP/browser surfaces without deleting those artifacts.
 
-### 15.4 Operational telemetry to retain
+### 15.4 Retracement-confluence delta evidence collected on 2026-07-25
+
+| Gate | Result |
+| --- | --- |
+| Completed post-fix matrix | **328 tests passed**: 122 retracement/graph/Pair-DNA/service/tracker/operator/static-contract tests; 75 adjacent candle/ledger/behavior/similarity/episode tests; 88 scene-forecast/public-operator tests; 3 changed Playwright cases; 9 V3 integrity tests; 2 hardened object-identity cases; and 29 tracker payload/model-council tests. |
+| Identity hardening | Arbitrary object IDs and zone keys remain `OBSERVATION_ONLY` unless a stable proof exists. The two directly changed cases passed. A broader 255-test tracker file produced about 181 passing indicators with no failure marker before the 900-second harness limit, so it is not counted as a completed pass. |
+| Static quality | Ruff, compileall, `git diff --check`, and `verify_v3_integrity.py` passed. Strict Pyright reported **0 errors and 0 warnings** across every changed production source and focused test. |
+| Browser contracts | The three changed retracement evidence states passed after the final fix. The broader collision suite had already completed at **55 passed and 35 skipped** before the final backend-only compaction and identity changes. |
+| Data-preserving live launch | The direct `.venv-live` launcher preserved the existing `pocket-live-8788` history, captured a fresh desktop frame, and passed the one-stack process-topology certificate on port 8793 with the MT4 bridge required. The destructive cold launcher was not used. |
+| Runtime lineage | `runtime_trace_v3.py` reported **Alignment: PASS**, a current study packet, 7/7 models, and no published execution packet. |
+| Operator DTO | On live frame 236 the operator exposed `USD/CAD OTC`, `M5`, and `STUDIED`; both `OTE_70_5` and `CUSTOM_71_8` were present. Study execution authority and entry permission were both false. |
+| Honest zero-evidence state | The current frame reported `NO_PROVEN_COMPLETED_SWINGS`, zero completed graph/Pair-DNA support, and no empirical partitions. This is the required result when the current closed-candle proof cannot support a completed swing; deterministic tests separately prove populated confluence and maturation paths. |
+
+### 15.5 Operational telemetry to retain
 
 - study status and reason;
 - symbol/timeframe/closed key/sequence ID;
@@ -991,7 +1111,8 @@ The V3 market-study lane is complete only when all of these statements are true 
 - one proven close creates at most one durable study event;
 - every persisted candle has explicit closure proof, a stable pair/timeframe close identity, and
   valid exact geometry; rolling windows upsert rather than duplicate it;
-- screenshot positional IDs remain display-only; resolver identity persists only with
+- screenshot positional IDs remain display-only; resolver identity persists only through the
+  bounded current-frame `stable_visible_candle_bindings` contract under
   `PG_CLOSED_CANDLE_IDENTITY_STATE_V3`, a stable event key, and monotonic event sequence;
 - the operator can see major trend, inner trend, current swing/rest behavior, and the one studied
   directional read;
@@ -1000,8 +1121,9 @@ The V3 market-study lane is complete only when all of these statements are true 
   the exact candle ledger remain distinct, durable, bounded, and pair/timeframe scoped;
 - an outcome matures only across an exact resolver `+1` event after its prior close is uniquely
   re-observed on the current frame axis; shifted/reacquired windows cannot substitute for proof;
-- real object keys and exact-dimension-normalized geometry remain distinct; anonymous identities
-  stay `OBSERVATION_ONLY`, and relationships never infer anchors, causation, or permission;
+- real object keys and exact-dimension-normalized geometry remain distinct; anonymous and
+  keyed-but-unproven identities stay `OBSERVATION_ONLY`, and relationships never infer anchors,
+  causation, or permission;
 - historical continuation is unavailable until causal outcomes reach minimum support;
 - every association and match can be explained from stored evidence;
 - retired forecast families cannot return through `Show all`, and `Show all` plus `Labels on` really

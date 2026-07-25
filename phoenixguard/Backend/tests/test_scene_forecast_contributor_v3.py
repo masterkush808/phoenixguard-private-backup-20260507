@@ -254,6 +254,45 @@ def test_stateful_identity_reuses_event_when_detector_reclassifies_closed_candle
     assert reclassified["transition_reason"] == "FORMING_CANDLE_STILL_ACTIVE"
 
 
+def test_stable_visible_history_baselines_only_latest_and_resets_on_context_change() -> (
+    None
+):
+    candles = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_sequence=9,
+    )
+
+    bindings = initial["stable_visible_candle_bindings"]
+    assert bindings == initial["state"]["stable_visible_candle_bindings"]
+    assert len(bindings) == 1
+    assert bindings[0]["current_row_index"] == 28
+    assert bindings[0]["closed_candle_key"] == initial["closed_candle_key"]
+    assert bindings[0]["closed_candle_sequence"] == 9
+    assert bindings[0]["proof_source"] == "INITIAL_CAUSAL_BASELINE_V3"
+    assert bindings[0]["reobserved_observation"]["index"] == 28
+
+    changed = resolve_closed_candle_identity_v3(
+        candles,
+        pair="EURUSD",
+        timeframe="M15",
+        previous_state=initial["state"],
+        previous_key=initial["closed_candle_key"],
+        previous_sequence=9,
+    )
+
+    assert changed["closed_candle_sequence"] == 0
+    assert changed["closed_candle_key"] != initial["closed_candle_key"]
+    assert changed["state"]["pair"] == "EURUSD"
+    assert changed["state"]["timeframe"] == "M15"
+    assert [
+        row["closed_candle_sequence"]
+        for row in changed["stable_visible_candle_bindings"]
+    ] == [0]
+
+
 def test_stateful_identity_reuses_event_during_closed_detector_dropout() -> None:
     candles = _candles()
     initial = resolve_closed_candle_identity_v3(
@@ -421,6 +460,89 @@ def _roll_forward_candles(
     return rows
 
 
+def test_stable_visible_history_rebinds_six_rollovers_without_track_identity() -> None:
+    rows = _candles()
+    rows[-2].update(
+        {
+            "open_y_px": 180.0,
+            "close_y_px": 166.0,
+            "wick_top_px": 158.0,
+            "wick_bottom_px": 187.0,
+            "bbox": [307.0, 158.0, 313.0, 187.0],
+        }
+    )
+    rows[-1].update(
+        {
+            "open_y_px": 211.0,
+            "close_y_px": 194.0,
+            "wick_top_px": 185.0,
+            "wick_bottom_px": 219.0,
+            "bbox": [317.0, 185.0, 323.0, 219.0],
+        }
+    )
+    resolution = resolve_closed_candle_identity_v3(
+        rows,
+        pair="GBPUSD_OTC",
+        timeframe="M5",
+    )
+
+    for frame in range(1, 7):
+        current = [dict(row) for row in rows]
+        current[-1]["is_closed"] = True
+        prior_forming = current[-1]
+        center_x = float(prior_forming["center_x"]) + 10.0
+        open_y = float(prior_forming["close_y_px"])
+        body = 5.0 + frame * 1.7
+        direction = "BUY" if frame % 2 else "SELL"
+        close_y = open_y - body if direction == "BUY" else open_y + body
+        current.append(
+            {
+                "track_id": "forming",
+                "direction": direction,
+                "center_x": center_x,
+                "open_y_px": open_y,
+                "close_y_px": close_y,
+                "wick_top_px": min(open_y, close_y) - (2.0 + frame),
+                "wick_bottom_px": max(open_y, close_y) + (3.0 + frame),
+                "price_proxy": 1.0 - close_y / 300.0,
+                "bbox": [
+                    center_x - 3.0,
+                    min(open_y, close_y) - (2.0 + frame),
+                    center_x + 3.0,
+                    max(open_y, close_y) + (3.0 + frame),
+                ],
+                "parse_confidence": 0.94,
+                "is_closed": False,
+            }
+        )
+        for index, row in enumerate(current):
+            # Reacquisition deliberately replaces every rolling detector id.
+            row["track_id"] = f"frame-{frame}-slot-{index}"
+        resolution = resolve_closed_candle_identity_v3(
+            current,
+            pair="GBPUSD_OTC",
+            timeframe="M5",
+            previous_state=resolution["state"],
+        )
+        assert resolution["transition_observed"] is True
+        assert resolution["transition_count"] == 1
+        rows = current
+
+    bindings = resolution["stable_visible_candle_bindings"]
+    assert bindings == resolution["state"]["stable_visible_candle_bindings"]
+    assert len(bindings) <= 32
+    assert [row["closed_candle_sequence"] for row in bindings] == list(range(7))
+    assert [row["current_row_index"] for row in bindings] == list(range(28, 35))
+    assert len({row["closed_candle_key"] for row in bindings}) == 7
+    assert all(
+        str(row["reobserved_observation"]["track_id"]).startswith("frame-6-")
+        for row in bindings
+    )
+    assert all(
+        row["proof_source"] == "UNIQUE_VISUAL_REOBSERVATION_V3" for row in bindings[:-1]
+    )
+
+
 def test_stateful_identity_reacquires_each_visible_missed_closed_candle() -> None:
     initial_rows = _candles()
     initial = resolve_closed_candle_identity_v3(
@@ -503,6 +625,7 @@ def test_stateful_identity_does_not_invent_a_gap_when_visible_chain_is_broken() 
     assert unresolved["transition_observed"] is False
     assert unresolved["closed_candle_sequence"] == 0
     assert unresolved["state"]["confirmed_event_batch"] == []
+    assert unresolved["stable_visible_candle_bindings"] == []
     assert unresolved["state"]["reacquisition"]["status"] == "NOT_CONFIRMED"
     assert (
         unresolved["state"]["reacquisition"]["reason"]
@@ -537,6 +660,7 @@ def test_screenshot_rollover_does_not_use_legacy_match_when_reacquisition_is_amb
     assert unresolved["transition_observed"] is False
     assert unresolved["closed_candle_sequence"] == 0
     assert unresolved["state"]["confirmed_event_batch"] == []
+    assert unresolved["stable_visible_candle_bindings"] == []
 
 
 def test_source_rollover_wins_over_simultaneous_detector_coverage_expansion() -> None:
@@ -562,6 +686,44 @@ def test_source_rollover_wins_over_simultaneous_detector_coverage_expansion() ->
     assert advanced["closed_candle_key"] != initial["closed_candle_key"]
     assert advanced["match_scores"]["detector_coverage_rebase"] is True
     assert advanced["same_event_cache_rebuild_required"] is False
+
+
+@pytest.mark.parametrize(
+    ("identity_field", "prior_identity", "current_identity"),
+    (
+        ("bar_open_time", 1_783_755_200, 1_783_756_100),
+        ("bar_open_time", 1_783_755_200_000, 1_783_756_100_000),
+        ("source_bar_id", "broker-bar-a", "broker-bar-d"),
+    ),
+)
+def test_source_identity_gap_cannot_masquerade_as_one_candle_horizon(
+    identity_field: str,
+    prior_identity: object,
+    current_identity: object,
+) -> None:
+    initial_rows = _coverage_candles(39)
+    initial_rows[-2][identity_field] = prior_identity
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+    )
+    current_rows = _coverage_candles(39)
+    current_rows[-2][identity_field] = current_identity
+    unresolved = resolve_closed_candle_identity_v3(
+        current_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    assert unresolved["transition_observed"] is False
+    assert unresolved["transition_count"] == 0
+    assert unresolved["closed_candle_sequence"] == 0
+    assert unresolved["closed_candle_key"] == initial["closed_candle_key"]
+    assert unresolved["transition_reason"] == "SOURCE_BAR_GAP_UNPROVEN"
+    assert unresolved["state"]["confirmed_event_batch"] == []
+    assert unresolved["match_scores"]["source_one_step_horizon_proven"] is False
 
 
 def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() -> None:

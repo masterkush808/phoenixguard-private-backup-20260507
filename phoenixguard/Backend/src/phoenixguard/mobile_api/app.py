@@ -94,6 +94,9 @@ from .operator_workspace_v1 import (
     build_operator_workspace_v1,
     project_public_tracking_episode_v1,
     public_tracking_readiness_message_v1,
+    retracement_graph_contract_v3,
+    retracement_pair_contract_v3,
+    retracement_study_contract_v3,
 )
 from .pipeline import DEFAULT_COUNCIL_SCOPE, DEFAULT_OVERLAY_MODE
 from .realtime_sync_v3 import (
@@ -4342,6 +4345,11 @@ def _bounded_operator_projection_context(
                         associations.append(association)
             if associations:
                 pair_dna["outcome_associations"] = associations
+            retracement_confluence = retracement_pair_contract_v3(
+                pair_mapping.get("retracement_confluence")
+            )
+            if retracement_confluence:
+                pair_dna["retracement_confluence"] = retracement_confluence
         if pair_dna:
             result["pair_dna"] = pair_dna
 
@@ -4397,8 +4405,17 @@ def _bounded_operator_projection_context(
             )
             if relationship_contract:
                 object_graph["relationship_contract"] = relationship_contract
+            retracement_graph = retracement_graph_contract_v3(
+                object_graph_mapping.get("retracement_study")
+            )
+            if retracement_graph:
+                object_graph["retracement_study"] = retracement_graph
         if object_graph:
             result["object_relationship_graph"] = object_graph
+
+        retracement_study = retracement_study_contract_v3(pair_dna, object_graph)
+        if retracement_study:
+            result["retracement_study"] = retracement_study
 
         maturation = selected(
             source.get("outcome_maturation"),

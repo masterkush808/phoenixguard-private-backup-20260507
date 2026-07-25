@@ -4333,6 +4333,7 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
             "broker_source",
             "broker_source_lock",
             "promotion_failure_audit_v3",
+            "market_study_v3",
         },
     )
     tracking = _mapping(session.get("tracking_summary"))
@@ -4359,6 +4360,7 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
             "pipeline_timing",
             "tracked_candles",
             "visible_candle_count",
+            "market_study_v3",
         },
     )
     tracked_candles = _sequence_of_mappings(tracking.get("tracked_candles"))

@@ -1228,6 +1228,15 @@
       line-height: 1.45;
     }
 
+    .retracement-evidence {
+      margin: 12px 0 0;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.55;
+    }
+
     .decision-advanced-link {
       margin-top: 12px;
       padding: 0;
@@ -3518,6 +3527,7 @@
               <strong id="beginner-evidence-safety">Closed while checking</strong>
             </div>
           </div>
+          <p class="retracement-evidence" id="retracement-evidence" aria-live="polite">Retracement evidence: awaiting completed graph and Pair DNA history for the 70.5% OTE reference and the 71.8% experimental, nonstandard level. Observation only; never entry permission.</p>
           <button class="decision-advanced-link" id="beginner-open-advanced" type="button">Explore the visual evidence</button>
         </details>
       </div>
@@ -3926,6 +3936,7 @@
       beginnerEvidenceStory: byId("beginner-evidence-story"),
       beginnerEvidenceTiming: byId("beginner-evidence-timing"),
       beginnerEvidenceSafety: byId("beginner-evidence-safety"),
+      retracementEvidence: byId("retracement-evidence"),
       trackingRibbon: byId("tracking-ribbon"),
       trackingEpisodeState: byId("tracking-episode-state"),
       trackingEpisodeSummary: byId("tracking-episode-summary"),
@@ -6096,6 +6107,7 @@
       setText(els.beginnerInstruction, "Entry permission is unavailable.");
       setText(els.beginnerReason, message);
       setText(els.beginnerNextCondition, "Reconnect the chart and wait for a new current observation.");
+      setText(els.retracementEvidence, "Retracement evidence: unavailable while the live workspace is offline. Observation only; never entry permission.");
       updateVisualStatus("chart", "offline", "Broker view unavailable");
     }
 
@@ -6377,6 +6389,43 @@
       return directional.length ? directional[directional.length - 1] : studyDirection(fallback);
     }
 
+    function retracementEvidenceSummary(studyContract) {
+      const retracement = safeObject(safeObject(studyContract).retracement_study);
+      const trustedObservationContract = retracement.study_only === true
+        && retracement.observation_only === true
+        && retracement.execution_authority === false
+        && retracement.can_grant_entry_permission === false;
+      const supportByLevel = new Map();
+      if (trustedObservationContract) {
+        safeList(retracement.levels).forEach(function (rawLevel) {
+          const level = safeObject(rawLevel);
+          const levelId = safeText(level.level_id, "").toUpperCase();
+          if (!["OTE_70_5", "CUSTOM_71_8"].includes(levelId)) {
+            return;
+          }
+          const graphSupport = Number(level.graph_support);
+          const hasFullPairDnaSupport = Object.prototype.hasOwnProperty.call(level, "pair_dna_support");
+          const pairDnaSupport = hasFullPairDnaSupport ? Number(level.pair_dna_support) : null;
+          supportByLevel.set(levelId, {
+            graph: Number.isFinite(graphSupport) && graphSupport >= 0 ? Math.floor(graphSupport) : 0,
+            pairDna: Number.isFinite(pairDnaSupport) && pairDnaSupport >= 0 ? Math.floor(pairDnaSupport) : null,
+          });
+        });
+      }
+      const ote = supportByLevel.get("OTE_70_5") || {graph: 0, pairDna: null};
+      const experimental = supportByLevel.get("CUSTOM_71_8") || {graph: 0, pairDna: null};
+      const totalSupport = ote.graph + (ote.pairDna || 0)
+        + experimental.graph + (experimental.pairDna || 0);
+      if (!trustedObservationContract || totalSupport === 0) {
+        return "Retracement evidence: awaiting completed graph and Pair DNA history for the 70.5% OTE reference and the 71.8% experimental, nonstandard level. Observation only; never entry permission.";
+      }
+      return "Retracement evidence: 70.5% OTE reference — current graph " + ote.graph
+        + ", full Pair DNA " + (ote.pairDna === null ? "unavailable" : ote.pairDna)
+        + "; 71.8% experimental/nonstandard — current graph " + experimental.graph
+        + ", full Pair DNA " + (experimental.pairDna === null ? "unavailable" : experimental.pairDna)
+        + ". Observation only; never entry permission.";
+    }
+
     function marketRegressionStudy(payload) {
       const operatorState = safeObject(payload);
       const tracking = safeObject(operatorState.tracking);
@@ -6549,6 +6598,7 @@
           ),
         },
         phase: phase,
+        retracementEvidence: retracementEvidenceSummary(explicitStudy),
       };
     }
 
@@ -6653,6 +6703,7 @@
       setText(els.pressureEvent, pressureCopy);
       setText(els.beginnerEvidenceStory, "Major " + study.major.title.toLowerCase() + " · Inner " + study.inner.title.toLowerCase());
       setText(els.beginnerEvidenceTiming, study.regression.title);
+      setText(els.retracementEvidence, study.retracementEvidence);
       setText(
         els.beginnerEvidenceSafety,
         entryPermissionTitle + " · " + freshnessLabel + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),

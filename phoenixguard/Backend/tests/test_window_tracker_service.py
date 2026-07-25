@@ -81,7 +81,8 @@ def test_market_study_objects_preserve_bounded_relationship_evidence() -> None:
         {
             "object_type": "CROWDED_PRICE_AREA",
             "object_id": "zone-7",
-            "identity_scope": "EXPLICIT",
+            "identity_scope": "OBSERVATION_ONLY",
+            "identity_stable": False,
             "direction": "BUY",
             "confidence": 0.84,
             "bounds": [0.2, 0.3, 0.6, 0.7],
@@ -126,7 +127,8 @@ def test_market_study_objects_keep_real_tracker_zones_and_normalize_geometry() -
     assert [row["object_id"] for row in objects] == ["support_1", "support_2"]
     assert [row["object_type"] for row in objects] == ["DEMAND_ZONE", "DEMAND_ZONE"]
     assert [row["confidence"] for row in objects] == [0.71, 0.83]
-    assert all(row["identity_scope"] == "EXPLICIT" for row in objects)
+    assert all(row["identity_scope"] == "OBSERVATION_ONLY" for row in objects)
+    assert all(row["identity_stable"] is False for row in objects)
     assert objects[0]["bounds"] == [0.1, 0.4, 0.5, 0.48]
     assert objects[0]["points"] == [[0.12, 0.44], [0.48, 0.436]]
     assert objects[1]["bounds"] == [0.2, 0.6, 0.7, 0.7]

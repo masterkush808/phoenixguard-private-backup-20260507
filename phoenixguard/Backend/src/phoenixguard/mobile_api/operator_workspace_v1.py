@@ -39,6 +39,34 @@ _EPISODE_HISTORY_ROW_LIMIT = (
 _FORECAST_BELIEF_STATES = frozenset(
     {"RESET", "REACQUIRING", "STABLE", "REVERSAL_PENDING"}
 )
+_RETRACEMENT_LEVEL_CATALOG: dict[str, dict[str, object]] = {
+    "OTE_70_5": {
+        "level_id": "OTE_70_5",
+        "level_ratio": 0.705,
+        "classification": "ICT_STYLE_OTE_REFERENCE",
+        "label": "70.5% ICT-style OTE reference",
+        "experimental": False,
+        "user_defined": False,
+        "standard_fibonacci": False,
+    },
+    "CUSTOM_71_8": {
+        "level_id": "CUSTOM_71_8",
+        "level_ratio": 0.718,
+        "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+        "label": "71.8% custom experimental nonstandard retracement",
+        "experimental": True,
+        "user_defined": True,
+        "standard_fibonacci": False,
+    },
+}
+_RETRACEMENT_LEVEL_ALIASES = {
+    "ICT_OTE_MIDPOINT_0_705": "OTE_70_5",
+    "USER_DEFINED_EXPERIMENTAL_0_718": "CUSTOM_71_8",
+}
+_RETRACEMENT_GRAPH_OBSERVATION_LIMIT = 128
+_RETRACEMENT_PARTITION_INPUT_LIMIT = 64
+_RETRACEMENT_PARTITION_OUTPUT_LIMIT = 16
+_RETRACEMENT_REGIME_BASIS = "CURRENT_STUDY_FRAME_AT_CONFLUENCE_OBSERVATION"
 _TOP_LEVEL_KEYS = (
     "schema_version",
     "session_id",
@@ -5372,6 +5400,422 @@ def _public_count_map(value: object, *, limit: int = 10) -> dict[str, int]:
     return dict(rows[:limit])
 
 
+def _canonical_retracement_level(value: object) -> dict[str, object]:
+    """Return one fixed public definition for the two studied level ids."""
+
+    source = _mapping(value)
+    raw_level_id = str(source.get("level_id") or "").strip().upper()
+    level_id = _RETRACEMENT_LEVEL_ALIASES.get(raw_level_id, raw_level_id)
+    if level_id not in _RETRACEMENT_LEVEL_CATALOG:
+        ratio = _number(source.get("level_ratio"))
+        if ratio is not None:
+            for candidate_id, candidate in _RETRACEMENT_LEVEL_CATALOG.items():
+                candidate_ratio = _number(candidate["level_ratio"])
+                if candidate_ratio is not None and abs(ratio - candidate_ratio) <= 1e-9:
+                    level_id = candidate_id
+                    break
+    catalog = _RETRACEMENT_LEVEL_CATALOG.get(level_id)
+    return dict(catalog) if catalog else {}
+
+
+def _safe_retracement_count_map(
+    value: object,
+    *,
+    limit: int = 8,
+    allowed_keys: frozenset[str] | None = None,
+) -> dict[str, int]:
+    source = _mapping(value)
+    rows: list[tuple[str, int]] = []
+    for raw_key, raw_count in source.items():
+        if isinstance(raw_count, bool):
+            continue
+        key = _safe_public_text(raw_key, "", limit=64).upper()
+        if not key or (allowed_keys is not None and key not in allowed_keys):
+            continue
+        rows.append((key, _integer(raw_count)))
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    return dict(rows[:limit])
+
+
+def retracement_graph_contract_v3(value: object) -> dict[str, object]:
+    """Strip raw geometry/identities and retain bounded per-level support."""
+
+    source = _mapping(value)
+    if (
+        source.get("study_only") is not True
+        or source.get("observation_only") is not True
+        or source.get("execution_authority") is not False
+    ):
+        return {}
+
+    catalog_ids: set[str] = set()
+    raw_catalog = source.get("level_catalog")
+    catalog_rows = (
+        _rows(raw_catalog)
+        if not isinstance(raw_catalog, Mapping)
+        else [
+            {"level_id": key, **dict(_mapping(row))}
+            for key, row in cast(Mapping[object, object], raw_catalog).items()
+        ]
+    )
+    for raw_level in catalog_rows[:8]:
+        canonical = _canonical_retracement_level(raw_level)
+        if canonical:
+            catalog_ids.add(str(canonical["level_id"]))
+
+    support_by_level: dict[str, int] = {}
+    compact_support = _rows(source.get("level_support"))[:2]
+    if compact_support:
+        for row in compact_support:
+            canonical = _canonical_retracement_level(row)
+            if not canonical:
+                continue
+            level_id = str(canonical["level_id"])
+            catalog_ids.add(level_id)
+            support_by_level[level_id] = _integer(
+                row.get("completed_observation_count"),
+                row.get("graph_support"),
+                row.get("support"),
+            )
+    else:
+        for row in _rows(source.get("observations"))[
+            :_RETRACEMENT_GRAPH_OBSERVATION_LIMIT
+        ]:
+            if (
+                str(row.get("status") or "").strip().upper() != "COMPLETED"
+                or row.get("identity_stable") is not True
+                or row.get("observational_confluence") is not True
+                or row.get("causal") is not False
+            ):
+                continue
+            canonical = _canonical_retracement_level(row)
+            if not canonical:
+                continue
+            level_id = str(canonical["level_id"])
+            catalog_ids.add(level_id)
+            support_by_level[level_id] = support_by_level.get(level_id, 0) + 1
+
+    level_support: list[dict[str, object]] = []
+    for level_id in _RETRACEMENT_LEVEL_CATALOG:
+        if level_id not in catalog_ids and level_id not in support_by_level:
+            continue
+        level = dict(_RETRACEMENT_LEVEL_CATALOG[level_id])
+        level["completed_observation_count"] = support_by_level.get(level_id, 0)
+        level_support.append(level)
+
+    return {
+        "schema_version": "PG_RETRACEMENT_CONFLUENCE_STUDY_V3",
+        "status": _safe_public_text(source.get("status"), "PENDING", limit=40).upper(),
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "truncated": source.get("truncated") is True,
+        "completed_observation_count": sum(support_by_level.values()),
+        "level_support": level_support,
+    }
+
+
+def _retracement_partition_contract(value: object) -> dict[str, object]:
+    source = _mapping(value)
+    partition = _mapping(source.get("partition")) or source
+    canonical = _canonical_retracement_level(partition)
+    if not canonical:
+        return {}
+
+    support = _mapping(source.get("support"))
+    counts = _mapping(source.get("counts"))
+    rates = _mapping(source.get("empirical_rates"))
+    completed = _integer(
+        support.get("completed_studies"),
+        source.get("completed_study_count"),
+    )
+    directional_alignment_labels = min(
+        completed,
+        _integer(
+            support.get("directional_alignment_label_count"),
+            source.get("directional_alignment_label_count"),
+        ),
+    )
+    side_adjusted_returns = min(
+        completed,
+        _integer(
+            support.get("side_adjusted_return_count"),
+            source.get("side_adjusted_return_count"),
+        ),
+    )
+    directional_alignment_count = min(
+        directional_alignment_labels,
+        _integer(
+            counts.get("directional_alignment_count"),
+            source.get("directional_alignment_count"),
+        ),
+    )
+    outcome_directions = _safe_retracement_count_map(
+        counts.get("outcome_directions")
+        or source.get("outcome_direction_counts"),
+        limit=3,
+        allowed_keys=frozenset({"UP", "DOWN", "REST"}),
+    )
+    if sum(outcome_directions.values()) > directional_alignment_labels:
+        outcome_directions = {}
+    relation_counts = _safe_retracement_count_map(
+        counts.get("relations") or source.get("relation_counts"),
+        limit=8,
+    )
+
+    def partition_token(key: str, default: str, *, limit: int) -> str:
+        return _safe_public_text(partition.get(key), default, limit=limit).upper()
+
+    symbol = partition_token("symbol", "", limit=64)
+    timeframe = partition_token("timeframe", "", limit=32)
+    observation_regime = partition_token("regime", "UNKNOWN", limit=48)
+    supplied_regime_basis = partition_token(
+        "regime_basis",
+        _RETRACEMENT_REGIME_BASIS,
+        limit=96,
+    )
+    if supplied_regime_basis != _RETRACEMENT_REGIME_BASIS:
+        return {}
+    side = partition_token("side", "UNKNOWN", limit=16)
+    coordinate_space = partition_token("coordinate_space", "UNKNOWN", limit=40)
+    object_type = partition_token("object_type", "UNKNOWN", limit=64)
+    label_parts = [
+        token
+        for token in (
+            symbol,
+            timeframe,
+            f"OBSERVATION REGIME {observation_regime}",
+            side,
+            coordinate_space,
+            str(canonical["label"]),
+            object_type,
+        )
+        if token
+    ]
+    result: dict[str, object] = {
+        "partition_label": " | ".join(label_parts)[:240],
+        **canonical,
+        "observation_regime": observation_regime,
+        "regime_basis": _RETRACEMENT_REGIME_BASIS,
+        "side": side,
+        "coordinate_space": coordinate_space,
+        "object_type": object_type,
+        "completed_study_count": completed,
+        "directional_alignment_label_count": directional_alignment_labels,
+        "directional_alignment_count": directional_alignment_count,
+        "side_adjusted_return_count": side_adjusted_returns,
+        "outcome_direction_counts": outcome_directions,
+        "relation_counts": relation_counts,
+    }
+    directional_alignment_rate = _number(
+        rates.get(
+            "directional_alignment_rate",
+            source.get("directional_alignment_rate"),
+        )
+    )
+    if (
+        directional_alignment_labels > 0
+        and directional_alignment_rate is not None
+        and 0.0 <= directional_alignment_rate <= 1.0
+    ):
+        result["directional_alignment_rate"] = round(
+            directional_alignment_rate, 6
+        )
+    average_side_adjusted_return = _number(
+        rates.get(
+            "average_side_adjusted_return",
+            source.get("average_side_adjusted_return"),
+        )
+    )
+    if side_adjusted_returns > 0 and average_side_adjusted_return is not None:
+        result["average_side_adjusted_return"] = round(
+            average_side_adjusted_return, 8
+        )
+    return result
+
+
+def retracement_pair_contract_v3(value: object) -> dict[str, object]:
+    """Bound the Pair DNA aggregate without persistence or dedupe metadata."""
+
+    source = _mapping(value)
+    if (
+        source.get("study_only") is not True
+        or source.get("observation_only") is not True
+        or source.get("execution_authority") is not False
+    ):
+        return {}
+
+    catalog_ids: set[str] = set()
+    raw_catalog = source.get("level_catalog")
+    catalog_rows = (
+        _rows(raw_catalog)
+        if not isinstance(raw_catalog, Mapping)
+        else [
+            {"level_id": key, **dict(_mapping(row))}
+            for key, row in cast(Mapping[object, object], raw_catalog).items()
+        ]
+    )
+    for raw_level in catalog_rows[:8]:
+        canonical = _canonical_retracement_level(raw_level)
+        if canonical:
+            catalog_ids.add(str(canonical["level_id"]))
+
+    full_support_by_level: dict[str, int] = {}
+    for raw_support in _rows(source.get("level_support"))[:2]:
+        canonical = _canonical_retracement_level(raw_support)
+        if not canonical:
+            continue
+        level_id = str(canonical["level_id"])
+        catalog_ids.add(level_id)
+        full_support_by_level[level_id] = _integer(
+            raw_support.get("completed_study_count")
+        )
+
+    deduplicated: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
+    for raw_partition in _rows(source.get("empirical_partitions"))[
+        :_RETRACEMENT_PARTITION_INPUT_LIMIT
+    ]:
+        compact = _retracement_partition_contract(raw_partition)
+        if not compact:
+            continue
+        level_id = str(compact["level_id"])
+        catalog_ids.add(level_id)
+        key = (
+            level_id,
+            str(compact["observation_regime"]),
+            str(compact["side"]),
+            str(compact["coordinate_space"]),
+            str(compact["object_type"]),
+        )
+        previous = deduplicated.get(key)
+        if previous is None or _integer(compact.get("completed_study_count")) > _integer(
+            previous.get("completed_study_count")
+        ):
+            deduplicated[key] = compact
+    partitions = sorted(
+        deduplicated.values(),
+        key=lambda row: (
+            -_integer(row.get("completed_study_count")),
+            str(row.get("partition_label") or ""),
+        ),
+    )[:_RETRACEMENT_PARTITION_OUTPUT_LIMIT]
+
+    return {
+        "schema_version": "PG_PAIR_DNA_RETRACEMENT_AGGREGATES_V3",
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "completed_study_count": _integer(source.get("completed_study_count")),
+        "partitions_truncated_count": _integer(
+            source.get("partitions_truncated_count")
+        ),
+        "level_catalog": {
+            level_id: dict(_RETRACEMENT_LEVEL_CATALOG[level_id])
+            for level_id in _RETRACEMENT_LEVEL_CATALOG
+            if level_id in catalog_ids
+        },
+        "level_support": [
+            {
+                "level_id": level_id,
+                "completed_study_count": full_support_by_level[level_id],
+            }
+            for level_id in _RETRACEMENT_LEVEL_CATALOG
+            if level_id in full_support_by_level
+        ],
+        "empirical_partitions": partitions,
+    }
+
+
+def retracement_study_contract_v3(
+    pair_dna: object,
+    object_relationship_graph: object,
+) -> dict[str, object]:
+    """Merge current graph support with Pair DNA history, without authority."""
+
+    pair_contract = retracement_pair_contract_v3(
+        _mapping(pair_dna).get("retracement_confluence")
+    )
+    graph_contract = retracement_graph_contract_v3(
+        _mapping(object_relationship_graph).get("retracement_study")
+    )
+    if not pair_contract and not graph_contract:
+        return {}
+
+    graph_support = {
+        str(row["level_id"]): _integer(row.get("completed_observation_count"))
+        for row in _rows(graph_contract.get("level_support"))
+        if row.get("level_id") in _RETRACEMENT_LEVEL_CATALOG
+    }
+    partitions = _rows(pair_contract.get("empirical_partitions"))[
+        :_RETRACEMENT_PARTITION_OUTPUT_LIMIT
+    ]
+    visible_partition_support: dict[str, int] = {}
+    for row in partitions:
+        level_id = str(row.get("level_id") or "")
+        if level_id not in _RETRACEMENT_LEVEL_CATALOG:
+            continue
+        visible_partition_support[level_id] = visible_partition_support.get(
+            level_id, 0
+        ) + _integer(row.get("completed_study_count"))
+    full_pair_support = {
+        str(row["level_id"]): _integer(row.get("completed_study_count"))
+        for row in _rows(pair_contract.get("level_support"))
+        if row.get("level_id") in _RETRACEMENT_LEVEL_CATALOG
+    }
+
+    pair_catalog = _mapping(pair_contract.get("level_catalog"))
+    level_ids = {
+        *graph_support,
+        *visible_partition_support,
+        *full_pair_support,
+        *(str(level_id) for level_id in pair_catalog),
+        *(
+            str(row.get("level_id"))
+            for row in _rows(graph_contract.get("level_support"))
+        ),
+    }
+    levels: list[dict[str, object]] = []
+    for level_id in _RETRACEMENT_LEVEL_CATALOG:
+        if level_id not in level_ids:
+            continue
+        level = {
+            **_RETRACEMENT_LEVEL_CATALOG[level_id],
+            "graph_support": graph_support.get(level_id, 0),
+        }
+        if level_id in full_pair_support:
+            level["pair_dna_support"] = full_pair_support[level_id]
+        else:
+            level["visible_partition_support"] = visible_partition_support.get(
+                level_id, 0
+            )
+        levels.append(level)
+
+    status = (
+        _safe_public_text(graph_contract.get("status"), "PENDING", limit=40).upper()
+        if graph_contract
+        else "PAIR_DNA_ONLY"
+    )
+    return {
+        "schema_version": "PG_MARKET_RETRACEMENT_STUDY_V3",
+        "status": status,
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+        "graph_completed_observation_count": _integer(
+            graph_contract.get("completed_observation_count")
+        ),
+        "pair_dna_completed_study_count": _integer(
+            pair_contract.get("completed_study_count")
+        ),
+        "empirical_partitions_truncated_count": _integer(
+            pair_contract.get("partitions_truncated_count")
+        ),
+        "levels": levels[:2],
+        "empirical_partitions": partitions,
+    }
+
+
 def _market_study_contract(value: object) -> dict[str, object]:
     """Project the bounded observation-only study into the operator DTO."""
 
@@ -5396,6 +5840,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
     pair_associations = _rows(pair_dna.get("outcome_associations"))[:12]
     candle_ledger = _mapping(source.get("candle_ledger"))
     object_graph = _mapping(source.get("object_relationship_graph"))
+    retracement_study = retracement_study_contract_v3(pair_dna, object_graph)
     maturation = _mapping(source.get("outcome_maturation"))
     matches: list[dict[str, object]] = []
     for row in _rows(similarity.get("matches"))[:5]:
@@ -5684,6 +6129,8 @@ def _market_study_contract(value: object) -> dict[str, object]:
             "execution_authority": False,
         },
     }
+    if retracement_study:
+        result["retracement_study"] = retracement_study
     return result
 
 

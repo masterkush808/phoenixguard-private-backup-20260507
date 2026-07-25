@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,152 @@ def _regression() -> dict[str, object]:
             "window_candles": 4,
         },
     }
+
+
+def _retracement_candles(*, include_next: bool) -> list[dict[str, object]]:
+    geometries = [
+        (102.0, 103.0, 101.0, 102.5),
+        (101.5, 102.0, 100.0, 101.0),
+        (102.5, 106.0, 102.0, 105.0),
+        (105.5, 110.0, 105.0, 109.0),
+        (108.5, 109.0, 104.0, 105.0),
+    ]
+    if include_next:
+        geometries.append((105.0, 106.0, 103.5, 104.0))
+    return [
+        {
+            "candle_id": f"retracement-bar-{index}",
+            "timestamp": 1_720_000_000 + index * 300,
+            "open": open_value,
+            "high": high,
+            "low": low,
+            "close": close,
+            "closed": True,
+        }
+        for index, (open_value, high, low, close) in enumerate(geometries)
+    ]
+
+
+def _outcome_baseline_candles(*, include_next: bool) -> list[dict[str, object]]:
+    geometries = [
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 105.0, 95.0, 100.0),
+        (100.0, 105.0, 95.0, 100.0),
+    ]
+    if include_next:
+        geometries.append((100.0, 150.0, 50.0, 100.3))
+    return [
+        {
+            "candle_id": f"baseline-bar-{index}",
+            "timestamp": 1_730_000_000 + index * 300,
+            "open": open_value,
+            "high": high,
+            "low": low,
+            "close": close,
+            "closed": True,
+        }
+        for index, (open_value, high, low, close) in enumerate(geometries)
+    ]
+
+
+def test_outcome_label_baseline_excludes_the_newest_outcome_candle(
+    tmp_path: Path,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "causal-baseline-study")
+    service.study(
+        _outcome_baseline_candles(include_next=False),
+        symbol="AUD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="baseline-close-1",
+        closed_candle_sequence=1,
+        regime="SIDEWAYS",
+        regression=_regression(),
+    )
+    result = service.study(
+        _outcome_baseline_candles(include_next=True),
+        symbol="AUD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="baseline-close-2",
+        closed_candle_sequence=2,
+        regime="TRANSITION",
+        regression=_regression(),
+    )
+
+    assert result["outcome_maturation"]["status"] == "MATURED"  # type: ignore[index]
+    matured = next(
+        row
+        for row in service.historical.entries()
+        if str(row["sequence_id"]).upper().endswith("BASELINE-CLOSE-1")
+    )
+    # Prior-only median range is 5.5, so +0.3 is directional. Including the
+    # 100-point outcome candle would raise the median to 10 and mislabel REST.
+    assert matured["outcome"]["direction"] == "UP"
+    assert math.isclose(
+        float(matured["outcome"]["realized_return"]),
+        0.05454545,
+        abs_tol=1e-8,
+    )
+
+
+def test_market_study_matures_retracement_confluence_into_pair_dna(
+    tmp_path: Path,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "retracement-study")
+    object_evidence = [
+        {
+            "object_type": "ORDER_BLOCK",
+            "object_id": "retracement-order-block-1",
+            "identity_stable": True,
+            "identity_scope": "EXPLICIT",
+            "confidence": 0.91,
+            "value_bounds": [102.8, 103.0],
+            "value_coordinate_space": "PRICE",
+            "value_axis_source": "TEST_PRICE_AXIS",
+        }
+    ]
+
+    first = service.study(
+        _retracement_candles(include_next=False),
+        symbol="EUR/USD OTC",
+        timeframe="M5",
+        closed_candle_key="retracement-close-1",
+        closed_candle_sequence=1,
+        regime="UPTREND",
+        regression=_regression(),
+        objects=object_evidence,
+    )
+    graph_study = first["object_relationship_graph"]["retracement_study"]  # type: ignore[index]
+    assert graph_study["status"] == "STUDIED"
+    assert {row["level_id"] for row in graph_study["observations"]} == {  # type: ignore[index]
+        "OTE_70_5",
+        "CUSTOM_71_8",
+    }
+
+    matured = service.study(
+        _retracement_candles(include_next=True),
+        symbol="EUR/USD OTC",
+        timeframe="M5",
+        closed_candle_key="retracement-close-2",
+        closed_candle_sequence=2,
+        regime="UPTREND",
+        regression=_regression(),
+        objects=object_evidence,
+    )
+
+    assert matured["outcome_maturation"]["status"] == "MATURED"  # type: ignore[index]
+    retracement_profile = matured["pair_dna"]["retracement_confluence"]  # type: ignore[index]
+    assert retracement_profile["completed_study_count"] == 2
+    assert {
+        row["partition"]["level_id"]
+        for row in retracement_profile["empirical_partitions"]
+    } == {"OTE_70_5", "CUSTOM_71_8"}
+    assert retracement_profile["level_support"] == [
+        {"level_id": "OTE_70_5", "completed_study_count": 1},
+        {"level_id": "CUSTOM_71_8", "completed_study_count": 1},
+    ]
+    assert retracement_profile["partitions_truncated_count"] == 0
+    assert retracement_profile["execution_authority"] is False
 
 
 def test_market_study_learns_prior_outcomes_without_execution_authority(

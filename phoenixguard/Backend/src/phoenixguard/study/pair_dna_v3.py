@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import json
 import math
 from pathlib import Path
 from typing import Any, cast
@@ -58,6 +59,39 @@ _LEGACY_FALSE_POSITIVE_CEILING = 1e-6
 MAX_PAIR_DNA_ASSOCIATIONS = 2_048
 MAX_PAIR_DNA_OBJECT_TYPES = 256
 MAX_PAIR_DNA_REGIMES = 128
+DEFAULT_MAX_RETRACEMENT_BUCKETS = 2_048
+MAX_RETRACEMENT_STUDY_ROWS = 2_048
+RETRACEMENT_CONFLUENCE_STUDY_SCHEMA_VERSION = (
+    "PG_RETRACEMENT_CONFLUENCE_STUDY_V3"
+)
+_RETRACEMENT_AGGREGATE_SCHEMA_VERSION = "PG_PAIR_DNA_RETRACEMENT_AGGREGATES_V3"
+_RETRACEMENT_LEVELS: dict[str, dict[str, Any]] = {
+    "OTE_70_5": {
+        "level_ratio": 0.705,
+        "classification": "ICT_STYLE_OTE_REFERENCE",
+        "experimental": False,
+        "user_defined": False,
+        "standard_fibonacci": False,
+    },
+    "CUSTOM_71_8": {
+        "level_ratio": 0.718,
+        "classification": "USER_DEFINED_EXPERIMENTAL_NONSTANDARD",
+        "experimental": True,
+        "user_defined": True,
+        "standard_fibonacci": False,
+    },
+}
+_RETRACEMENT_LEVEL_ALIASES = {
+    "ICT_OTE_MIDPOINT_0_705": "OTE_70_5",
+    "USER_DEFINED_EXPERIMENTAL_0_718": "CUSTOM_71_8",
+}
+_RETRACEMENT_RATIO_TOLERANCE = 1e-9
+_RETRACEMENT_COORDINATE_SPACES = {
+    "PRICE",
+    "NORMALIZED_PRICE_PROXY",
+    "PIXEL_PRICE_PROXY",
+}
+_RETRACEMENT_REGIME_BASIS = "CURRENT_STUDY_FRAME_AT_CONFLUENCE_OBSERVATION"
 
 
 class PairDNAValidationError(ValueError):
@@ -193,6 +227,34 @@ def _counter(value: object, *, field: str) -> dict[str, int]:
     return dict(sorted(result.items()))
 
 
+def _empty_segmented_bloom() -> dict[str, Any]:
+    return {
+        "algorithm": "SHA256_SEGMENTED_BLOOM_V2",
+        "insertions": 0,
+        "capacity": PAIR_DNA_DEDUPE_CAPACITY,
+        "false_positive_ceiling": PAIR_DNA_DEDUPE_FALSE_POSITIVE_CEILING,
+        "segment_bits": PAIR_DNA_DEDUPE_SEGMENT_BITS,
+        "segment_hashes": PAIR_DNA_DEDUPE_SEGMENT_HASHES,
+        "segment_capacity": PAIR_DNA_DEDUPE_SEGMENT_CAPACITY,
+        "max_segments": PAIR_DNA_DEDUPE_MAX_SEGMENTS,
+        "segments": [],
+        "legacy_sha256_bloom_v1": None,
+    }
+
+
+def _empty_retracement_aggregate() -> dict[str, Any]:
+    return {
+        "schema_version": _RETRACEMENT_AGGREGATE_SCHEMA_VERSION,
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "completed_study_count": 0,
+        "buckets": {},
+        "recent_study_ids": [],
+        "study_dedupe_bloom": _empty_segmented_bloom(),
+    }
+
+
 def _empty_profile(symbol: str, timeframe: str, pair_id: str) -> dict[str, Any]:
     return {
         "pair_id": pair_id,
@@ -230,6 +292,7 @@ def _empty_profile(symbol: str, timeframe: str, pair_id: str) -> dict[str, Any]:
         "object_type_counts": {},
         "outcome_correlations": {},
         "association_overflow_count": 0,
+        "retracement_confluence": _empty_retracement_aggregate(),
         "recent_sequences": [],
         "seen_sequence_ids": [],
         "identity_ledger": {
@@ -247,18 +310,7 @@ def _empty_profile(symbol: str, timeframe: str, pair_id: str) -> dict[str, Any]:
             "skipped_incomplete_segments": 0,
             "skipped_overlapping_segments": 0,
         },
-        "sequence_dedupe_bloom": {
-            "algorithm": "SHA256_SEGMENTED_BLOOM_V2",
-            "insertions": 0,
-            "capacity": PAIR_DNA_DEDUPE_CAPACITY,
-            "false_positive_ceiling": PAIR_DNA_DEDUPE_FALSE_POSITIVE_CEILING,
-            "segment_bits": PAIR_DNA_DEDUPE_SEGMENT_BITS,
-            "segment_hashes": PAIR_DNA_DEDUPE_SEGMENT_HASHES,
-            "segment_capacity": PAIR_DNA_DEDUPE_SEGMENT_CAPACITY,
-            "max_segments": PAIR_DNA_DEDUPE_MAX_SEGMENTS,
-            "segments": [],
-            "legacy_sha256_bloom_v1": None,
-        },
+        "sequence_dedupe_bloom": _empty_segmented_bloom(),
     }
 
 
@@ -671,6 +723,397 @@ def _bloom_add(bloom: Mapping[str, Any], sequence_id: str) -> dict[str, Any]:
     return _validate_bloom(canonical, field="sequence_dedupe_bloom")
 
 
+def _bounded_token(value: object, *, field: str, maximum: int) -> str:
+    token = "_".join(str(value or "").strip().upper().split())
+    if not token:
+        raise PairDNAValidationError(f"{field} is required")
+    if len(token) > maximum:
+        raise PairDNAValidationError(f"{field} exceeds {maximum} characters")
+    if any(ord(character) < 32 for character in token):
+        raise PairDNAValidationError(f"{field} contains control characters")
+    return token
+
+
+def _canonical_retracement_side(value: object, *, field: str) -> str:
+    token = _bounded_token(value, field=field, maximum=32)
+    if token in {"BUY", "BULL", "BULLISH", "UP", "UP_SWING"}:
+        return "BULLISH"
+    if token in {"SELL", "BEAR", "BEARISH", "DOWN", "DOWN_SWING"}:
+        return "BEARISH"
+    raise PairDNAValidationError(f"{field} must identify a bullish or bearish swing")
+
+
+def _canonical_retracement_level(row: Mapping[str, Any], *, field: str) -> dict[str, Any]:
+    supplied_level_id = _bounded_token(
+        row.get("level_id"), field=f"{field}.level_id", maximum=64
+    )
+    level_id = _RETRACEMENT_LEVEL_ALIASES.get(supplied_level_id, supplied_level_id)
+    contract = _mapping(_RETRACEMENT_LEVELS.get(level_id))
+    if not contract:
+        raise PairDNAValidationError(
+            f"{field}.level_id must be OTE_70_5 or CUSTOM_71_8"
+        )
+    expected_ratio = float(contract["level_ratio"])
+    level_ratio = _finite(row.get("level_ratio"), field=f"{field}.level_ratio")
+    if abs(level_ratio - expected_ratio) > _RETRACEMENT_RATIO_TOLERANCE:
+        raise PairDNAValidationError(
+            f"{field}.level_ratio does not match {level_id}"
+        )
+    for boolean_field in ("experimental", "user_defined", "standard_fibonacci"):
+        if boolean_field in row and not isinstance(row.get(boolean_field), bool):
+            raise PairDNAValidationError(f"{field}.{boolean_field} must be boolean")
+        if boolean_field in row and row.get(boolean_field) is not bool(
+            contract[boolean_field]
+        ):
+            raise PairDNAValidationError(
+                f"{field}.{boolean_field} contradicts the level contract"
+            )
+    if "classification" in row and _bounded_token(
+        row.get("classification"),
+        field=f"{field}.classification",
+        maximum=96,
+    ) != str(contract["classification"]):
+        raise PairDNAValidationError(
+            f"{field}.classification contradicts the level contract"
+        )
+    return {
+        "level_id": level_id,
+        "level_ratio": expected_ratio,
+        "classification": str(contract["classification"]),
+        "experimental": bool(contract["experimental"]),
+        "user_defined": bool(contract["user_defined"]),
+        "standard_fibonacci": False,
+    }
+
+
+def _retracement_partition_key(partition: Mapping[str, Any]) -> str:
+    material = json.dumps(
+        [
+            str(partition.get(field) or "")
+            for field in (
+                "symbol",
+                "timeframe",
+                "regime",
+                "side",
+                "coordinate_space",
+                "level_id",
+                "object_type",
+            )
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return f"retracement-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _canonical_retracement_partition(
+    row: Mapping[str, Any],
+    *,
+    symbol: str,
+    timeframe: str,
+    field: str,
+) -> dict[str, Any]:
+    if "symbol" in row and _canonical_identity(
+        row.get("symbol"), field=f"{field}.symbol", maximum=64
+    ) != symbol:
+        raise PairDNAValidationError(f"{field}.symbol does not match the Pair DNA profile")
+    if "timeframe" in row and _canonical_identity(
+        row.get("timeframe"), field=f"{field}.timeframe", maximum=32
+    ) != timeframe:
+        raise PairDNAValidationError(
+            f"{field}.timeframe does not match the Pair DNA profile"
+        )
+    level = _canonical_retracement_level(row, field=field)
+    coordinate_space = _bounded_token(
+        row.get("coordinate_space"),
+        field=f"{field}.coordinate_space",
+        maximum=64,
+    )
+    if coordinate_space not in _RETRACEMENT_COORDINATE_SPACES:
+        raise PairDNAValidationError(
+            f"{field}.coordinate_space must be PRICE, NORMALIZED_PRICE_PROXY, "
+            "or PIXEL_PRICE_PROXY"
+        )
+    partition = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "regime": _bounded_token(
+            row.get("observation_regime", row.get("regime")),
+            field=f"{field}.observation_regime",
+            maximum=64,
+        ),
+        "regime_basis": _RETRACEMENT_REGIME_BASIS,
+        "side": _canonical_retracement_side(
+            row.get("side", row.get("swing_direction")),
+            field=f"{field}.side",
+        ),
+        "coordinate_space": coordinate_space,
+        "level_id": str(level["level_id"]),
+        "level_ratio": float(level["level_ratio"]),
+        "classification": str(level["classification"]),
+        "experimental": bool(level["experimental"]),
+        "user_defined": bool(level["user_defined"]),
+        "standard_fibonacci": False,
+        "object_type": _bounded_token(
+            row.get("object_type"),
+            field=f"{field}.object_type",
+            maximum=128,
+        ),
+    }
+    supplied_regime_basis = row.get("regime_basis")
+    if supplied_regime_basis is not None and _bounded_token(
+        supplied_regime_basis,
+        field=f"{field}.regime_basis",
+        maximum=96,
+    ) != _RETRACEMENT_REGIME_BASIS:
+        raise PairDNAValidationError(
+            f"{field}.regime_basis must identify the current confluence observation frame"
+        )
+    return partition
+
+
+def _canonical_completed_retracement_rows(
+    retracement_study: Mapping[str, Any] | None,
+    *,
+    symbol: str,
+    timeframe: str,
+) -> list[dict[str, Any]]:
+    if retracement_study is None:
+        return []
+    study = _required_mapping(retracement_study, field="retracement_study")
+    if study.get("schema_version") != RETRACEMENT_CONFLUENCE_STUDY_SCHEMA_VERSION:
+        raise PairDNAValidationError(
+            "retracement_study schema is not PhoenixGuard V3"
+        )
+    if (
+        study.get("study_only") is not True
+        or study.get("observation_only") is not True
+        or study.get("execution_authority") is not False
+    ):
+        raise PairDNAValidationError(
+            "retracement_study must be observation-only and have no execution authority"
+        )
+    if str(study.get("status") or "").strip().upper() not in {
+        "STUDIED",
+        "STUDIED_TRUNCATED",
+    }:
+        return []
+    observations = _required_rows(
+        study.get("observations"), field="retracement_study.observations"
+    )
+    if len(observations) > MAX_RETRACEMENT_STUDY_ROWS:
+        raise PairDNAValidationError(
+            "retracement_study observations exceed the bounded input capacity"
+        )
+    completed: list[dict[str, Any]] = []
+    by_study_id: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(observations):
+        if (
+            str(row.get("status") or "").strip().upper() != "COMPLETED"
+            or row.get("observational_confluence") is not True
+        ):
+            continue
+        field = f"retracement_study.observations[{index}]"
+        study_id = str(row.get("study_id") or "").strip()
+        if not study_id or len(study_id) > 256:
+            raise PairDNAValidationError(
+                f"{field}.study_id must be a stable 1..256 character identity"
+            )
+        if row.get("identity_stable") is not True:
+            raise PairDNAValidationError(
+                f"{field}.identity_stable must be true for completed evidence"
+            )
+        if row.get("causal") is not False:
+            raise PairDNAValidationError(
+                f"{field}.causal must be explicitly false"
+            )
+        if any(
+            row.get(flag) is True
+            for flag in (
+                "execution_authority",
+                "can_grant_entry_permission",
+                "grants_entry_permission",
+                "grants_execution_permission",
+                "may_issue_orders",
+            )
+        ):
+            raise PairDNAValidationError(f"{field} cannot carry trade authority")
+        canonical = {
+            "study_id": study_id,
+            "partition": _canonical_retracement_partition(
+                row,
+                symbol=symbol,
+                timeframe=timeframe,
+                field=field,
+            ),
+            "relation": _bounded_token(
+                row.get("relation", "OBSERVED_CONFLUENCE"),
+                field=f"{field}.relation",
+                maximum=96,
+            ),
+        }
+        previous = by_study_id.get(study_id)
+        if previous is not None and previous != canonical:
+            raise PairDNAValidationError(
+                f"retracement_study contains conflicting study_id {study_id}"
+            )
+        if previous is None:
+            by_study_id[study_id] = canonical
+            completed.append(canonical)
+    return completed
+
+
+def _empty_retracement_bucket(partition: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "partition": dict(partition),
+        "completed_study_count": 0,
+        "relation_counts": {},
+        "outcome_direction_counts": {},
+        "directional_alignment_label_count": 0,
+        "directional_alignment_count": 0,
+        "side_adjusted_return_count": 0,
+        "side_adjusted_return_sum": 0.0,
+    }
+
+
+def _validate_retracement_bucket(
+    value: object,
+    *,
+    field: str,
+    symbol: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    source = _required_mapping(value, field=field)
+    partition = _canonical_retracement_partition(
+        _required_mapping(source.get("partition"), field=f"{field}.partition"),
+        symbol=symbol,
+        timeframe=timeframe,
+        field=f"{field}.partition",
+    )
+    completed_count = _integer(
+        source.get("completed_study_count"),
+        field=f"{field}.completed_study_count",
+    )
+    direction_counts = _counter(
+        source.get("outcome_direction_counts"),
+        field=f"{field}.outcome_direction_counts",
+    )
+    if set(direction_counts) - {"UP", "DOWN", "REST"}:
+        raise PairDNAValidationError(f"{field} has an unsupported outcome direction")
+    directional_label_count = _integer(
+        source.get("directional_alignment_label_count"),
+        field=f"{field}.directional_alignment_label_count",
+    )
+    if sum(direction_counts.values()) != directional_label_count:
+        raise PairDNAValidationError(
+            f"{field}.directional_alignment_label_count does not match its counts"
+        )
+    directional_alignment_count = _integer(
+        source.get("directional_alignment_count"),
+        field=f"{field}.directional_alignment_count",
+    )
+    if directional_alignment_count > directional_label_count:
+        raise PairDNAValidationError(
+            f"{field}.directional_alignment_count exceeds labeled support"
+        )
+    side_adjusted_return_count = _integer(
+        source.get("side_adjusted_return_count"),
+        field=f"{field}.side_adjusted_return_count",
+    )
+    if max(directional_label_count, side_adjusted_return_count) > completed_count:
+        raise PairDNAValidationError(f"{field} outcome support exceeds study support")
+    relation_counts = _counter(
+        source.get("relation_counts"), field=f"{field}.relation_counts"
+    )
+    if sum(relation_counts.values()) != completed_count:
+        raise PairDNAValidationError(
+            f"{field}.relation_counts does not match completed study support"
+        )
+    return {
+        "partition": partition,
+        "completed_study_count": completed_count,
+        "relation_counts": relation_counts,
+        "outcome_direction_counts": direction_counts,
+        "directional_alignment_label_count": directional_label_count,
+        "directional_alignment_count": directional_alignment_count,
+        "side_adjusted_return_count": side_adjusted_return_count,
+        "side_adjusted_return_sum": _finite(
+            source.get("side_adjusted_return_sum"),
+            field=f"{field}.side_adjusted_return_sum",
+            default=0.0,
+        ),
+    }
+
+
+def _validate_retracement_aggregate(
+    value: object,
+    *,
+    field: str,
+    symbol: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    source = _mapping(value)
+    if not source:
+        return _empty_retracement_aggregate()
+    if source.get("schema_version") != _RETRACEMENT_AGGREGATE_SCHEMA_VERSION:
+        raise PairDNAValidationError(f"{field}.schema_version is not supported")
+    if (
+        source.get("study_only") is not True
+        or source.get("observation_only") is not True
+        or source.get("execution_authority") is not False
+    ):
+        raise PairDNAValidationError(f"{field} must remain observation-only")
+    raw_buckets = _required_mapping(source.get("buckets"), field=f"{field}.buckets")
+    if len(raw_buckets) > 4096:
+        raise PairDNAValidationError(f"{field}.buckets exceeds the absolute capacity")
+    buckets: dict[str, Any] = {}
+    for key, raw in raw_buckets.items():
+        bucket = _validate_retracement_bucket(
+            raw,
+            field=f"{field}.buckets.{key}",
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        if _retracement_partition_key(_mapping(bucket["partition"])) != str(key):
+            raise PairDNAValidationError(f"{field}.buckets.{key} identity mismatch")
+        buckets[str(key)] = bucket
+    recent_ids = _required_strings(
+        source.get("recent_study_ids"),
+        field=f"{field}.recent_study_ids",
+        maximum_length=256,
+    )
+    if len(recent_ids) != len(set(recent_ids)):
+        raise PairDNAValidationError(f"{field}.recent_study_ids contains duplicates")
+    completed_study_count = _integer(
+        source.get("completed_study_count"),
+        field=f"{field}.completed_study_count",
+    )
+    if sum(int(row["completed_study_count"]) for row in buckets.values()) != (
+        completed_study_count
+    ):
+        raise PairDNAValidationError(
+            f"{field}.completed_study_count does not match bucket support"
+        )
+    study_dedupe_bloom = _validate_bloom(
+        source.get("study_dedupe_bloom"),
+        field=f"{field}.study_dedupe_bloom",
+    )
+    if int(study_dedupe_bloom["insertions"]) != completed_study_count:
+        raise PairDNAValidationError(
+            f"{field}.study_dedupe_bloom does not match completed study support"
+        )
+    return {
+        "schema_version": _RETRACEMENT_AGGREGATE_SCHEMA_VERSION,
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "completed_study_count": completed_study_count,
+        "buckets": buckets,
+        "recent_study_ids": recent_ids,
+        "study_dedupe_bloom": study_dedupe_bloom,
+    }
+
+
 def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]:
     pair_id = str(profile.get("pair_id") or "")
     if pair_id != key:
@@ -716,6 +1159,12 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
     object_type_counts = _counter(profile.get("object_type_counts"), field="object_type_counts")
     if len(object_type_counts) > MAX_PAIR_DNA_OBJECT_TYPES + 1:
         raise PairDNAValidationError(f"profile {key} exceeds the object-type bound")
+    retracement_confluence = _validate_retracement_aggregate(
+        profile.get("retracement_confluence"),
+        field=f"profiles.{key}.retracement_confluence",
+        symbol=symbol,
+        timeframe=timeframe,
+    )
     return {
         "pair_id": pair_id,
         "symbol": symbol,
@@ -761,6 +1210,7 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
             profile.get("association_overflow_count"),
             field=f"profiles.{key}.association_overflow_count",
         ),
+        "retracement_confluence": retracement_confluence,
         "recent_sequences": recent_sequences,
         "seen_sequence_ids": seen_sequence_ids,
         "identity_ledger": _validate_identity_ledger(
@@ -779,6 +1229,7 @@ def _validate_state(
     *,
     max_pairs: int,
     recent_sequence_limit: int,
+    max_retracement_buckets: int,
 ) -> dict[str, Any]:
     if raw.get("schema_version") != PAIR_DNA_SCHEMA_VERSION:
         raise PairDNAValidationError(f"pair DNA schema must be {PAIR_DNA_SCHEMA_VERSION}")
@@ -794,6 +1245,15 @@ def _validate_state(
             raise PairDNAValidationError("pair DNA recent sequence bound was exceeded")
         if len(cast(list[str], profile["seen_sequence_ids"])) > recent_sequence_limit:
             raise PairDNAValidationError("pair DNA sequence identity bound was exceeded")
+        retracement = _mapping(profile.get("retracement_confluence"))
+        if len(_mapping(retracement.get("buckets"))) > max_retracement_buckets:
+            raise PairDNAValidationError(
+                "pair DNA retracement bucket bound was exceeded"
+            )
+        if len(cast(list[str], retracement.get("recent_study_ids", []))) > recent_sequence_limit:
+            raise PairDNAValidationError(
+                "pair DNA recent retracement identity bound was exceeded"
+            )
         profiles[str(key)] = profile
     return {
         "schema_version": PAIR_DNA_SCHEMA_VERSION,
@@ -847,6 +1307,107 @@ def _outcome_success(outcome: Mapping[str, Any]) -> bool:
         return explicit
     result = str(outcome.get("result") or outcome.get("status") or "").strip().upper()
     return result in {"WIN", "WON", "SUCCESS", "SUCCESSFUL", "MATCHED", "CORRECT"}
+
+
+def _apply_retracement_confluence(
+    profile: dict[str, Any],
+    completed_rows: Sequence[Mapping[str, Any]],
+    *,
+    outcome: Mapping[str, Any],
+    recent_study_limit: int,
+    max_buckets: int,
+) -> None:
+    if not completed_rows:
+        return
+    aggregate = _validate_retracement_aggregate(
+        profile.get("retracement_confluence"),
+        field="retracement_confluence",
+        symbol=str(profile["symbol"]),
+        timeframe=str(profile["timeframe"]),
+    )
+    buckets = _mapping(aggregate.get("buckets"))
+    bloom = _validate_bloom(
+        aggregate.get("study_dedupe_bloom"),
+        field="retracement_confluence.study_dedupe_bloom",
+    )
+    unseen_rows = [
+        dict(row)
+        for row in completed_rows
+        if not _bloom_contains(bloom, str(row.get("study_id") or ""))
+    ]
+    new_keys = {
+        _retracement_partition_key(_mapping(row.get("partition")))
+        for row in unseen_rows
+        if _retracement_partition_key(_mapping(row.get("partition"))) not in buckets
+    }
+    if len(buckets) + len(new_keys) > max_buckets:
+        raise PairDNAValidationError(
+            "Pair DNA retracement bucket capacity reached; shard or raise "
+            "max_retracement_buckets without evicting evidence"
+        )
+    direction = _outcome_direction(outcome)
+    has_realized_return = (
+        "realized_return" in outcome and outcome.get("realized_return") is not None
+    )
+    realized_return = (
+        _finite(outcome.get("realized_return"), field="outcome.realized_return")
+        if has_realized_return
+        else 0.0
+    )
+    recent_ids = [
+        str(value)
+        for value in cast(Sequence[object], aggregate.get("recent_study_ids", []))
+    ]
+    for row in unseen_rows:
+        study_id = str(row["study_id"])
+        partition = _mapping(row.get("partition"))
+        bucket_key = _retracement_partition_key(partition)
+        bucket = _mapping(buckets.get(bucket_key)) or _empty_retracement_bucket(
+            partition
+        )
+        bucket["completed_study_count"] = int(
+            bucket.get("completed_study_count", 0)
+        ) + 1
+        relation_counts = _mapping(bucket.get("relation_counts"))
+        _increment_bounded(
+            relation_counts,
+            row.get("relation"),
+            maximum_keys=64,
+        )
+        bucket["relation_counts"] = relation_counts
+        if direction != "UNKNOWN":
+            direction_counts = _mapping(bucket.get("outcome_direction_counts"))
+            _increment(direction_counts, direction)
+            bucket["outcome_direction_counts"] = direction_counts
+            bucket["directional_alignment_label_count"] = int(
+                bucket.get("directional_alignment_label_count", 0)
+            ) + 1
+            expected_direction = (
+                "UP" if str(partition.get("side")) == "BULLISH" else "DOWN"
+            )
+            bucket["directional_alignment_count"] = int(
+                bucket.get("directional_alignment_count", 0)
+            ) + int(direction == expected_direction)
+        if has_realized_return:
+            bucket["side_adjusted_return_count"] = int(
+                bucket.get("side_adjusted_return_count", 0)
+            ) + 1
+            side_multiplier = (
+                1.0 if str(partition.get("side")) == "BULLISH" else -1.0
+            )
+            bucket["side_adjusted_return_sum"] = float(
+                bucket.get("side_adjusted_return_sum", 0.0)
+            ) + realized_return * side_multiplier
+        buckets[bucket_key] = bucket
+        bloom = _bloom_add(bloom, study_id)
+        recent_ids.append(study_id)
+    aggregate["completed_study_count"] = int(
+        aggregate.get("completed_study_count", 0)
+    ) + len(unseen_rows)
+    aggregate["buckets"] = buckets
+    aggregate["recent_study_ids"] = recent_ids[-recent_study_limit:]
+    aggregate["study_dedupe_bloom"] = bloom
+    profile["retracement_confluence"] = aggregate
 
 
 def _correlation_features(
@@ -1149,10 +1710,12 @@ def _apply_study(
     segments: Sequence[Mapping[str, Any]],
     objects: Sequence[Mapping[str, Any]],
     outcome: Mapping[str, Any],
+    retracement_rows: Sequence[Mapping[str, Any]],
     sequence_id: str,
     observed_at: str,
     ordinal: int,
     recent_sequence_limit: int,
+    max_retracement_buckets: int,
 ) -> None:
     new_candles, completed_segments, identity_ledger = _incremental_evidence(
         profile,
@@ -1273,6 +1836,13 @@ def _apply_study(
             _correlation_features(candles, behavior_study, objects),
             outcome,
         )
+        _apply_retracement_confluence(
+            profile,
+            retracement_rows,
+            outcome=outcome,
+            recent_study_limit=recent_sequence_limit,
+            max_buckets=max_retracement_buckets,
+        )
 
     recent = _rows(profile.get("recent_sequences"))
     recent.append(
@@ -1342,6 +1912,97 @@ def _derived_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         if count > 0
     }
     result["behavior"] = behavior
+    retracement = _mapping(result.get("retracement_confluence"))
+    retracement["interpretation_contract"] = {
+        "analysis_kind": "PARTITIONED_EMPIRICAL_FREQUENCY",
+        "causal": False,
+        "predictive_probability": False,
+        "entry_signal": False,
+        "grants_entry_permission": False,
+        "grants_execution_permission": False,
+        "requires_support_count_with_every_rate": True,
+        "overall_directional_study_success_used": False,
+        "returns_are_side_adjusted": True,
+        "custom_71_8_is_experimental": True,
+        "custom_71_8_is_standard_fibonacci": False,
+        "note": (
+            "Rates summarize completed historical observations only; they are "
+            "not forecasts, trade instructions, or proof of causation."
+        ),
+    }
+    retracement["level_catalog"] = deepcopy(_RETRACEMENT_LEVELS)
+    empirical_partitions: list[dict[str, Any]] = []
+    level_support_counts: Counter[str] = Counter()
+    for bucket_key, raw_bucket in sorted(_mapping(retracement.get("buckets")).items()):
+        bucket = _mapping(raw_bucket)
+        completed_support = int(bucket.get("completed_study_count", 0))
+        level_support_counts[
+            str(_mapping(bucket.get("partition")).get("level_id") or "")
+        ] += completed_support
+        directional_support = int(
+            bucket.get("directional_alignment_label_count", 0)
+        )
+        return_support = int(bucket.get("side_adjusted_return_count", 0))
+        direction_counts = _counter(
+            bucket.get("outcome_direction_counts"),
+            field=f"retracement.{bucket_key}.outcome_direction_counts",
+        )
+        empirical_partitions.append(
+            {
+                "bucket_id": bucket_key,
+                "partition": deepcopy(_mapping(bucket.get("partition"))),
+                "support": {
+                    "completed_studies": completed_support,
+                    "directional_alignment_label_count": directional_support,
+                    "side_adjusted_return_count": return_support,
+                },
+                "counts": {
+                    "relations": deepcopy(_mapping(bucket.get("relation_counts"))),
+                    "outcome_directions": direction_counts,
+                    "directional_alignment_count": int(
+                        bucket.get("directional_alignment_count", 0)
+                    ),
+                },
+                "empirical_rates": {
+                    "direction_frequency": (
+                        {
+                            direction: round(count / directional_support, 6)
+                            for direction, count in sorted(direction_counts.items())
+                        }
+                        if directional_support
+                        else {}
+                    ),
+                    "directional_alignment_rate": (
+                        round(
+                            int(bucket.get("directional_alignment_count", 0))
+                            / directional_support,
+                            6,
+                        )
+                        if directional_support
+                        else None
+                    ),
+                    "average_side_adjusted_return": (
+                        round(
+                            float(bucket.get("side_adjusted_return_sum", 0.0))
+                            / return_support,
+                            8,
+                        )
+                        if return_support
+                        else None
+                    ),
+                },
+            }
+        )
+    retracement["level_support"] = [
+        {
+            "level_id": level_id,
+            "completed_study_count": int(level_support_counts[level_id]),
+            **deepcopy(contract),
+        }
+        for level_id, contract in _RETRACEMENT_LEVELS.items()
+    ]
+    retracement["empirical_partitions"] = empirical_partitions
+    result["retracement_confluence"] = retracement
     correlations = _mapping(result.get("outcome_correlations"))
     result["outcome_association_contract"] = {
         "analysis_kind": "MARGINAL_AND_PAIRWISE_FEATURE_ASSOCIATION",
@@ -1376,16 +2037,22 @@ class PairDNAStoreV3:
         *,
         max_pairs: int = DEFAULT_MAX_PAIR_PROFILES,
         recent_sequence_limit: int = DEFAULT_RECENT_SEQUENCE_LIMIT,
+        max_retracement_buckets: int = DEFAULT_MAX_RETRACEMENT_BUCKETS,
         lock_timeout_seconds: float = 5.0,
     ) -> None:
         self.path = Path(path)
         self.max_pairs = int(max_pairs)
         self.recent_sequence_limit = int(recent_sequence_limit)
+        self.max_retracement_buckets = int(max_retracement_buckets)
         self.lock_timeout_seconds = float(lock_timeout_seconds)
         if not 1 <= self.max_pairs <= 4096:
             raise PairDNAValidationError("max_pairs must be in [1, 4096]")
         if not 1 <= self.recent_sequence_limit <= 4096:
             raise PairDNAValidationError("recent_sequence_limit must be in [1, 4096]")
+        if not 1 <= self.max_retracement_buckets <= 4096:
+            raise PairDNAValidationError(
+                "max_retracement_buckets must be in [1, 4096]"
+            )
         if not 0.0 < self.lock_timeout_seconds <= 60.0:
             raise PairDNAValidationError("lock_timeout_seconds must be in (0, 60]")
 
@@ -1397,6 +2064,7 @@ class PairDNAStoreV3:
             raw,
             max_pairs=self.max_pairs,
             recent_sequence_limit=self.recent_sequence_limit,
+            max_retracement_buckets=self.max_retracement_buckets,
         )
 
     def record_study(
@@ -1410,8 +2078,23 @@ class PairDNAStoreV3:
         observed_at: object | None = None,
         objects: Sequence[Mapping[str, Any]] = (),
         outcome: Mapping[str, Any] | None = None,
+        retracement_study: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Atomically merge one completed sequence into its Pair DNA profile."""
+        """Atomically merge one completed sequence into its Pair DNA profile.
+
+        ``retracement_study`` is optional and must use
+        ``PG_RETRACEMENT_CONFLUENCE_STUDY_V3`` with ``study_only`` and
+        ``observation_only`` true, ``execution_authority`` false, and an
+        ``observations`` list. Only rows with ``status=COMPLETED`` and
+        ``observational_confluence=true`` are admitted. Each admitted row must
+        provide ``study_id``, ``identity_stable=true``, ``regime``, ``side``
+        (or ``swing_direction``), ``coordinate_space``, ``level_id``,
+        ``level_ratio``, and ``object_type``; ``relation`` is optional. The
+        existing matured ``outcome`` mapping supplies direction and
+        realized-return evidence without granting trade authority. Its overall
+        directional-study ``success`` flag is deliberately not attributed to a
+        retracement bucket.
+        """
 
         canonical_symbol = _canonical_identity(symbol, field="symbol", maximum=64)
         canonical_timeframe = _canonical_identity(timeframe, field="timeframe", maximum=32)
@@ -1429,6 +2112,11 @@ class PairDNAStoreV3:
                 raise PairDNAValidationError(f"objects[{index}] must be a mapping")
             object_rows.append(dict(cast(Mapping[str, Any], raw_row)))
         outcome_row = _mapping(outcome)
+        retracement_rows = _canonical_completed_retracement_rows(
+            retracement_study,
+            symbol=canonical_symbol,
+            timeframe=canonical_timeframe,
+        )
 
         try:
             with exclusive_store_lock(self.path, timeout_seconds=self.lock_timeout_seconds):
@@ -1467,10 +2155,12 @@ class PairDNAStoreV3:
                     segments=segments,
                     objects=object_rows,
                     outcome=outcome_row,
+                    retracement_rows=retracement_rows,
                     sequence_id=resolved_sequence_id,
                     observed_at=resolved_observed_at,
                     ordinal=ordinal,
                     recent_sequence_limit=self.recent_sequence_limit,
+                    max_retracement_buckets=self.max_retracement_buckets,
                 )
                 profiles[pair_id] = profile
                 state["profiles"] = profiles
@@ -1479,6 +2169,7 @@ class PairDNAStoreV3:
                     state,
                     max_pairs=self.max_pairs,
                     recent_sequence_limit=self.recent_sequence_limit,
+                    max_retracement_buckets=self.max_retracement_buckets,
                 )
                 write_json_atomic(self.path, canonical)
         except StudyPersistenceError:
@@ -1533,6 +2224,7 @@ def update_pair_dna_v3(
     observed_at: object | None = None,
     objects: Sequence[Mapping[str, Any]] = (),
     outcome: Mapping[str, Any] | None = None,
+    retracement_study: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Functional convenience wrapper around :class:`PairDNAStoreV3`."""
 
@@ -1545,11 +2237,13 @@ def update_pair_dna_v3(
         observed_at=observed_at,
         objects=objects,
         outcome=outcome,
+        retracement_study=retracement_study,
     )
 
 
 __all__ = [
     "DEFAULT_MAX_PAIR_PROFILES",
+    "DEFAULT_MAX_RETRACEMENT_BUCKETS",
     "DEFAULT_RECENT_SEQUENCE_LIMIT",
     "PAIR_DNA_DEDUPE_CAPACITY",
     "PAIR_DNA_DEDUPE_FALSE_POSITIVE_CEILING",
@@ -1558,6 +2252,7 @@ __all__ = [
     "PAIR_DNA_DEDUPE_SEGMENT_CAPACITY",
     "PAIR_DNA_DEDUPE_SEGMENT_HASHES",
     "PAIR_DNA_SCHEMA_VERSION",
+    "RETRACEMENT_CONFLUENCE_STUDY_SCHEMA_VERSION",
     "PairDNAStoreV3",
     "PairDNAValidationError",
     "pair_profile_key_v3",

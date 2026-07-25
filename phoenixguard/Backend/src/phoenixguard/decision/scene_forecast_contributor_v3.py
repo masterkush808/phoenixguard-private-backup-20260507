@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+import re
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
@@ -98,6 +99,78 @@ _IMMUTABLE_CANDLE_ID_FIELDS_V3 = (
     "closed_candle_epoch",
     "close_time",
 )
+_SOURCE_TIME_ID_FIELDS_V3 = frozenset(
+    {
+        "bar_open_time",
+        "open_time",
+        "open_timestamp",
+        "candle_open_epoch",
+        "closed_candle_epoch",
+        "close_time",
+    }
+)
+
+
+def _timeframe_seconds_v3(value: object) -> int | None:
+    text = str(value or "").strip().upper().replace(" ", "")
+    match = re.fullmatch(r"(?:([SMHDW])(\d+)|(\d+)([SMHDW]))", text)
+    if match is None:
+        return None
+    unit = str(match.group(1) or match.group(4) or "")
+    raw_count = str(match.group(2) or match.group(3) or "")
+    try:
+        count = int(raw_count)
+    except ValueError:
+        return None
+    multiplier = {"S": 1, "M": 60, "H": 3_600, "D": 86_400, "W": 604_800}.get(
+        unit
+    )
+    if count <= 0 or multiplier is None:
+        return None
+    seconds = count * multiplier
+    return seconds if seconds <= 31_536_000 else None
+
+
+def _source_time_seconds_v3(observation: Mapping[str, Any]) -> float | None:
+    field = str(observation.get("source_identity_field") or "").strip()
+    if field not in _SOURCE_TIME_ID_FIELDS_V3:
+        return None
+    value = _finite(observation.get("source_identity_value"))
+    if value is None or value < 0.0:
+        return None
+    magnitude = abs(value)
+    if magnitude >= 1e17:
+        value /= 1e9
+    elif magnitude >= 1e14:
+        value /= 1e6
+    elif magnitude >= 1e11:
+        value /= 1e3
+    return value
+
+
+def _source_time_step_count_v3(
+    prior: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    timeframe: str,
+) -> int | None:
+    if str(prior.get("source_identity_field") or "") != str(
+        current.get("source_identity_field") or ""
+    ):
+        return None
+    prior_time = _source_time_seconds_v3(prior)
+    current_time = _source_time_seconds_v3(current)
+    timeframe_seconds = _timeframe_seconds_v3(timeframe)
+    if prior_time is None or current_time is None or timeframe_seconds is None:
+        return None
+    delta = current_time - prior_time
+    if delta <= 0.0:
+        return None
+    steps = round(delta / timeframe_seconds)
+    tolerance = max(1e-6, timeframe_seconds * 1e-6)
+    if steps <= 0 or abs(delta - steps * timeframe_seconds) > tolerance:
+        return None
+    return int(steps)
 
 
 def _immutable_candle_identity_v3(candle: Mapping[str, Any]) -> tuple[str, str] | None:
@@ -771,6 +844,312 @@ def _prior_close_reobservation_v3(
     return evidence
 
 
+_STABLE_VISIBLE_CANDLE_BINDING_LIMIT_V3 = 32
+
+
+def _stable_visual_match_score_v3(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    *,
+    x_step: float,
+    range_scale: float,
+) -> float:
+    """Match candle shape without allowing a rolling tracker id to decide it."""
+
+    same_source = _same_source_candle_v3(left, right)
+    if same_source is not None:
+        return 1.0 if same_source else 0.0
+    comparable_shape_fields = sum(
+        _finite(left.get(key)) is not None and _finite(right.get(key)) is not None
+        for key in ("open_y", "close_y", "top_y", "bottom_y")
+    )
+    if comparable_shape_fields < 3:
+        return 0.0
+    # ``_visual_candle_match_score_v3`` uses track id only as weak supporting
+    # evidence. Remove it entirely here: stable history may survive detector
+    # reacquisition only through source identity or candle geometry.
+    left_without_track = dict(left)
+    right_without_track = dict(right)
+    left_without_track.pop("track_id", None)
+    right_without_track.pop("track_id", None)
+    return _visual_candle_match_score_v3(
+        left_without_track,
+        right_without_track,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
+
+
+def _stable_chain_is_contiguous_v3(
+    closed_tail: Sequence[Mapping[str, Any]],
+    *,
+    start_index: int,
+    x_step: float,
+) -> bool:
+    """Require every successor through the current close to remain visible."""
+
+    if start_index < 0 or start_index >= len(closed_tail):
+        return False
+    chain = closed_tail[start_index:]
+    if len(chain) == 1:
+        return _finite(chain[0].get("x")) is not None
+    x_values = [_finite(row.get("x")) for row in chain]
+    if any(value is None for value in x_values):
+        return False
+    minimum_step = max(0.5, x_step * 0.30)
+    maximum_step = max(3.0, x_step * 1.80)
+    return all(
+        minimum_step <= cast(float, right) - cast(float, left) <= maximum_step
+        for left, right in zip(x_values, x_values[1:])
+    )
+
+
+def _stable_binding_row_v3(
+    observation: Mapping[str, Any],
+    *,
+    event_key: str,
+    event_sequence: int,
+    proof_source: str,
+    sequence_distance: int,
+    match_score: float,
+    match_margin: float,
+) -> dict[str, Any] | None:
+    parsed_index = _finite(observation.get("index"))
+    row_index = int(parsed_index) if parsed_index is not None else -1
+    if row_index < 0 or not event_key or event_sequence < 0:
+        return None
+    return {
+        "current_row_index": row_index,
+        "closed_candle_key": str(event_key),
+        "closed_candle_sequence": int(event_sequence),
+        "proof_source": str(proof_source),
+        "reobserved_observation": dict(observation),
+        "sequence_distance_from_latest": max(0, int(sequence_distance)),
+        "match_score": round(max(0.0, min(1.0, match_score)), 6),
+        "match_margin": round(max(0.0, min(1.0, match_margin)), 6),
+    }
+
+
+def _initial_stable_visible_candle_binding_v3(
+    observation: Mapping[str, Any],
+    *,
+    event_key: str,
+    event_sequence: int,
+) -> list[dict[str, Any]]:
+    latest_closed = observation.get("latest_closed")
+    if not isinstance(latest_closed, Mapping):
+        return []
+    binding = _stable_binding_row_v3(
+        cast(Mapping[str, Any], latest_closed),
+        event_key=event_key,
+        event_sequence=event_sequence,
+        proof_source="INITIAL_CAUSAL_BASELINE_V3",
+        sequence_distance=0,
+        match_score=1.0,
+        match_margin=1.0,
+    )
+    return [binding] if binding is not None else []
+
+
+def _stable_visible_candle_bindings_v3(
+    prior: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    event_sequence: int,
+    confirmed_event_batch: Sequence[Mapping[str, Any]],
+    x_step: float,
+    range_scale: float,
+) -> list[dict[str, Any]]:
+    """Bind proven event identities to visible rows on the current frame.
+
+    Consumers may use only the returned rows as stable screenshot candle
+    identities. A sequence's expected row is derived from its causal distance
+    to the newest confirmed close. Source identity, or a unique visual match,
+    must confirm that exact row and the X chain through the latest close must
+    be contiguous. Missing, ambiguous, duplicate, or off-screen bindings are
+    omitted instead of being carried forward or inferred from ``track_id``.
+    """
+
+    closed_tail = [
+        dict(cast(Mapping[str, Any], row))
+        for row in cast(Sequence[Any], observation.get("closed_tail") or [])
+        if isinstance(row, Mapping)
+    ]
+    if not closed_tail:
+        return []
+
+    raw_prior_bindings = [
+        dict(cast(Mapping[str, Any], row))
+        for row in cast(
+            Sequence[Any],
+            prior.get("stable_visible_candle_bindings") or [],
+        )
+        if isinstance(row, Mapping)
+    ]
+    if not raw_prior_bindings:
+        prior_observation = prior.get("latest_closed")
+        prior_key = str(prior.get("event_key") or "")
+        prior_sequence = _finite(prior.get("event_sequence"))
+        if (
+            isinstance(prior_observation, Mapping)
+            and prior_key
+            and prior_sequence is not None
+        ):
+            raw_prior_bindings = [
+                {
+                    "closed_candle_key": prior_key,
+                    "closed_candle_sequence": int(prior_sequence),
+                    "reobserved_observation": dict(
+                        cast(Mapping[str, Any], prior_observation)
+                    ),
+                }
+            ]
+
+    sequence_counts: dict[int, int] = {}
+    for binding in raw_prior_bindings:
+        parsed_sequence = _finite(binding.get("closed_candle_sequence"))
+        if parsed_sequence is None:
+            continue
+        sequence = int(parsed_sequence)
+        sequence_counts[sequence] = sequence_counts.get(sequence, 0) + 1
+
+    rebound: list[dict[str, Any]] = []
+    for binding in raw_prior_bindings:
+        parsed_sequence = _finite(binding.get("closed_candle_sequence"))
+        prior_observation = binding.get("reobserved_observation")
+        key = str(binding.get("closed_candle_key") or "")
+        if (
+            parsed_sequence is None
+            or not isinstance(prior_observation, Mapping)
+            or not key
+        ):
+            continue
+        sequence = int(parsed_sequence)
+        if sequence_counts.get(sequence) != 1 or not 0 <= sequence <= event_sequence:
+            continue
+        sequence_distance = event_sequence - sequence
+        expected_index = len(closed_tail) - sequence_distance - 1
+        if not 0 <= expected_index < len(closed_tail):
+            continue
+        expected = closed_tail[expected_index]
+
+        source_match_indices = [
+            index
+            for index, row in enumerate(closed_tail)
+            if _same_source_candle_v3(
+                cast(Mapping[str, Any], prior_observation),
+                row,
+            )
+            is True
+        ]
+        if source_match_indices:
+            if source_match_indices != [expected_index]:
+                continue
+            score = 1.0
+            margin = 1.0
+            proof_source = "UNIQUE_SOURCE_IDENTITY_REOBSERVATION_V3"
+        else:
+            scores = [
+                _stable_visual_match_score_v3(
+                    cast(Mapping[str, Any], prior_observation),
+                    row,
+                    x_step=x_step,
+                    range_scale=range_scale,
+                )
+                for row in closed_tail
+            ]
+            score = scores[expected_index]
+            second_score = max(
+                (
+                    candidate_score
+                    for index, candidate_score in enumerate(scores)
+                    if index != expected_index
+                ),
+                default=0.0,
+            )
+            margin = score - second_score
+            if score < 0.62 or margin < 0.10:
+                continue
+            proof_source = "UNIQUE_VISUAL_REOBSERVATION_V3"
+        if not _stable_chain_is_contiguous_v3(
+            closed_tail,
+            start_index=expected_index,
+            x_step=x_step,
+        ):
+            continue
+        rebound_binding = _stable_binding_row_v3(
+            expected,
+            event_key=key,
+            event_sequence=sequence,
+            proof_source=proof_source,
+            sequence_distance=sequence_distance,
+            match_score=score,
+            match_margin=margin,
+        )
+        if rebound_binding is not None:
+            rebound.append(rebound_binding)
+
+    appended: list[dict[str, Any]] = []
+    for event in confirmed_event_batch:
+        parsed_sequence = _finite(event.get("closed_candle_sequence"))
+        event_key = str(event.get("closed_candle_key") or "")
+        event_observation = event.get("observation")
+        if (
+            parsed_sequence is None
+            or not event_key
+            or not isinstance(event_observation, Mapping)
+        ):
+            continue
+        sequence = int(parsed_sequence)
+        if not 0 <= sequence <= event_sequence:
+            continue
+        sequence_distance = event_sequence - sequence
+        expected_index = len(closed_tail) - sequence_distance - 1
+        if not 0 <= expected_index < len(closed_tail):
+            continue
+        expected = closed_tail[expected_index]
+        source_match = _same_source_candle_v3(
+            cast(Mapping[str, Any], event_observation),
+            expected,
+        )
+        score = _stable_visual_match_score_v3(
+            cast(Mapping[str, Any], event_observation),
+            expected,
+            x_step=x_step,
+            range_scale=range_scale,
+        )
+        if source_match is False or score < 0.62:
+            continue
+        if not _stable_chain_is_contiguous_v3(
+            closed_tail,
+            start_index=expected_index,
+            x_step=x_step,
+        ):
+            continue
+        appended_binding = _stable_binding_row_v3(
+            expected,
+            event_key=event_key,
+            event_sequence=sequence,
+            proof_source=str(event.get("confirmation_reason") or "CONFIRMED_EVENT_V3"),
+            sequence_distance=sequence_distance,
+            match_score=score,
+            match_margin=1.0,
+        )
+        if appended_binding is not None:
+            appended.append(appended_binding)
+
+    by_sequence: dict[int, dict[str, Any]] = {}
+    for binding in rebound:
+        sequence = int(binding["closed_candle_sequence"])
+        by_sequence.setdefault(sequence, binding)
+    for binding in appended:
+        # A newly confirmed event is the current-frame authority for its
+        # sequence; prior bindings never legitimately overlap it.
+        by_sequence[int(binding["closed_candle_sequence"])] = binding
+    ordered = [by_sequence[sequence] for sequence in sorted(by_sequence)]
+    return ordered[-_STABLE_VISIBLE_CANDLE_BINDING_LIMIT_V3:]
+
+
 def resolve_closed_candle_identity_v3(
     candles: Sequence[Mapping[str, Any]],
     *,
@@ -803,12 +1182,20 @@ def resolve_closed_candle_identity_v3(
         and str(prior.get("timeframe") or "").upper() == timeframe_key
     )
     if not prior_matches_context:
-        baseline_key = str(previous_key or "") or closed_candle_identity_v3(
+        context_changed = bool(prior)
+        baseline_key = (
+            "" if context_changed else str(previous_key or "")
+        ) or closed_candle_identity_v3(
             candles,
             pair=pair_key,
             timeframe=timeframe_key,
         )
-        baseline_sequence = max(0, int(previous_sequence))
+        baseline_sequence = 0 if context_changed else max(0, int(previous_sequence))
+        stable_visible_candle_bindings = _initial_stable_visible_candle_binding_v3(
+            observation,
+            event_key=baseline_key,
+            event_sequence=baseline_sequence,
+        )
         state: dict[str, Any] = {
             "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
             "pair": pair_key,
@@ -823,6 +1210,7 @@ def resolve_closed_candle_identity_v3(
                 "confirmed_closed_count": 0,
             },
             **observation,
+            "stable_visible_candle_bindings": stable_visible_candle_bindings,
         }
         return {
             "closed_candle_key": baseline_key,
@@ -836,6 +1224,7 @@ def resolve_closed_candle_identity_v3(
                 "reason": "INITIAL_CAUSAL_BASELINE",
                 "proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
             },
+            "stable_visible_candle_bindings": stable_visible_candle_bindings,
             "state": state,
         }
 
@@ -904,17 +1293,24 @@ def resolve_closed_candle_identity_v3(
     source_closed_match = _same_source_candle_v3(prior_closed, current_closed)
     source_rollover_match = _same_source_candle_v3(prior_forming, current_closed)
     source_forming_match = _same_source_candle_v3(prior_forming, current_forming)
+    source_time_steps = _source_time_step_count_v3(
+        prior_closed,
+        current_closed,
+        timeframe=timeframe_key,
+    )
+    scores["source_time_step_count"] = source_time_steps or 0
+    scores["source_one_step_horizon_proven"] = source_time_steps == 1
     transition = False
     transition_count = 0
     reason = "AMBIGUOUS_SCREENSHOT_REUSES_EVENT"
-    if source_closed_match is False:
-        transition = True
-        transition_count = 1
-        reason = "SOURCE_BAR_ID_ADVANCED"
-    elif source_rollover_match is True and source_forming_match is False:
+    if source_rollover_match is True and source_forming_match is False:
         transition = True
         transition_count = 1
         reason = "SOURCE_FORMING_BAR_BECAME_CLOSED"
+    elif source_closed_match is False and source_time_steps == 1:
+        transition = True
+        transition_count = 1
+        reason = "SOURCE_BAR_ID_ADVANCED"
     elif (
         reacquisition.get("status") == "CONFIRMED"
         and int(reacquisition.get("confirmed_closed_count", 0) or 0) >= 1
@@ -931,6 +1327,13 @@ def resolve_closed_candle_identity_v3(
         # the same captured chart. It changes the model context and anchor but
         # does not manufacture a new market event.
         reason = "DETECTOR_COVERAGE_REBASE"
+    elif source_closed_match is False:
+        # An arbitrary changed source id does not disclose how many market
+        # intervals were missed. Timestamp-like identities must prove exactly
+        # one timeframe above, or a complete visible reacquisition chain must
+        # enumerate every intervening close. Otherwise preserve the prior
+        # event so N -> N+1 outcome maturation cannot absorb a gap.
+        reason = "SOURCE_BAR_GAP_UNPROVEN"
     elif source_closed_match is True:
         reason = "SOURCE_BAR_ID_UNCHANGED"
     elif forming_same >= 0.62:
@@ -1005,6 +1408,14 @@ def resolve_closed_candle_identity_v3(
                     if key in prior:
                         next_observation[key] = prior[key]
 
+    stable_visible_candle_bindings = _stable_visible_candle_bindings_v3(
+        prior,
+        observation,
+        event_sequence=event_sequence,
+        confirmed_event_batch=confirmed_event_batch,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
     state: dict[str, Any] = {
         "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
         "pair": pair_key,
@@ -1019,6 +1430,7 @@ def resolve_closed_candle_identity_v3(
             if key != "events"
         },
         **next_observation,
+        "stable_visible_candle_bindings": stable_visible_candle_bindings,
     }
     prior_close_reobservation = _prior_close_reobservation_v3(
         prior_closed,
@@ -1044,6 +1456,7 @@ def resolve_closed_candle_identity_v3(
         "same_event_cache_rebuild_required": bool(coverage_rebase and not transition),
         "match_scores": scores,
         "prior_close_reobservation": prior_close_reobservation,
+        "stable_visible_candle_bindings": stable_visible_candle_bindings,
         "state": state,
     }
 

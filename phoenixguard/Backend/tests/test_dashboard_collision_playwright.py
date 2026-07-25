@@ -4340,6 +4340,148 @@ def test_ended_sell_pressure_and_current_up_move_keep_entry_closed_and_study_upt
         assert page.locator(".history-item").count() == 2
 
 
+def test_retracement_evidence_shows_current_and_full_pair_support_without_permission(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="WAIT")
+    payload["tracking"]["market_study_v3"] = {
+        "retracement_study": {
+            "schema_version": "PG_MARKET_RETRACEMENT_STUDY_V3",
+            "status": "STUDIED",
+            "study_only": True,
+            "observation_only": True,
+            "execution_authority": False,
+            "can_grant_entry_permission": False,
+            "levels": [
+                {
+                    "level_id": "OTE_70_5",
+                    "graph_support": 2,
+                    "pair_dna_support": 14,
+                },
+                {
+                    "level_id": "CUSTOM_71_8",
+                    "graph_support": 1,
+                    "pair_dna_support": 9,
+                },
+            ],
+        }
+    }
+    updated = copy.deepcopy(payload)
+    updated["revision"] = 43
+    updated["freshness"]["observed_at"] += 1
+    updated_levels = updated["tracking"]["market_study_v3"][
+        "retracement_study"
+    ]["levels"]
+    updated_levels[0]["graph_support"] = 3
+    updated_levels[0]["pair_dna_support"] = 15
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        summary = page.locator(".evidence-details summary")
+        summary.click()
+        evidence = page.locator("#retracement-evidence")
+        assert evidence.is_visible()
+        assert evidence.inner_text() == (
+            "Retracement evidence: 70.5% OTE reference — current graph 2, "
+            "full Pair DNA 14; 71.8% experimental/nonstandard — current graph 1, "
+            "full Pair DNA 9. Observation only; never entry permission."
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#beginner-confidence").inner_text() == (
+            "No entry permission"
+        )
+
+        page.evaluate("payload => window.renderOperatorState(payload)", updated)
+        page.wait_for_function(
+            "() => document.querySelector('#retracement-evidence')?.textContent.includes('current graph 3, full Pair DNA 15')"
+        )
+        assert "current graph 3, full Pair DNA 15" in evidence.inner_text()
+        assert page.evaluate(
+            "() => document.activeElement === document.querySelector('.evidence-details summary')"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+
+        page.evaluate(
+            "() => window.renderUnavailableState(new Error('Workspace offline'))"
+        )
+        assert evidence.inner_text() == (
+            "Retracement evidence: unavailable while the live workspace is offline. "
+            "Observation only; never entry permission."
+        )
+
+
+def test_zero_retracement_support_waits_for_history_and_stays_observation_only(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="WAIT")
+    payload["tracking"]["market_study_v3"] = {
+        "retracement_study": {
+            "schema_version": "PG_MARKET_RETRACEMENT_STUDY_V3",
+            "status": "NO_PROVEN_COMPLETED_SWINGS",
+            "study_only": True,
+            "observation_only": True,
+            "execution_authority": False,
+            "can_grant_entry_permission": False,
+            "levels": [
+                {
+                    "level_id": "OTE_70_5",
+                    "graph_support": 0,
+                    "pair_dna_support": 0,
+                },
+                {
+                    "level_id": "CUSTOM_71_8",
+                    "graph_support": 0,
+                    "pair_dna_support": 0,
+                },
+            ],
+        }
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator(".evidence-details summary").click()
+        assert page.locator("#retracement-evidence").inner_text() == (
+            "Retracement evidence: awaiting completed graph and Pair DNA history "
+            "for the 70.5% OTE reference and the 71.8% experimental, nonstandard "
+            "level. Observation only; never entry permission."
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+
+
+def test_partial_retracement_dto_does_not_claim_unknown_full_support_is_zero(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="WAIT")
+    payload["tracking"]["market_study_v3"] = {
+        "retracement_study": {
+            "schema_version": "PG_MARKET_RETRACEMENT_STUDY_V3",
+            "status": "STUDIED_TRUNCATED",
+            "study_only": True,
+            "observation_only": True,
+            "execution_authority": False,
+            "can_grant_entry_permission": False,
+            "levels": [
+                {
+                    "level_id": "OTE_70_5",
+                    "graph_support": 4,
+                },
+                {
+                    "level_id": "CUSTOM_71_8",
+                    "graph_support": 0,
+                    "visible_partition_support": 8,
+                },
+            ],
+        }
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator(".evidence-details summary").click()
+        assert page.locator("#retracement-evidence").inner_text() == (
+            "Retracement evidence: 70.5% OTE reference — current graph 4, "
+            "full Pair DNA unavailable; 71.8% experimental/nonstandard — "
+            "current graph 0, full Pair DNA unavailable. Observation only; "
+            "never entry permission."
+        )
+
+
 def test_fresh_explicit_buy_permission_renders_buy_now(
     chromium_browser: Browser,
 ) -> None:

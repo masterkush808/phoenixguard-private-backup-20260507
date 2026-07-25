@@ -175,6 +175,29 @@ def test_dashboard_keeps_trend_regression_and_entry_permission_separate() -> Non
     assert "Entry permission remains" in text
 
 
+def test_dashboard_renders_retracement_support_as_observation_only_evidence() -> None:
+    text = _dashboard_text()
+
+    assert 'id="retracement-evidence" aria-live="polite"' in text
+    assert "function retracementEvidenceSummary(studyContract)" in text
+    assert "safeObject(studyContract).retracement_study" in text
+    assert 'level.level_id, "").toUpperCase()' in text
+    assert '"OTE_70_5", "CUSTOM_71_8"' in text
+    assert "level.graph_support" in text
+    assert "level.pair_dna_support" in text
+    assert 'Object.prototype.hasOwnProperty.call(level, "pair_dna_support")' in text
+    assert "level.visible_partition_support" not in text
+    assert "70.5% OTE reference" in text
+    assert "71.8% experimental/nonstandard" in text
+    assert "awaiting completed graph and Pair DNA history" in text
+    assert "full Pair DNA" in text
+    assert 'full Pair DNA " + (ote.pairDna === null ? "unavailable"' in text
+    assert "unavailable while the live workspace is offline" in text
+    assert "Observation only; never entry permission." in text
+    assert "retracement.can_grant_entry_permission === false" in text
+    assert "setText(els.retracementEvidence, study.retracementEvidence);" in text
+
+
 def test_dashboard_tracking_episode_controls_use_the_public_episode_contract() -> None:
     text = _dashboard_text()
 

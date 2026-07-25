@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 from pathlib import Path
+from statistics import median
 import threading
 from typing import Any, Mapping, Sequence, cast
 
@@ -122,6 +123,25 @@ def _current_axis_prior_candle(
         if timestamp_matches or identity_matches:
             return dict(row)
     return {}
+
+
+def _prior_only_baseline_range(
+    studied_candles: Sequence[Mapping[str, Any]],
+) -> float:
+    """Measure the current-frame scale without using the outcome candle."""
+
+    ranges: list[float] = []
+    for row in studied_candles[:-1]:
+        ohlc = _mapping(row.get("ohlc"))
+        try:
+            high = float(cast(Any, ohlc.get("high")))
+            low = float(cast(Any, ohlc.get("low")))
+        except (TypeError, ValueError):
+            continue
+        range_size = high - low
+        if math.isfinite(range_size) and range_size > 0.0:
+            ranges.append(range_size)
+    return float(median(ranges)) if ranges else 0.0
 
 
 def _base_contract(*, symbol: str = "", timeframe: str = "", status: str) -> dict[str, Any]:
@@ -281,6 +301,22 @@ def _pending_behavior_study(study: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pending_retracement_study(study: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only the completed graph evidence needed for delayed Pair DNA."""
+
+    if not study:
+        return {}
+    observations = _rows(study.get("observations"))[:128]
+    return {
+        "schema_version": study.get("schema_version"),
+        "status": study.get("status"),
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "observations": deepcopy(observations),
+    }
+
+
 def _top_counts(value: object, *, limit: int = 8) -> dict[str, int]:
     source = _mapping(value)
     ranked = sorted(
@@ -301,6 +337,50 @@ def _compact_pair_profile(value: object) -> dict[str, Any]:
         or profile.get("correlation_summary")
     )
     correlations.sort(key=lambda row: (-int(row.get("support", 0) or 0), str(row.get("feature") or "")))
+    retracement = _mapping(profile.get("retracement_confluence"))
+    retracement_partitions = _rows(retracement.get("empirical_partitions"))
+    retracement_level_support = {"OTE_70_5": 0, "CUSTOM_71_8": 0}
+    for row in retracement_partitions:
+        level_id = str(_mapping(row.get("partition")).get("level_id") or "")
+        if level_id not in retracement_level_support:
+            continue
+        retracement_level_support[level_id] += int(
+            _mapping(row.get("support")).get("completed_studies", 0) or 0
+        )
+    retracement_partitions.sort(
+        key=lambda row: (
+            -int(_mapping(row.get("support")).get("completed_studies", 0) or 0),
+            str(_mapping(row.get("partition")).get("level_id") or ""),
+            str(row.get("bucket_id") or ""),
+        )
+    )
+    retracement_catalog = _mapping(retracement.get("level_catalog"))
+    compact_retracement = {
+        "schema_version": retracement.get("schema_version"),
+        "study_only": True,
+        "observation_only": True,
+        "execution_authority": False,
+        "completed_study_count": int(
+            retracement.get("completed_study_count", 0) or 0
+        ),
+        "interpretation_contract": deepcopy(
+            _mapping(retracement.get("interpretation_contract"))
+        ),
+        "level_catalog": {
+            level_id: deepcopy(_mapping(retracement_catalog.get(level_id)))
+            for level_id in ("OTE_70_5", "CUSTOM_71_8")
+            if _mapping(retracement_catalog.get(level_id))
+        },
+        "level_support": [
+            {
+                "level_id": level_id,
+                "completed_study_count": retracement_level_support[level_id],
+            }
+            for level_id in ("OTE_70_5", "CUSTOM_71_8")
+        ],
+        "empirical_partitions": deepcopy(retracement_partitions[:16]),
+        "partitions_truncated_count": max(0, len(retracement_partitions) - 16),
+    }
     return {
         "schema_version": profile.get("schema_version"),
         "pair_id": profile.get("pair_id"),
@@ -330,6 +410,7 @@ def _compact_pair_profile(value: object) -> dict[str, Any]:
             _mapping(profile.get("outcome_association_contract"))
         ),
         "outcome_associations": deepcopy(correlations[:12]),
+        "retracement_confluence": compact_retracement,
         "study_only": True,
         "execution_authority": False,
     }
@@ -710,6 +791,9 @@ class MarketStudyServiceV3:
                 max_edges=128,
                 max_points_per_object=8,
             )
+            retracement_study = _mapping(
+                object_relationship_graph.get("retracement_study")
+            )
             latest_candle = studied_candles[-1]
             ledger_candle = deepcopy(latest_candle)
             ledger_candle["identity_stable"] = True
@@ -772,7 +856,9 @@ class MarketStudyServiceV3:
                         prior,
                         previous_close=previous_close,
                         current_close=current_close,
-                        baseline_range=float(candle_study.get("baseline_range", 0.0) or 0.0),
+                        baseline_range=_prior_only_baseline_range(
+                            studied_candles
+                        ),
                     )
                     enriched = deepcopy(_mapping(prior.get("fingerprint")))
                     enriched["outcome"] = outcome
@@ -786,6 +872,9 @@ class MarketStudyServiceV3:
                         observed_at=prior.get("observed_at"),
                         objects=_rows(prior.get("objects")),
                         outcome=outcome,
+                        retracement_study=(
+                            _mapping(prior.get("retracement_study")) or None
+                        ),
                     )
                     maturation = {
                         "status": "MATURED",
@@ -883,6 +972,9 @@ class MarketStudyServiceV3:
                 "candle_study": _pending_candle_study(candle_study),
                 "behavior_study": _pending_behavior_study(behavior_study),
                 "objects": object_rows[:_MAX_PENDING_OBJECTS],
+                "retracement_study": _pending_retracement_study(
+                    retracement_study
+                ),
                 "observed_at": str(observed_at or ""),
                 "directional_side": directional.get("side"),
                 "latest_candle_id": str(latest_candle.get("candle_id") or ""),

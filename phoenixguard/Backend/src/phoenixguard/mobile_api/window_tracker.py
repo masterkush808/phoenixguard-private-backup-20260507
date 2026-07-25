@@ -19043,11 +19043,34 @@ class PhoenixGuardWindowTrackingAdapter:
     def _market_study_objects_v3(
         *groups: Sequence[Mapping[str, Any]],
         image_size: tuple[int, int] | None = None,
+        stable_candle_identities_by_index: Mapping[int, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Reduce detected chart objects to bounded, explainable study evidence."""
 
         image_width = max(0, int(image_size[0])) if image_size else 0
         image_height = max(0, int(image_size[1])) if image_size else 0
+
+        def nonnegative_integer(value: object) -> int | None:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                number = float(cast(Any, value))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(number) or number < 0.0 or not number.is_integer():
+                return None
+            return int(number)
+
+        stable_candle_identities: dict[int, str] = {}
+        for raw_index, raw_identity in dict(
+            stable_candle_identities_by_index or {}
+        ).items():
+            index = nonnegative_integer(raw_index)
+            if index is None:
+                continue
+            identity = str(raw_identity or "").strip()
+            if identity:
+                stable_candle_identities[index] = identity[:256]
 
         def normalized_bounds(value: object) -> list[float]:
             if not isinstance(value, Sequence) or isinstance(
@@ -19099,6 +19122,62 @@ class PhoenixGuardWindowTrackingAdapter:
                 round(right / float(image_width), 8),
                 round(bottom / float(image_height), 8),
             ]
+
+        def pixel_value_bounds(value: object) -> list[float]:
+            """Map chart-pixel Y to the candle study's price-like proxy axis."""
+
+            if image_width <= 0 or image_height <= 0:
+                return []
+            if not isinstance(value, Sequence) or isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return []
+            coordinates = list(cast(Sequence[Any], value))
+            if len(coordinates) != 4:
+                return []
+            try:
+                left, top, right, bottom = [float(item) for item in coordinates]
+            except (TypeError, ValueError):
+                return []
+            if (
+                not all(math.isfinite(item) for item in (left, top, right, bottom))
+                or left < 0.0
+                or top < 0.0
+                or right > float(image_width)
+                or bottom > float(image_height)
+                or left >= right
+                or top >= bottom
+            ):
+                return []
+            # Candle intelligence negates pixel Y so larger values consistently
+            # mean higher prices without claiming access to broker prices.
+            return [round(-bottom, 8), round(-top, 8)]
+
+        def explicit_value_axis(row: Mapping[str, Any]) -> tuple[list[float], str]:
+            raw_bounds = row.get("value_bounds")
+            if not isinstance(raw_bounds, Sequence) or isinstance(
+                raw_bounds, (str, bytes, bytearray)
+            ):
+                return [], ""
+            coordinates = list(cast(Sequence[Any], raw_bounds))
+            if len(coordinates) != 2:
+                return [], ""
+            try:
+                low, high = [float(item) for item in coordinates]
+            except (TypeError, ValueError):
+                return [], ""
+            coordinate_space = str(
+                row.get("value_coordinate_space") or ""
+            ).strip().upper()
+            if (
+                not math.isfinite(low)
+                or not math.isfinite(high)
+                or low >= high
+                or coordinate_space
+                not in {"PRICE", "NORMALIZED_PRICE_PROXY", "PIXEL_PRICE_PROXY"}
+            ):
+                return [], ""
+            return [round(low, 8), round(high, 8)], coordinate_space
 
         def normalized_points(value: object) -> list[list[float]]:
             if not isinstance(value, Sequence) or isinstance(
@@ -19180,6 +19259,31 @@ class PhoenixGuardWindowTrackingAdapter:
                     return text
             return ""
 
+        def source_indices(row: Mapping[str, Any]) -> list[int]:
+            raw_many = row.get("source_indices")
+            values: list[object] = []
+            if isinstance(raw_many, Sequence) and not isinstance(
+                raw_many, (str, bytes, bytearray)
+            ):
+                values.extend(list(cast(Sequence[object], raw_many))[:64])
+            elif row.get("source_index") is not None:
+                values.append(row.get("source_index"))
+            result: set[int] = set()
+            for raw_value in values:
+                index = nonnegative_integer(raw_value)
+                if index is None:
+                    continue
+                result.add(index)
+            return sorted(result)
+
+        def stable_anchor_identities(row: Mapping[str, Any]) -> list[str]:
+            indices = source_indices(row)
+            if not indices or any(
+                index not in stable_candle_identities for index in indices
+            ):
+                return []
+            return [stable_candle_identities[index] for index in indices]
+
         def bounded_scalar(value: object, *, maximum: int = 128) -> object:
             if isinstance(value, bool):
                 return value
@@ -19204,13 +19308,53 @@ class PhoenixGuardWindowTrackingAdapter:
                     or row.get("type")
                     or ""
                 ).strip().upper().replace(" ", "_")
+                raw_knowledge_tags = row.get("knowledge_tags")
+                knowledge_tags: set[str] = set()
+                if isinstance(raw_knowledge_tags, Sequence) and not isinstance(
+                    raw_knowledge_tags,
+                    (str, bytes, bytearray),
+                ):
+                    knowledge_tags = {
+                        str(tag or "").strip().upper()
+                        for tag in cast(Sequence[object], raw_knowledge_tags)
+                    }
+                if (
+                    "LIQUIDITY_POOL" in knowledge_tags
+                    and (nonnegative_integer(row.get("touch_count")) or 0) >= 2
+                ):
+                    object_type = "CROWDED_PRICE_AREA"
                 if not object_type:
                     continue
+                direction = _upper_action(
+                    row.get("direction", row.get("side", "HOLD"))
+                )
                 identity = explicit_identity(row)
-                identity_scope = "EXPLICIT"
+                stable_anchors = stable_anchor_identities(row)
+                supplied_scope = str(row.get("identity_scope") or "").strip().upper()
+                explicitly_proven = bool(
+                    identity
+                    and row.get("identity_stable") is True
+                    and supplied_scope
+                    not in {"OBSERVATION_ONLY", "POSITIONAL", "EPHEMERAL"}
+                )
+                if stable_anchors:
+                    identity_material = "|".join(
+                        (object_type, direction, *stable_anchors)
+                    )
+                    identity = (
+                        f"anchored-{object_type.lower()}-"
+                        f"{hashlib.sha256(identity_material.encode('utf-8')).hexdigest()[:20]}"
+                    )
+                    identity_scope = "STABLE_CANDLE_ANCHOR"
+                    identity_stable = True
+                elif explicitly_proven:
+                    identity_scope = supplied_scope or "EXPLICIT_PROVEN"
+                    identity_stable = True
+                else:
+                    identity_scope = "OBSERVATION_ONLY"
+                    identity_stable = False
                 if not identity:
                     identity = f"observation-{group_index + 1}-{row_index + 1}"
-                    identity_scope = "OBSERVATION_ONLY"
                 token = (object_type, identity)
                 if token in seen:
                     continue
@@ -19219,9 +19363,8 @@ class PhoenixGuardWindowTrackingAdapter:
                     "object_type": object_type[:96],
                     "object_id": identity[:128],
                     "identity_scope": identity_scope,
-                    "direction": _upper_action(
-                        row.get("direction", row.get("side", "HOLD"))
-                    ),
+                    "identity_stable": identity_stable,
+                    "direction": direction,
                     "confidence": _clip01(
                         row.get("confidence")
                         if row.get("confidence") is not None
@@ -19245,6 +19388,21 @@ class PhoenixGuardWindowTrackingAdapter:
                 if points:
                     evidence["points"] = points
                     evidence["coordinate_space"] = "NORMALIZED"
+                value_bounds, value_coordinate_space = explicit_value_axis(row)
+                value_axis_source = "EXPLICIT"
+                if not value_bounds:
+                    value_bounds = pixel_value_bounds(row.get("bbox"))
+                    value_coordinate_space = (
+                        "PIXEL_PRICE_PROXY" if value_bounds else ""
+                    )
+                    value_axis_source = "PIXEL_BBOX" if value_bounds else ""
+                if value_bounds and value_coordinate_space:
+                    evidence["value_bounds"] = value_bounds
+                    evidence["value_coordinate_space"] = value_coordinate_space
+                    evidence["value_axis_source"] = value_axis_source
+                if stable_anchors:
+                    evidence["associated_candle_ids"] = stable_anchors[:64]
+                    evidence["candle_id"] = stable_anchors[-1]
                 for source_name, public_name in (
                     ("lifecycle", "lifecycle"),
                     ("state", "lifecycle"),
@@ -19289,6 +19447,7 @@ class PhoenixGuardWindowTrackingAdapter:
         structure_boxes: Sequence[Mapping[str, Any]],
         historical_structure: Sequence[Mapping[str, Any]],
         support_resistance_zones: Sequence[Mapping[str, Any]],
+        smart_money_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the study-only V3 intelligence lane from proven candle closes."""
 
@@ -19314,79 +19473,121 @@ class PhoenixGuardWindowTrackingAdapter:
                 status="UNAVAILABLE",
             )
 
-        closed_sequence = int(
-            scene_forecast.get("closed_candle_sequence", 0) or 0
+        def strict_nonnegative_integer(value: object) -> int | None:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                number = float(cast(Any, value))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(number) or number < 0.0 or not number.is_integer():
+                return None
+            return int(number)
+
+        def finite_number(value: object) -> float | None:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                number = float(cast(Any, value))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) else None
+
+        closed_sequence = strict_nonnegative_integer(
+            scene_forecast.get("closed_candle_sequence")
         )
-        resolver_marks: dict[int, tuple[str, int]] = {}
+        if closed_sequence is None:
+            return pending_market_study_v3(
+                "The completed-candle sequence proof is malformed.",
+                symbol=market,
+                timeframe=timeframe,
+                status="DEGRADED",
+            )
+
         identity_state = _mapping_to_dict(
             scene_forecast.get("closed_candle_identity_state", {})
         )
-        if (
+        identity_event_sequence = strict_nonnegative_integer(
+            identity_state.get("event_sequence")
+        )
+        identity_state_is_current = (
             identity_state.get("schema_version")
             == "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+            and str(identity_state.get("pair") or "").strip().upper()
+            == str(market or "").strip().upper()
+            and str(identity_state.get("timeframe") or "").strip().upper()
+            == str(timeframe or "").strip().upper()
             and str(identity_state.get("event_key") or "") == closed_key
-            and int(identity_state.get("event_sequence", -1) or 0)
-            == closed_sequence
-        ):
-            latest_observation = _mapping_to_dict(
-                identity_state.get("latest_closed", {})
-            )
-            latest_index_value = latest_observation.get("index")
-            latest_index = (
-                int(latest_index_value)
-                if latest_index_value is not None
-                else -1
-            )
-            if latest_index >= 0:
-                resolver_marks[latest_index] = (closed_key, closed_sequence)
+            and identity_event_sequence == closed_sequence
+        )
+        mark_candidates: set[tuple[int, str, int]] = set()
+        allowed_binding_proofs = {
+            "INITIAL_CAUSAL_BASELINE_V3",
+            "UNIQUE_SOURCE_IDENTITY_REOBSERVATION_V3",
+            "UNIQUE_VISUAL_REOBSERVATION_V3",
+            "SOURCE_BAR_ID_ADVANCED",
+            "SOURCE_FORMING_BAR_BECAME_CLOSED",
+            "VISUAL_CLOSED_CANDLE_GAP_REACQUIRED",
+            "VISUAL_FORMING_CANDLE_BECAME_CLOSED",
+            "CONFIRMED_EVENT_V3",
+        }
+        raw_bindings = identity_state.get("stable_visible_candle_bindings", [])
+        binding_rows = _sequence_of_mappings(raw_bindings)
+        if identity_state_is_current and len(binding_rows) <= 32:
+            for binding in binding_rows:
+                row_index = strict_nonnegative_integer(
+                    binding.get("current_row_index")
+                )
+                event_sequence = strict_nonnegative_integer(
+                    binding.get("closed_candle_sequence")
+                )
+                sequence_distance = strict_nonnegative_integer(
+                    binding.get("sequence_distance_from_latest")
+                )
+                event_key = str(
+                    binding.get("closed_candle_key") or ""
+                ).strip()
+                proof_source = str(binding.get("proof_source") or "").strip()
+                reobserved = _mapping_to_dict(
+                    binding.get("reobserved_observation", {})
+                )
+                reobserved_index = strict_nonnegative_integer(
+                    reobserved.get("index")
+                )
+                match_score = finite_number(binding.get("match_score"))
+                match_margin = finite_number(binding.get("match_margin"))
+                if (
+                    row_index is None
+                    or row_index >= len(candles)
+                    or event_sequence is None
+                    or event_sequence > closed_sequence
+                    or sequence_distance != closed_sequence - event_sequence
+                    or not event_key
+                    or len(event_key) > 256
+                    or proof_source not in allowed_binding_proofs
+                    or reobserved_index != row_index
+                    or match_score is None
+                    or not 0.0 <= match_score <= 1.0
+                    or match_margin is None
+                    or not 0.0 <= match_margin <= 1.0
+                ):
+                    continue
+                mark_candidates.add((row_index, event_key, event_sequence))
 
-        for batch_row in _sequence_of_mappings(
-            scene_forecast.get("confirmed_closed_candle_batch", [])
-        ):
-            observation = _mapping_to_dict(batch_row.get("observation", {}))
-            row_index_value = observation.get("index")
-            row_index = int(row_index_value) if row_index_value is not None else -1
-            event_key = str(batch_row.get("closed_candle_key") or "").strip()
-            event_sequence_value = batch_row.get("closed_candle_sequence")
-            event_sequence = (
-                int(event_sequence_value)
-                if event_sequence_value is not None
-                else -1
-            )
-            if (
-                row_index >= 0
-                and event_key
-                and 0 <= event_sequence <= closed_sequence
-            ):
-                resolver_marks[row_index] = (event_key, event_sequence)
-
-        prior_reobservation = _mapping_to_dict(
-            scene_forecast.get("prior_close_reobservation", {})
-        )
-        prior_key = str(
-            prior_reobservation.get("prior_closed_candle_key") or ""
-        ).strip()
-        prior_sequence_value = prior_reobservation.get(
-            "prior_closed_candle_sequence"
-        )
-        prior_sequence = (
-            int(prior_sequence_value)
-            if prior_sequence_value is not None
-            else -1
-        )
-        prior_index_value = prior_reobservation.get("current_row_index")
-        prior_index = (
-            int(prior_index_value) if prior_index_value is not None else -1
-        )
-        if (
-            prior_reobservation.get("status") == "CONFIRMED"
-            and prior_reobservation.get("proof_source")
-            == "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
-            and prior_key
-            and prior_index >= 0
-            and 0 <= prior_sequence < closed_sequence
-        ):
-            resolver_marks[prior_index] = (prior_key, prior_sequence)
+        by_index: dict[int, set[tuple[str, int]]] = {}
+        by_key: dict[str, set[tuple[int, int]]] = {}
+        by_sequence: dict[int, set[tuple[int, str]]] = {}
+        for row_index, event_key, event_sequence in mark_candidates:
+            by_index.setdefault(row_index, set()).add((event_key, event_sequence))
+            by_key.setdefault(event_key, set()).add((row_index, event_sequence))
+            by_sequence.setdefault(event_sequence, set()).add((row_index, event_key))
+        resolver_marks = {
+            row_index: (event_key, event_sequence)
+            for row_index, event_key, event_sequence in mark_candidates
+            if len(by_index[row_index]) == 1
+            and len(by_key[event_key]) == 1
+            and len(by_sequence[event_sequence]) == 1
+        }
 
         closed_candles: list[dict[str, Any]] = []
         candle_count = len(candles)
@@ -19394,6 +19595,13 @@ class PhoenixGuardWindowTrackingAdapter:
             row = dict(raw)
             if not self._candle_is_closed(row, index=index, total=candle_count):
                 continue
+            # Screenshot detector ids and caller-supplied stability flags are
+            # not lifelong identity proof. Only the resolver's bounded,
+            # current-frame stable binding contract can promote a candle.
+            row.pop("identity_stable", None)
+            row.pop("stable_candle_identity", None)
+            row.pop("identity_proof_source", None)
+            row.pop("closed_candle_sequence", None)
             resolver_mark = resolver_marks.get(index)
             if resolver_mark is not None:
                 stable_identity, stable_sequence = resolver_mark
@@ -19483,11 +19691,22 @@ class PhoenixGuardWindowTrackingAdapter:
             "study_only": True,
             "execution_authority": False,
         }
+        stable_candle_identities_by_index = {
+            index: f"EXPLICIT:{identity}"
+            for index, (identity, _sequence) in resolver_marks.items()
+            if identity
+        }
+        smart_money_row = _mapping_to_dict(smart_money_context)
         objects = self._market_study_objects_v3(
+            _sequence_of_mappings(smart_money_row.get("order_blocks", [])),
+            _sequence_of_mappings(smart_money_row.get("fair_value_gaps", [])),
             structure_boxes,
             historical_structure,
             support_resistance_zones,
             image_size=image_size,
+            stable_candle_identities_by_index=(
+                stable_candle_identities_by_index
+            ),
         )
         try:
             return service.study(
@@ -20115,6 +20334,7 @@ class PhoenixGuardWindowTrackingAdapter:
             structure_boxes=structure_boxes,
             historical_structure=historical_structure,
             support_resistance_zones=support_resistance_zones,
+            smart_money_context=smart_money_context,
         )
 
         tracking_summary: dict[str, Any] = {
