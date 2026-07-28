@@ -2,13 +2,16 @@
 
 - Status: implemented V3 architecture and operating contract
 - Updated: 2026-07-25
-- Scope: candle intelligence, exact candle memory, behavioral regression, Pair DNA, object relationships, retracement confluence, historical similarity, and operator presentation
+- Scope: continuous candle intelligence, exact candle memory, behavioral regression, Pair DNA,
+  hierarchical motifs, historical time-to-event evidence, exact normalized paths, adaptive feature
+  governance, concept drift, non-causal cross-pair association, proof certificates, object
+  relationships, retracement confluence, historical similarity, and operator presentation
 - Version boundary: **V3 only. This is not a V4 proposal.**
 
-This document is the implementation blueprint for PhoenixGuard's new candlestick-by-candlestick
-study lane. It should be read with the
-[PhoenixGuard Live Tracking Blueprint](PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md), which remains the
-canonical source for capture, 12-candle tracking episodes, permission, and live process topology.
+This document is the canonical implementation blueprint for PhoenixGuard's continuous
+candlestick-by-candlestick V3 study lane. Capture begins with the tracker service, but durable study
+advancement is automatic and event-driven: every newly proven closed candle can extend the study
+exactly once, with no manual study baseline and no fixed-length run.
 
 ## 1. What changed, in plain language
 
@@ -53,6 +56,11 @@ These invariants apply to every module and payload described below.
 | Durable publication | JSON stores are validated, finite, size-bounded, locked, written to a same-directory temporary file, `fsync`ed, and atomically replaced. The exact candle ledger separately requires SQLite WAL, `synchronous=FULL`, and an immediate transaction. |
 | Honest insufficiency | Missing identity, incomplete geometry, too little history, mixed evidence, and persistence failure produce explicit pending/degraded states. They do not invent a trend or match. |
 | Association is not causation | Object/candle outcome statistics are historical associations. Their payload explicitly says they are not causal. |
+| Continuous study | Study advancement is driven by proven closed-candle identity. Repeated frames are idempotent; stopping and restarting capture does not redefine historical study boundaries. |
+| Hierarchical evidence | Motif levels compose single-candle micro-events, 3-5 candle atoms, 7-12 candle compounds, and full swing/rest regimes under deterministic depth and node bounds. |
+| Drift honesty | A drift partition is evidence that a feature distribution changed. It is not a directional prediction or market-cause claim. |
+| Cross-pair honesty | Granger-style variance reduction and mutual information are published only as non-causal historical association. They never establish influence, direction, or permission. |
+| Proof-certificate boundary | A valid study certificate proves canonical derivation integrity against supplied evidence. It does not authenticate the market source, establish causation, or grant entry/execution authority. |
 
 ## 3. Implemented end-to-end architecture
 
@@ -78,6 +86,20 @@ flowchart TD
     X --> M
     I --> K[Same-pair historical search]
     K --> L[Outcome-supported continuation summary]
+    G --> AA[Hierarchical motif lattice]
+    H --> AB[Historical time-to-event curves]
+    G --> AC[Exact normalized historical paths]
+    AA --> AD[Shadow feature ontology]
+    AD --> AE[Audited promotion or rollback]
+    G --> AF[Online distribution drift partitions]
+    G --> AI[Restart-safe cross-pair normalized-return coordinator]
+    AI --> AG[Exact-timestamp non-causal association graph]
+    AA --> AH[Study claim proof certificates]
+    AB --> AH
+    AC --> AH
+    AE --> AH
+    AF --> AH
+    AG --> AH
     G --> M[Pair DNA cumulative profile]
     H --> M
     J --> M
@@ -87,6 +109,13 @@ flowchart TD
     M --> P[PG_MARKET_STUDY_V3]
     V --> P
     W --> P
+    AA --> P
+    AB --> P
+    AC --> P
+    AE --> P
+    AF --> P
+    AG --> P
+    AH --> P
     O --> P
     P --> Q[tracking_summary and latest_signal]
     Q --> R[Compact live state]
@@ -110,13 +139,18 @@ candle as closed.
 | Pair DNA | `Backend/src/phoenixguard/study/pair_dna_v3.py` | Durable pair/timeframe aggregates, bounded recent identities, object/candle outcome associations, and partitioned retracement-confluence outcomes. |
 | Object relationship graph | `Backend/src/phoenixguard/study/object_relationship_graph_v3.py` | Bounded observation graph with explicit candle anchors, co-presence, co-occurrence, proven normalized overlap, and completed-swing retracement/object evidence. |
 | Historical similarity | `Backend/src/phoenixguard/study/historical_similarity_v3.py` | Explainable fixed-size fingerprints, deterministic similarity, bounded library, graphs, supported outcomes. |
-| Live study coordinator | `Backend/src/phoenixguard/study/market_study_service_v3.py` | One idempotent study per proven close, prior-outcome maturation, compact public study, directional read. |
+| Motif, duration, and path research | `Backend/src/phoenixguard/study/motif_lattice_v3.py` | Four-level motif composition, Kaplan-Meier-style historical time-to-event curves, and anchor-known normalized historical path reconstruction. |
+| Adaptive feature ontology | `Backend/src/phoenixguard/study/adaptive_feature_ontology_v3.py` | Shadow proposals, versioned temporal/leakage promotion gates, promoted-only public snapshots, and reversible audited rollback. |
+| Concept drift | `Backend/src/phoenixguard/study/concept_drift_v3.py` | Adjacent-window KS evidence and deterministic pair/timeframe regime partition identities. |
+| Cross-pair association | `Backend/src/phoenixguard/study/cross_pair_association_v3.py` | Exact shared-timestamp, compatible-coordinate Granger-style proxy and mutual-information graph, always explicitly non-causal. |
+| Cross-pair coordinator | `Backend/src/phoenixguard/study/cross_pair_coordinator_v3.py` | Restart-safe bounded normalized-return state, exact timestamp synchronization, atomic update, and insufficient-peer/support abstention without fabricated edges. |
+| Study claim proofs | `Backend/src/phoenixguard/study/study_claim_proof_v3.py` | Deterministic content-addressed integrity certificates over closed-candle evidence, inputs, order domain, coordinate space, and derivation. |
+| Live study coordinator | `Backend/src/phoenixguard/study/market_study_service_v3.py` | One idempotent study per proven close, prior-outcome maturation, deterministic research rebuild, cross-pair coordination, claim-proof attachment, compact public study, and directional read. |
 | Tracker integration | `Backend/src/phoenixguard/mobile_api/window_tracker.py` | Identity gates, close adaptation, regression context, object reduction, study invocation, safe degradation. |
 | Live-state projection | `Backend/src/phoenixguard/mobile_api/live_state_v3.py` | Preserves bounded `market_study_v3` in tracking and latest-signal compaction. |
 | API allowlist projection | `Backend/src/phoenixguard/mobile_api/app.py` | Projects explicitly selected nested study evidence instead of relying on a generic depth walk. |
-| Tracking history attribution | `Backend/src/phoenixguard/tracking/tracking_episode_v3.py` | Attaches a compact study snapshot only when its close key and monotonic close sequence exactly match the event. |
 | Operator projection | `Backend/src/phoenixguard/mobile_api/operator_workspace_v1.py` | Keeps the fixed top-level schema and projects the study inside `tracking`; history remains evidence-only. |
-| Dashboard | `Frontend/dashboard/static/window_tracker_dashboard.html` | Major/inner/regression story, candle-by-candle session history, exhaustive label mode, separate permission. |
+| Dashboard | `Frontend/dashboard/static/window_tracker_dashboard.html` | Major/inner/regression story, continuous candle-by-candle history, exhaustive label mode, separate permission. |
 
 ## 5. Closed-candle causality and idempotency
 
@@ -715,7 +749,7 @@ result is marked `DIRECTIONAL_STUDY` or `INSUFFICIENT_EVIDENCE` and always inclu
 This is the operator's one studied direction, not a second execution lane and not two simultaneous
 forecast routes.
 
-## 12. Tracker, live state, operator, history, and frontend flow
+## 12. Tracker, live state, operator, continuous history, and frontend flow
 
 ### 12.1 Tracker integration
 
@@ -772,39 +806,39 @@ operator_workspace.tracking.market_study_v3
 Do not introduce a V4 route or an extra unversioned top-level market-study key. The frontend may
 read the tracking study first and use a latest-signal copy only as a compatibility fallback.
 
-### 12.3 Session history
+### 12.3 Continuous closed-candle history
 
-History rows are not a list of permission decisions. A tracking event receives a compact market
-study snapshot only when both its `closed_candle_key` and monotonic `closed_candle_sequence` exactly
-match the study. Reacquired batches may carry a distinct study with each confirmed event. The
-newest live study is never copied backward onto older events; an unproven sequence gap remains an
-`UNKNOWN_GAP` without invented candle behavior. Each correctly attributed completed-candle
-observation can carry or derive:
+History rows are not a list of permission decisions and do not depend on an operator-created study
+run. A completed-candle event receives a compact market-study snapshot only when both its
+`closed_candle_key` and monotonic `closed_candle_sequence` exactly match the study. Reacquired
+batches may carry a distinct study with each confirmed event. The newest live study is never copied
+backward onto older events; an unproven sequence gap remains an `UNKNOWN_GAP` without invented
+candle behavior. Each correctly attributed completed-candle observation can carry or derive:
 
 - actual candle direction;
 - major trend;
 - inner trend;
 - regression/directional study side;
 - behavior classification: movement, rest, continuation, or direction change;
-- match/difference when a previously saved future block was evaluated;
-- observed time and episode/candle index.
+- historical-match support or difference when comparable prior evidence exists;
+- observed time and monotonic closed-candle sequence.
 
-Archived tracking summaries remain neutral about execution. A saved study with no completed
-candles is described as an empty regression archive, not as a permanent `WAIT` trend.
+Retained summaries remain neutral about execution. A study with no proven completed candles is
+described as insufficient regression history, not as a permanent `WAIT` trend.
 
 ### 12.4 Frontend contract
 
 The V3 dashboard is a chart-led study workspace:
 
-- the forecast-control panel, Forecast navigation, dual frozen-route presentation, and public
+- the forecast-control panel, Forecast navigation, dual-path forecast presentation, and public
   `two_candle`, `scene_forecaster`, `lstm`, and `prediction` overlay families are retired from the
   V3 workspace;
 - retired forecast families are absent from `ALL_OVERLAY_FAMILIES`, presets, public view routing,
-  tracking-plan controls, and diagnostic rendering, so `Show all` cannot re-enable them;
+  removed forecast controls, and diagnostic rendering, so `Show all` cannot re-enable them;
 - one concise market story shows major trend, inner trend, and historical regression;
 - current movement/rest/continuation is described without turning it into permission;
 - entry permission remains a separate compact block;
-- session history is titled and rendered as a candle-by-candle regression study;
+- history is titled and rendered as a continuous candle-by-candle regression study;
 - `Show all` plus `Labels on` activates `labels-show-all`: collision solving is bypassed and both
   `label-collision-hidden` and `label-policy-hidden` labels are forced visible even when they overlap
   or cluster;
@@ -838,6 +872,10 @@ market_study_v3/
 |- candle_ledger_v3.sqlite3-shm        # SQLite-managed while active
 |- historical_sequences_v3.json
 |- historical_sequences_v3.json.lock
+|- adaptive_feature_ontology_v3.json
+|- adaptive_feature_ontology_v3.json.lock
+|- cross_pair_coordinator_v3.json
+|- cross_pair_coordinator_v3.json.lock
 |- pending_outcomes_v3.json
 `- pending_outcomes_v3.json.lock
 ```
@@ -847,6 +885,14 @@ than 16 MiB fails closed, and encoding rejects NaN and infinity. The SQLite ledg
 V3 ledger schema and SQL schema version in `ledger_meta`; its default distinct-row capacity is
 1,000,000. WAL and shared-memory sidecars are SQLite implementation files, not separate sources of
 truth and not files for manual editing.
+
+Motif, survival, path, and proof-certificate results rebuild deterministically from retained
+continuous history. The pair-scoped adaptive ontology owns a versioned, bounded audit store. Drift
+detector snapshots and append-stable regime partitions are persisted inside Pair DNA without raw
+feature windows. The cross-pair coordinator owns the versioned, atomically replaced, bounded
+`cross_pair_coordinator_v3.json` normalized-return store so pair updates arriving at different times
+can be matched only on exact shared closed timestamps. None of these stores may retain unbounded
+feature windows, raw price geometry, or raw cross-pair evidence.
 
 ### 13.3 Concurrency and durability
 
@@ -897,6 +943,13 @@ deliberate, versioned rebuild/migration.
 | More than 2,048 association keys | Profile remains valid | Established associations remain; unseen keys increment `association_overflow_count`. |
 | Object graph exceeds live caps | `READY_TRUNCATED` | Deterministic highest-priority proven edges remain and every omission is counted. |
 | Object graph has unsafe/conflicting geometry or identity | Validation failure, then `DEGRADED` at tracker boundary | No guessed anchor/overlap is published; independent capture and permission continue. |
+| Motif, duration, or path input contains a forming candle, mixed coordinate/order scope, or an unproven gap | Validation failure | No hierarchical node, duration curve, or reconstructed path is published from discontinuous evidence. |
+| Motif/survival/path configured capacity is exceeded | Validation failure | The service fails closed instead of truncating hidden evidence or expanding resource use. |
+| Shadow feature promotion gate fails | Feature remains `SHADOW` | It is absent from the promoted-only public snapshot; failed checks remain in the versioned audit trail. |
+| Drift evidence is insignificant or still warming | `STABLE` or `WARMING` | Current regime partition remains unchanged and no directional interpretation is added. |
+| Drift partition capacity is reached | `DRIFT_PARTITION_CAPACITY_REACHED` | The existing partition history remains intact; no unbounded partition is created. |
+| Cross-pair timestamps, normalized space, or order domain differ | Validation failure | No edge is calculated. A non-significant direction is suppressed, and every published Granger-style/MI edge remains explicitly non-causal. |
+| Claim certificate or supplied proof material is altered | `INVALID` | The study claim is suppressed; certificate validity can never promote trade authority. |
 | Pending outcome journal exceeds 64 pair/timeframe rows | Current study remains `STUDIED` | Oldest pending ordinal is evicted; Pair DNA, historical sequences, and exact candle rows remain. |
 | Reacquired history event lacks an exactly matching study key and sequence | Event remains valid without a study snapshot | The newest live study is not backfilled onto the older candle. |
 | Public app receives non-study authority flags or non-allowlisted nested fields | Study or fields omitted | No generic depth expansion exposes geometry, fingerprints, persistence, or model input. |
@@ -916,11 +969,12 @@ deliberate, versioned rebuild/migration.
 | `test_pair_dna_store_service_v3.py` | Monotonic unique-candle high-water, timestamp/resolver-event order-domain locking and conflict skips, stable completed-segment dedupe, retracement partitions and replay protection, Bloom probability/capacity, legacy migration, corruption and concurrent writes. |
 | `test_object_relationship_graph_v3.py` | Proven anchors/overlap, confirmed-pivot retracement math in both directions, 70.5%/experimental-71.8% object confluence, coordinate rejection, deterministic caps/truncation, unsafe geometry failure, and stripped trade instructions. |
 | `test_historical_similarity_service_v3.py` | Fingerprint validation, scoring, bounded storage/graph, supported continuation, and correlation statistics. |
-| `test_market_study_service_v3.py` | Idempotent close-key caching, exact candle-ledger integration, exact `+1` horizon enforcement, delayed retracement maturation, restart maturation, current-frame pixel-axis proof/skip, bounded pending journal, and no execution authority. |
+| `test_market_study_service_v3.py` | Idempotent close-key caching, exact candle-ledger integration, exact `+1` horizon enforcement, delayed retracement maturation, restart maturation, continuous research-key publication, deterministic ontology/drift rebuild, exact cross-pair synchronization/abstention across restart, current-frame pixel-axis proof/skip, bounded pending journal, and no execution authority. |
 | `test_market_study_tracker_bridge_v3.py` | Live resolver-to-study promotion: positional IDs stay unstable, stable history accumulates across source and screenshot rollovers, production objects require stable candle anchors, object boxes publish the exact candle-compatible pixel-value axis, spoofed caller stability cannot promote an object, and an arbitrary reacquired pixel window cannot false-mature. |
 | `test_market_study_operator_integration_v3.py` | Live/operator explicit nested allowlist, bounded retracement summary, experimental-level disclosure, privacy boundary, and fixed V3 schema integration. |
 | Focused `test_window_tracker_service.py` cases | Real source keys remain distinct and pixel bounds/points normalize against exact image dimensions before the study graph. |
-| `test_tracking_episode_v3.py` | Exact key/sequence study attribution for live and reacquired events; unknown gaps never inherit the newest study. |
+| `test_motif_lattice_v3.py` | Deterministic four-level motifs, contiguous order proof, bounded node publication, censored time-to-event curves, and anchor-known path reconstruction with MFE/MAE/state-time evidence. |
+| `test_advanced_research_studies_v3.py` | Shadow feature gates and rollback, deterministic drift partitions, exact-timestamp normalized cross-pair association, non-causal contracts, graph bounds, and proof-certificate tamper rejection. |
 | `test_dashboard_static_contract.py` | Required V3 study and label-mode DOM/static contracts. |
 | `test_dashboard_collision_playwright.py` | Exhaustive labels, retired forecast families, market-study schema use, and regression-history behavior in a browser. |
 | Existing operator/live-state tests | Fixed public schemas, compact projection, privacy, history, freshness, and permission separation. |
@@ -953,7 +1007,8 @@ Run focused tests first, then the complete repository suite. The final acceptanc
 13. `Show all` + `Labels on` leaves no collision-hidden or policy-hidden label visually suppressed;
 14. retired forecast families remain absent even under `Show all`;
 15. the dashboard shows major trend, inner trend, regression, and permission as separate concepts;
-16. session history describes directional/rest behavior rather than defaulting every row to `WAIT`;
+16. continuous history describes directional/rest behavior rather than defaulting every row to
+    `WAIT`;
 17. canonical `.venv-live` launch keeps one API/tracker topology and writes study data outside the
     launcher-cleaned runtime tree.
 18. a multi-rollover current-frame binding chain produces a proven completed swing and production
@@ -975,13 +1030,15 @@ $env:PYTHONPATH='Backend/src;Backend'
   Backend/tests/test_market_study_service_v3.py `
   Backend/tests/test_market_study_tracker_bridge_v3.py `
   Backend/tests/test_market_study_operator_integration_v3.py `
+  Backend/tests/test_motif_lattice_v3.py `
+  Backend/tests/test_advanced_research_studies_v3.py `
   Backend/tests/test_dashboard_static_contract.py `
   -q
 ```
 
-The canonical live launch remains the command documented in the live tracking blueprint. A healthy
-launch must expose the same `closed_candle_key` and `sequence_id` through tracker, compact live
-state, operator workspace, and dashboard.
+The canonical live launch is `Backend/launch/launch_phoenixguard_live_ready.ps1`. A healthy launch
+must expose the same `closed_candle_key` and `sequence_id` through tracker, compact live state,
+operator workspace, and dashboard.
 
 ### 15.3 Release evidence collected on 2026-07-24
 
@@ -1006,7 +1063,7 @@ covered by the V3 launcher/integrity and window-tracker tests, while the smoke u
 
 | Gate | Result |
 | --- | --- |
-| Completed post-fix matrix | **328 tests passed**: 122 retracement/graph/Pair-DNA/service/tracker/operator/static-contract tests; 75 adjacent candle/ledger/behavior/similarity/episode tests; 88 scene-forecast/public-operator tests; 3 changed Playwright cases; 9 V3 integrity tests; 2 hardened object-identity cases; and 29 tracker payload/model-council tests. |
+| Completed post-fix matrix | **328 tests passed**: 122 retracement/graph/Pair-DNA/service/tracker/operator/static-contract tests; 75 adjacent candle/ledger/behavior/similarity/history tests; 88 scene-forecast/public-operator tests; 3 changed Playwright cases; 9 V3 integrity tests; 2 hardened object-identity cases; and 29 tracker payload/model-council tests. |
 | Identity hardening | Arbitrary object IDs and zone keys remain `OBSERVATION_ONLY` unless a stable proof exists. The two directly changed cases passed. A broader 255-test tracker file produced about 181 passing indicators with no failure marker before the 900-second harness limit, so it is not counted as a completed pass. |
 | Static quality | Ruff, compileall, `git diff --check`, and `verify_v3_integrity.py` passed. Strict Pyright reported **0 errors and 0 warnings** across every changed production source and focused test. |
 | Browser contracts | The three changed retracement evidence states passed after the final fix. The broader collision suite had already completed at **55 passed and 35 skipped** before the final backend-only compaction and identity changes. |
@@ -1031,18 +1088,20 @@ covered by the V3 launcher/integrity and window-tracker tests, while the smoke u
 - cache hit versus new-close computation;
 - degraded exceptions without raw broker imagery or secrets.
 
-## 16. Implemented now versus research challengers
+## 16. Advanced continuous V3 research services
 
-The following boundary is deliberate. PhoenixGuard currently uses deterministic, explainable,
-bounded algorithms so every displayed claim can be traced. Advanced models may compete as shadow
-challengers only after they pass causal evaluation; they do not replace the implemented baseline by
-name alone.
+The following boundary is deliberate. PhoenixGuard uses deterministic, explainable, bounded
+algorithms so every study claim can be traced. The services below are implemented V3 backend
+research primitives integrated into `MarketStudyServiceV3`. The app and operator boundaries publish
+only their bounded, privacy-allowlisted summaries; raw histories, feature windows, persistence
+internals, and private model contributions remain private. None can alter the independent permission
+contract.
 
-### 16.1 Implemented now
+### 16.1 Established continuous study baseline
 
 - exact candle body/wick micro geometry in price, normalized proxy, or pixel proxy space;
 - candle taxonomy, personality, rejection/acceptance, and prior-candle relations;
-- closed-candle-only sequence study;
+- automatic closed-candle-only continuous study with idempotent repeated frames;
 - SQLite WAL exact candle ledger with one authoritative stable close per study and exact unique/
   re-observation counts;
 - major/inner regression and explicit swing/rest segmentation;
@@ -1055,24 +1114,56 @@ name alone.
 - deterministic pair-scoped nearest-sequence search and bounded similarity graph;
 - one-candle delayed outcome maturation and minimum-support historical continuation;
 - one BUY/SELL/HOLD directional study with a hard study/execution boundary;
-- compact live-state, explicit app allowlist, exact tracking-history attribution, operator, and
+- compact live-state, explicit app allowlist, exact continuous-history attribution, operator, and
   chart-led frontend contracts;
 - retired public forecast families plus exhaustive `Show all` + `Labels on` label rendering.
 
-### 16.2 Near-term hardening, still V3
+### 16.2 Seven implemented research-grade capabilities
 
-1. Add rolling calibration by pair, regime, session, and horizon. Report Brier score, log loss,
-   calibration error, hit rate with confidence intervals, and abstention coverage.
-2. Add temporal train/calibration/test partitions with purge/embargo around overlapping windows.
-   Never evaluate on a sequence whose candles overlap its retrieval bank.
-3. Add session/time-of-day and verified price-scale features only when source identity and scale are
-   proven.
-4. Version feature definitions and migration tools before changing fingerprint dimensions or
-   thresholds.
+| Capability | Exact behavior | Bounds and honesty contract |
+| --- | --- | --- |
+| Hierarchical multi-resolution motif lattice | `build_hierarchical_motif_lattice_v3(...)` composes level 0 single-candle micro-events, level 1 3-5 candle atoms, level 2 7-12 candle compounds, and level 3 full swing/rest regimes. Parent nodes retain bounded child composition and normalized features. | Depth is at most four, nodes at most 2,048 per level, children at most 64 per node, and input history at most 512 closed candles. Motifs describe history; resemblance is not a future outcome. |
+| Historical time-to-event evidence | `build_time_to_event_survival_evidence_v3(...)` measures next swing, direction change, and rest end. It publishes Kaplan-Meier-style curves, at-risk/event/censor counts, restricted mean duration, median when observed, and Greenwood log-log intervals. Object-conditioned edges are built only from durable matured Pair DNA sequences; without that history the service explicitly abstains. | At most 32 histories, 49,152 derived observations, and 256 closed candles of horizon. Overlapping origins may be dependent. The curves are descriptive, non-causal, and not future deadlines. |
+| Adaptive feature ontology | `AdaptiveFeatureOntologyV3` creates pair/timeframe-scoped shadow proposals with bounded JSON definitions and closed-candle evidence. The live service calculates train/holdout support, stability, effect size and multiplicity-adjusted evidence internally before promotion. Promotion and rollback append immutable audit revisions, persist restart-safely, and the public snapshot excludes raw shadow definitions. | At most 2,048 features and 32 revisions by default. Passing the gate means eligible for public study only; it neither establishes causation nor authorizes prediction or execution. |
+| Exact normalized historical path reconstruction | `reconstruct_normalized_historical_path_v3(...)` fixes scale from candles known at the anchor, reconstructs later close/high/low paths in median-range units, and records MFE, MAE, final displacement, efficiency, transitions, and time in state. The service also publishes a bounded trajectory library linked to historical motif/similarity evidence. | Every path is independently fail-closed and clamped to at most 256 candles, so one invalid path cannot suppress motif or survival results. Future geometry cannot alter normalization. Direction is a reference orientation, not a trade instruction. |
+| Multi-pair association graph | `analyze_cross_pair_lead_lag_v3(...)` and `build_cross_pair_association_graph_v3(...)` require distinct pairs, exact shared contiguous closed timestamps, one compatible normalized coordinate space, and one order domain. `CrossPairStudyCoordinatorV3` atomically retains bounded normalized-return tails as pair updates arrive, aligns only genuine exact timestamps, then invokes that engine. They compare an autoregressive baseline with a lagged-source augmentation, measure mutual information, and test the selected lag against deterministic circular shifts. | The pure engine permits at most 1,024 samples, lag 12, eight graph pairs, and 64 published edges; the live coordinator defaults to 256 samples, lag six, eight pairs, 32 edges, and 63 null shifts so an adjusted 5% result is mathematically reachable. Without compatible support it abstains. **Granger-style variance reduction and mutual information are non-causal associations only**. |
+| Online concept-drift partitioning | `OnlineConceptDriftDetectorV3` compares fixed adjacent closed-candle feature windows with a two-sample KS statistic, Bonferroni-adjusted DKW threshold, and standardized mean-shift floor. Digest-validated snapshots replay idempotently; a significant change closes the prior partition and persists a deterministic append-stable regime ID into Pair DNA. | Window size is at most 256, feature count at most 64, and partition history is bounded. A partition boundary describes distribution change only and never market direction. |
+| Machine-checkable claim proofs | `issue_study_claim_certificate_v3(...)` hashes the claim, bounded inputs, derivation, ordered closed-candle evidence, coordinate space, and order domain into a deterministic certificate. A non-circular `PG_PUBLIC_STUDY_CANONICAL_V3` projection keeps the bound hash stable after proof references are attached, and cross-pair certificates bind every tested peer digest. | At most 512 evidence candles, bounded depth/collection/document sizes, and allowlisted material public claim types. Verification rejects envelope, evidence, peer-manifest or final-study tampering. A valid certificate proves supplied-evidence integrity only; it does not authenticate the market source, prove causation or accuracy, or grant execution permission. |
 
-### 16.3 Research-informed shadow challengers
+All seven services require one pair/timeframe and one coordinate/order domain unless the cross-pair
+service explicitly validates compatible normalized streams. All return `study_only: true`,
+`causal: false`, and `execution_authority: false` or an equivalent hard contract. Capacity overruns
+fail closed; no service silently expands its bound or invents missing continuity.
 
-These are future challengers, **not claims about the current implementation**:
+### 16.3 Continuous pipeline integration and promotion boundary
+
+1. `MarketStudyServiceV3` supplies only identity-proven closed histories. A forming candle, gapped
+   order, mixed coordinate space, or positional identity fails validation.
+2. Every successful continuous study carries the bounded keys `motif_lattice`, `survival_network`,
+   `path_reconstruction`, `adaptive_feature_ontology`, `concept_drift`, `regime_partition`,
+   `cross_pair_association`, and `claim_proofs`. Pending studies carry the same families with explicit
+   insufficient-evidence states rather than invented findings.
+3. Ontology audit state persists per pair/timeframe after internally calculated train/holdout gates.
+   Drift snapshots and append-stable regime partitions persist inside Pair DNA and replay
+   idempotently. Only promoted ontology definitions enter the public snapshot; shadow totals remain
+   bounded audit metadata.
+4. Cross-pair normalized returns use their own versioned atomic coordinator store. A lone pair,
+   timestamp mismatch, incompatible timeframe, or insufficient support must abstain with an explicit
+   status rather than manufacture a peer, shared timestamp, or edge.
+5. The dedicated app/operator allowlist publishes bounded research summaries only after removing raw
+   identities, raw geometry, full feature windows, dedupe state, and persistence internals.
+6. The ontology's temporal-safety gate is an eligibility screen. Documentation and UI must never
+   abbreviate it to proof that a feature causes an outcome.
+7. Cross-pair edges must always travel with support, lag, coordinate space, order domain,
+   significance method, and a visible non-causal statement.
+8. Proof certificates travel with the claim they bind and the declared derivation version. A digest
+   mismatch suppresses the claim; a valid digest still cannot elevate authority.
+9. Public evidence remains separate from current entry permission, execution-packet validation, and
+   downstream bridge controls.
+
+### 16.4 Further research-informed shadow challengers
+
+These remain future challengers, **not claims about the current implementation**:
 
 - A [Matrix Profile](https://www.cs.ucr.edu/~eamonn/MatrixProfile.html) challenger can discover
   motifs and discords in normalized candle-feature streams while preserving an inspectable nearest
@@ -1101,8 +1192,8 @@ These are future challengers, **not claims about the current implementation**:
 
 Every challenger must publish beside the baseline with its model/data version, training cutoff,
 pair/timeframe scope, latency, abstention behavior, calibration, and exact evaluation split. It is
-promoted only when it improves out-of-sample decision support without weakening causality,
-explainability, runtime bounds, or the independent execution gate.
+promoted only when it improves out-of-sample decision support without weakening closed-candle
+temporal integrity, explainability, runtime bounds, or the independent execution gate.
 
 ## 17. Definition of done for this V3 lane
 
@@ -1126,6 +1217,20 @@ The V3 market-study lane is complete only when all of these statements are true 
   causation, or permission;
 - historical continuation is unavailable until causal outcomes reach minimum support;
 - every association and match can be explained from stored evidence;
+- motif nodes compose deterministically through all four declared levels and never exceed their
+  published depth/node/child bounds;
+- time-to-event curves retain support, at-risk events, censoring, and uncertainty and never present
+  a historical duration distribution as a deadline;
+- reconstructed paths use only anchor-known normalization and disclose MFE, MAE, efficiency,
+  transitions, and state time as historical evidence;
+- shadow features cannot enter a public study snapshot until their latest versioned gate passes,
+  and every promotion can be rolled back without deleting audit history;
+- drift creates a new deterministic regime partition only from significant closed-window evidence
+  and never supplies directional permission;
+- every cross-pair edge uses exact shared closed timestamps and compatible normalized geometry, and
+  all Granger-style and mutual-information language remains explicitly non-causal;
+- every published proof certificate validates its claim, inputs, derivation, ordered closed-candle
+  identities, coordinate space, and order domain, while retaining zero execution authority;
 - retired forecast families cannot return through `Show all`, and `Show all` plus `Labels on` really
   shows every present overlay label, even when clustered;
 - session history describes what price did instead of mirroring permission `WAIT`;

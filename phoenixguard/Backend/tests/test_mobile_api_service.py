@@ -389,18 +389,8 @@ def test_full_live_state_routes_strip_host_paths_without_losing_public_geometry(
             )
         }
         assert payload["execution_debug"] == {"status": "WAIT"}
-        assert payload["memory_projection_future"] == {
-            "summary": "Price may retest before continuation."
-        }
-        overlay = payload["overlays"]["objects"][0]
-        assert overlay["path"] == [[0.4, 0.6], [0.5, 0.45]]
-        assert overlay["forecast_path"] == [
-            {"step": 1, "expected_close_norm": 0.45}
-        ]
-        assert overlay["source_path"] == (
-            "tracking_summary.historical_structure[0]"
-        )
-        assert "artifact_path" not in overlay
+        assert "memory_projection_future" not in payload
+        assert payload["overlays"]["objects"] == []
 
     # Response projection must not mutate the runtime's authoritative state.
     assert raw_live_state["last_chart_path"] == r"C:\private\runtime\chart.png"

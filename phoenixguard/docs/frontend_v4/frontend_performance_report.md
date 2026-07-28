@@ -37,7 +37,7 @@ Each refresh:
 - surface caption
 - image surface
 - performance fields
-- prediction images
+- regression history
 - inspector panel
 
 ## Performance Constraints
@@ -65,7 +65,7 @@ The dashboard avoids overlapping requests with a global busy flag. This is good 
 
 - a slow telemetry request can skip a session refresh
 - a mutation request can pause polling
-- memory projection actions can delay regular state reads
+- private council computation must not delay regular public state reads
 
 ### Image Cache Busting Is Frame-Aware
 

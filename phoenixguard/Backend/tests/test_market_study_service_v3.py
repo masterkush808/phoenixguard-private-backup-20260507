@@ -1,11 +1,38 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import math
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
-from phoenixguard.study.market_study_service_v3 import MarketStudyServiceV3
+from phoenixguard.study.behavioral_sequence_v3 import measure_market_behavior_v3
+from phoenixguard.study.candle_intelligence_v3 import analyze_candle_sequence_v3
+from phoenixguard.study.market_study_service_v3 import (
+    MarketStudyServiceV3,
+    _continuous_advanced_studies,  # pyright: ignore[reportPrivateUsage]
+    _object_conditioned_time_to_event,  # pyright: ignore[reportPrivateUsage]
+)
+from phoenixguard.study.motif_lattice_v3 import (
+    MAX_PATH_CANDLES,
+    MotifLatticeValidationError,
+)
+from phoenixguard.study.study_claim_proof_v3 import (
+    canonical_public_study_hash_v3,
+)
+
+
+def _nested_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, nested in cast(Mapping[object, object], value).items():
+            keys.add(str(key))
+            keys.update(_nested_keys(nested))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for nested in cast(Sequence[object], value):
+            keys.update(_nested_keys(nested))
+    return keys
 
 
 def _candles(_offset: float, sequence: int) -> list[dict[str, object]]:
@@ -480,7 +507,9 @@ def test_one_step_outcome_rejects_gap_replay_and_out_of_order_sequences(
     assert maturation["current_closed_candle_sequence"] == current_sequence
     assert maturation["required_horizon_candles"] == 1
     profile = service.pair_dna.get_profile("EUR/CHF OTC", "M5")
-    assert profile["status"] == "NOT_FOUND"
+    assert profile["status"] == "READY"
+    assert profile["profile"]["observation_count"] == 0
+    assert profile["profile"]["concept_drift"]["status"] == "READY"
 
 
 def test_pixel_outcome_skips_when_prior_candle_identity_is_not_reobserved(
@@ -519,8 +548,9 @@ def test_pixel_outcome_skips_when_prior_candle_identity_is_not_reobserved(
         "SKIPPED_UNPROVEN_COORDINATE_CONTINUITY"
     )
     profile = service.pair_dna.get_profile("NZD/JPY OTC", "M5")
-    assert profile["status"] == "NOT_FOUND"
-    assert profile["profile"] is None
+    assert profile["status"] == "READY"
+    assert profile["profile"]["observation_count"] == 0
+    assert profile["profile"]["concept_drift"]["status"] == "READY"
 
 
 def test_pending_outcome_journal_stays_bounded_for_full_window_and_objects(
@@ -554,3 +584,535 @@ def test_pending_outcome_journal_stays_bounded_for_full_window_and_objects(
 
     pending_path = root / "pending_outcomes_v3.json"
     assert pending_path.stat().st_size < 64 * 1024
+
+
+def test_market_study_publishes_continuous_advanced_contracts_without_fixed_horizon(
+    tmp_path: Path,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "continuous-advanced")
+    result = service.study(
+        _many_candles(40),
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="continuous-close-39",
+        closed_candle_sequence=39,
+        regime="TRANSITION",
+        regression=_regression(),
+    )
+
+    motif = result["motif_lattice"]
+    survival = result["survival_network"]
+    path = result["path_reconstruction"]
+    assert motif["status"] == "STUDIED"  # type: ignore[index]
+    assert motif["depth"] == 4  # type: ignore[index]
+    assert motif["closed_candle_count"] == 40  # type: ignore[index]
+    assert motif["continuous_window"] == {  # type: ignore[index]
+        "fixed_sequence_horizon": False,
+        "observed_closed_candle_count": 40,
+        "retained_closed_candle_limit": 512,
+        "history_source": "CURRENT_RETAINED_CLOSED_HISTORY",
+    }
+    assert all(
+        level["published_count"] <= 512
+        for level in motif["levels"]  # type: ignore[index]
+    )
+
+    assert survival["status"] == "STUDIED"  # type: ignore[index]
+    assert survival["max_horizon_closed_candles"] == 39  # type: ignore[index]
+    assert survival["network"]["node_count"] > 0  # type: ignore[index]
+    assert survival["network"]["edge_count"] == len(survival["curves"])  # type: ignore[index]
+    assert survival["network"]["edge_semantics"] == (  # type: ignore[index]
+        "NON_CAUSAL_HISTORICAL_TIME_TO_EVENT_ASSOCIATION"
+    )
+    assert all(edge["causal"] is False for edge in survival["network"]["edges"])  # type: ignore[index]
+
+    assert path["status"] == "RECONSTRUCTED"  # type: ignore[index]
+    assert path["end_index"] == 39  # type: ignore[index]
+    assert path["anchor_selection"]["fixed_sequence_horizon"] is False  # type: ignore[index]
+    assert path["anchor_selection"]["reference_direction_is_trade_instruction"] is False  # type: ignore[index]
+    assert path["point_count"] != 12  # type: ignore[index]
+    for advanced in (motif, survival, path):
+        assert advanced["study_only"] is True  # type: ignore[index]
+        assert advanced["causal"] is False  # type: ignore[index]
+        assert advanced["execution_authority"] is False  # type: ignore[index]
+        assert advanced["grants_entry_permission"] is False  # type: ignore[index]
+        assert not {
+            "candle_id",
+            "timestamp",
+            "stable_candle_identity",
+            "source_values",
+            "ohlc",
+        } & _nested_keys(advanced)
+
+
+def test_advanced_contracts_fail_closed_without_stable_contiguous_order(
+    tmp_path: Path,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "advanced-unproven-order")
+    result = service.study(
+        _positional_pixel_candles(
+            8,
+            price_offset=0.0,
+            scale=2.0,
+            y_origin=500.0,
+        ),
+        symbol="CAD/CHF OTC",
+        timeframe="M5",
+        closed_candle_key="unproven-order-close",
+        closed_candle_sequence=1,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+
+    assert result["status"] == "STUDIED"
+    for name in ("motif_lattice", "survival_network", "path_reconstruction"):
+        advanced = result[name]
+        assert advanced["status"] == "INSUFFICIENT_PROVEN_HISTORY"  # type: ignore[index]
+        assert "order is unproven" in advanced["reason"]  # type: ignore[index]
+        assert advanced["continuous_window"]["fixed_sequence_horizon"] is False  # type: ignore[index]
+        assert advanced["study_only"] is True  # type: ignore[index]
+        assert advanced["execution_authority"] is False  # type: ignore[index]
+
+
+def test_advanced_tracker_event_history_uses_exact_resolver_order_domain(
+    tmp_path: Path,
+) -> None:
+    candles = _candles(0.0, 20)
+    for index, row in enumerate(candles):
+        row.pop("timestamp")
+        row["stable_candle_identity"] = f"resolver-event-{index}"
+        row["identity_stable"] = True
+        row["identity_proof_source"] = "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+        row["closed_candle_sequence"] = 200 + index
+
+    result = MarketStudyServiceV3(tmp_path / "advanced-resolver-order").study(
+        candles,
+        symbol="EUR/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="resolver-close-207",
+        closed_candle_sequence=207,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+
+    assert result["motif_lattice"]["status"] == "STUDIED"  # type: ignore[index]
+    assert result["motif_lattice"]["order_domain"] == (  # type: ignore[index]
+        "TRACKER_EVENT_SEQUENCE_V3"
+    )
+    assert result["survival_network"]["order_domain"] == (  # type: ignore[index]
+        "TRACKER_EVENT_SEQUENCE_V3"
+    )
+    assert result["path_reconstruction"]["order_domain"] == (  # type: ignore[index]
+        "TRACKER_EVENT_SEQUENCE_V3"
+    )
+
+
+def test_continuous_price_history_extends_from_pair_ledger_after_restart(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "advanced-restart-ledger"
+    service = MarketStudyServiceV3(root)
+    result: dict[str, Any] = {}
+    for sequence in range(1, 15):
+        result = service.study(
+            _candles(0.0, sequence),
+            symbol="AUD/JPY OTC",
+            timeframe="M5",
+            closed_candle_key=f"advanced-ledger-{sequence}",
+            closed_candle_sequence=sequence,
+            regime="UPTREND",
+            regression=_regression(),
+        )
+
+    before_count = result["motif_lattice"]["closed_candle_count"]  # type: ignore[index]
+    assert before_count > 8
+    assert result["motif_lattice"]["continuous_window"]["history_source"] == (  # type: ignore[index]
+        "CURRENT_HISTORY_PLUS_RESTART_SAFE_PAIR_LEDGER"
+    )
+
+    restarted = MarketStudyServiceV3(root)
+    after = restarted.study(
+        _candles(0.0, 15),
+        symbol="AUD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="advanced-ledger-15",
+        closed_candle_sequence=15,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+    assert after["motif_lattice"]["closed_candle_count"] > before_count  # type: ignore[index]
+    assert after["motif_lattice"]["symbol"] == "AUD/JPY OTC"  # type: ignore[index]
+    assert after["motif_lattice"]["timeframe"] == "M5"  # type: ignore[index]
+    assert after["motif_lattice"]["continuous_window"]["history_source"] == (  # type: ignore[index]
+        "CURRENT_HISTORY_PLUS_RESTART_SAFE_PAIR_LEDGER"
+    )
+
+    other_pair = restarted.study(
+        _candles(0.0, 15),
+        symbol="GBP/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="other-pair-close-15",
+        closed_candle_sequence=15,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+    assert other_pair["motif_lattice"]["closed_candle_count"] == 8  # type: ignore[index]
+    assert other_pair["motif_lattice"]["history_id"] != after["motif_lattice"]["history_id"]  # type: ignore[index]
+
+
+def test_continuous_research_publishes_shadow_counts_drift_and_claim_coverage(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "continuous-research-contracts"
+    service = MarketStudyServiceV3(root)
+    result = service.study(
+        _many_candles(40),
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="research-close-39",
+        closed_candle_sequence=39,
+        regime="TRANSITION",
+        regression=_regression(),
+    )
+
+    ontology = result["adaptive_feature_ontology"]
+    assert ontology["status"] == "SHADOW_EVIDENCE_ACCUMULATING"  # type: ignore[index]
+    assert ontology["public_features"] == []  # type: ignore[index]
+    assert ontology["promoted_feature_count"] == 0  # type: ignore[index]
+    assert ontology["shadow_features_excluded"] is True  # type: ignore[index]
+    assert ontology["shadow_audit"] == {  # type: ignore[index]
+        "shadow_feature_count": 2,
+        "evaluated_shadow_feature_count": 2,
+        "evidence_closed_candle_count": 40,
+        "definitions_published": False,
+        "promotion_requires_real_holdout_gate": True,
+    }
+    assert "definition" not in _nested_keys(ontology)
+    assert "derivation" not in _nested_keys(ontology)
+
+    drift = result["concept_drift"]
+    regime = result["regime_partition"]
+    assert drift["status"] in {"WARMING", "STABLE", "DRIFT_DETECTED"}  # type: ignore[index]
+    assert drift["window_policy"] == {  # type: ignore[index]
+        "adaptive": False,
+        "window_size": 24,
+        "fixed_sequence_horizon": False,
+        "configuration_persisted_per_pair": True,
+        "retained_history_replay_idempotent": True,
+    }
+    assert drift["private_identity_audit"]["raw_candle_identities_published"] is False  # type: ignore[index]
+    assert regime["status"] == "ACTIVE"  # type: ignore[index]
+    assert regime["current_partition"]["regime_partition_id"] == (  # type: ignore[index]
+        drift["current_regime_partition_id"]  # type: ignore[index]
+    )
+    assert drift["execution_authority"] is False  # type: ignore[index]
+    assert regime["predicts_direction"] is False  # type: ignore[index]
+
+    cross_pair = result["cross_pair_association"]
+    assert cross_pair["status"] == "INSUFFICIENT_SYNCHRONIZED_PAIR"  # type: ignore[index]
+    assert cross_pair["edges"] == []  # type: ignore[index]
+    assert cross_pair["contract"]["fabricates_missing_pair_evidence"] is False  # type: ignore[index]
+
+    proofs = result["claim_proofs"]
+    coverage = {row["claim_key"]: row for row in proofs["coverage"]}  # type: ignore[index]
+    assert proofs["status"] == "PARTIAL"  # type: ignore[index]
+    assert {
+        "motif_lattice",
+        "survival_network",
+        "path_reconstruction",
+        "adaptive_feature_ontology",
+        "concept_drift",
+        "regime_partition",
+        "cross_pair_association",
+        "regression",
+        "candle_intelligence",
+        "behavior",
+        "pair_dna",
+        "object_relationship_graph",
+        "historical_similarity",
+        "outcome_maturation",
+        "directional_read",
+    } <= set(coverage)
+    assert coverage["cross_pair_association"]["status"] == (
+        "NOT_PUBLISHED_INSUFFICIENT_SYNCHRONIZED_EVIDENCE"
+    )
+    assert all(
+        coverage[name]["status"] == "COVERED"
+        for name in (
+            "motif_lattice",
+            "survival_network",
+            "path_reconstruction",
+            "concept_drift",
+            "regime_partition",
+        )
+    )
+    assert proofs["certificate_count"] == 13  # type: ignore[index]
+    assert all(
+        certificate["execution_authority"] is False
+        and certificate["causal"] is False
+        for certificate in proofs["certificates"]  # type: ignore[index]
+    )
+    assert result["motif_lattice"]["claim_proof_id"] == coverage[  # type: ignore[index]
+        "motif_lattice"
+    ]["certificate_id"]
+    assert result["motif_lattice"]["claim_bound_study_hash"] == coverage[  # type: ignore[index]
+        "motif_lattice"
+    ]["published_study_hash"]
+    for claim_key, proof_row in coverage.items():
+        if proof_row["status"] != "COVERED" or claim_key not in result:
+            continue
+        published = cast(Mapping[str, Any], result[claim_key])
+        assert canonical_public_study_hash_v3(published) == proof_row[
+            "published_study_hash"
+        ]
+
+    restarted = MarketStudyServiceV3(root).study(
+        _many_candles(40),
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="research-close-39",
+        closed_candle_sequence=39,
+        regime="TRANSITION",
+        regression=_regression(),
+    )
+    assert restarted["concept_drift"]["partitions"] == drift["partitions"]  # type: ignore[index]
+    assert restarted["adaptive_feature_ontology"] == ontology
+    persisted_before = service.pair_dna.get_concept_drift_state(
+        "CAD/JPY OTC",
+        "M5",
+    )
+    assert persisted_before["status"] == "READY"
+    assert persisted_before["detector_state"]["configuration"][  # type: ignore[index]
+        "window_size"
+    ] == 24
+
+    appended = MarketStudyServiceV3(root).study(
+        _many_candles(41),
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="research-close-40",
+        closed_candle_sequence=40,
+        regime="TRANSITION",
+        regression=_regression(),
+    )
+    assert [
+        row["regime_partition_id"]
+        for row in appended["concept_drift"]["partitions"]  # type: ignore[index]
+    ] == [row["regime_partition_id"] for row in drift["partitions"]]  # type: ignore[index]
+    persisted_after = service.pair_dna.get_concept_drift_state(
+        "CAD/JPY OTC",
+        "M5",
+    )
+    assert persisted_after["detector_state"]["last_order_index"] > (  # type: ignore[index]
+        persisted_before["detector_state"]["last_order_index"]  # type: ignore[index]
+    )
+
+
+def test_cross_pair_association_requires_real_exact_peer_and_survives_restart(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cross-pair-restart"
+    first = MarketStudyServiceV3(root).study(
+        _many_candles(40),
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="cadjpy-cross-close",
+        closed_candle_sequence=39,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+    assert first["cross_pair_association"]["status"] == (  # type: ignore[index]
+        "INSUFFICIENT_SYNCHRONIZED_PAIR"
+    )
+    assert first["cross_pair_association"]["published_edge_count"] == 0  # type: ignore[index]
+
+    second = MarketStudyServiceV3(root).study(
+        _many_candles(40),
+        symbol="GBP/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="gbpjpy-cross-close",
+        closed_candle_sequence=39,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+    association = second["cross_pair_association"]
+    assert association["compatible_pair_count"] == 1  # type: ignore[index]
+    assert association["tested_pair_count"] == 1  # type: ignore[index]
+    assert association["status"] in {  # type: ignore[index]
+        "SUPPORTED",
+        "NO_SIGNIFICANT_ASSOCIATION",
+    }
+    assert association["contract"]["fabricates_missing_pair_evidence"] is False  # type: ignore[index]
+    assert all(edge["causal"] is False for edge in association["edges"])  # type: ignore[index]
+    cross_coverage = next(
+        row
+        for row in second["claim_proofs"]["coverage"]  # type: ignore[index]
+        if row["claim_key"] == "cross_pair_association"
+    )
+    assert cross_coverage["status"] == "COVERED"
+    assert cross_coverage["certificate_id"]
+
+    third = MarketStudyServiceV3(root).study(
+        _many_candles(40),
+        symbol="CHF/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="chfjpy-cross-close",
+        closed_candle_sequence=39,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+    multi_peer = third["cross_pair_association"]
+    assert multi_peer["tested_pair_count"] == 2  # type: ignore[index]
+    assert multi_peer["all_tested_peer_evidence_bound"] is True  # type: ignore[index]
+    assert len(multi_peer["proof_evidence_digests"]) == 2  # type: ignore[index]
+    assert multi_peer["proof_evidence_digests"] == sorted(  # type: ignore[index]
+        multi_peer["proof_evidence_digests"]  # type: ignore[index]
+    )
+    assert (root / "cross_pair_coordinator_v3.json").stat().st_size < 128 * 1024
+
+
+def test_cross_pair_association_rejects_merely_similar_unsynchronized_pairs(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cross-pair-unsynchronized"
+    service = MarketStudyServiceV3(root)
+    service.study(
+        _many_candles(40),
+        symbol="AUD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="audjpy-synchronized-anchor",
+        closed_candle_sequence=39,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+    shifted = _many_candles(40)
+    for row in shifted:
+        row["timestamp"] = int(cast(Any, row["timestamp"])) + 60
+    result = service.study(
+        shifted,
+        symbol="NZD/JPY OTC",
+        timeframe="M5",
+        closed_candle_key="nzdjpy-unsynchronized-close",
+        closed_candle_sequence=39,
+        regime="UPTREND",
+        regression=_regression(),
+    )
+
+    association = result["cross_pair_association"]
+    assert association["status"] == "INSUFFICIENT_SYNCHRONIZED_PAIR"  # type: ignore[index]
+    assert association["compatible_pair_count"] == 0  # type: ignore[index]
+    assert association["tested_pair_count"] == 0  # type: ignore[index]
+    assert association["edges"] == []  # type: ignore[index]
+
+
+def test_continuous_path_is_clamped_and_advanced_failures_are_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candles = analyze_candle_sequence_v3(
+        _many_candles(300),
+        regime="TRANSITION",
+        require_closed=True,
+        max_candles=512,
+    )
+    behavior = measure_market_behavior_v3(
+        candles,
+        timeframe_seconds=300,
+        max_candles=512,
+        inner_window=16,
+    )
+    def _fixed_path_anchor(
+        _behavior: Mapping[str, Any],
+        _count: int,
+    ) -> tuple[int, str]:
+        return 0, "TEST_RETAINED_HISTORY_START"
+
+    monkeypatch.setattr(
+        "phoenixguard.study.market_study_service_v3._path_anchor",
+        _fixed_path_anchor,
+    )
+    studied = _continuous_advanced_studies(
+        candles,
+        behavior,
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        history_source="TEST_CLOSED_HISTORY",
+    )
+    path = studied["path_reconstruction"]
+    assert path["status"] == "RECONSTRUCTED"
+    assert path["point_count"] == MAX_PATH_CANDLES
+    assert path["anchor_index"] == 300 - MAX_PATH_CANDLES
+    assert path["anchor_selection"]["method"].endswith("BOUNDED_TAIL_CLAMP")
+    library = path["trajectory_library"]
+    assert library["entry_count"] <= library["max_entries"] == 16
+    assert all(
+        len(entry["points"]) <= library["max_follow_through_candles"]
+        for entry in library["entries"]
+    )
+
+    def _motif_failure(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise MotifLatticeValidationError("isolated motif failure")
+
+    monkeypatch.setattr(
+        "phoenixguard.study.market_study_service_v3.build_hierarchical_motif_lattice_v3",
+        _motif_failure,
+    )
+    isolated = _continuous_advanced_studies(
+        candles,
+        behavior,
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        history_source="TEST_CLOSED_HISTORY",
+    )
+    assert isolated["motif_lattice"]["status"] == "INSUFFICIENT_PROVEN_HISTORY"
+    assert isolated["survival_network"]["status"] == "STUDIED"
+    assert isolated["path_reconstruction"]["status"] == "RECONSTRUCTED"
+
+
+def test_object_survival_uses_only_matured_pair_dna_history() -> None:
+    states = [
+        "REST",
+        "REST",
+        "UP_SWING",
+        "UP_SWING",
+        "DOWN_SWING",
+        "REST",
+        "REST",
+        "UP_SWING",
+        "DOWN_SWING",
+        "REST",
+        "UP_SWING",
+        "DOWN_SWING",
+    ]
+    pair_profile = {
+        "recent_sequences": [
+            {
+                "sequence_id": f"S-{index}",
+                "current_state": state,
+                "object_types": ["ORDER_BLOCK", "PRICE_IMBALANCE"],
+            }
+            for index, state in enumerate(states)
+        ]
+    }
+    study = _object_conditioned_time_to_event(pair_profile)
+
+    assert study["status"] == "STUDIED"
+    assert study["curve_count"] > 0
+    assert any(curve["status"] == "SUPPORTED" for curve in study["curves"])
+    assert {
+        node["node_type"] for node in study["network"]["nodes"]
+    } >= {
+        "MARKET_OBJECT_TYPE",
+        "OBJECT_CANDLE_STATE_CONFLUENCE",
+        "OBJECT_CONDITIONED_TIME_TO_EVENT",
+    }
+    assert all(edge["causal"] is False for edge in study["network"]["edges"])
+    assert study["history_contract"] == {
+        "source": "PAIR_DNA_MATURED_COMPLETED_STUDIES",
+        "closed_history_only": True,
+        "current_frame_objects_are_not_historical_support": True,
+    }
+    pending = _object_conditioned_time_to_event(
+        {"recent_sequences": [{"current_state": "REST"}]}
+    )
+    assert pending["status"] == "INSUFFICIENT_MATURED_OBJECT_HISTORY"
+    assert pending["curves"] == []

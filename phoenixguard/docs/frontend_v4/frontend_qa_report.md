@@ -18,7 +18,8 @@ Live broker execution must not be triggered during QA. Treat these as inspect-on
 
 Observed launcher risk:
 
-- `Backend/launch/start_live_dashboard.ps1` can patch controls to live mode and can auto-start tracking when broker focus already exists.
+- `Backend/launch/start_live_dashboard.ps1` can patch controls to live mode and can begin continuous
+  tracker capture automatically when broker focus already exists.
 - `Backend/launch/start_phoenixguard_full_local.ps1` starts tracker tooling and then launches `Backend/launch/shooter.py` in `LIVE_READY` mode with `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS` set inside the shooter process.
 
 ## Dashboard Surface Reviewed

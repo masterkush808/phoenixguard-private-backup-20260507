@@ -27,7 +27,6 @@ TOP_LEVEL_KEYS = {
     "tracking",
     "freshness",
     "current_move",
-    "forecast",
     "permission",
     "pressure_event",
     "surface",
@@ -67,14 +66,6 @@ class _MovementView(TypedDict):
     started_at: float | None
     ended_at: float | None
     frame_id: _FrameId
-    summary: str
-
-
-class _ForecastView(TypedDict):
-    direction: str
-    state: str
-    confidence: float | None
-    horizon_seconds: float | None
     summary: str
 
 
@@ -132,24 +123,10 @@ class _OverlayView(TypedDict):
     frame_id: _FrameId
     coordinate_space: str
     coordinate_units: str
-    forecast_role: NotRequired[str]
-    forecast_status: NotRequired[str]
-    forecast_authorized: NotRequired[bool]
-    geometry_kind: NotRequired[str]
-    horizon_unit: NotRequired[str]
-    clock_time_assumption: NotRequired[str]
-    uncertainty_level: NotRequired[float]
     semantic_id: NotRequired[str]
     overlay_semantic_revision: NotRequired[str]
     overlay_geometry_revision: NotRequired[str]
     anchor_id: NotRequired[str]
-    forecast_scenarios: NotRequired[object]
-    forecast_candles: NotRequired[list[dict[str, object]]]
-    forecast_anchor: NotRequired[object]
-    baseline_locked: NotRequired[bool]
-    trajectory_mode: NotRequired[str]
-    trajectory_mode_probability_calibrated: NotRequired[bool]
-    interval: NotRequired[object]
     positioning_status: NotRequired[str]
     positioning_basis: NotRequired[str]
     positioning_mode: NotRequired[str]
@@ -167,10 +144,6 @@ class _HistoryView(TypedDict):
     summary: str
     frame_id: _FrameId
     id: NotRequired[str]
-    episode_id: NotRequired[str]
-    event_index: NotRequired[int]
-    predicted_direction: NotRequired[str]
-    agreement: NotRequired[bool | None]
 
 
 class _OperatorWorkspaceView(TypedDict):
@@ -181,7 +154,6 @@ class _OperatorWorkspaceView(TypedDict):
     tracking: _TrackingView
     freshness: _FreshnessView
     current_move: _MovementView
-    forecast: _ForecastView
     permission: _PermissionView
     pressure_event: _MovementView
     surface: _SurfaceView
@@ -205,66 +177,6 @@ def _mutable_mapping(value: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _complete_forecast_bundle(
-    *,
-    selected_side: str = "BUY",
-    anchor_x: float = 0.55,
-    anchor_y: float = 0.30,
-) -> dict[str, object]:
-    x_step = 0.35 / 12.0
-    paths = {
-        "BUY": [
-            [round(anchor_x + step * x_step, 6), round(anchor_y - step * 0.005, 6)]
-            for step in range(13)
-        ],
-        "SELL": [
-            [round(anchor_x + step * x_step, 6), round(anchor_y + step * 0.006, 6)]
-            for step in range(13)
-        ],
-        "NEUTRAL": [
-            [round(anchor_x + step * x_step, 6), round(anchor_y, 6)]
-            for step in range(13)
-        ],
-    }
-    selected_path = paths[selected_side]
-    candles: list[dict[str, object]] = []
-    for step in range(1, 13):
-        open_y = float(selected_path[step - 1][1])
-        close_y = float(selected_path[step][1])
-        candles.append(
-            {
-                "step": step,
-                "x_norm": selected_path[step][0],
-                "open_y_norm": open_y,
-                "high_y_norm": round(min(open_y, close_y) - 0.004, 6),
-                "low_y_norm": round(max(open_y, close_y) + 0.004, 6),
-                "close_y_norm": close_y,
-                "movement_side": selected_side,
-            }
-        )
-    probabilities = {"BUY": 0.72, "SELL": 0.18, "NEUTRAL": 0.10}
-    return {
-        "line_points": selected_path,
-        "forecast_candles": candles,
-        "forecast_scenarios": [
-            {
-                "side": side,
-                "label": f"{side} PATH",
-                "probability": probabilities[side],
-                "probability_calibrated": False,
-                "selected": side == selected_side,
-                "line_points": points,
-                "event_count": 12,
-            }
-            for side, points in paths.items()
-        ],
-        "forecast_anchor": {
-            "x_norm": anchor_x,
-            "y_norm": anchor_y,
-            "verified_latest_close": True,
-            "source": "TRACKER_LATEST_CLOSE",
-        },
-    }
 
 
 def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object]:
@@ -273,18 +185,6 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
         "state_version": 14,
         "display_frame_id": 14,
         "tracking_enabled": True,
-        "tracking_episode": {
-            "schema_version": "PG_TRACKING_EPISODE_V1",
-            "episode_id": "episode-test-active",
-            "state": "ACTIVE",
-            "revision": 1,
-            "event_horizon": 12,
-            "event_cursor": 0,
-            "pair": "EUR/USD",
-            "timeframe": "M5",
-            "committed_plan": {"decision": {"action": side}},
-            "events": [],
-        },
         "tracking_summary": {
             "detected_market": "EUR/USD",
             "detected_timeframe": "M5",
@@ -312,12 +212,6 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
                 "observed_at": now - 1,
                 "frame_id": 14,
                 "confidence": 0.79,
-            },
-            "forecast": {
-                "frame_id": 14,
-                "side": side,
-                "confidence": 0.73,
-                "duration_sec": 300,
             },
             "execution_opportunity_window_v3": {
                 "state": "OPEN",
@@ -615,7 +509,7 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
     assert "private-agent" not in serialized
 
 
-def test_idle_workspace_publishes_exact_validated_order_area_previews(
+def test_idle_workspace_does_not_publish_retired_order_area_previews(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload(side="BUY")
@@ -629,13 +523,6 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
             "timeframe_identity_confirmed": True,
         }
     )
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "state": "IDLE",
-        "revision": 0,
-        "event_horizon": 12,
-        "event_cursor": 0,
-    }
     payload["overlays"] = {
         "objects": [
             {
@@ -695,12 +582,12 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
 
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_positioning_candidate_v3",
+        "build_current_order_positioning_candidate_v3",
         preview_candidate_stub,
     )
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
+        "build_current_order_reference_map_v3",
         reference_map_stub,
     )
 
@@ -719,74 +606,12 @@ def test_idle_workspace_publishes_exact_validated_order_area_previews(
         if row.get("positioning_mode") == "REFERENCE"
     ]
 
-    assert {row["kind"]: row["bounds"] for row in preview_rows} == {
-        "lower_price_buy_area": [0.56, 0.62, 0.78, 0.68],
-        "higher_price_sell_area": [0.54, 0.24, 0.76, 0.30],
-        "upside_break_area": [0.60, 0.18, 0.80, 0.22],
-        "downside_break_area": [0.58, 0.72, 0.79, 0.76],
-        "plan_failure_area": [0.56, 0.68, 0.78, 0.70],
-    }
-    # A verified preview owns its public kind. Current references fill only a
-    # genuinely missing kind instead of creating a second visible rectangle.
-    assert reference_rows == []
-    assert len(positioning_rows) == 5
-    assert all(row.get("immutable_geometry") is False for row in positioning_rows)
-    assert all(row.get("evidence_only") is True for row in positioning_rows)
-    assert all(row["coordinate_units"] == "normalized" for row in positioning_rows)
-    assert all(row["lifecycle"] == "current" for row in positioning_rows)
-    assert all(row["label_hidden"] is False for row in positioning_rows)
-    assert all(row["symbol"] == "EUR/USD" for row in positioning_rows)
-    assert all(row["timeframe"] == "M5" for row in positioning_rows)
-    assert all(
-        row["market_selector_visual_fingerprint"] == "selector_v2_eurusd"
-        for row in positioning_rows
-    )
-    assert all(row["instrument_identity_status"] == "LOCKED" for row in positioning_rows)
-    assert {
-        row.get("geometry_role") for row in positioning_rows
-    } == {"FORWARD_REACTION_WINDOW"}
-    assert {
-        row.get("reaction_window_anchor") for row in positioning_rows
-    } == {"LATEST_COMPLETED_CANDLE"}
-    published_source_bounds = [
-        cast(list[float], row.get("source_bounds")) for row in positioning_rows
-    ]
-    assert all(len(bounds) == 4 for bounds in published_source_bounds)
-    assert all(
-        source_bounds[0] < row["bounds"][0]
-        for source_bounds, row in zip(
-            published_source_bounds,
-            positioning_rows,
-            strict=True,
-        )
-    )
-    assert {row["id"] for row in positioning_rows}.isdisjoint(
-        {
-            "order-zone-private-buy-limit",
-            "order-zone-private-sell-limit",
-            "order-zone-private-buy-stop",
-            "order-zone-private-sell-stop",
-            "order-zone-private-plan-failure",
-        }
-    )
-    # Preview evidence must not hide the current adaptive plan; only a frozen
-    # active episode owns that precedence.
+    assert preview_rows == []
+    assert all(row.get("positioning_mode") == "REFERENCE" for row in reference_rows)
+    assert all(row.get("immutable_geometry") is False for row in reference_rows)
+    assert all(row.get("evidence_only") is True for row in reference_rows)
     assert any(row["id"] == "adaptive-trigger" for row in workspace["overlays"])
     assert any(row["id"] == "adaptive-target" for row in workspace["overlays"])
-    episode = _mutable_mapping(
-        _mutable_mapping(workspace["tracking"])["episode"]
-    )
-    order_areas = _mutable_mapping(episode["order_areas"])
-    assert order_areas["status"] == "PREVIEW"
-    assert order_areas["count"] == 5
-    assert order_areas["kind_counts"] == {
-        "lower_price_buy_area": 1,
-        "higher_price_sell_area": 1,
-        "upside_break_area": 1,
-        "downside_break_area": 1,
-        "plan_failure_area": 1,
-    }
-    assert "5 current order area previews" in str(order_areas["message"])
     serialized = json.dumps(workspace)
     for private_token in (
         "PG_ORDER_POSITIONING",
@@ -806,12 +631,6 @@ def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload()
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "state": "IDLE",
-        "revision": 0,
-    }
-
     def blocked_candidate_stub(
         _payload: Mapping[str, object],
     ) -> dict[str, object]:
@@ -837,12 +656,12 @@ def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
 
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_positioning_candidate_v3",
+        "build_current_order_positioning_candidate_v3",
         blocked_candidate_stub,
     )
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
+        "build_current_order_reference_map_v3",
         unavailable_reference_stub,
     )
 
@@ -851,21 +670,6 @@ def test_idle_workspace_hides_blocked_order_candidates_without_private_reasons(
     assert not any(
         row["family"] == "order_positioning" for row in workspace["overlays"]
     )
-    episode = _mutable_mapping(
-        _mutable_mapping(workspace["tracking"])["episode"]
-    )
-    assert episode["order_areas"] == {
-        "status": "UNAVAILABLE",
-        "count": 0,
-        "message": "No chart-verified order area is available on this current frame.",
-        "kind_counts": {
-            "lower_price_buy_area": 0,
-            "higher_price_sell_area": 0,
-            "upside_break_area": 0,
-            "downside_break_area": 0,
-            "plan_failure_area": 0,
-        },
-    }
     serialized = json.dumps(workspace)
     assert "PRIVATE_SOURCE_LOCK_FAILURE" not in serialized
     assert "PG_ORDER_POSITIONING" not in serialized
@@ -875,11 +679,6 @@ def test_idle_preview_drops_unpaired_plan_failure_area(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload(side="SELL")
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "state": "IDLE",
-        "revision": 0,
-    }
     candidate = _ready_positioning_preview_candidate()
     zones = cast(list[dict[str, object]], candidate["candidate_zones"])
     candidate["candidate_zones"] = [
@@ -901,12 +700,12 @@ def test_idle_preview_drops_unpaired_plan_failure_area(
 
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_positioning_candidate_v3",
+        "build_current_order_positioning_candidate_v3",
         candidate_stub,
     )
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
+        "build_current_order_reference_map_v3",
         unavailable_reference_stub,
     )
 
@@ -919,23 +718,12 @@ def test_idle_preview_drops_unpaired_plan_failure_area(
     assert [row["kind"] for row in positioning_rows] == [
         "higher_price_sell_area"
     ]
-    episode = _mutable_mapping(
-        _mutable_mapping(workspace["tracking"])["episode"]
-    )
-    order_areas = _mutable_mapping(episode["order_areas"])
-    assert order_areas["count"] == 1
-    assert _mutable_mapping(order_areas["kind_counts"])["plan_failure_area"] == 0
 
 
 def test_idle_blocked_candidate_publishes_observational_order_references(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload()
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "state": "IDLE",
-        "revision": 0,
-    }
     payload["overlays"] = {
         "objects": [
             {
@@ -967,12 +755,12 @@ def test_idle_blocked_candidate_publishes_observational_order_references(
 
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_positioning_candidate_v3",
+        "build_current_order_positioning_candidate_v3",
         blocked_candidate_stub,
     )
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
+        "build_current_order_reference_map_v3",
         reference_map_stub,
     )
 
@@ -1004,21 +792,6 @@ def test_idle_blocked_candidate_publishes_observational_order_references(
         row["id"] == "adaptive-target-remains-visible"
         for row in workspace["overlays"]
     )
-    order_areas = _mutable_mapping(
-        _mutable_mapping(_mutable_mapping(workspace["tracking"])["episode"])[
-            "order_areas"
-        ]
-    )
-    assert order_areas["status"] == "REFERENCE"
-    assert order_areas["count"] == 4
-    assert order_areas["kind_counts"] == {
-        "lower_price_buy_area": 1,
-        "higher_price_sell_area": 1,
-        "upside_break_area": 1,
-        "downside_break_area": 1,
-        "plan_failure_area": 0,
-    }
-    assert "Entry permission remains separate" in str(order_areas["message"])
     serialized = json.dumps(workspace)
     for private_token in (
         "PG_ORDER_REFERENCE_MAP",
@@ -1137,8 +910,6 @@ def test_order_reference_with_execution_authority_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload()
-    payload["tracking_episode"] = {"state": "IDLE", "revision": 0}
-
     def blocked_candidate_stub(
         _payload: Mapping[str, object],
     ) -> dict[str, object]:
@@ -1154,12 +925,12 @@ def test_order_reference_with_execution_authority_fails_closed(
 
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_positioning_candidate_v3",
+        "build_current_order_positioning_candidate_v3",
         blocked_candidate_stub,
     )
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
+        "build_current_order_reference_map_v3",
         unauthorized_reference_stub,
     )
 
@@ -1175,8 +946,6 @@ def test_observational_plan_failure_reference_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _fresh_payload()
-    payload["tracking_episode"] = {"state": "IDLE", "revision": 0}
-
     def blocked_candidate_stub(
         _payload: Mapping[str, object],
     ) -> dict[str, object]:
@@ -1200,486 +969,26 @@ def test_observational_plan_failure_reference_fails_closed(
 
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_positioning_candidate_v3",
+        "build_current_order_positioning_candidate_v3",
         blocked_candidate_stub,
     )
     monkeypatch.setattr(
         "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
+        "build_current_order_reference_map_v3",
         legacy_reference_stub,
     )
 
     workspace = _build_workspace(payload, now_epoch=100.0)
-    episode = _mutable_mapping(
-        _mutable_mapping(workspace["tracking"])["episode"]
-    )
-
     assert not any(
         row["family"] == "order_positioning" for row in workspace["overlays"]
     )
-    assert _mutable_mapping(episode["order_areas"])["status"] == "UNAVAILABLE"
     assert "legacy-plan-failure-reference" not in json.dumps(workspace)
 
 
-def test_active_episode_without_frozen_areas_shows_current_references_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = _fresh_payload()
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "raw-active-preview",
-                "type": "SELL_LIMIT_ZONE",
-                "side": "SELL",
-                "layer": "order_positioning",
-                "bounds": [0.20, 0.20, 0.40, 0.26],
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-                "positioning_mode": "PREVIEW",
-                "immutable_geometry": False,
-                "evidence_only": True,
-            }
-        ]
-    }
-    episode_before = json.dumps(payload["tracking_episode"], sort_keys=True)
-
-    def reference_map_stub(
-        _payload: Mapping[str, object],
-    ) -> dict[str, object]:
-        return _ready_order_reference_map()
-
-    monkeypatch.setattr(
-        "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
-        reference_map_stub,
-    )
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-    references = [
-        row
-        for row in workspace["overlays"]
-        if row["family"] == "order_positioning"
-    ]
-    order_areas = _mutable_mapping(
-        _mutable_mapping(_mutable_mapping(workspace["tracking"])["episode"])[
-            "order_areas"
-        ]
-    )
-
-    assert len(references) == 4
-    assert all(row.get("positioning_mode") == "REFERENCE" for row in references)
-    assert all(row.get("positioning_status") == "WAITING" for row in references)
-    assert not any(row["kind"] == "plan_failure_area" for row in references)
-    assert not any(row["id"] == "raw-active-preview" for row in workspace["overlays"])
-    assert order_areas["status"] == "REFERENCE"
-    assert order_areas["count"] == 4
-    assert _mutable_mapping(order_areas["kind_counts"])["plan_failure_area"] == 0
-    assert "original tracking plan remains unchanged" in str(
-        order_areas["message"]
-    ).lower()
-    assert "entry permission remains separate" in str(
-        order_areas["message"]
-    ).lower()
-    assert json.dumps(payload["tracking_episode"], sort_keys=True) == episode_before
 
 
-def test_episode_order_areas_are_frozen_public_overlays_and_replace_moving_plan_boxes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = _fresh_payload(side="BUY")
-    episode = _mutable_mapping(payload["tracking_episode"])
-    episode["anchor"] = {
-        "frame_id": 9,
-        "closed_candle_key": "closed-9",
-        "market_selector_visual_fingerprint": "selector_v2_eurusd",
-    }
-    episode["market_selector_visual_fingerprint"] = "selector_v2_eurusd"
-    positioning_plan: dict[str, object] = {
-        "schema_version": "PG_ORDER_POSITIONING_PLAN_V3",
-        "frozen": True,
-        "sequence_id": "episode-positioning-sequence",
-        "chart_transform_id": "episode-positioning-transform",
-        "broker_source_lock_id": "episode-positioning-source",
-        "market": "EUR/USD",
-        "timeframe": "M5",
-        "reprojection_anchors": [
-            {
-                "anchor_id": row["track_id"],
-                "x_norm": row["x_norm"],
-                "y_norm": row["close_y_norm"],
-            }
-            for row in _positioning_anchor_rows()
-        ],
-        "zones": [
-            {
-                "zone_id": "episode-test-active:buy-limit:zone-1",
-                "overlay_type": "BUY_LIMIT_ZONE",
-                "side": "BUY",
-                "normalized_bounds": [0.56, 0.52, 0.78, 0.58],
-                "source_bounds": [0.56, 0.52, 0.78, 0.58],
-                "source_type": "DEMAND_ZONE",
-                "source_track_id": "demand-source",
-                "status": "APPROACHING",
-                "confidence": 0.84,
-                "public_basis": "Lower-price reaction area",
-                "origin_frame_id": 9,
-            },
-            {
-                "zone_id": "episode-test-active:buy-stop:zone-2",
-                "overlay_type": "BUY_STOP_ENTRY_ZONE",
-                "side": "BUY",
-                "normalized_bounds": [0.64, 0.36, 0.82, 0.38],
-                "source_bounds": [0.64, 0.38, 0.82, 0.44],
-                "source_type": "SUPPLY_ZONE",
-                "source_track_id": "supply-source",
-                "status": "WAITING",
-                "confidence": 0.79,
-                "public_basis": "Completed-candle confirmation",
-                "origin_frame_id": 9,
-            },
-            {
-                "zone_id": "episode-test-active:protective-stop:zone-3",
-                "overlay_type": "PROTECTIVE_STOP_ZONE",
-                "side": "SELL",
-                "normalized_bounds": [0.56, 0.58, 0.78, 0.60],
-                "source_bounds": [0.56, 0.52, 0.78, 0.58],
-                "source_type": "DEMAND_ZONE",
-                "source_track_id": "demand-source",
-                "status": "WAITING",
-                "confidence": 0.84,
-                "public_basis": "Original idea boundary",
-                "origin_frame_id": 9,
-            },
-        ],
-    }
-    _seal_positioning_plan(positioning_plan)
-    episode["positioning_plan"] = positioning_plan
-    tracking = _mutable_mapping(payload["tracking_summary"])
-    tracking["tracked_candles"] = _positioning_anchor_rows()
-    tracking["market_selector_visual_fingerprint"] = "selector_v2_eurusd"
-    payload["overlays"] = {
-        "objects": [
-            {
-                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
-                "overlay_id": "demand-frame-14",
-                "object_id": "demand-object",
-                "track_id": "demand-source",
-                "type": "DEMAND_ZONE",
-                "side": "BUY",
-                "layer": "supply_demand",
-                "bounds": [0.56, 0.52, 0.78, 0.58],
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-                "sequence_id": "current-positioning-sequence-14",
-                "chart_transform_id": "current-positioning-transform-14",
-                "broker_source_lock_id": "episode-positioning-source",
-            },
-            {
-                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
-                "overlay_id": "supply-frame-14",
-                "object_id": "supply-object",
-                "track_id": "supply-source",
-                "type": "SUPPLY_ZONE",
-                "side": "SELL",
-                "layer": "supply_demand",
-                "bounds": [0.64, 0.38, 0.82, 0.44],
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-                "sequence_id": "current-positioning-sequence-14",
-                "chart_transform_id": "current-positioning-transform-14",
-                "broker_source_lock_id": "episode-positioning-source",
-            },
-            {
-                "overlay_id": "moving-target-frame-14",
-                "type": "TARGET_ZONE_BOX",
-                "side": "BUY",
-                "layer": "target_zones",
-                "bounds": [0.55, 0.20, 0.78, 0.27],
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            },
-            {
-                "overlay_id": "adaptive-preview-must-not-win",
-                "type": "SELL_LIMIT_ZONE",
-                "side": "SELL",
-                "layer": "order_positioning",
-                "bounds": [0.20, 0.20, 0.40, 0.26],
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-                "positioning_status": "WAITING",
-                "positioning_basis": "PRIVATE_MOVING_PREVIEW",
-                "positioning_mode": "PREVIEW",
-                "immutable_geometry": False,
-                "evidence_only": True,
-            },
-        ]
-    }
-
-    def reference_map_stub(
-        source: Mapping[str, object],
-    ) -> dict[str, object]:
-        frame_id = cast(int, source.get("display_frame_id", 14))
-        reference_map = _ready_order_reference_map(frame_id=frame_id)
-        if frame_id == 14:
-            rows = cast(list[dict[str, object]], reference_map["rows"])
-            rows.extend(
-                [
-                    {
-                        **rows[0],
-                        "reference_id": "near-frozen-same-kind",
-                        "bounds": [0.5605, 0.5205, 0.7795, 0.5805],
-                    },
-                    {
-                        **rows[1],
-                        "reference_id": "exact-frozen-shared-bounds",
-                        "bounds": [0.56, 0.52, 0.78, 0.58],
-                    },
-                ]
-            )
-        return reference_map
-
-    monkeypatch.setattr(
-        "phoenixguard.mobile_api.operator_workspace_v1."
-        "build_tracking_order_reference_map_v3",
-        reference_map_stub,
-    )
-
-    first = _build_workspace(payload, now_epoch=100.0)
-    first_areas = [
-        row for row in first["overlays"] if row["family"] == "order_positioning"
-    ]
-
-    assert {row["kind"] for row in first_areas} == {
-        "lower_price_buy_area",
-        "higher_price_sell_area",
-        "upside_break_area",
-        "downside_break_area",
-        "plan_failure_area",
-    }
-    assert all(row["frame_id"] == 14 for row in first_areas)
-    assert all(row["coordinate_units"] == "normalized" for row in first_areas)
-    assert sum(row.get("positioning_mode") == "FROZEN" for row in first_areas) == 3
-    assert sum(row.get("positioning_mode") == "REFERENCE" for row in first_areas) == 2
-    assert all(
-        row.get("positioning_status") == "WAITING"
-        for row in first_areas
-        if row.get("positioning_mode") == "REFERENCE"
-    )
-    assert all(
-        cast(dict[str, object], row)["immutable_geometry"]
-        is (row.get("positioning_mode") == "FROZEN")
-        for row in first_areas
-    )
-    assert all(row["label_hidden"] is False for row in first_areas)
-    assert all(row["lifecycle"] == "current" for row in first_areas)
-    assert all(
-        row.get("geometry_role") == "FORWARD_REACTION_WINDOW"
-        and row.get("reaction_window_anchor") == "LATEST_COMPLETED_CANDLE"
-        for row in first_areas
-        if row.get("positioning_mode") == "REFERENCE"
-    )
-    assert all(
-        "geometry_role" not in row and "reaction_window_anchor" not in row
-        for row in first_areas
-        if row.get("positioning_mode") == "FROZEN"
-    )
-    assert not any(
-        row["id"] == "adaptive-preview-must-not-win"
-        for row in first["overlays"]
-    )
-    assert not any(row["kind"] == "target_area" for row in first["overlays"])
-    public_episode = _mutable_mapping(
-        cast(dict[str, object], first["tracking"])["episode"]
-    )
-    public_order_areas = _mutable_mapping(public_episode["order_areas"])
-    assert public_order_areas["status"] == "TRACKING"
-    assert public_order_areas["count"] == 5
-    assert public_order_areas["kind_counts"] == {
-        "lower_price_buy_area": 1,
-        "higher_price_sell_area": 1,
-        "upside_break_area": 1,
-        "downside_break_area": 1,
-        "plan_failure_area": 1,
-    }
-    assert "saved fixed order areas" in str(public_order_areas["message"])
-    assert "current chart location references" in str(public_order_areas["message"])
-    first_geometry = {row["id"]: row["bounds"] for row in first_areas}
-
-    payload["display_frame_id"] = 15
-    command = _mutable_mapping(payload["decision_command_center"])
-    _mutable_mapping(command["current_movement"])["frame_id"] = 15
-    _mutable_mapping(command["pressure_event"])["frame_id"] = 15
-    tracking["tracked_candles"] = _positioning_anchor_rows(
-        scale_x=1.02,
-        offset_x=0.01,
-        scale_y=0.96,
-        offset_y=0.02,
-    )
-    payload["overlays"] = {
-        "objects": [
-            {
-                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
-                "overlay_id": "demand-frame-15",
-                "object_id": "demand-object",
-                "track_id": "demand-source",
-                "type": "DEMAND_ZONE",
-                "side": "BUY",
-                "layer": "supply_demand",
-                "bounds": [0.57, 0.54, 0.79, 0.60],
-                "frame_id": 15,
-                "coordinate_mode": "CHART_NORMALIZED",
-                "sequence_id": "current-positioning-sequence-15",
-                "chart_transform_id": "current-positioning-transform-15",
-                "broker_source_lock_id": "episode-positioning-source",
-            },
-            {
-                "schema_version": "PG_V3_OVERLAY_OBJECT_V1",
-                "overlay_id": "supply-frame-15",
-                "object_id": "supply-object",
-                "track_id": "supply-source",
-                "type": "SUPPLY_ZONE",
-                "side": "SELL",
-                "layer": "supply_demand",
-                "bounds": [0.65, 0.40, 0.83, 0.46],
-                "frame_id": 15,
-                "coordinate_mode": "CHART_NORMALIZED",
-                "sequence_id": "current-positioning-sequence-15",
-                "chart_transform_id": "current-positioning-transform-15",
-                "broker_source_lock_id": "episode-positioning-source",
-            },
-        ]
-    }
-    second = _build_workspace(payload, now_epoch=101.0)
-    second_areas = [
-        row for row in second["overlays"] if row["family"] == "order_positioning"
-    ]
-
-    assert {row["id"]: row["bounds"] for row in second_areas} != first_geometry
-    assert all(row["frame_id"] == 15 for row in second_areas)
-    serialized = json.dumps(second_areas)
-    assert "BUY_LIMIT_ZONE" not in serialized
-    assert "closed-9" not in serialized
-
-    payload["display_frame_id"] = 16
-    _mutable_mapping(command["current_movement"])["frame_id"] = 16
-    _mutable_mapping(command["pressure_event"])["frame_id"] = 16
-    bad_anchors = _positioning_anchor_rows(
-        scale_x=1.02,
-        offset_x=0.01,
-        scale_y=0.96,
-        offset_y=0.02,
-    )
-    bad_anchors[-1]["close_y_norm"] = 0.75
-    tracking["tracked_candles"] = bad_anchors
-    current_objects = cast(
-        list[dict[str, object]],
-        _mutable_mapping(payload["overlays"])["objects"],
-    )
-    for row in current_objects:
-        row["frame_id"] = 16
-        row["sequence_id"] = "current-positioning-sequence-16"
-        row["chart_transform_id"] = "current-positioning-transform-16"
-    unproven = _build_workspace(payload, now_epoch=102.0)
-    unproven_areas = [
-        row
-        for row in unproven["overlays"]
-        if row["family"] == "order_positioning"
-    ]
-    assert len(unproven_areas) == 4
-    assert all(
-        row.get("positioning_mode") == "REFERENCE" for row in unproven_areas
-    )
-    unproven_episode = _mutable_mapping(
-        _mutable_mapping(unproven["tracking"])["episode"]
-    )
-    assert _mutable_mapping(unproven_episode["order_areas"])["status"] == "REFERENCE"
 
 
-def test_operator_forecast_keeps_user_truth_and_strips_runtime_telemetry() -> None:
-    payload = _fresh_payload()
-    private_forecast_fields: dict[str, object] = {
-        "forecast_engine": "SCENE_FORECASTER_V3",
-        "forecast_provider": "SCENE_STATISTICAL_FALLBACK_V3",
-        "forecast_provider_status": "FOUNDATION_DISABLED_FALLBACK",
-        "forecast_id": "private-forecast-id",
-        "forecast_revision": 23,
-        "belief_revision": 11,
-        "closed_candle_key": "private-candle-key",
-        "closed_candle_sequence": 91,
-        "forecast_computed_frame_id": 12,
-        "source_forecast_frame_id": 12,
-        "geometry_projected_frame_id": 14,
-        "geometry_frame_match_verified": True,
-        "geometry_reprojected_from_cache": True,
-        "detector_coverage_rebase_applied": True,
-        "cache_replaced_for_detector_coverage_rebase": True,
-        "geometry_projection_provenance": {
-            "method": "SHARED_ANCHOR_AFFINE_FIT",
-            "source_geometry_frame_id": 12,
-            "projected_frame_id": 14,
-        },
-        "scene_feature_audit": {
-            "consumed_field_count": 41,
-            "source_presence": {"decision_kernel": True},
-        },
-    }
-    public_belief_fields: dict[str, object] = {
-        "belief_state": "STABLE",
-        "committed_side": "BUY",
-        "candidate_side": "HOLD",
-        "confirmation_events": 2,
-        "required_events": 2,
-        "change_probability": 0.08,
-    }
-    payload["scene_forecast_contribution"] = {
-        "frame_id": 14,
-        "direction": "BUY",
-        "confidence": 0.71,
-        "fresh": True,
-        **public_belief_fields,
-        **private_forecast_fields,
-    }
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "scene-current",
-                "type": "SCENE_FORECAST_STUDY",
-                "layer": "prediction_path",
-                "role": "scene_forecast_candle_event_path_no_edge",
-                "frame_id": 14,
-                "coordinate_space": "chart",
-                "coordinate_units": "normalized",
-                "line_points": [[0.42, 0.58], [0.66, 0.44]],
-                "side": "BUY",
-                "confidence": 0.71,
-                **public_belief_fields,
-                **private_forecast_fields,
-            }
-        ]
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    forecast = workspace["forecast"]
-    forecast_mapping = cast(Mapping[str, object], forecast)
-    assert forecast["direction"] == "BUY"
-    assert forecast["confidence"] == 0.71
-    for key, value in public_belief_fields.items():
-        assert forecast_mapping[key] == value
-    assert len(workspace["overlays"]) == 1
-    overlay = workspace["overlays"][0]
-    overlay_mapping = cast(Mapping[str, object], overlay)
-    assert overlay["family"] == "scene_forecaster"
-    assert overlay["line_points"] == [[0.42, 0.58], [0.66, 0.44]]
-    for key, value in public_belief_fields.items():
-        assert overlay_mapping[key] == value
-    forbidden = set(private_forecast_fields)
-    assert _all_keys(forecast).isdisjoint(forbidden)
-    assert _all_keys(overlay).isdisjoint(forbidden)
-    serialized = json.dumps(workspace)
-    assert "FOUNDATION_DISABLED_FALLBACK" not in serialized
-    assert "SHARED_ANCHOR_AFFINE_FIT" not in serialized
-    assert "private-candle-key" not in serialized
 
 
 def test_legacy_tracker_session_route_redacts_backend_internals() -> None:
@@ -1706,10 +1015,6 @@ def test_legacy_tracker_session_route_redacts_backend_internals() -> None:
                     "source_path": r"C:\private\signal.json",
                     "normalized_features": [0.1, 0.9],
                     "study_signature": "study-secret",
-                },
-                "forecast_snapshot_v3": {
-                    "features": [{"momentum": 0.8}],
-                    "raw_model_logits": [0.2, 0.8],
                 },
             }
 
@@ -2143,17 +1448,17 @@ def test_operator_same_frame_cache_is_complete_in_both_view_orders(
     tracker = _Tracker()
 
     with TestClient(mobile_app.create_app(window_tracker_service=tracker)) as client:
-        forecast_first = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=forecast"
+        history_first = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=history"
         )
         all_second = client.get(
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
-    assert forecast_first.status_code == 200
+    assert history_first.status_code == 200
     assert all_second.status_code == 200
     assert not any(
         row["family"] == "supply_demand"
-        for row in forecast_first.json()["overlays"]
+        for row in history_first.json()["overlays"]
     )
     assert any(
         row["family"] == "supply_demand"
@@ -2165,18 +1470,18 @@ def test_operator_same_frame_cache_is_complete_in_both_view_orders(
         all_first = client.get(
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
-        forecast_second = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=forecast"
+        history_second = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=history"
         )
     assert all_first.status_code == 200
-    assert forecast_second.status_code == 200
+    assert history_second.status_code == 200
     assert any(
         row["family"] == "supply_demand"
         for row in all_first.json()["overlays"]
     )
     assert not any(
         row["family"] == "supply_demand"
-        for row in forecast_second.json()["overlays"]
+        for row in history_second.json()["overlays"]
     )
     assert operator_projection_calls == 2
 
@@ -2223,10 +1528,6 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
         }
         command_center["pressure_event"] = {
             **_mutable_mapping(command_center["pressure_event"]),
-            "frame_id": frame_id,
-        }
-        command_center["forecast"] = {
-            **_mutable_mapping(command_center["forecast"]),
             "frame_id": frame_id,
         }
         payload["overlays"] = {"objects": []}
@@ -2317,10 +1618,10 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
             now_epoch + 60.0,
         )
         stale_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=forecast"
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
         duplicate_poll = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=forecast"
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
 
         assert stale_response.status_code == 200
@@ -2344,698 +1645,18 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
     assert deferred_tasks == []
 
 
-def test_tracking_controls_invalidate_operator_projection_on_the_same_frame(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    session_id = "episode-control-cache"
-    now_epoch = time.time()
-    episode: dict[str, object] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "episode_id": "",
-        "state": "IDLE",
-        "revision": 0,
-        "event_horizon": 12,
-        "event_cursor": 0,
-        "events": [],
-    }
-
-    def live_state() -> dict[str, object]:
-        payload = _fresh_payload(now=now_epoch)
-        payload["session_id"] = session_id
-        payload["tracking_episode"] = json.loads(json.dumps(episode))
-        payload["overlays"] = {"objects": []}
-        payload["live_visual_state"] = {"overlays": {"objects": []}}
-        return payload
-
-    class _Tracker:
-        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return live_state()
-
-        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return {}
-
-        def start_tracking_episode(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            episode.update(
-                {
-                    "episode_id": "episode-control-1",
-                    "state": "ACTIVE",
-                    "revision": 1,
-                    "committed_plan": {"decision": {"action": "BUY"}},
-                }
-            )
-            return json.loads(json.dumps(episode))
-
-        def stop_tracking_episode(
-            self,
-            requested_session_id: str,
-            *,
-            reason: str,
-        ) -> dict[str, object]:
-            assert requested_session_id == session_id
-            assert reason == "operator_stop"
-            episode.update(
-                {
-                    "state": "STOPPED",
-                    "revision": 2,
-                    "terminal_reason": "MANUAL_STOP",
-                }
-            )
-            return json.loads(json.dumps(episode))
-
-        def get_tracking_episode_readiness(
-            self,
-            requested_session_id: str,
-        ) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return {"ready": True, "reasons": []}
-
-    def build_state(
-        tracker: object,
-        requested_session_id: str,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        assert isinstance(tracker, _Tracker)
-        assert requested_session_id == session_id
-        return live_state()
-
-    def source_revision(
-        requested_session_id: str,
-    ) -> tuple[str, int, float] | None:
-        if requested_session_id != session_id:
-            return None
-        return (
-            f"episode:{episode['episode_id']}:{episode['state']}:{episode['revision']}",
-            14,
-            now_epoch + 60.0,
-        )
-
-    projection_calls = 0
-    original_builder = mobile_app.build_operator_workspace_v1
-
-    def counted_builder(source: Mapping[str, object]) -> dict[str, object]:
-        nonlocal projection_calls
-        projection_calls += 1
-        return original_builder(source)
-
-    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
-    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_DIRECT_READ", "0")
-    monkeypatch.setattr(mobile_app, "_LIVE_STATE_V3_CACHE_TTL_SEC", 0.0)
-    monkeypatch.setattr(
-        mobile_app,
-        "_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC",
-        0.0,
-    )
-    monkeypatch.setattr(
-        mobile_app,
-        "build_live_state_v3_from_tracker_service",
-        build_state,
-    )
-    monkeypatch.setattr(
-        mobile_app,
-        "_operator_projection_source_revision",
-        source_revision,
-    )
-    monkeypatch.setattr(mobile_app, "build_operator_workspace_v1", counted_builder)
-
-    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        idle = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
-        started = client.post(
-            f"/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/start"
-        )
-        active = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
-        stopped = client.post(
-            f"/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/stop",
-            json={"reason": "operator_stop"},
-        )
-        retained = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
-
-    assert idle.json()["tracking"]["episode"]["state"] == "IDLE"
-    assert started.status_code == 200
-    assert active.json()["tracking"]["episode"]["state"] == "ACTIVE"
-    assert active.json()["freshness"]["state"] != "STALE"
-    assert stopped.status_code == 200
-    assert retained.json()["tracking"]["episode"]["state"] == "STOPPED"
-    assert retained.json()["freshness"]["state"] != "STALE"
-    assert projection_calls == 3
 
 
-def test_inflight_old_episode_projection_cannot_repopulate_cache(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    session_id = "episode-cache-race"
-    now_epoch = time.time()
-    episode: dict[str, object] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "episode_id": "episode-race-1",
-        "state": "ACTIVE",
-        "revision": 1,
-        "event_horizon": 12,
-        "event_cursor": 0,
-        "committed_plan": {"decision": {"action": "BUY"}},
-        "events": [],
-    }
-
-    def live_state() -> dict[str, object]:
-        payload = _fresh_payload(now=now_epoch)
-        payload["session_id"] = session_id
-        payload["tracking_episode"] = json.loads(json.dumps(episode))
-        payload["overlays"] = {"objects": []}
-        payload["live_visual_state"] = {"overlays": {"objects": []}}
-        return payload
-
-    class _Tracker:
-        def get_session_snapshot(self, _session_id: str) -> dict[str, object]:
-            return live_state()
-
-        def latest_model_council_state(self, _session_id: str) -> dict[str, object]:
-            return {}
-
-    def build_state(
-        _tracker: object,
-        _session_id: str,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return live_state()
-
-    def source_revision(
-        requested_session_id: str,
-    ) -> tuple[str, int, float] | None:
-        if requested_session_id != session_id:
-            return None
-        return (
-            f"episode:{episode['state']}:{episode['revision']}",
-            14,
-            now_epoch + 60.0,
-        )
-
-    projection_calls = 0
-    transition_during_first_build = True
-    original_builder = mobile_app.build_operator_workspace_v1
-
-    def racing_builder(source: Mapping[str, object]) -> dict[str, object]:
-        nonlocal projection_calls, transition_during_first_build
-        projection_calls += 1
-        projected = original_builder(source)
-        if transition_during_first_build:
-            transition_during_first_build = False
-            episode.update(
-                {
-                    "state": "STOPPED",
-                    "revision": 2,
-                    "terminal_reason": "MANUAL_STOP",
-                }
-            )
-        return projected
-
-    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
-    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_DIRECT_READ", "0")
-    monkeypatch.setattr(mobile_app, "_LIVE_STATE_V3_CACHE_TTL_SEC", 0.0)
-    monkeypatch.setattr(
-        mobile_app,
-        "_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC",
-        0.0,
-    )
-    monkeypatch.setattr(
-        mobile_app,
-        "build_live_state_v3_from_tracker_service",
-        build_state,
-    )
-    monkeypatch.setattr(
-        mobile_app,
-        "_operator_projection_source_revision",
-        source_revision,
-    )
-    monkeypatch.setattr(mobile_app, "build_operator_workspace_v1", racing_builder)
-
-    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        old_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
-        )
-        current_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
-        )
-
-    assert old_response.json()["tracking"]["episode"]["state"] == "ACTIVE"
-    assert current_response.json()["tracking"]["episode"]["state"] == "STOPPED"
-    assert current_response.json()["freshness"]["state"] != "STALE"
-    assert projection_calls == 2
 
 
-def test_bounded_operator_context_keeps_safe_two_candle_forecast_without_raw_features() -> None:
-    bounded_context = cast(
-        Callable[[Mapping[str, object]], dict[str, object]],
-        getattr(mobile_app, "_bounded_operator_projection_context"),
-    )
-    source: dict[str, object] = {
-        "session_id": "bounded-forecast",
-        "tracking_enabled": True,
-        "display_frame_id": 14,
-        "chart_frame_id": 14,
-        "overlay_frame_id": 14,
-        "full_overlay_frame_id": 14,
-        "model_vote_frame_id": 14,
-        "last_capture_epoch": 99.0,
-        "forecast_snapshot_v3": {
-            "schema_version": "PG_FORECAST_SNAPSHOT_V3",
-            "source_frame_id": 14,
-            "observed_epoch": 99.0,
-            "stale": False,
-            "diagnostic_only": False,
-            "lstm_contribution": {
-                "frame_id": 14,
-                "forecast_available": True,
-                "path_side": "SELL",
-                "confidence": 0.77,
-                "features": [{"relative_price_location": 0.51}],
-                "raw_model_logits": [0.12, 0.88],
-            },
-            "two_candle_study": {
-                "frame_id": 14,
-                "primary_pressure": "SELL",
-                "next_candle_forecast": {
-                    "frame_id": 14,
-                    "direction": "SELL",
-                    "confidence": 0.64,
-                },
-            },
-        },
-    }
-
-    context = bounded_context(source)
-    serialized_context = json.dumps(context)
-    workspace = _build_workspace(context, now_epoch=100.0)
-
-    assert "features" not in serialized_context
-    assert "raw_model_logits" not in serialized_context
-    assert workspace["forecast"]["direction"] == "SELL"
-    assert workspace["forecast"]["confidence"] == 0.64
 
 
-def test_public_episode_and_legacy_session_routes_never_expose_frozen_internals() -> None:
-    visual_blocks = cast(list[dict[str, object]], _complete_forecast_bundle()["forecast_candles"])
-    raw_episode: dict[str, object] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "episode_id": "episode-public-route-1",
-        "state": "ACTIVE",
-        "revision": 3,
-        "event_horizon": 12,
-        "event_cursor": 0,
-        "pair": "EUR/USD",
-        "timeframe": "M5",
-        "committed_plan": {
-            "decision": {"action": "BUY", "summary": "PRIVATE_PLAN_TRACE"},
-            "model_council": {"provider": "PRIVATE_COUNCIL_PROVIDER"},
-        },
-        "baseline_forecasts": {
-            "scene": {
-                "forecast_candles": visual_blocks,
-                "provider": "PRIVATE_SCENE_PROVIDER",
-                "source_path": r"C:\private\scene.json",
-            },
-            "lstm": {
-                "forecast_path": [{"step": step, "raw_model_score": 0.9} for step in range(1, 13)],
-                "model_version": "PRIVATE_MODEL_VERSION",
-            },
-        },
-        "candidate_revision": {"model_vote": "PRIVATE_CANDIDATE_MODEL"},
-        "events": [],
-    }
-
-    class _Tracker:
-        def get_session_snapshot(self, _session_id: str) -> dict[str, object]:
-            return {
-                "session_id": "episode-route-test",
-                "tracking_episode": json.loads(json.dumps(raw_episode)),
-                "tracking_episode_history": [
-                    {"provider": "PRIVATE_ARCHIVE_PROVIDER"}
-                ],
-            }
-
-        def get_tracking_episode(self, _session_id: str) -> dict[str, object]:
-            return json.loads(json.dumps(raw_episode))
-
-        def get_tracking_episode_readiness(self, _session_id: str) -> dict[str, object]:
-            return {
-                "ready": False,
-                "reasons": [
-                    "Wait for a complete 12-event Scene or LSTM forecast baseline."
-                ],
-                "identity": {"closed_candle_key": "PRIVATE_EVENT_KEY"},
-                "scene_horizon": 12,
-                "lstm_horizon": 12,
-                "current": json.loads(json.dumps(raw_episode)),
-            }
-
-        def start_tracking_episode(self, _session_id: str) -> dict[str, object]:
-            return json.loads(json.dumps(raw_episode))
-
-        def stop_tracking_episode(
-            self,
-            _session_id: str,
-            *,
-            reason: str,
-        ) -> dict[str, object]:
-            stopped = json.loads(json.dumps(raw_episode))
-            stopped["state"] = "STOPPED"
-            stopped["terminal_reason"] = reason
-            return stopped
-
-    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        responses = [
-            client.get(
-                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/current"
-            ),
-            client.get(
-                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/readiness"
-            ),
-            client.post(
-                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/start"
-            ),
-            client.post(
-                "/v1/mobile/window-tracker/sessions/episode-route-test/tracking-episodes/stop",
-                json={"reason": "operator_stop"},
-            ),
-        ]
-        legacy = client.get(
-            "/v1/mobile/window-tracker/sessions/episode-route-test"
-        )
-
-    assert all(response.status_code == 200 for response in responses)
-    assert responses[0].json()["schema_version"] == "PG_TRACKING_EPISODE_PUBLIC_V1"
-    assert responses[1].json()["schema_version"] == (
-        "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1"
-    )
-    assert responses[-1].json()["terminal_reason"] == "STOPPED"
-    assert legacy.status_code == 200
-    assert "tracking_episode" not in legacy.json()
-    assert "tracking_episode_history" not in legacy.json()
-    serialized = json.dumps([response.json() for response in responses]).lower()
-    for secret in (
-        "baseline_forecasts",
-        "committed_plan",
-        "candidate_revision",
-        "private_plan_trace",
-        "private_scene_provider",
-        "private_council_provider",
-        "private_model_version",
-        "private_candidate_model",
-        "private_event_key",
-        "private_",
-        "provider",
-        "source_path",
-        "model_version",
-        "raw_model",
-        "raw_model_score",
-        "scene_horizon",
-        "lstm_horizon",
-    ):
-        assert secret not in serialized
 
 
-def test_operator_route_preserves_twelve_frozen_blocks_through_bounded_merge(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    session_id = "episode-bounded-route"
-    bundle = _complete_forecast_bundle(
-        selected_side="SELL",
-        anchor_x=0.55,
-        anchor_y=0.38,
-    )
-    visual_blocks = cast(list[dict[str, object]], bundle["forecast_candles"])
-    sequence_path = [
-        {
-            "step": block["step"],
-            "expected_open_norm": 1.0 - float(cast(float, block["open_y_norm"])),
-            "expected_high_norm": 1.0 - float(cast(float, block["high_y_norm"])),
-            "expected_low_norm": 1.0 - float(cast(float, block["low_y_norm"])),
-            "expected_close_norm": 1.0 - float(cast(float, block["close_y_norm"])),
-            "movement_direction": "SELL",
-            "candle_body_direction": "SELL",
-            "raw_model_score": 0.99,
-            "source_path": r"C:\private\future.json",
-        }
-        for block in visual_blocks
-    ]
-    episode: dict[str, object] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "session_id": session_id,
-        "episode_id": "episode-bounded-1",
-        "state": "ACTIVE",
-        "revision": 5,
-        "event_horizon": 12,
-        "event_cursor": 0,
-        "started_at": "2026-07-18T08:00:00Z",
-        "updated_at": "2026-07-18T08:00:00Z",
-        "pair": "EUR/USD",
-        "timeframe": "M5",
-        "committed_plan": {
-            "decision": {"action": "SELL", "summary": "PRIVATE_PLAN_TRACE"},
-        },
-        "baseline_forecasts": {
-            "scene": {
-                "provider": "PRIVATE_SCENE_PROVIDER",
-            },
-            "lstm": {
-                "forecast_path": sequence_path,
-                "model_version": "PRIVATE_MODEL_VERSION",
-            },
-        },
-        "events": [],
-    }
-    live_state: dict[str, object] = {
-        "session_id": session_id,
-        "state_version": 14,
-        "decision_version": 14,
-        "display_frame_id": 14,
-        "chart_frame_id": 14,
-        "overlay_frame_id": 14,
-        "full_overlay_frame_id": 14,
-        "model_vote_frame_id": 14,
-        "frame_bundle_complete_v3": True,
-        "tracking_enabled": True,
-        "last_capture_epoch": 99.0,
-        "last_display_surface_signature": "window-sig-14",
-        "last_window_surface_signature": "window-sig-14",
-        "last_study_surface_signature": "study-sig-14",
-        "overlay_source_window_signature": "window-sig-14",
-        "overlay_source_study_signature": "study-sig-14",
-        "manual_focus_region": {
-            "enabled": True,
-            "normalized_bbox": [0.1, 0.1, 0.9, 0.9],
-        },
-        "tracking_summary": {
-            "detected_market": "EUR/USD",
-            "detected_timeframe": "M5",
-            "last_capture_epoch": 99.0,
-        },
-        "tracking_episode": episode,
-        "tracking_episode_history": [
-            {
-                "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
-                "episode_id": "episode-bounded-previous",
-                "state": "STOPPED",
-                "revision": 3,
-                "event_cursor": 1,
-                "event_horizon": 12,
-                "direction_agreement_count": 1,
-                "direction_observation_count": 1,
-                "ended_at": 98.5,
-                "anchor_frame_id": 13,
-                "events": [
-                    {
-                        "event_id": "episode-bounded-previous:E1",
-                        "step": 1,
-                        "observed_at": 98.0,
-                        "predicted_side": "SELL",
-                        "actual_side": "SELL",
-                        "direction_agreement": True,
-                        "frame_id": 13,
-                        "raw_block": {"provider": "PRIVATE_HISTORY_PROVIDER"},
-                    }
-                ],
-            }
-        ],
-        "tracking_episode_readiness": {"ready": True, "reasons": []},
-        # The contributor is deliberately absent.  The frozen episode itself
-        # must continue publishing the twelve block-only objects.
-        "overlays": {"objects": []},
-        "live_visual_state": {"overlays": {"objects": []}},
-    }
-
-    class _Tracker:
-        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return cast(dict[str, object], json.loads(json.dumps(live_state)))
-
-        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return {}
-
-    def _build_state(
-        tracker: object,
-        requested_session_id: str,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        assert isinstance(tracker, _Tracker)
-        assert requested_session_id == session_id
-        return cast(dict[str, object], json.loads(json.dumps(live_state)))
-
-    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
-    monkeypatch.setattr(
-        mobile_app,
-        "build_live_state_v3_from_tracker_service",
-        _build_state,
-    )
-    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        operator_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
-        )
-        compact_response = client.get(
-            f"/v1/mobile/live/state/v3/{session_id}?mode=INSPECTOR&compact=true"
-        )
-
-    assert operator_response.status_code == 200
-    workspace = cast(_OperatorWorkspaceView, operator_response.json())
-    public_episode = cast(
-        Mapping[str, object],
-        cast(Mapping[str, object], workspace["tracking"])["episode"],
-    )
-    future_blocks = cast(list[dict[str, object]], public_episode["future_blocks"])
-    assert len(future_blocks) == 12
-    assert [block["step"] for block in future_blocks] == list(range(1, 13))
-    public_composite = next(
-        row
-        for row in workspace["overlays"]
-        if row.get("family") == "lstm"
-        and row.get("forecast_role") == "composite"
-    )
-    assert public_composite.get("baseline_locked") is True
-    assert public_composite.get("forecast_candles") == future_blocks
-    assert public_composite["line_points"] == []
-    assert public_composite.get("geometry_kind") == "future_blocks"
-    assert public_composite["kind"] == "future_blocks"
-    assert public_composite["label"] == "Saved future blocks"
-    archived_event = next(
-        row
-        for row in workspace["history"]
-        if row.get("id") == "episode-bounded-previous-e1"
-    )
-    assert archived_event.get("agreement") is True
-    assert archived_event.get("predicted_direction") == "SELL"
-
-    assert compact_response.status_code == 200
-    compact_serialized = json.dumps(compact_response.json()).lower()
-    assert "tracking_episode" not in compact_serialized
-    assert "baseline_forecasts" not in compact_serialized
-    assert "private_scene_provider" not in compact_serialized
-    assert "private_model_version" not in compact_serialized
-    assert "private_plan_trace" not in compact_serialized
-    assert "raw_model_score" not in compact_serialized
-    assert "source_path" not in compact_serialized
-    assert "private_history_provider" not in json.dumps(workspace).lower()
 
 
-def test_projector_synthesizes_episode_owned_future_blocks_without_live_lstm() -> None:
-    payload = _fresh_payload(side="SELL")
-    bundle = _complete_forecast_bundle(
-        selected_side="SELL",
-        anchor_x=0.56,
-        anchor_y=0.37,
-    )
-    episode = _mutable_mapping(payload["tracking_episode"])
-    episode["baseline_forecasts"] = {
-        "scene": {
-            "forecast_candles": bundle["forecast_candles"],
-            "provider": "PRIVATE_PROVIDER",
-        }
-    }
-    payload["overlays"] = {"objects": []}
-    payload["live_visual_state"] = {"overlays": {"objects": []}}
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-    rows = [
-        row
-        for row in workspace["overlays"]
-        if row.get("family") == "lstm"
-        and row.get("forecast_role") == "composite"
-    ]
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.get("baseline_locked") is True
-    assert row["frame_id"] == 14
-    assert row["coordinate_space"] == "chart"
-    assert row["coordinate_units"] == "normalized"
-    assert len(cast(list[object], row.get("forecast_candles"))) == 12
-    assert row["line_points"] == []
-    assert row.get("geometry_kind") == "future_blocks"
-    anchor = cast(Mapping[str, object], row.get("forecast_anchor"))
-    first_block = cast(Sequence[Mapping[str, object]], row.get("forecast_candles", []))[0]
-    assert float(cast(float, anchor["x_norm"])) < float(cast(float, first_block["x_norm"]))
-    assert anchor["y_norm"] == first_block["open_y_norm"]
-    serialized = json.dumps(row).lower()
-    assert "private" not in serialized
-    assert "provider" not in serialized
-    assert "model" not in serialized
-    assert "source" not in serialized
 
 
-def test_projector_builds_twelve_safe_blocks_from_lstm_only_episode() -> None:
-    payload = _fresh_payload(side="BUY")
-    episode = _mutable_mapping(payload["tracking_episode"])
-    episode["baseline_forecasts"] = {
-        "scene": {},
-        "lstm": {
-            "forecast_path": [
-                {
-                    "step": step,
-                    "expected_open_norm": 0.45 + step * 0.004,
-                    "expected_high_norm": 0.47 + step * 0.004,
-                    "expected_low_norm": 0.43 + step * 0.004,
-                    "expected_close_norm": 0.46 + step * 0.004,
-                    "movement_direction": "BUY",
-                    "candle_body_direction": "BUY",
-                    "raw_model_score": 0.99,
-                }
-                for step in range(1, 13)
-            ],
-            "model_version": "PRIVATE_LSTM_VERSION",
-        },
-    }
-    payload["overlays"] = {"objects": []}
-    payload["live_visual_state"] = {"overlays": {"objects": []}}
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-    public_episode = cast(
-        Mapping[str, object],
-        cast(Mapping[str, object], workspace["tracking"])["episode"],
-    )
-    blocks = cast(list[dict[str, object]], public_episode["future_blocks"])
-    composite = next(
-        row
-        for row in workspace["overlays"]
-        if row.get("family") == "lstm"
-        and row.get("forecast_role") == "composite"
-    )
-
-    assert len(blocks) == 12
-    assert [block["step"] for block in blocks] == list(range(1, 13))
-    assert all(
-        float(cast(float, right["x_norm"]))
-        > float(cast(float, left["x_norm"]))
-        for left, right in zip(blocks, blocks[1:])
-    )
-    assert composite.get("forecast_candles") == blocks
-    assert composite.get("baseline_locked") is True
-    serialized = json.dumps(workspace).lower()
-    assert "private_lstm_version" not in serialized
-    assert "raw_model_score" not in serialized
 
 
 def test_fresh_current_authority_can_grant_buy_now() -> None:
@@ -3067,71 +1688,52 @@ def test_fresh_current_authority_can_grant_buy_now() -> None:
     }
 
 
-def test_entry_permission_fails_closed_without_an_active_tracking_episode() -> None:
-    missing = _fresh_payload(side="BUY")
-    missing.pop("tracking_episode")
-    idle = _fresh_payload(side="BUY")
-    idle["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "episode_id": "",
-        "state": "IDLE",
-        "revision": 0,
-    }
 
-    for payload in (missing, idle):
+
+
+
+
+
+def test_entry_permission_fails_closed_when_any_independent_authority_gate_is_missing() -> None:
+    for missing_gate in (
+        "direction",
+        "freshness",
+        "execution_packet",
+        "execution_control",
+        "opportunity",
+        "movement_alignment",
+        "pressure_alignment",
+    ):
+        payload = cast(
+            dict[str, object],
+            json.loads(json.dumps(_fresh_payload(side="BUY"))),
+        )
+        command = _mutable_mapping(payload["decision_command_center"])
+        if missing_gate == "direction":
+            command["selected_side"] = "HOLD"
+        elif missing_gate == "freshness":
+            command["fresh"] = False
+            command["freshness_status"] = "STALE"
+            command["valid_until_epoch"] = 99.0
+        elif missing_gate == "execution_packet":
+            command["execution_packet_present"] = False
+        elif missing_gate == "execution_control":
+            _mutable_mapping(payload["execution_controls"])[
+                "live_execution_enabled"
+            ] = False
+        elif missing_gate == "opportunity":
+            _mutable_mapping(command["execution_opportunity_window_v3"])[
+                "state"
+            ] = "CLOSED"
+        elif missing_gate == "movement_alignment":
+            _mutable_mapping(command["current_movement"])["side"] = "SELL"
+        else:
+            _mutable_mapping(command["pressure_event"])["side"] = "SELL"
+
         permission = _build_workspace(payload, now_epoch=100.0)["permission"]
-        assert permission["action"] == "WAIT"
-        assert permission["allowed"] is False
-        assert permission["window_open"] is False
-        assert permission["expires_at"] is None
-        assert "Start Tracking" in permission["message"]
-
-
-def test_active_episode_never_authorizes_a_direction_that_differs_from_saved_plan() -> None:
-    payload = _fresh_payload(side="SELL")
-    episode = _mutable_mapping(payload["tracking_episode"])
-    episode["committed_plan"] = {"decision": {"action": "BUY"}}
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-    permission = workspace["permission"]
-    public_episode = cast(
-        Mapping[str, object],
-        cast(Mapping[str, object], workspace["tracking"])["episode"],
-    )
-
-    assert cast(Mapping[str, object], public_episode["baseline"])["direction"] == "BUY"
-    assert permission["action"] == "WAIT"
-    assert permission["allowed"] is False
-    assert permission["window_open"] is False
-    assert permission["expires_at"] is None
-    assert permission["valid_for_seconds"] is None
-    assert permission["window_label"] == "Closed"
-    assert permission["entry_location"] == "LOWER_PRICE"
-    assert permission["entry_guidance"] == (
-        "Aim for a lower price inside the verified demand or retest area; do not "
-        "chase highs."
-    )
-    assert permission["message"] == (
-        "Wait. The current proposal differs from the saved tracking plan."
-    )
-
-
-def test_active_episode_without_directional_saved_plan_remains_wait() -> None:
-    payload = _fresh_payload(side="BUY")
-    episode = _mutable_mapping(payload["tracking_episode"])
-    episode["committed_plan"] = {"decision": {"action": "HOLD"}}
-
-    permission = _build_workspace(payload, now_epoch=100.0)["permission"]
-
-    assert permission["action"] == "WAIT"
-    assert permission["allowed"] is False
-    assert permission["window_open"] is False
-    assert permission["expires_at"] is None
-    assert permission["valid_for_seconds"] is None
-    assert permission["window_label"] == "Closed"
-    assert permission["message"] == (
-        "Wait. The saved tracking plan does not permit a directional entry."
-    )
+        assert permission["action"] == "WAIT", missing_gate
+        assert permission["allowed"] is False, missing_gate
+        assert permission["side"] == "NEUTRAL", missing_gate
 
 
 def test_open_setup_window_without_current_packet_waits_for_refresh() -> None:
@@ -3217,282 +1819,20 @@ def test_duplicate_visual_wait_is_publicly_waiting_and_never_fresh() -> None:
     assert workspace["tracking"]["state"] == "UPDATING"
     assert workspace["permission"]["action"] == "WAIT"
     assert workspace["permission"]["allowed"] is False
-    assert workspace["forecast"]["state"] == "STALE"
+    assert "forecast" not in workspace
     serialized = json.dumps(workspace)
     assert "private-signature" not in serialized
     assert "duplicate_study_count" not in serialized
 
 
-def test_duplicate_wait_keeps_last_forecast_nonzero_but_diagnostic_only() -> None:
-    payload = _fresh_payload(side="SELL")
-    command = _mutable_mapping(payload["decision_command_center"])
-    command.pop("forecast")
-    payload["visual_observation_v3"] = {
-        "status": "WAITING_FOR_NEW_FRAME",
-        "message": "Waiting for a new broker frame.",
-        "new_visual_evidence": False,
-        "last_observed_epoch": 99.0,
-    }
-    payload["forecast_snapshot_v3"] = {
-        "schema_version": "PG_FORECAST_SNAPSHOT_V3",
-        "source_frame_id": 14,
-        "observed_epoch": 99.0,
-        "stale": True,
-        "diagnostic_only": True,
-        "lstm_contribution": {
-            "frame_id": 14,
-            "stale": True,
-            "diagnostic_only": True,
-            "forecast_available": True,
-            "path_side": "SELL",
-            "confidence": 0.77,
-        },
-    }
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "lstm-last-valid",
-                "type": "LSTM_STUDY",
-                "side": "HOLD",
-                "layer": "prediction_path",
-                "role": "lstm_candle_event_path_stale_diagnostic",
-                "bounds": [0.66, 0.32, 0.91, 0.54],
-                "line_points": [[0.66, 0.38], [0.91, 0.51]],
-                "confidence": 0.77,
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            },
-            {
-                "overlay_id": "lstm-last-valid-band",
-                "type": "LSTM_STUDY",
-                "side": "HOLD",
-                "layer": "prediction_path",
-                "role": "lstm_forecast_90_band_stale_diagnostic",
-                "bounds": [0.66, 0.30, 0.91, 0.56],
-                "points": [
-                    [0.66, 0.36],
-                    [0.91, 0.49],
-                    [0.91, 0.53],
-                    [0.66, 0.40],
-                ],
-                "confidence": 0.77,
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            }
-        ]
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"]["direction"] == "SELL"
-    assert workspace["forecast"]["confidence"] == 0.77
-    assert workspace["forecast"]["state"] == "STALE"
-    assert "last valid outlook" in workspace["forecast"]["summary"].lower()
-    assert "observation only" in workspace["forecast"]["summary"].lower()
-    assert workspace["permission"]["action"] == "WAIT"
-    assert workspace["permission"]["allowed"] is False
-    # The last textual read remains available, but obsolete LSTM path/band
-    # drawings are not public now that the operator contract is block-only.
-    assert workspace["overlays"] == []
 
 
-@pytest.mark.parametrize("bad_frame", [None, 13])
-def test_forecast_without_exact_current_frame_fails_closed(
-    bad_frame: int | None,
-) -> None:
-    payload = _fresh_payload(side="BUY")
-    command = _mutable_mapping(payload["decision_command_center"])
-    forecast = _mutable_mapping(command["forecast"])
-    if bad_frame is None:
-        forecast.pop("frame_id")
-    else:
-        forecast["frame_id"] = bad_frame
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"] == {
-        "direction": "NEUTRAL",
-        "state": "UNKNOWN",
-        "confidence": None,
-        "horizon_seconds": None,
-        "summary": "No reliable next direction is confirmed.",
-    }
 
 
-def test_mismatched_explicit_forecast_does_not_mask_aligned_model_forecast() -> None:
-    payload = _fresh_payload(side="SELL")
-    command = _mutable_mapping(payload["decision_command_center"])
-    command["forecast"] = {
-        "frame_id": 13,
-        "side": "SELL",
-        "confidence": 0.99,
-    }
-    payload["forecast_snapshot_v3"] = {
-        "source_frame_id": 14,
-        "high_frequency_forecast": {
-            "frame_id": 14,
-            "direction": "BUY",
-            "confidence": 0.71,
-        },
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"]["direction"] == "BUY"
-    assert workspace["forecast"]["state"] == "CURRENT"
-    assert workspace["forecast"]["confidence"] == 0.71
 
 
-@pytest.mark.parametrize("forecast_status", ["AUTHORIZED", "NO_EDGE", "LOW_CONFIDENCE"])
-def test_line_only_lstm_path_cannot_restore_forecast_when_raw_projection_races(
-    forecast_status: str,
-) -> None:
-    payload = _fresh_payload(side="SELL")
-    command = _mutable_mapping(payload["decision_command_center"])
-    command.pop("forecast")
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "current-lstm-center",
-                "type": "LSTM_STUDY",
-                "side": "SELL",
-                "layer": "prediction_path",
-                "role": f"lstm_candle_event_path_{forecast_status.lower()}",
-                "bounds": [0.60, 0.30, 0.92, 0.58],
-                "line_points": [[0.60, 0.32], [0.76, 0.44], [0.92, 0.54]],
-                "confidence": 0.77,
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            }
-        ]
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"] == {
-        "direction": "NEUTRAL",
-        "state": "UNKNOWN",
-        "confidence": None,
-        "horizon_seconds": None,
-        "summary": "No reliable next direction is confirmed.",
-    }
-    assert workspace["overlays"] == []
 
 
-def test_current_no_edge_path_completes_partial_raw_forecast_without_hiding_risk_gate() -> None:
-    payload = _fresh_payload(side="SELL")
-    command = _mutable_mapping(payload["decision_command_center"])
-    forecast = _mutable_mapping(command["forecast"])
-    forecast.pop("confidence")
-    command["execution_packet_present"] = False
-    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
-    opportunity["state"] = "WAIT"
-    opportunity["integrity_valid"] = False
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "current-lstm-center-no-edge",
-                "type": "LSTM_STUDY",
-                "side": "SELL",
-                "layer": "prediction_path",
-                "role": "lstm_candle_event_path_no_edge",
-                "bounds": [0.60, 0.30, 0.92, 0.58],
-                "line_points": [[0.60, 0.32], [0.76, 0.44], [0.92, 0.54]],
-                "confidence": 0.77,
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            }
-        ]
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"]["direction"] == "SELL"
-    assert workspace["forecast"]["state"] == "CURRENT"
-    assert workspace["forecast"]["confidence"] is None
-    assert workspace["permission"]["action"] == "WAIT"
-    assert workspace["permission"]["allowed"] is False
-
-
-def test_lstm_path_side_drives_operator_direction_when_body_bias_disagrees() -> None:
-    payload = _fresh_payload(side="SELL")
-    command = _mutable_mapping(payload["decision_command_center"])
-    command.pop("forecast")
-    command["execution_packet_present"] = False
-    payload["forecast_snapshot_v3"] = {
-        "source_frame_id": 14,
-        "high_frequency_forecast": {
-            "frame_id": 14,
-            "direction": "BUY",
-            "confidence": 0.91,
-            "horizon_seconds": 60,
-        },
-        "lstm_contribution": {
-            "frame_id": 14,
-            "side": "BUY",
-            "path_side": "SELL",
-            "confidence": 0.77,
-            "selective_status": "NO_EDGE",
-            "selective_authorized": False,
-        },
-    }
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "current-lstm-center-body-path-disagreement",
-                "type": "LSTM_STUDY",
-                "side": "SELL",
-                "layer": "prediction_path",
-                "role": "lstm_candle_event_path_no_edge",
-                "bounds": [0.60, 0.30, 0.92, 0.58],
-                "line_points": [[0.60, 0.32], [0.76, 0.44], [0.92, 0.54]],
-                "confidence": 0.77,
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            }
-        ]
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"]["direction"] == "BUY"
-    assert workspace["forecast"]["state"] == "CURRENT"
-    assert workspace["forecast"]["confidence"] == 0.91
-    assert workspace["forecast"]["horizon_seconds"] == 60
-    assert workspace["permission"]["action"] == "WAIT"
-    assert workspace["permission"]["allowed"] is False
-
-
-def test_center_path_with_side_geometry_conflict_cannot_restore_forecast() -> None:
-    payload = _fresh_payload(side="BUY")
-    command = _mutable_mapping(payload["decision_command_center"])
-    command.pop("forecast")
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": "contradictory-lstm-center",
-                "type": "LSTM_STUDY",
-                "side": "BUY",
-                "layer": "prediction_path",
-                "role": "lstm_candle_event_path_authorized",
-                "bounds": [0.60, 0.30, 0.92, 0.58],
-                "line_points": [[0.60, 0.32], [0.76, 0.44], [0.92, 0.54]],
-                "confidence": 0.91,
-                "frame_id": 14,
-                "coordinate_mode": "CHART_NORMALIZED",
-            }
-        ]
-    }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert workspace["forecast"] == {
-        "direction": "NEUTRAL",
-        "state": "UNKNOWN",
-        "confidence": None,
-        "horizon_seconds": None,
-        "summary": "No reliable next direction is confirmed.",
-    }
 
 
 def test_safe_overlay_merge_filters_to_one_frame_and_deduplicates_stable_id() -> None:
@@ -3515,208 +1855,8 @@ def test_safe_overlay_merge_filters_to_one_frame_and_deduplicates_stable_id() ->
     assert {row["frame_id"] for row in merged} == {15}
 
 
-def test_safe_operator_projection_retains_bounded_forecast_scenarios() -> None:
-    project_rows = cast(
-        Callable[[object], list[dict[str, object]]],
-        getattr(mobile_app, "_safe_operator_overlay_rows"),
-    )
-    scenario_points = [
-        [round(0.55 + index * 0.03, 4), round(0.48 - index * 0.01, 4)]
-        for index in range(14)
-    ]
-    raw_scenarios = [
-        {
-            "side": side,
-            "label": f"{side} PATH",
-            "probability": probability,
-            "probability_calibrated": False,
-            "selected": side == "BUY",
-            "line_points": scenario_points,
-            "event_count": 99,
-            "forecast_path": [{"raw_model_value": 0.123}],
-            "private_artifact_path": rf"C:\private\{side.lower()}.pt",
-        }
-        for side, probability in (
-            ("BUY", 1.2),
-            ("SELL", 0.21),
-            ("NEUTRAL", -0.4),
-            ("BUY", 0.01),
-        )
-    ]
-
-    projected = project_rows(
-        [
-            {
-                "id": "lstm-path-current",
-                "family": "lstm",
-                "frame_id": 14,
-                "forecast_coordinate_units": "normalized",
-                "forecast_scenarios": raw_scenarios,
-                "trajectory_mode": "BUY",
-                "trajectory_mode_probability_calibrated": False,
-                "forecast_engine": "SCENE_FORECASTER_V3",
-                "forecast_computed_frame_id": 12,
-                "source_forecast_frame_id": 12,
-                "geometry_projected_frame_id": 14,
-                "geometry_frame_match_verified": True,
-                "geometry_reprojected_from_cache": True,
-                "detector_coverage_rebase_applied": True,
-                "cache_replaced_for_detector_coverage_rebase": True,
-                "geometry_projection_provenance": {
-                    "status": "REANCHORED",
-                    "source_forecast_frame_id": 12,
-                    "source_geometry_frame_id": 12,
-                    "projected_frame_id": 14,
-                    "verified": True,
-                    "pointwise_clipping_applied": False,
-                },
-            }
-        ]
-    )
-
-    assert len(projected) == 1
-    row = projected[0]
-    scenarios = cast(list[dict[str, object]], row["forecast_scenarios"])
-    assert len(scenarios) == 3
-    assert [scenario["side"] for scenario in scenarios] == [
-        "BUY",
-        "SELL",
-        "NEUTRAL",
-    ]
-    assert [scenario["probability"] for scenario in scenarios] == [1.0, 0.21, 0.0]
-    assert all(len(cast(list[object], scenario["line_points"])) == 13 for scenario in scenarios)
-    assert all(scenario["event_count"] == 12 for scenario in scenarios)
-    assert all(scenario["probability_calibrated"] is False for scenario in scenarios)
-    assert row["trajectory_mode"] == "BUY"
-    assert row["trajectory_mode_probability_calibrated"] is False
-    assert row["geometry_frame_match_verified"] is True
-    assert row["geometry_projected_frame_id"] == 14
-    assert row["forecast_computed_frame_id"] == 12
-    geometry_provenance = cast(
-        Mapping[str, object],
-        row["geometry_projection_provenance"],
-    )
-    assert geometry_provenance["verified"] is True
-    assert row["detector_coverage_rebase_applied"] is True
-    assert row["cache_replaced_for_detector_coverage_rebase"] is True
-    serialized = json.dumps(projected)
-    assert "raw_model_value" not in serialized
-    assert "private_artifact_path" not in serialized
-    assert r"C:\private" not in serialized
 
 
-def test_safe_operator_projection_accepts_role_complete_scene_scenarios() -> None:
-    project_rows = cast(
-        Callable[[object], list[dict[str, object]]],
-        getattr(mobile_app, "_safe_operator_overlay_rows"),
-    )
-    bundle = _complete_forecast_bundle(selected_side="SELL")
-    legacy_scenarios = cast(list[dict[str, object]], bundle["forecast_scenarios"])
-    paths = {
-        str(scenario["side"]): cast(list[list[float]], scenario["line_points"])
-        for scenario in legacy_scenarios
-    }
-
-    def candles_for(points: list[list[float]]) -> list[dict[str, object]]:
-        return [
-            {
-                "step": step,
-                "label": f"E{step}",
-                "x_norm": points[step][0],
-                "open_y_norm": points[step - 1][1],
-                "high_y_norm": round(
-                    min(points[step - 1][1], points[step][1]) - 0.004,
-                    6,
-                ),
-                "low_y_norm": round(
-                    max(points[step - 1][1], points[step][1]) + 0.004,
-                    6,
-                ),
-                "close_y_norm": points[step][1],
-                "movement_side": "BUY"
-                if points[step][1] < points[step - 1][1]
-                else "SELL",
-                "body_bias": "BUY"
-                if points[step][1] < points[step - 1][1]
-                else "SELL",
-                "direction_conflict": False,
-                "private_model_value": 0.123,
-            }
-            for step in range(1, 13)
-        ]
-
-    scene_scenarios = [
-        {
-            "role": role,
-            "side": side,
-            "label": label,
-            "probability": probability,
-            "probability_calibrated": False,
-            "selected": role == "base",
-            "raw_selected": role == "bear",
-            "candidate": role == "bear",
-            "line_points": paths[path_side],
-            "forecast_candles": candles_for(paths[path_side]),
-        }
-        for role, side, path_side, label, probability in (
-            ("base", "SELL", "SELL", "MEDOID PATH", 0.39),
-            ("bull", "BUY", "BUY", "UPPER PATH", 0.29),
-            # Endpoint-derived sides may duplicate; roles identify the scenario.
-            ("bear", "SELL", "SELL", "LOWER PATH", 0.32),
-        )
-    ]
-    bundle["forecast_scenarios"] = scene_scenarios
-    anchor = cast(dict[str, object], bundle["forecast_anchor"])
-    anchor["source"] = "TRACKER_LATEST_CLOSED_CANDLE"
-
-    projected = project_rows(
-        [
-            {
-                "id": "scene-forecast-current",
-                "family": "lstm",
-                "frame_id": 14,
-                "forecast_role": "composite",
-                "forecast_coordinate_units": "normalized",
-                "coordinate_units": "normalized",
-                "forecast_engine": "SCENE_FORECASTER_V3",
-                "forecast_provider": "CHRONOS_2_LOCAL",
-                "belief_state": "REACQUIRING",
-                "committed_side": "HOLD",
-                "candidate_side": "SELL",
-                "forecast_revision": 11,
-                "belief_revision": 4,
-                **bundle,
-            }
-        ]
-    )
-
-    assert len(projected) == 1
-    row = projected[0]
-    scenarios = cast(list[dict[str, object]], row["forecast_scenarios"])
-    assert {str(scenario["role"]) for scenario in scenarios} == {
-        "base",
-        "bull",
-        "bear",
-    }
-    assert [str(scenario["side"]) for scenario in scenarios].count("SELL") == 2
-    candidate = next(
-        scenario for scenario in scenarios if scenario.get("candidate") is True
-    )
-    assert candidate["role"] == "bear"
-    assert candidate["raw_selected"] is True
-    assert all(
-        len(cast(list[object], scenario["forecast_candles"])) == 12
-        for scenario in scenarios
-    )
-    assert cast(dict[str, object], row["forecast_anchor"])["source"] == (
-        "TRACKER_LATEST_CLOSED_CANDLE"
-    )
-    assert row["forecast_engine"] == "SCENE_FORECASTER_V3"
-    assert row["forecast_provider"] == "CHRONOS_2_LOCAL"
-    assert row["belief_state"] == "REACQUIRING"
-    assert row["committed_side"] == "HOLD"
-    assert row["candidate_side"] == "SELL"
-    assert "private_model_value" not in json.dumps(projected)
 
 
 def test_mixed_frame_operator_snapshot_is_rejected(
@@ -3811,7 +1951,7 @@ def test_stale_or_contradictory_pressure_fails_closed(failure: str) -> None:
         assert workspace["pressure_event"]["state"] == "ACTIVE"
 
 
-def test_ended_opposite_pressure_is_history_not_a_current_veto() -> None:
+def test_ended_opposite_pressure_does_not_pollute_regression_history() -> None:
     payload = _fresh_payload(side="BUY")
     command = _mutable_mapping(payload["decision_command_center"])
     command["pressure_event"] = {
@@ -3828,10 +1968,7 @@ def test_ended_opposite_pressure_is_history_not_a_current_veto() -> None:
     assert workspace["pressure_event"]["state"] == "ENDED"
     assert workspace["permission"]["action"] == "BUY_NOW"
     assert workspace["permission"]["allowed"] is True
-    assert any(
-        row["direction"] == "SELL" and row["state"] == "ENDED"
-        for row in workspace["history"]
-    )
+    assert workspace["history"] == []
 
 
 def test_overlay_projection_filters_internal_stale_and_wrong_frame_objects() -> None:
@@ -4210,7 +2347,7 @@ def test_compact_live_chain_preserves_bounded_tracker_close_for_operator(
     assert current["points"] == [[505.0, 276.25]]
 
 
-def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
+def test_retired_fixed_forecasts_do_not_enter_public_overlay_contract() -> None:
     payload = _fresh_payload()
     payload["overlays"] = {
         "objects": [
@@ -4232,18 +2369,8 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
             {
                 "overlay_id": "lstm-path-current",
                 "type": "LSTM_STUDY",
-                "role": "lstm_forecast_composite_no_edge",
-                "forecast_role": "composite",
-                "forecast_status": "NO_EDGE",
-                "forecast_authorized": False,
-                "forecast_direction": "BUY",
-                "body_bias": "SELL",
                 "layer": "prediction_path",
                 "bounds": [0.55, 0.20, 0.90, 0.40],
-                **_complete_forecast_bundle(selected_side="SELL"),
-                "trajectory_mode": "SELL",
-                "trajectory_mode_probability_calibrated": False,
-                "interval": {"calibrated": False, "method": "UNAVAILABLE"},
                 "frame_id": 14,
                 "coordinate_mode": "CHART_NORMALIZED",
             },
@@ -4276,48 +2403,12 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
     overlays = _build_workspace(payload, now_epoch=100.0)["overlays"]
     by_id = {row["id"]: row for row in overlays}
 
-    assert by_id["two-candle-current"]["family"] == "two_candle"
-    assert by_id["two-candle-current"]["label"] == "Near-term candle read"
-    assert by_id["lstm-study-current"]["family"] == "lstm"
-    assert by_id["lstm-study-current"]["label"] == "12-step future blocks"
-    assert by_id["lstm-path-current"]["family"] == "lstm"
-    assert by_id["lstm-path-current"]["layer"] == "prediction_path"
-    assert by_id["lstm-path-current"]["label"] == "Future blocks · no reliable edge"
-    assert by_id["lstm-path-current"]["coordinate_units"] == "normalized"
-    assert by_id["lstm-path-current"].get("forecast_role") == "composite"
-    assert by_id["lstm-path-current"].get("forecast_status") == "NO_EDGE"
-    assert by_id["lstm-path-current"].get("forecast_authorized") is False
-    assert by_id["lstm-path-current"].get("horizon_unit") == "CANDLE_EVENTS"
-    assert by_id["lstm-path-current"].get("clock_time_assumption") == "NONE"
-    assert by_id["lstm-path-current"].get("uncertainty_level") is None
-    assert by_id["lstm-path-current"].get("forecast_direction") == "BUY"
-    assert by_id["lstm-path-current"].get("body_bias") == "SELL"
-    assert by_id["lstm-path-current"].get("trajectory_mode") == "SELL"
-    assert (
-        by_id["lstm-path-current"].get("trajectory_mode_probability_calibrated")
-        is False
-    )
-    scenarios = cast(
-        list[dict[str, object]],
-        by_id["lstm-path-current"].get("forecast_scenarios"),
-    )
-    assert [row["side"] for row in scenarios] == ["SELL", "BUY", "NEUTRAL"]
-    assert [row["selected"] for row in scenarios] == [True, False, False]
-    assert [row["probability"] for row in scenarios] == [0.18, 0.72, 0.10]
-    assert all("line_points" not in scenario for scenario in scenarios)
-    assert by_id["lstm-path-current"]["line_points"] == []
-    assert all("forecast_path" not in row for row in scenarios)
-    assert all("private_artifact_path" not in row for row in scenarios)
-    interval = by_id["lstm-path-current"].get("interval")
-    assert isinstance(interval, dict)
-    interval = cast(dict[str, object], interval)
-    assert interval["calibrated"] is False
-    assert interval["method"] == "UNAVAILABLE"
-    assert interval["status"] == "UNAVAILABLE"
-    lstm_rows = [row for row in overlays if row["family"] == "lstm"]
-    assert [row.get("forecast_role") for row in lstm_rows].count("composite") == 1
-    assert by_id["scene-study-current"]["family"] == "scene_forecaster"
-    assert by_id["scene-study-current"]["label"] == "Visual outlook"
+    assert {
+        "two-candle-current",
+        "lstm-study-current",
+        "lstm-path-current",
+        "scene-study-current",
+    }.isdisjoint(by_id)
     assert by_id["council-current"]["family"] == "council"
     assert by_id["council-current"]["label"] == "Combined analysis"
     context_overlay = next(row for row in overlays if row["kind"] == "reaction_zone")
@@ -4332,154 +2423,6 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
     assert "liquidity" not in serialized_context
 
 
-def test_precision_projected_lstm_composite_survives_full_public_chain() -> None:
-    payload = _fresh_payload(side="BUY")
-    command = _mutable_mapping(payload["decision_command_center"])
-    command["execution_packet_present"] = False
-    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
-    opportunity["state"] = "WAIT"
-    opportunity["integrity_valid"] = False
-
-    chart_left = 100.0
-    chart_top = 50.0
-    chart_width = 1628.0
-    chart_height = 861.0
-    bundle = _complete_forecast_bundle(
-        selected_side="BUY",
-        anchor_x=0.55,
-        anchor_y=0.30,
-    )
-    normalized_line = cast(list[list[float]], bundle["line_points"])
-    pixel_line = [
-        [
-            round(chart_left + point[0] * chart_width, 6),
-            round(chart_top + point[1] * chart_height, 6),
-        ]
-        for point in normalized_line
-    ]
-    payload.update(
-        {
-            "chart_frame": {
-                "artifact": {"width": chart_width, "height": chart_height}
-            },
-            "scene_graph": {
-                "chart_region_chart_bounds": [
-                    chart_left,
-                    chart_top,
-                    chart_left + chart_width,
-                    chart_top + chart_height,
-                ]
-            },
-            "overlays": {
-                "objects": [
-                    {
-                        "overlay_id": "precision-projected-lstm",
-                        "type": "LSTM_STUDY",
-                        "side": "NEUTRAL",
-                        "forecast_direction": "BUY",
-                        "layer": "prediction_path",
-                        "role": "lstm_forecast_composite_low_confidence",
-                        "bounds": [
-                            min(point[0] for point in pixel_line) - 2.0,
-                            min(point[1] for point in pixel_line) - 2.0,
-                            max(point[0] for point in pixel_line) + 2.0,
-                            max(point[1] for point in pixel_line) + 2.0,
-                        ],
-                        **bundle,
-                        "line_points": pixel_line,
-                        "forecast_band_points": [
-                            [0.55, 0.29],
-                            [0.90, 0.23],
-                            [0.90, 0.25],
-                            [0.55, 0.31],
-                            [0.55, 0.29],
-                        ],
-                        "forecast_coordinate_space": "chart",
-                        "forecast_coordinate_units": "normalized",
-                        "forecast_quality_status": "LOW_CONFIDENCE",
-                        "trade_authorization_status": "NO_EDGE",
-                        "frame_id": 14,
-                        "coordinate_mode": "CHART_IMAGE_SPACE",
-                    }
-                ]
-            },
-        }
-    )
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-    lstm_rows = [row for row in workspace["overlays"] if row["family"] == "lstm"]
-
-    assert len(lstm_rows) == 1
-    lstm = lstm_rows[0]
-    assert lstm["coordinate_space"] == "chart"
-    assert lstm["coordinate_units"] == "normalized"
-    assert lstm.get("forecast_coordinate_units") == "normalized"
-    assert lstm["line_points"] == []
-    assert lstm.get("geometry_kind") == "future_blocks"
-    assert lstm.get("forecast_band_points") == []
-    assert len(cast(list[object], lstm.get("forecast_candles"))) == 12
-    scenarios = cast(list[dict[str, object]], lstm.get("forecast_scenarios"))
-    assert len(scenarios) == 3
-    assert sum(bool(scenario["selected"]) for scenario in scenarios) == 1
-    selected = next(scenario for scenario in scenarios if scenario["selected"])
-    assert "line_points" not in selected
-    assert lstm.get("forecast_band_points") == []
-    assert lstm.get("forecast_anchor") == {
-        "x_norm": 0.55,
-        "y_norm": 0.30,
-        "verified_latest_close": True,
-        "source": "TRACKER_LATEST_CLOSE",
-    }
-    assert lstm.get("forecast_status") == "LOW_CONFIDENCE"
-    assert lstm.get("forecast_authorized") is False
-    assert workspace["permission"]["action"] == "WAIT"
-    assert workspace["permission"]["allowed"] is False
-
-    safe_rows = mobile_app._safe_operator_overlay_rows(  # pyright: ignore[reportPrivateUsage]
-        workspace["overlays"]
-    )
-    safe_lstm = [row for row in safe_rows if row.get("family") == "lstm"]
-    assert len(safe_lstm) == 1
-    assert safe_lstm[0]["line_points"] == []
-
-
-@pytest.mark.parametrize("failure", ["missing_transform", "space_mismatch"])
-def test_precision_projected_lstm_composite_fails_closed_without_one_chart_plane(
-    failure: str,
-) -> None:
-    payload = _fresh_payload(side="BUY")
-    bundle = _complete_forecast_bundle(selected_side="BUY")
-    normalized_line = cast(list[list[float]], bundle["line_points"])
-    payload["overlays"] = {
-        "objects": [
-            {
-                "overlay_id": f"invalid-projected-lstm-{failure}",
-                "type": "LSTM_STUDY",
-                "layer": "prediction_path",
-                "role": "lstm_forecast_composite_no_edge",
-                "bounds": [1100.0, 260.0, 1500.0, 520.0],
-                **bundle,
-                "line_points": [
-                    [round(point[0] * 1628.0, 6), round(point[1] * 861.0, 6)]
-                    for point in normalized_line
-                ],
-                "forecast_coordinate_space": (
-                    "window" if failure == "space_mismatch" else "chart"
-                ),
-                "forecast_coordinate_units": "normalized",
-                "frame_id": 14,
-                "coordinate_mode": "CHART_IMAGE_SPACE",
-            }
-        ]
-    }
-    if failure == "space_mismatch":
-        payload["chart_frame"] = {
-            "artifact": {"width": 1628.0, "height": 861.0}
-        }
-
-    workspace = _build_workspace(payload, now_epoch=100.0)
-
-    assert not any(row["family"] == "lstm" for row in workspace["overlays"])
 
 
 def test_surface_urls_use_encoded_session_id_and_never_copy_artifact_paths() -> None:
@@ -4551,7 +2494,7 @@ def test_studied_history_semantics_survive_frames_but_geometry_reprojects() -> N
         tracking["market_selector_visual_fingerprint"] = f"selector-frame-{frame_id}"
         payload["broker_source_lock_id"] = "locked-broker-surface"
         command = _mutable_mapping(payload["decision_command_center"])
-        for key in ("current_movement", "pressure_event", "forecast"):
+        for key in ("current_movement", "pressure_event"):
             _mutable_mapping(command[key])["frame_id"] = frame_id
         payload["overlays"] = {
             "objects": [
@@ -4726,304 +2669,71 @@ def test_overlay_identifiers_never_echo_paths_or_uris() -> None:
     assert "data:" not in serialized
 
 
-def test_history_is_chronological_bounded_and_uses_generated_summaries() -> None:
+def test_history_retains_continuous_chronological_regression_studies() -> None:
     payload = _fresh_payload()
     payload["recent_studies"] = [
         {
+            "id": f"closed-candle-{index}",
             "created_epoch": float(index),
+            "observed_at": float(index),
             "frame_id": index,
-            "side": "SELL" if index % 2 else "BUY",
-            "summary": f"internal model trace {index}",
-            "reason": "private",
-            "source_path": rf"C:\private\{index}.json",
+            "market_study_v3": {
+                "schema_version": "PG_MARKET_STUDY_V3",
+                "status": "STUDIED",
+                "study_only": True,
+                "execution_authority": False,
+                "can_grant_entry_permission": False,
+                "symbol": "CAD/JPY OTC",
+                "timeframe": "M5",
+                "closed_candle_key": f"closed-candle-{index}",
+                "closed_candle_sequence": index,
+                "regression": {
+                    "major_trend": {"side": "BUY", "confidence": 0.8},
+                    "inner_trend": {
+                        "side": "SELL" if index % 2 else "BUY",
+                        "confidence": 0.6,
+                    },
+                },
+                "behavior": {
+                    "current_state": {
+                        "state": "REST" if index % 3 == 0 else "SWING",
+                        "candle_count": index % 5 + 1,
+                        "duration_seconds": (index % 5 + 1) * 300,
+                    }
+                },
+                "directional_read": {
+                    "side": "SELL" if index % 2 else "BUY",
+                    "confidence": 0.7,
+                },
+            },
         }
         for index in range(40)
+    ]
+    tracking_summary = _mutable_mapping(payload["tracking_summary"])
+    tracking_summary["market_study_v3"] = payload["recent_studies"][-1][
+        "market_study_v3"
     ]
 
     workspace = _build_workspace(payload, now_epoch=100.0)
     history = workspace["history"]
 
-    assert len(history) == 24
+    assert len(history) == 40
     observed = [row["observed_at"] or 0 for row in history]
     assert observed == sorted(observed)
-    serialized = json.dumps(history).lower()
-    assert "internal model trace" not in serialized
-    assert "private" not in serialized
-    assert all(set(row) == {"observed_at", "direction", "state", "summary", "frame_id"} for row in history)
+    assert all(row["major_trend"]["side"] == "BUY" for row in history)
+    assert all(row["inner_trend"]["side"] in {"BUY", "SELL"} for row in history)
+    assert all(row["behavior"]["current_state"]["state"] in {"REST", "SWING"} for row in history)
+    assert all(row["regression_read"]["side"] in {"BUY", "SELL"} for row in history)
 
 
-def test_episode_history_accepts_action_and_iso_timestamp_without_exposing_internals() -> None:
-    payload = _fresh_payload()
-    payload["recent_studies"] = [
-        {
-            "timestamp": "2026-07-18T08:30:00Z",
-            "frame_id": 13,
-            "action": "SELL",
-            "state": "ENDED",
-            "summary": "Event 3 closed below the starting block.",
-            "episode_id": "episode-safe-1",
-            "event_id": "episode-safe-1-e3",
-            "event_index": 3,
-            "source_path": r"C:\private\episode.json",
-        }
-    ]
-
-    history = _build_workspace(payload, now_epoch=1_768_000_000.0)["history"]
-    event = next(row for row in history if row.get("episode_id") == "episode-safe-1")
-
-    assert event.get("id") == "episode-safe-1-e3"
-    assert event["direction"] == "SELL"
-    assert event.get("event_index") == 3
-    assert event["observed_at"] == 1_784_363_400.0
-    assert event["summary"] == "Event 3 closed below the starting block."
-    assert "source_path" not in event
 
 
-def test_tracking_episode_projects_frozen_plan_blocks_and_before_after_story() -> None:
-    payload = _fresh_payload(side="SELL")
-    payload["tracking_episode_readiness"] = {"ready": True, "reasons": []}
-    visual_blocks = [
-        {
-            "step": step,
-            "x_norm": 0.55 + step * 0.02,
-            "open_y_norm": 0.45 + step * 0.002,
-            "high_y_norm": 0.42 + step * 0.002,
-            "low_y_norm": 0.49 + step * 0.002,
-            "close_y_norm": 0.47 + step * 0.002,
-            "movement_side": "SELL",
-            "body_bias": "SELL",
-        }
-        for step in range(1, 13)
-    ]
-    sequence_path = [
-        {
-            "step": step,
-            "expected_open_norm": 0.55 - step * 0.002,
-            "expected_high_norm": 0.57 - step * 0.002,
-            "expected_low_norm": 0.51 - step * 0.002,
-            "expected_close_norm": 0.53 - step * 0.002,
-            "movement_direction": "SELL",
-            "candle_body_direction": "SELL",
-            "raw_model_buy_probability": 0.01,
-            "source_path": r"C:\private\forecast.json",
-        }
-        for step in range(1, 13)
-    ]
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "episode_id": "episode-public-1",
-        "state": "ACTIVE",
-        "revision": 4,
-        "event_horizon": 12,
-        "event_cursor": 1,
-        "started_at": "2026-07-18T08:00:00Z",
-        "updated_at": "2026-07-18T08:05:00Z",
-        "pair": "EUR/USD OTC",
-        "timeframe": "M5",
-        "committed_plan": {"decision": {"action": "SELL", "summary": "private trace"}},
-        "baseline_forecasts": {
-            "scene": {"forecast_candles": visual_blocks, "provider": "private"},
-            "lstm": {"forecast_path": sequence_path, "model_version": "private"},
-        },
-        "events": [
-            {
-                "event_id": "episode-public-1:E1",
-                "episode_id": "episode-public-1",
-                "step": 1,
-                "observed_at": "2026-07-18T08:05:00Z",
-                "predicted_block": {"side": "SELL"},
-                "actual_block": {"side": "SELL"},
-                "direction_agreement": True,
-                "after_reference": {"frame_id": 14, "source_path": r"C:\private\frame.png"},
-            }
-        ],
-    }
-
-    workspace = _build_workspace(payload, now_epoch=1_784_362_000.0)
-    episode = cast(dict[str, object], cast(dict[str, object], workspace["tracking"])["episode"])
-
-    assert episode["state"] == "ACTIVE"
-    assert episode["progress"] == {"completed": 1, "total": 12}
-    assert len(cast(list[object], episode["future_blocks"])) == 12
-    assert cast(dict[str, object], episode["baseline"])["direction"] == "SELL"
-    assert "matched" in str(cast(dict[str, object], episode["current"])["summary"])
-    event = next(row for row in workspace["history"] if row.get("episode_id") == "episode-public-1")
-    assert event.get("event_index") == 1
-    assert event["direction"] == "SELL"
-    serialized = json.dumps(episode).lower()
-    assert "raw_model" not in serialized
-    assert "provider" not in serialized
-    assert "source_path" not in serialized
-    assert "private trace" not in serialized
 
 
-def test_tracking_episode_archive_is_projected_as_persistent_session_history() -> None:
-    payload = _fresh_payload()
-    payload["tracking_episode_history"] = [
-        {
-            "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
-            "episode_id": "episode-archived-1",
-            "state": "STOPPED",
-            "event_cursor": 7,
-            "event_horizon": 12,
-            "direction_agreement_count": 5,
-            "direction_observation_count": 7,
-            "ended_at": "2026-07-18T09:00:00Z",
-            "anchor_frame_id": 40,
-            "events": [
-                {
-                    "event_id": "episode-archived-1:E1",
-                    "step": 1,
-                    "observed_at": "2026-07-18T08:05:00Z",
-                    "predicted_side": "SELL",
-                    "actual_side": "SELL",
-                    "direction_agreement": True,
-                    "frame_id": 34,
-                    "raw_block": {"provider": "private"},
-                },
-                {
-                    "event_id": "episode-archived-1:E2",
-                    "step": 2,
-                    "observed_at": "2026-07-18T08:10:00Z",
-                    "predicted_side": "SELL",
-                    "actual_side": "BUY",
-                    "direction_agreement": False,
-                    "frame_id": 35,
-                },
-            ],
-            "source_path": r"C:\private\episode.json",
-            "provider": "private-provider",
-        },
-        {
-            "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
-            "episode_id": "episode-archived-2",
-            "state": "COMPLETED",
-            "event_cursor": 1,
-            "event_horizon": 12,
-            "direction_agreement_count": 1,
-            "direction_observation_count": 1,
-            "ended_at": "2026-07-18T10:00:00Z",
-            "anchor_frame_id": 52,
-            "events": [
-                {
-                    "event_id": "episode-archived-2:E1",
-                    "step": 1,
-                    "observed_at": "2026-07-18T09:05:00Z",
-                    "predicted_side": "BUY",
-                    "actual_side": "BUY",
-                    "direction_agreement": True,
-                    "frame_id": 45,
-                }
-            ],
-        },
-    ]
-
-    history = _build_workspace(payload, now_epoch=1_784_400_000.0)["history"]
-    archived = next(
-        row
-        for row in history
-        if row.get("id") == "episode-archived-1-summary"
-    )
-
-    assert archived.get("id") == "episode-archived-1-summary"
-    assert archived.get("event_index") == 7
-    assert archived["frame_id"] == 40
-    assert archived["summary"] == (
-        "Saved tracking study: 7 of 12 events recorded; "
-        "5 of 7 directional blocks matched."
-    )
-    by_id = {
-        str(row.get("id")): row
-        for row in history
-        if row.get("episode_id") in {
-            "episode-archived-1",
-            "episode-archived-2",
-        }
-    }
-    assert {
-        "episode-archived-1-e1",
-        "episode-archived-1-e2",
-        "episode-archived-1-summary",
-        "episode-archived-2-e1",
-        "episode-archived-2-summary",
-    }.issubset(by_id)
-    assert by_id["episode-archived-1-e1"].get("agreement") is True
-    assert by_id["episode-archived-1-e2"].get("agreement") is False
-    assert by_id["episode-archived-2-e1"].get("predicted_direction") == "BUY"
-    serialized = json.dumps(list(by_id.values())).lower()
-    assert "provider" not in serialized
-    assert "source_path" not in serialized
-    assert "raw_block" not in serialized
-    assert "private" not in serialized
 
 
-def test_session_history_preserves_every_retained_episode_event_and_summary() -> None:
-    payload = _fresh_payload()
-    payload["tracking_episode_history"] = [
-        {
-            "schema_version": "PG_TRACKING_EPISODE_HISTORY_ENTRY_V1",
-            "episode_id": f"episode-retained-{episode_index:02d}",
-            "state": "COMPLETED",
-            "event_cursor": 12,
-            "event_horizon": 12,
-            "direction_agreement_count": 12,
-            "direction_observation_count": 12,
-            "ended_at": float(10_000 + episode_index * 100 + 99),
-            "anchor_frame_id": episode_index * 100,
-            "events": [
-                {
-                    "event_id": f"episode-retained-{episode_index:02d}-e{step}",
-                    "step": step,
-                    "observed_at": float(10_000 + episode_index * 100 + step),
-                    "predicted_side": "BUY",
-                    "actual_side": "BUY",
-                    "direction_agreement": True,
-                    "frame_id": episode_index * 100 + step,
-                }
-                for step in range(1, 13)
-            ],
-        }
-        for episode_index in range(24)
-    ]
-
-    history = _build_workspace(payload, now_epoch=20_000.0)["history"]
-    episode_rows = [row for row in history if row.get("episode_id")]
-    row_ids = {str(row.get("id")) for row in episode_rows}
-
-    assert len(episode_rows) == 24 * 13
-    assert "episode-retained-00-e1" in row_ids
-    assert "episode-retained-00-summary" in row_ids
-    assert "episode-retained-23-e12" in row_ids
-    assert "episode-retained-23-summary" in row_ids
-    observed = [float(row.get("observed_at") or 0.0) for row in episode_rows]
-    assert observed == sorted(observed)
 
 
-def test_tracking_readiness_message_uses_plain_public_language() -> None:
-    payload = _fresh_payload()
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "episode_id": "",
-        "state": "IDLE",
-        "revision": 0,
-    }
-    payload["tracking_episode_readiness"] = {
-        "ready": False,
-        "reasons": ["Wait for a complete 12-event Scene or LSTM forecast baseline."],
-    }
-
-    episode = cast(
-        Mapping[str, object],
-        cast(Mapping[str, object], _build_workspace(payload, now_epoch=100.0)["tracking"])[
-            "episode"
-        ],
-    )
-
-    assert episode["readiness_message"] == "Wait until all 12 future blocks are ready."
-    serialized = json.dumps(episode).lower()
-    assert "scene" not in serialized
-    assert "lstm" not in serialized
-    assert "forecast baseline" not in serialized
 
 
 def test_canonical_current_leg_requires_current_frame_and_ends_previous_pressure() -> None:
@@ -5061,7 +2771,7 @@ def test_canonical_current_leg_requires_current_frame_and_ends_previous_pressure
     assert workspace["pressure_event"]["state"] == "ENDED"
     assert workspace["permission"]["action"] == "BUY_NOW"
     assert workspace["permission"]["allowed"] is True
-    assert workspace["forecast"]["direction"] == "BUY"
+    assert "forecast" not in workspace
 
 
 def test_canonical_buy_reconciles_explicit_sell_pressure_by_frame_time() -> None:
@@ -5164,174 +2874,53 @@ def test_unconfirmed_or_wrong_frame_candle_leg_never_becomes_current(
     assert workspace["permission"]["action"] == "WAIT"
 
 
-def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
+def test_operator_route_returns_only_the_current_public_projection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     session_id = "operator-route-contract"
-    snapshot: dict[str, object] = {
-        "session_id": session_id,
-        "display_frame_id": 21,
-        "tracking_enabled": True,
-        "last_capture_epoch": 199.0,
-        "execution_controls": {"live_execution_enabled": False},
-        "tracking_summary": {
-            "detected_market": "GBP/USD",
-            "detected_timeframe": "M5",
-            "last_capture_epoch": 199.0,
-            "candle_movement_context_v3": {
-                "current_leg": {"side": "BUY", "transition_state": "CONFIRMED"},
-                "previous_leg": {"side": "SELL"},
-            },
-        },
-        "recent_studies": [
-            {"created_epoch": 190.0, "frame_id": 21, "side": "SELL", "reason": "private"}
-        ],
-        "provider_status": {"source_path": r"C:\private\session.json"},
-    }
-    compact_state: dict[str, object] = {
-        "session_id": session_id,
-        "state_version": 22,
-        "display_frame_id": 22,
-        "model_vote_frame_id": 22,
-        "model_capture_epoch": 199.0,
-        "tracking_enabled": True,
-        "symbol": "GBP/USD",
-        "timeframe": "M5",
-        "market_selector_visual_fingerprint": "selector_v2_gbpusd",
-        "instrument_identity_status": "LOCKED",
-        "market_identity_confirmed": True,
-        "timeframe_identity_confirmed": True,
-        "execution_controls": snapshot["execution_controls"],
-        "tracking_summary": {
-            "detected_market": "GBP/USD",
-            "detected_timeframe": "M5",
-            "last_capture_epoch": 199.0,
-        },
-        "recent_studies": snapshot["recent_studies"],
-        "decision_command_center": {
-            "fresh": True,
-            "freshness_status": "PASS",
-            "created_epoch": 199.0,
-            "valid_until_epoch": 220.0,
-            "selected_side": "BUY",
-            "execution_packet_present": False,
-        },
-        "overlays": {
-            "objects": [
-                {
-                    "overlay_id": "route-demand",
-                    "object_id": "route-demand",
-                    "track_id": "route-demand",
-                    "type": "DEMAND_ZONE",
-                    "side": "BUY",
-                    "layer": "supply_demand",
-                    "bounds": [10, 20, 40, 60],
-                    "frame_id": 22,
-                    "sequence_id": "seq-22",
-                    "chart_transform_id": "ct-22",
-                    "coordinate_mode": "CHART_IMAGE_SPACE",
-                    "anchor_type": "CANDLES",
-                    "anchor_candles": [4, 5],
-                    "anchor_candle_indices": [4, 5],
-                    "anchor_price_band": {"top_y": 20, "bottom_y": 60},
-                    "anchor_time_span": {"left_x": 10, "right_x": 40},
-                    "anchor_evidence": {"valid": True, "evidence_type": "support_reclaim"},
-                    "truth_score": 0.84,
-                    "confidence": 0.88,
-                    "lifecycle_state": "ACTIVE",
-                    "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT"],
-                    "ttl_ms": 9000,
-                    "source_agent": "model_council_v3",
-                    "source_version": "PG_V3_OVERLAY_OBJECT_V1",
-                    "broker_source_lock_id": "broker-lock-22",
-                    "symbol": "GBP/USD",
-                    "timeframe": "M5",
-                    "market_selector_visual_fingerprint": "selector_v2_gbpusd",
-                    "instrument_identity_status": "LOCKED",
-                    "source_path": r"C:\private\overlay.json",
-                }
-            ]
-        },
-        "frame_timing_trace_v3": {"pipeline_latency_ms": 9},
-    }
-    compact_overlays = _mutable_mapping(compact_state["overlays"])
-    compact_objects = compact_overlays["objects"]
-    assert isinstance(compact_objects, list)
-    cast(list[object], compact_objects).extend(
-        [
-            {
-                "overlay_id": overlay_id,
-                "type": overlay_type,
-                "layer": layer,
-                "bounds": [12 + index, 22, 42 + index, 62],
-                    "frame_id": 22,
-                    "coordinate_mode": "CHART_IMAGE_SPACE",
-                    "lifecycle_state": lifecycle,
-                    "symbol": "GBP/USD",
-                    "timeframe": "M5",
-                    "market_selector_visual_fingerprint": "selector_v2_gbpusd",
-                    "instrument_identity_status": "LOCKED",
-                }
-            for index, (overlay_id, overlay_type, layer, lifecycle) in enumerate(
-                (
-                    ("route-bounds", "CHART_BOUNDS", "chart_bounds", "ACTIVE"),
-                    ("route-current", "CURRENT_CANDLE", "recent_candles", "ACTIVE"),
-                    ("route-major", "IMPULSE_BOX", "major_swings", "ACTIVE"),
-                    ("route-local", "PULLBACK_BOX", "local_swings", "ACTIVE"),
-                    ("route-trend", "SUPPORT_TRENDLINE", "trendlines", "ACTIVE"),
-                    ("route-trigger", "SNIPER_ENTRY_BOX", "trigger_zones", "ACTIVE"),
-                    ("route-target", "TARGET_ZONE_BOX", "target_zones", "ACTIVE"),
-                    ("route-risk", "INVALIDATION_BOX", "invalidation", "ACTIVE"),
-                    (
-                        "route-council",
-                        "MODEL_COUNCIL_MARKER",
-                        "active_council_decision",
-                        "ACTIVE",
-                    ),
-                    ("route-smc", "ORDER_BLOCK", "smart_money", "ACTIVE"),
-                    (
-                        "route-two-candle",
-                        "TWO_CANDLE_STUDY",
-                        "active_council_decision",
-                        "ACTIVE",
-                    ),
-                    (
-                        "route-lstm",
-                        "LSTM_STUDY",
-                        "active_council_decision",
-                        "ACTIVE",
-                    ),
-                    ("route-prediction", "PREDICTION_PATH", "prediction_path", "ACTIVE"),
-                    ("route-history", "REPLAY_ENTRY", "historical_replay", "STALE"),
-                )
-            )
-        ]
-    )
-    route_lstm = next(
-        cast(dict[str, object], item)
-        for item in cast(list[object], compact_objects)
-        if isinstance(item, dict)
-        and cast(dict[str, object], item).get("overlay_id") == "route-lstm"
-    )
-    route_lstm.update(
+    compact_state = _fresh_payload(side="BUY", now=200.0)
+    compact_state.update(
         {
-            "role": "lstm_forecast_composite_no_edge",
-            **_complete_forecast_bundle(
-                selected_side="BUY",
-                anchor_x=0.58,
-                anchor_y=0.50,
-            ),
-            "forecast_coordinate_space": "chart",
-            "forecast_coordinate_units": "normalized",
-            "coordinate_mode": "CHART_NORMALIZED",
-            "trajectory_mode": "BUY",
-            "trajectory_mode_probability_calibrated": False,
+            "session_id": session_id,
+            "state_version": 22,
+            "display_frame_id": 22,
+            "last_capture_epoch": 199.0,
+            "tracking_enabled": True,
+            "symbol": "GBP/USD",
+            "timeframe": "M5",
+            "tracking_summary": {
+                "detected_market": "GBP/USD",
+                "detected_timeframe": "M5",
+                "last_capture_epoch": 199.0,
+            },
+            "overlays": {
+                "objects": [
+                    {
+                        "overlay_id": "route-demand",
+                        "type": "DEMAND_ZONE",
+                        "side": "BUY",
+                        "layer": "supply_demand",
+                        "bounds": [10, 20, 40, 60],
+                        "frame_id": 22,
+                        "coordinate_mode": "CHART_IMAGE_SPACE",
+                    },
+                    {
+                        "overlay_id": "route-internal-model-path",
+                        "type": "LSTM_STUDY",
+                        "layer": "prediction_path",
+                        "bounds": [0.55, 0.30, 0.90, 0.42],
+                        "frame_id": 22,
+                        "coordinate_mode": "CHART_NORMALIZED",
+                    },
+                ]
+            },
         }
     )
-    compact_state["live_visual_state"] = {"overlays": compact_state["overlays"]}
-    observed_call: dict[str, object] = {}
-    captured_projection_input: dict[str, object] = {}
+    command = _mutable_mapping(compact_state["decision_command_center"])
+    for leg_key in ("current_movement", "pressure_event"):
+        leg = _mutable_mapping(command[leg_key])
+        leg["frame_id"] = 22
 
     class _Tracker:
         def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
@@ -5346,11 +2935,10 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
     def _build_compact_state(
         tracker: object,
         requested_session_id: str,
-        **kwargs: object,
+        **_kwargs: object,
     ) -> dict[str, object]:
         assert isinstance(tracker, _Tracker)
         assert requested_session_id == session_id
-        observed_call.update(kwargs)
         return compact_state
 
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
@@ -5359,349 +2947,29 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
         "build_live_state_v3_from_tracker_service",
         _build_compact_state,
     )
-    real_projection_builder = mobile_app.build_operator_workspace_v1
-
-    def _capture_projection_input(
-        payload: Mapping[str, object],
-    ) -> dict[str, object]:
-        captured_projection_input.update(payload)
-        return real_projection_builder(payload)
-
-    monkeypatch.setattr(
-        mobile_app,
-        "build_operator_workspace_v1",
-        _capture_projection_input,
-    )
     client = TestClient(mobile_app.create_app(window_tracker_service=_Tracker()))
 
-    response = client.get(
-        f"/v1/mobile/operator/state/v1/{session_id}?view=zones"
-    )
+    response = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
 
     assert response.status_code == 200
     workspace = cast(_OperatorWorkspaceView, response.json())
     assert set(workspace) == TOP_LEVEL_KEYS
-    assert workspace["schema_version"] == OPERATOR_WORKSPACE_SCHEMA_VERSION
+    assert "forecast" not in workspace
     assert workspace["market"] == {"symbol": "GBP/USD", "timeframe": "M5"}
-    assert workspace["current_move"]["direction"] == "NEUTRAL"
-    assert workspace["current_move"]["state"] == "UNKNOWN"
-    assert workspace["surface"]["frame_id"] == 22
-    assert workspace["permission"]["action"] == "WAIT"
-    captured_overlays = captured_projection_input["overlays"]
-    assert isinstance(captured_overlays, Mapping)
-    captured_overlays = cast(Mapping[str, object], captured_overlays)
-    assert captured_overlays.get("objects"), captured_overlays
-    compact_lstm = next(
-        cast(Mapping[str, object], row)
-        for row in cast(Sequence[object], captured_overlays["objects"])
-        if isinstance(row, Mapping)
-        and cast(Mapping[str, object], row).get("overlay_id") == "route-lstm"
-    )
-    compact_scenarios = cast(
-        Sequence[Mapping[str, object]],
-        compact_lstm["forecast_scenarios"],
-    )
-    assert len(compact_scenarios) == 3
-    assert all(len(cast(Sequence[object], row["line_points"])) == 13 for row in compact_scenarios)
-    assert compact_lstm["trajectory_mode"] == "BUY"
-    assert compact_lstm["trajectory_mode_probability_calibrated"] is False
-    captured_tracking = captured_projection_input["tracking_summary"]
-    assert isinstance(captured_tracking, Mapping)
-    assert "candle_movement_context_v3" not in captured_tracking
-    assert [row["id"] for row in workspace["overlays"]] == ["route-demand"]
-    assert any(row["frame_id"] == 21 for row in workspace["history"])
+    assert workspace["overlays"] == []
+    assert workspace["permission"]["allowed"] is False
     assert _all_keys(workspace).isdisjoint(
         {"provider_status", "frame_timing_trace_v3", "source_path", "reason"}
     )
-    assert observed_call["overlay_mode"] == "INSPECTOR"
-    assert observed_call["compact_public"] is True
 
-    expected_views: dict[str, tuple[str, set[str]]] = {
-        "all": (
-            "INSPECTOR",
-            {
-                "chart_bounds",
-                "current_candles",
-                "major_swings",
-                "local_swings",
-                "supply_demand",
-                "trendlines",
-                "triggers",
-                "targets",
-                "invalidation",
-                "council",
-                "market_context",
-                "two_candle",
-                "lstm",
-                "history",
-            },
-        ),
-        "live": (
-            "INSPECTOR",
-            {
-                "chart_bounds",
-                "current_candles",
-                "major_swings",
-                "local_swings",
-                "supply_demand",
-                "trendlines",
-                "triggers",
-                "targets",
-                "invalidation",
-                "market_context",
-                "council",
-            },
-        ),
-        "structure": (
-            "INSPECTOR",
-            {"current_candles", "major_swings", "local_swings", "trendlines"},
-        ),
-        "zones": ("INSPECTOR", {"supply_demand"}),
-        "plan": ("INSPECTOR", {"council", "triggers", "targets", "invalidation"}),
-        "market_context": ("INSPECTOR", {"market_context"}),
-        "two-candle": ("INSPECTOR", {"two_candle"}),
-        "scene-forecaster": ("INSPECTOR", set()),
-        "lstm": ("INSPECTOR", {"lstm"}),
-        "forecast": ("INSPECTOR", {"two_candle", "lstm"}),
-        "history": ("INSPECTOR", {"history", "major_swings", "local_swings"}),
-    }
-    public_family_views = cast(
-        Mapping[str, frozenset[str] | None],
-        getattr(mobile_app, "_OPERATOR_VIEW_TO_PUBLIC_FAMILIES"),
-    )
-    assert public_family_views["scene-forecaster"] == frozenset(
-        {"scene_forecaster"}
-    )
-    assert public_family_views["forecast"] == frozenset(
-        {"two_candle", "scene_forecaster", "lstm", "prediction"}
-    )
-    for public_view, (expected_mode, expected_families) in expected_views.items():
-        public_view_modes = cast(
-            Mapping[str, str],
-            getattr(mobile_app, "_OPERATOR_VIEW_TO_OVERLAY_MODE"),
+    for retired_view in ("forecast", "lstm", "two-candle", "scene-forecaster", "prediction"):
+        rejected = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view={retired_view}"
         )
-        assert public_view_modes[public_view] == expected_mode
-        public_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view={public_view}"
-        )
-        assert public_response.status_code == 200
-        public_workspace = cast(_OperatorWorkspaceView, public_response.json())
-        assert {row["family"] for row in public_workspace["overlays"]} == expected_families
-        if public_view == "lstm":
-            forecast_row = next(
-                row
-                for row in public_workspace["overlays"]
-                if row.get("forecast_role") == "composite"
-            )
-            endpoint_scenarios = cast(
-                Sequence[Mapping[str, object]],
-                forecast_row.get("forecast_scenarios"),
-            )
-            assert endpoint_scenarios == []
-            assert forecast_row.get("line_points") == []
-            assert forecast_row.get("geometry_kind") == "future_blocks"
-            assert len(
-                cast(Sequence[object], forecast_row.get("forecast_candles"))
-            ) == 12
-            assert forecast_row.get("trajectory_mode") == "BUY"
-            assert forecast_row.get("trajectory_mode_probability_calibrated") is False
-        assert observed_call["compact_public"] is True
-
-    rejected = client.get(
-        f"/v1/mobile/operator/state/v1/{session_id}?view=inspector"
-    )
-    assert rejected.status_code == 400
-    assert rejected.json() == {"detail": "Unsupported operator view."}
+        assert rejected.status_code == 400
+        assert rejected.json() == {"detail": "Unsupported operator view."}
 
 
-def test_current_studies_survive_incomplete_same_lineage_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    session_id = "operator-incomplete-snapshot"
-    source: dict[str, object] = {
-        "session_id": session_id,
-        "state_version": 14,
-        "display_frame_id": 14,
-        "chart_frame_id": 14,
-        "overlay_frame_id": 14,
-        "full_overlay_frame_id": 14,
-        "model_vote_frame_id": 14,
-        "tracking_enabled": True,
-        "last_capture_epoch": 99.0,
-        "last_display_surface_signature": "window-sig-14",
-        "last_study_surface_signature": "study-sig-14",
-        "overlay_source_window_signature": "window-sig-14",
-        "overlay_source_study_signature": "study-sig-14",
-        "manual_focus_region": {
-            "enabled": True,
-            "normalized_bbox": [0.1, 0.1, 0.9, 0.9],
-        },
-    }
-
-    def study_row(
-        overlay_id: str,
-        *,
-        role: str = "",
-        points: list[list[float]] | None = None,
-    ) -> dict[str, object]:
-        row: dict[str, object] = {
-            "overlay_id": overlay_id,
-            "type": "LSTM_STUDY" if role else "TWO_CANDLE_STUDY",
-            "side": "BUY",
-            "layer": "prediction_path" if role else "active_council_decision",
-            "role": role or "two_candle_study",
-            "bounds": [0.62, 0.24, 0.92, 0.56],
-            "frame_id": 14,
-            "coordinate_mode": "CHART_NORMALIZED",
-            "lifecycle_state": "ACTIVE",
-            "confidence": 0.77,
-        }
-        if points is not None:
-            if "90_band" in role:
-                row["points"] = points
-            else:
-                row["line_points"] = points
-        return row
-
-    current_rows = [
-        study_row("current-two-candle"),
-        study_row(
-            "current-lstm-center",
-            role="lstm_candle_event_path_authorized",
-            points=[[0.62, 0.42], [0.76, 0.38], [0.92, 0.34]],
-        ),
-        study_row(
-            "current-lstm-band",
-            role="lstm_forecast_90_band_authorized",
-            points=[
-                [0.62, 0.36],
-                [0.92, 0.28],
-                [0.92, 0.44],
-                [0.62, 0.48],
-            ],
-        ),
-        study_row(
-            "current-lstm-upper",
-            role="lstm_forecast_90_upper_boundary_authorized",
-            points=[[0.62, 0.36], [0.92, 0.28]],
-        ),
-        study_row(
-            "current-lstm-lower",
-            role="lstm_forecast_90_lower_boundary_authorized",
-            points=[[0.62, 0.48], [0.92, 0.44]],
-        ),
-    ]
-    live_state: dict[str, object] = {
-        **source,
-        "frame_id": 14,
-        "overlays": {"objects": current_rows},
-        "live_visual_state": {"overlays": {"objects": current_rows}},
-    }
-
-    class _Tracker:
-        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return json.loads(json.dumps(source))
-
-        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return {}
-
-    def _build_state(
-        tracker: object,
-        requested_session_id: str,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        assert isinstance(tracker, _Tracker)
-        assert requested_session_id == session_id
-        return json.loads(json.dumps(live_state))
-
-    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
-    monkeypatch.setattr(
-        mobile_app,
-        "build_live_state_v3_from_tracker_service",
-        _build_state,
-    )
-    snapshot_path = (
-        tmp_path
-        / "mobile_api"
-        / "window_tracker"
-        / "sessions"
-        / session_id
-        / "operator_overlay_snapshot_v1.json"
-    )
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "PG_OPERATOR_OVERLAY_SNAPSHOT_V1",
-                "session_id": session_id,
-                "lineage": {
-                    "frame_id": 14,
-                    "chart_frame_id": 14,
-                    "overlay_frame_id": 14,
-                    "full_overlay_frame_id": 14,
-                    "model_vote_frame_id": 14,
-                    "display_surface_signature": "window-sig-14",
-                    "study_surface_signature": "study-sig-14",
-                    "overlay_source_window_signature": "window-sig-14",
-                    "overlay_source_study_signature": "study-sig-14",
-                    "state_version": 14,
-                },
-                "overlay_viewport": {
-                    "source_space": "chart",
-                    "target_space": "window",
-                    "coordinate_units": "normalized",
-                    "bounds": [0.1, 0.1, 0.9, 0.9],
-                },
-                # This deliberately represents an earlier incomplete build of
-                # the same atomic frame.
-                "overlays": [
-                    {
-                        "id": "saved-demand-only",
-                        "type": "zone",
-                        "side": "BUY",
-                        "group": "zones",
-                        "family": "supply_demand",
-                        "layer": "supply_demand",
-                        "label": "Demand area",
-                        "label_hidden": False,
-                        "bounds": [10.0, 20.0, 30.0, 40.0],
-                        "points": [],
-                        "line_points": [],
-                        "confidence": 0.7,
-                        "lifecycle": "current",
-                        "frame_id": 14,
-                        "coordinate_space": "chart",
-                        "coordinate_units": "pixels",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=forecast"
-        )
-
-    assert response.status_code == 200
-    workspace = cast(_OperatorWorkspaceView, response.json())
-    counts = {
-        family: sum(1 for row in workspace["overlays"] if row["family"] == family)
-        for family in ("two_candle", "lstm", "prediction")
-    }
-    assert counts == {"two_candle": 1, "lstm": 0, "prediction": 0}
-    repaired_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    repaired_families = [
-        str(row.get("family"))
-        for row in cast(list[dict[str, object]], repaired_snapshot["overlays"])
-    ]
-    assert repaired_families.count("two_candle") == 1
-    assert repaired_families.count("lstm") == 0
-    assert repaired_families.count("prediction") == 0
 
 
 def test_operator_route_persists_projection_frame_when_service_snapshot_advances(
@@ -5822,360 +3090,3 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
     persisted = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert persisted["lineage"]["frame_id"] == 14
     assert {row["frame_id"] for row in persisted["overlays"]} == {14}
-
-
-def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    session_id = "operator-cold-wait"
-    source: dict[str, object] = {
-        "session_id": session_id,
-        "state_version": 14,
-        "display_frame_id": 14,
-        "chart_frame_id": 14,
-        "overlay_frame_id": 14,
-        "full_overlay_frame_id": 14,
-        "model_vote_frame_id": 14,
-        "tracking_enabled": True,
-        "tracking_episode": {
-            "schema_version": "PG_TRACKING_EPISODE_V1",
-            "episode_id": "episode-cold-wait",
-            "state": "ACTIVE",
-            "revision": 2,
-            "event_cursor": 0,
-            "baseline_forecasts": {
-                "scene": {"provider": "PRIVATE_EPISODE_PROVIDER"},
-                "lstm": {"model_version": "PRIVATE_EPISODE_MODEL"},
-            },
-            "committed_plan": {"summary": "PRIVATE_EPISODE_PLAN"},
-            "candidate_revision": {"source_path": r"C:\private\candidate.json"},
-        },
-        "tracking_episode_history": [
-            {"episode_id": "archived-private", "provider": "PRIVATE_ARCHIVE_PROVIDER"}
-        ],
-        "last_capture_epoch": 99.0,
-        "last_display_surface_signature": "window-sig-14",
-        "last_study_surface_signature": "study-sig-14",
-        "overlay_source_window_signature": "window-sig-14",
-        "overlay_source_study_signature": "study-sig-14",
-        "manual_focus_region": {
-            "enabled": True,
-            "normalized_bbox": [0.12, 0.08, 0.88, 0.92],
-        },
-        "tracking_summary": {
-            "detected_market": "CAD/JPY OTC",
-            "detected_timeframe": "M5",
-            "high_frequency_study_timeframe": "M5",
-            "last_capture_epoch": 99.0,
-        },
-        "forecast_snapshot_v3": {
-            "schema_version": "PG_FORECAST_SNAPSHOT_V3",
-            "source_frame_id": 14,
-            "observed_epoch": 99.0,
-            "stale": False,
-            "diagnostic_only": False,
-            "lstm_contribution": {
-                "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
-                "frame_id": 14,
-                "pair": "CAD/JPY OTC",
-                "timeframe": "M5",
-                "fresh": True,
-                "market_identity_confirmed": True,
-                "timeframe_identity_confirmed": True,
-                "forecast_available": True,
-                "artifact_production_gate_passed": True,
-                "production_authorized": True,
-                "selective_authorized": True,
-                "trade_authorization_status": "AUTHORIZED",
-                "path_side": "SELL",
-                "confidence": 0.77,
-                "features": [{"relative_price_location": 0.51}],
-                "raw_model_logits": [0.12, 0.88],
-            },
-            "two_candle_study": {
-                "frame_id": 14,
-                "primary_pressure": "SELL",
-                "next_candle_forecast": {
-                    "frame_id": 14,
-                    "direction": "SELL",
-                    "confidence": 0.64,
-                },
-            },
-        },
-    }
-
-    def overlay(
-        overlay_id: str,
-        overlay_type: str,
-        layer: str,
-        *,
-        role: str = "",
-        bounds: list[float] | None = None,
-        line_points: list[list[float]] | None = None,
-        points: list[list[float]] | None = None,
-    ) -> dict[str, object]:
-        row: dict[str, object] = {
-            "overlay_id": overlay_id,
-            "type": overlay_type,
-            "side": "SELL",
-            "layer": layer,
-            "bounds": bounds or [100.0, 120.0, 220.0, 240.0],
-            "frame_id": 14,
-            "coordinate_mode": (
-                "CHART_NORMALIZED" if overlay_type == "LSTM_STUDY" else "CHART_IMAGE_SPACE"
-            ),
-            "lifecycle_state": "ACTIVE",
-            "confidence": 0.77,
-            # These raw diagnostic fields must never enter the persisted
-            # operator DTO or its public response.
-            "source_agent": "private_model_agent",
-            "source_path": r"C:\private\raw-overlay.json",
-            "reason": "private backend diagnostic",
-        }
-        if role:
-            row["role"] = role
-            if "authorized" in role:
-                row["trade_authorization_status"] = "AUTHORIZED"
-        if line_points is not None:
-            row["line_points"] = line_points
-        if points is not None:
-            row["points"] = points
-        return row
-
-    full_rows = [
-        overlay("cold-smc", "ORDER_BLOCK", "smart_money"),
-        overlay("cold-demand", "DEMAND_ZONE", "supply_demand"),
-        overlay("cold-trigger", "SNIPER_ENTRY_BOX", "trigger_zones"),
-        overlay("cold-two-candle", "TWO_CANDLE_STUDY", "active_council_decision"),
-        overlay(
-            "cold-lstm-center",
-            "LSTM_STUDY",
-            "prediction_path",
-            role="lstm_candle_event_path_authorized",
-            bounds=[0.60, 0.28, 0.92, 0.52],
-            line_points=[[0.60, 0.32], [0.76, 0.40], [0.92, 0.48]],
-        ),
-        overlay(
-            "cold-lstm-band",
-            "LSTM_STUDY",
-            "prediction_path",
-            role="lstm_forecast_90_band_authorized",
-            bounds=[0.60, 0.24, 0.92, 0.56],
-            points=[
-                [0.60, 0.28],
-                [0.92, 0.44],
-                [0.92, 0.52],
-                [0.60, 0.36],
-            ],
-        ),
-        overlay(
-            "cold-lstm-upper",
-            "LSTM_STUDY",
-            "prediction_path",
-            role="lstm_forecast_90_upper_boundary_authorized",
-            bounds=[0.60, 0.24, 0.92, 0.46],
-            line_points=[[0.60, 0.28], [0.92, 0.44]],
-        ),
-        overlay(
-            "cold-lstm-lower",
-            "LSTM_STUDY",
-            "prediction_path",
-            role="lstm_forecast_90_lower_boundary_authorized",
-            bounds=[0.60, 0.34, 0.92, 0.56],
-            line_points=[[0.60, 0.36], [0.92, 0.52]],
-        ),
-    ]
-    live_state: dict[str, object] = {
-        **source,
-        "frame_id": 14,
-        "overlays": {"objects": full_rows},
-        "live_visual_state": {"overlays": {"objects": full_rows}},
-    }
-
-    class _Tracker:
-        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return json.loads(json.dumps(source))
-
-        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
-            assert requested_session_id == session_id
-            return {}
-
-    def _build_state(
-        tracker: object,
-        requested_session_id: str,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        assert isinstance(tracker, _Tracker)
-        assert requested_session_id == session_id
-        return json.loads(json.dumps(live_state))
-
-    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
-    monkeypatch.setattr(
-        mobile_app,
-        "build_live_state_v3_from_tracker_service",
-        _build_state,
-    )
-    tracker = _Tracker()
-    snapshot_path = (
-        tmp_path
-        / "mobile_api"
-        / "window_tracker"
-        / "sessions"
-        / session_id
-        / "operator_overlay_snapshot_v1.json"
-    )
-    with TestClient(mobile_app.create_app(window_tracker_service=tracker)) as client:
-        fresh_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
-        )
-        first_snapshot_mtime_ns = snapshot_path.stat().st_mtime_ns
-        repeated_response = client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
-        )
-        repeated_snapshot_mtime_ns = snapshot_path.stat().st_mtime_ns
-        compact_response = client.get(
-            f"/v1/mobile/live/state/v3/{session_id}?mode=INSPECTOR&compact=true"
-        )
-    assert fresh_response.status_code == 200
-    assert repeated_response.status_code == 200
-    assert repeated_snapshot_mtime_ns == first_snapshot_mtime_ns
-    assert compact_response.status_code == 200
-    compact_serialized = json.dumps(compact_response.json())
-    assert "forecast_snapshot_v3" not in compact_serialized
-    assert "tracking_episode" not in compact_serialized
-    assert "tracking_episode_history" not in compact_serialized
-    assert "PRIVATE_EPISODE_PROVIDER" not in compact_serialized
-    assert "PRIVATE_EPISODE_MODEL" not in compact_serialized
-    assert "PRIVATE_EPISODE_PLAN" not in compact_serialized
-    assert "PRIVATE_ARCHIVE_PROVIDER" not in compact_serialized
-    assert "features" not in compact_serialized
-    assert "raw_model_" not in compact_serialized
-    fresh_workspace = cast(_OperatorWorkspaceView, fresh_response.json())
-    fresh_counts = {
-        family: sum(1 for row in fresh_workspace["overlays"] if row["family"] == family)
-        for family in {"market_context", "supply_demand", "triggers", "two_candle", "lstm", "prediction"}
-    }
-    assert fresh_counts == {
-        "market_context": 1,
-        "supply_demand": 1,
-        "triggers": 1,
-        "two_candle": 1,
-        "lstm": 0,
-        "prediction": 0,
-    }
-    assert all(
-        row.get("forecast_authorized") is True
-        and row.get("forecast_status") == "AUTHORIZED"
-        for row in fresh_workspace["overlays"]
-        if row.get("forecast_role")
-    )
-
-    persisted_text = snapshot_path.read_text(encoding="utf-8")
-    assert "private_model_agent" not in persisted_text
-    assert "private backend diagnostic" not in persisted_text
-    assert r"C:\private\raw-overlay.json" not in persisted_text
-
-    source["state_version"] = 15
-    source["visual_observation_v3"] = {
-        "status": "WAITING_FOR_NEW_FRAME",
-        "new_visual_evidence": False,
-        "duplicate_study_count": 20,
-    }
-    forecast_snapshot = _mutable_mapping(source["forecast_snapshot_v3"])
-    forecast_snapshot["stale"] = True
-    forecast_snapshot["diagnostic_only"] = True
-    live_state.clear()
-    live_state.update(
-        {
-            **source,
-            "frame_id": 14,
-            "overlays": {"objects": []},
-            "live_visual_state": {"overlays": {"objects": []}},
-        }
-    )
-
-    # A new app instance simulates the launcher/API process restarting while
-    # the broker is still displaying the exact same accepted frame.
-    with TestClient(mobile_app.create_app(window_tracker_service=tracker)) as cold_client:
-        all_response = cold_client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
-        )
-        forecast_response = cold_client.get(
-            f"/v1/mobile/operator/state/v1/{session_id}?view=forecast"
-        )
-
-    assert all_response.status_code == 200
-    waiting_workspace = cast(_OperatorWorkspaceView, all_response.json())
-    waiting_counts = {
-        family: sum(1 for row in waiting_workspace["overlays"] if row["family"] == family)
-        for family in {"market_context", "supply_demand", "triggers", "two_candle", "lstm", "prediction"}
-    }
-    assert waiting_counts == fresh_counts
-    assert waiting_workspace["forecast"]["direction"] == "SELL"
-    # The line-only LSTM fixture is intentionally excluded by the public
-    # block-only contract, so the aligned near-term candle read owns the
-    # restored forecast confidence.
-    assert waiting_workspace["forecast"]["confidence"] == 0.64
-    assert waiting_workspace["forecast"]["state"] == "STALE"
-    assert waiting_workspace["permission"] == {
-        **waiting_workspace["permission"],
-        "action": "WAIT",
-        "allowed": False,
-        "side": "NEUTRAL",
-    }
-    assert all(
-        row["lifecycle"] == "current"
-        for row in waiting_workspace["overlays"]
-    )
-    assert {row["frame_id"] for row in waiting_workspace["overlays"]} == {14}
-    fresh_semantic_ids = {
-        row["id"]: row.get("semantic_id")
-        for row in fresh_workspace["overlays"]
-    }
-    waiting_semantic_ids = {
-        row["id"]: row.get("semantic_id")
-        for row in waiting_workspace["overlays"]
-    }
-    assert all(fresh_semantic_ids.values())
-    assert waiting_semantic_ids == fresh_semantic_ids
-    forecast_workspace = cast(_OperatorWorkspaceView, forecast_response.json())
-    assert {row["family"] for row in forecast_workspace["overlays"]} == {
-        "two_candle",
-    }
-    assert sum(
-        row.get("forecast_role") == "center"
-        for row in forecast_workspace["overlays"]
-    ) == 0
-    assert all(
-        row.get("forecast_authorized") is False
-        and row.get("forecast_status") == "STALE"
-        and row.get("trade_authorization_status") == "NO_EDGE"
-        for row in forecast_workspace["overlays"]
-        if row.get("forecast_role")
-    ), [
-        (
-            row.get("forecast_role"),
-            row.get("forecast_status"),
-            row.get("forecast_authorized"),
-            row.get("trade_authorization_status"),
-        )
-        for row in forecast_workspace["overlays"]
-        if row.get("forecast_role")
-    ]
-    waiting_serialized = json.dumps(waiting_workspace)
-    assert all(
-        forbidden not in waiting_serialized
-        for forbidden in (
-            "forecast_snapshot_v3",
-            "features",
-            "raw_model_",
-            "surface_signature",
-            "source_agent",
-            "source_path",
-            "provider_status",
-            "frame_timing_trace_v3",
-            "performance_trace_v3",
-        )
-    )

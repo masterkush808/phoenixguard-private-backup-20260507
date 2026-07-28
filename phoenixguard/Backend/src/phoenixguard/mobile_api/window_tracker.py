@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import Counter
 import copy
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -13,8 +12,6 @@ import math
 import os
 import re
 import secrets
-import shutil
-import stat
 import subprocess
 import sys
 import threading
@@ -38,6 +35,9 @@ from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
 from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import (
     build_lstm_candle_sequence_contribution,
+)
+from phoenixguard.decision.order_positioning_evidence_v3 import (
+    order_positioning_evidence_rows_v3,
 )
 from phoenixguard.decision.forecast_belief_tracker_v3 import (
     ForecastBeliefConfigV3,
@@ -75,20 +75,6 @@ from phoenixguard.study.candle_intelligence_v3 import adapt_tracker_candle_v3
 from phoenixguard.tracking.market_object_tracker_v3 import (
     build_market_object_registry_v3,
     derive_trendline_overlays,
-)
-from phoenixguard.tracking.tracking_episode_v3 import (
-    TRACKING_EPISODE_HISTORY_LIMIT,
-    TRACKING_EPISODE_HORIZON,
-    advance_tracking_episode_v1,
-    default_tracking_episode_v1,
-    normalize_tracking_episode_v1,
-    order_positioning_source_rows_v3,
-    reset_tracking_episode_v1,
-    start_tracking_episode_v1,
-    stop_tracking_episode_v1,
-    tracking_episode_history_entry_v1,
-    tracking_episode_readiness_v1,
-    update_tracking_episode_history_v1,
 )
 from phoenixguard.vision.broker_source_lock_v3 import build_broker_source_lock_v3
 from phoenixguard.vision.candle_palette_v3 import (
@@ -130,11 +116,6 @@ _REAL_SLEEP = time.sleep
 LOGGER = logging.getLogger("phoenixguard.mobile_api.window_tracker")
 _ASYNCIO_LOGGER = logging.getLogger("asyncio")
 
-_FORECAST_ACTION_SCHEMA_VERSION = "PG_FORECAST_ACTION_V1"
-_FORECAST_ACTION_POLL_AFTER_MS = 250
-_FORECAST_ACTION_MAX_PENDING = 4
-_FORECAST_ACTION_MAX_RETAINED = 128
-_FORECAST_ACTION_TERMINAL_STATUSES = frozenset({"ready", "degraded", "stale", "error"})
 _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_SESSIONS = 32
 _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_TOTAL_MB = 64.0
 _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_RECORD_MB = 1.0
@@ -142,17 +123,6 @@ _DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_MAX_MB = 1.0
 _DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_TAIL_LINES = 512
 
 
-def _forecast_action_timeout_sec() -> float:
-    try:
-        configured = float(os.getenv("PHOENIXGUARD_FORECAST_ACTION_TIMEOUT_SEC", "420"))
-    except (TypeError, ValueError):
-        configured = 420.0
-    if not math.isfinite(configured):
-        configured = 420.0
-    return min(1800.0, max(30.0, configured))
-
-
-_FORECAST_ACTION_TIMEOUT_SEC = _forecast_action_timeout_sec()
 _MEMORY_PROJECTION_WARMUP_LOCK = threading.Lock()
 _PHOENIXGUARD_MEMORY_BANK_LOAD_LOCK = threading.Lock()
 _memory_projection_warmup_started = False
@@ -1320,6 +1290,124 @@ def _compact_public_overlay_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+_RETIRED_PUBLIC_FORECAST_OVERLAY_TYPES = frozenset(
+    {
+        "PREDICTION_PATH",
+        "LSTM_STUDY",
+        "TWO_CANDLE_STUDY",
+        "PROJECTED_CANDLES",
+        "FORWARD_PROJECTION",
+        "FORECAST_PATH",
+        "FUTURE_PATH",
+        "PREDICTION_ANGLE",
+        "OUTLOOK",
+    }
+)
+_RETIRED_PUBLIC_FORECAST_OVERLAY_LAYERS = frozenset(
+    {
+        "prediction",
+        "prediction_path",
+        "forecast",
+        "forecast_path",
+        "future",
+        "future_path",
+    }
+)
+_PRIVATE_SHADOW_FORECAST_KEYS = frozenset(
+    {
+        "auto_memory_projection",
+        "countertrend_lane",
+        "high_frequency_forecast",
+        "lstm_candle_sequence_contribution_v3",
+        "lstm_contribution",
+        "memory_projection_active_mode",
+        "memory_projection_current",
+        "memory_projection_future",
+        "memory_projection_predict",
+        "micro_candle_forecast",
+        "prediction_overlay",
+        "scene_forecast_contribution",
+        "scene_forecast_contribution_v3",
+        "timing_forecast",
+        "two_candle_study",
+        "two_candle_study_v3",
+        "projection_focus",
+        "require_memory_projection",
+    }
+)
+
+
+def _is_retired_public_forecast_overlay_v3(value: Mapping[str, Any]) -> bool:
+    overlay = _mapping_to_dict(value.get("overlay")) or dict(value)
+    overlay_type = str(
+        overlay.get("type")
+        or overlay.get("overlay_type")
+        or value.get("type")
+        or value.get("overlay_type")
+        or ""
+    ).strip().upper()
+    layer = str(
+        overlay.get("layer") or value.get("layer") or ""
+    ).strip().lower()
+    if overlay_type in _RETIRED_PUBLIC_FORECAST_OVERLAY_TYPES:
+        return True
+    if layer in _RETIRED_PUBLIC_FORECAST_OVERLAY_LAYERS:
+        return True
+    provenance = " ".join(
+        str(overlay.get(key) or value.get(key) or "").strip().lower()
+        for key in (
+            "source_agent",
+            "source_key",
+            "source_rule",
+            "role",
+            "schema_version",
+        )
+    )
+    return any(
+        token in provenance
+        for token in (
+            "scene_forecast",
+            "lstm_candle_sequence",
+            "two_candle_study",
+            "forecast_path",
+            "future_path",
+        )
+    )
+
+
+def _strip_private_shadow_forecast_fields_v3(value: Any) -> Any:
+    """Copy public state without private forecast blocks or retired lanes."""
+
+    if isinstance(value, Mapping):
+        mapping_value = cast(Mapping[str, Any], value)
+        if _is_retired_public_forecast_overlay_v3(mapping_value):
+            return {}
+        public: dict[str, Any] = {}
+        for raw_key, item in mapping_value.items():
+            key = str(raw_key)
+            normalized_key = key.strip().lower()
+            if (
+                normalized_key in _PRIVATE_SHADOW_FORECAST_KEYS
+                or normalized_key.startswith("forecast_")
+            ):
+                continue
+            public[key] = _strip_private_shadow_forecast_fields_v3(item)
+        return public
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        public_rows: list[Any] = []
+        for item in cast(Sequence[Any], value):
+            if isinstance(item, Mapping) and _is_retired_public_forecast_overlay_v3(
+                cast(Mapping[str, Any], item)
+            ):
+                continue
+            public_rows.append(_strip_private_shadow_forecast_fields_v3(item))
+        return public_rows
+    return value
+
+
 def _compact_public_overlay_suite_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     """Keep full-suite truth visible without shipping every raw overlay body."""
 
@@ -1328,7 +1416,14 @@ def _compact_public_overlay_suite_evidence(value: Mapping[str, Any]) -> dict[str
         for key in _PUBLIC_OVERLAY_SUITE_SUMMARY_KEYS
         if value.get(key) not in (None, "", [], {})
     }
-    rows = _sequence_of_mappings(value.get("normalized_rows")) or _sequence_of_mappings(value.get("rows"))
+    rows = [
+        row
+        for row in (
+            _sequence_of_mappings(value.get("normalized_rows"))
+            or _sequence_of_mappings(value.get("rows"))
+        )
+        if not _is_retired_public_forecast_overlay_v3(row)
+    ]
     type_counts: dict[str, int] = {}
     representative_rows: list[dict[str, Any]] = []
     if rows:
@@ -2176,8 +2271,8 @@ def _scene_forecast_identity_pending_v3(
 
     A pair/timeframe transition is not a forecastable candle event until OCR has
     rebound both identity fields.  Publishing an empty, current-frame tombstone
-    prevents persistence code and public readers from reviving the previous
-    market's twelve-step geometry.
+    prevents persistence code from reviving geometry produced for the previous
+    market. Public readers never receive the private shadow-model body.
     """
 
     return {
@@ -2481,7 +2576,7 @@ def _forecast_snapshot_v3(
             _float_or(existing.get("source_frame_id") or existing_lstm.get("frame_id"), 0.0)
         )
         if candidate_frame_id <= 0 or existing_frame_id <= 0 or candidate_frame_id == existing_frame_id:
-            # Persistence summaries intentionally omit the dense E1-E12 body.
+            # Persistence summaries intentionally omit dense shadow-model geometry.
             # Re-saving that same frame must not downgrade the authoritative
             # forecast snapshot to the summary-only council copy.
             retained_lstm = dict(existing_lstm)
@@ -2606,16 +2701,6 @@ def _forecast_snapshot_v3(
 
 def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact = dict(payload)
-    if "tracking_episode" in compact:
-        compact["tracking_episode"] = normalize_tracking_episode_v1(
-            compact.get("tracking_episode"),
-            session_id=str(compact.get("session_id", "") or ""),
-        )
-    if "tracking_episode_history" in compact:
-        compact["tracking_episode_history"] = update_tracking_episode_history_v1(
-            compact.get("tracking_episode_history"),
-            {},
-        )
     forecast_snapshot = _forecast_snapshot_v3(compact)
     if forecast_snapshot:
         compact["forecast_snapshot_v3"] = forecast_snapshot
@@ -2648,9 +2733,14 @@ def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, 
 
 
 def _compact_persisted_decision_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Apply the same single-snapshot persistence contract to decisions."""
+    """Persist public decision evidence without private forward-model bodies."""
 
-    return _compact_session_persisted_payload(payload)
+    return cast(
+        dict[str, Any],
+        _strip_private_shadow_forecast_fields_v3(
+            _compact_session_persisted_payload(payload)
+        ),
+    )
 
 
 _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
@@ -2658,8 +2748,6 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "session_id",
         "status",
         "tracking_enabled",
-        "tracking_episode",
-        "tracking_episode_history",
         "capture_count",
         "frame_index",
         "chart_frame_id",
@@ -2767,10 +2855,10 @@ def _tracking_summary_with_order_positioning_sources_v3(
     current = dict(payload)
     current["tracking_summary"] = tracking
     try:
-        rows = order_positioning_source_rows_v3(current)
+        rows = order_positioning_evidence_rows_v3(current)
     except Exception:
         # Positioning is evidence-only. A malformed optional source must fail
-        # closed without interrupting the chart capture or tracking episode.
+        # closed without interrupting the chart capture or continuous study.
         LOGGER.debug(
             "Unable to refresh current order-positioning sources.",
             exc_info=True,
@@ -3415,7 +3503,10 @@ def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str,
     if current_packet:
         compact["latest_execution_packet"] = current_packet
         compact["execution_packet_present"] = True
-    return compact
+    return cast(
+        dict[str, Any],
+        _strip_private_shadow_forecast_fields_v3(compact),
+    )
 
 
 def _first_mapping(value: Any) -> dict[str, Any]:
@@ -4806,15 +4897,6 @@ def _slugify(value: str, fallback: str) -> str:
     return slug or fallback
 
 
-def _bounded_storage_slug(value: str, fallback: str, *, max_chars: int) -> str:
-    slug = _slugify(value, fallback)
-    if len(slug) <= max_chars:
-        return slug
-    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:12]
-    prefix_length = max(1, max_chars - len(digest) - 1)
-    return f"{slug[:prefix_length]}-{digest}"
-
-
 def _read_json_payload(path: Path) -> Any:
     data = path.read_bytes()
     try:
@@ -4898,150 +4980,6 @@ def _encode_json_mapping(payload: Mapping[str, Any]) -> bytes:
             separators=(",", ":"),
             default=str,
         ).encode("utf-8")
-
-
-def _compact_durable_json_value(
-    value: Any,
-    *,
-    depth: int = 0,
-    max_depth: int,
-    max_mapping_items: int,
-    max_sequence_items: int,
-    max_string_chars: int,
-) -> Any:
-    """Build a deterministic JSON value without allowing payload fan-out."""
-
-    if depth >= max_depth:
-        return None
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return max(-(2**63), min((2**63) - 1, value))
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, str):
-        return value[:max_string_chars]
-    if isinstance(value, Mapping):
-        output: dict[str, Any] = {}
-        for raw_key, item in list(cast(Mapping[Any, Any], value).items())[
-            :max_mapping_items
-        ]:
-            key = str(raw_key)[:128]
-            if not key:
-                continue
-            compact = _compact_durable_json_value(
-                item,
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_mapping_items=max_mapping_items,
-                max_sequence_items=max_sequence_items,
-                max_string_chars=max_string_chars,
-            )
-            if compact is not None:
-                output[key] = compact
-        return output
-    if isinstance(value, Sequence) and not isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        output_list: list[Any] = []
-        for item in cast(Sequence[Any], value)[:max_sequence_items]:
-            compact = _compact_durable_json_value(
-                item,
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_mapping_items=max_mapping_items,
-                max_sequence_items=max_sequence_items,
-                max_string_chars=max_string_chars,
-            )
-            if compact is not None:
-                output_list.append(compact)
-        return output_list
-    return str(value)[:max_string_chars]
-
-
-def _bounded_durable_json_mapping(
-    payload: Mapping[str, Any],
-    *,
-    max_bytes: int,
-) -> dict[str, Any]:
-    """Keep a durable record under its hard byte budget without making copies."""
-
-    original = dict(payload)
-    if len(_encode_json_mapping(original)) <= max_bytes:
-        return original
-    for limits in (
-        (8, 96, 48, 2048),
-        (7, 64, 24, 512),
-        (6, 32, 16, 192),
-    ):
-        compact = _compact_durable_json_value(
-            original,
-            max_depth=limits[0],
-            max_mapping_items=limits[1],
-            max_sequence_items=limits[2],
-            max_string_chars=limits[3],
-        )
-        compact_mapping = _mapping_to_dict(compact)
-        if compact_mapping and len(_encode_json_mapping(compact_mapping)) <= max_bytes:
-            compact_mapping["storage_compaction"] = {
-                "schema_version": "PG_DURABLE_STORAGE_COMPACTION_V1",
-                "reason": "RECORD_BYTE_LIMIT",
-            }
-            if len(_encode_json_mapping(compact_mapping)) <= max_bytes:
-                return compact_mapping
-
-    history_summary = tracking_episode_history_entry_v1(original)
-    minimal = {
-        key: original.get(key)
-        for key in (
-            "schema_version",
-            "session_id",
-            "episode_id",
-            "state",
-            "revision",
-            "event_cursor",
-            "event_horizon",
-            "started_at",
-            "updated_at",
-            "stopped_at",
-            "completed_at",
-            "terminal_reason",
-            "pair",
-            "timeframe",
-        )
-    }
-    minimal.update(
-        {
-            "anchor": original.get("anchor", {}),
-            "positioning_plan": original.get("positioning_plan", {}),
-            "baseline_forecasts": original.get("baseline_forecasts", {}),
-            "events": original.get("events", []),
-            "history_summary": history_summary,
-            "storage_compaction": {
-                "schema_version": "PG_DURABLE_STORAGE_COMPACTION_V1",
-                "reason": "RECORD_BYTE_LIMIT",
-            },
-        }
-    )
-    compact_minimal = _mapping_to_dict(
-        _compact_durable_json_value(
-            minimal,
-            max_depth=6,
-            max_mapping_items=32,
-            max_sequence_items=16,
-            max_string_chars=128,
-        )
-    )
-    if not compact_minimal:
-        raise ValueError("Unable to compact durable tracking history record.")
-    if len(_encode_json_mapping(compact_minimal)) > max_bytes:
-        compact_minimal.pop("baseline_forecasts", None)
-        compact_minimal.pop("positioning_plan", None)
-        compact_minimal.pop("events", None)
-    if len(_encode_json_mapping(compact_minimal)) > max_bytes:
-        raise ValueError("Durable tracking history byte budget is too small.")
-    return compact_minimal
 
 
 def _json_snapshot_freshness_key(payload: Any, mtime_ns: int) -> tuple[float, int, int]:
@@ -6229,6 +6167,30 @@ def _regression_slope(values: Sequence[float]) -> float:
     return float(slope)
 
 
+def _market_study_namespace_v3(value: Any) -> tuple[str, str]:
+    study = _mapping_to_dict(value)
+    return (
+        str(study.get("symbol") or "").strip().upper(),
+        str(study.get("timeframe") or "").strip().upper(),
+    )
+
+
+def _history_entry_matches_study_namespace_v3(
+    value: Any,
+    namespace: tuple[str, str],
+) -> bool:
+    symbol, timeframe = namespace
+    if not symbol or not timeframe:
+        return False
+    row = _mapping_to_dict(value)
+    row_study = _mapping_to_dict(row.get("market_study_v3"))
+    return bool(
+        str(row_study.get("status") or "").strip().upper() == "STUDIED"
+        and str(row_study.get("closed_candle_key") or "").strip()
+        and _market_study_namespace_v3(row_study) == namespace
+    )
+
+
 def _study_entry(
     signal: Mapping[str, Any],
     tracking: Mapping[str, Any],
@@ -6249,6 +6211,9 @@ def _study_entry(
         tracking.get("support_resistance_context", signal.get("support_resistance_context", {}))
     )
     execution_timing = _mapping_to_dict(tracking.get("execution_timing", signal.get("execution_timing", {})))
+    market_study_v3 = _mapping_to_dict(
+        signal.get("market_study_v3") or tracking.get("market_study_v3")
+    )
     observed_at = str(
         captured_at
         or signal.get("capture_started_at")
@@ -6284,8 +6249,15 @@ def _study_entry(
         "setup": str(signal.get("setup", "") or ""),
         "confidence": _clip01(signal.get("effective_confidence", 0.0)),
         "summary": str(signal.get("summary", "") or ""),
-        "timeframe": str(signal.get("focus_timeframe", "") or ""),
-        "market": str(signal.get("market", "") or ""),
+        "timeframe": str(
+            market_study_v3.get("timeframe")
+            or signal.get("focus_timeframe", "")
+            or ""
+        ),
+        "market": str(
+            market_study_v3.get("symbol") or signal.get("market", "") or ""
+        ),
+        "market_study_v3": market_study_v3,
         "global_direction": str(tracking.get("global_direction", "HOLD") or "HOLD"),
         "local_direction": str(tracking.get("local_direction", "HOLD") or "HOLD"),
         "dominant_side": str(decision_kernel.get("dominant_side", "hold") or "hold").upper(),
@@ -8278,8 +8250,8 @@ def _default_phoenixguard_report(*, message: str = "", status: str = "warming") 
 def _memory_projection_default_note(mode: str) -> str:
     normalized_mode = str(mode or "predict").strip().lower()
     if normalized_mode == "future":
-        return "Run Show Future on the latest locked chart to load the memory-backed future path."
-    return "Run Predict on the latest locked chart to load memory-matched projection."
+        return "Memory-backed future-path evidence is refreshed automatically inside the private study pipeline."
+    return "Memory-matched evidence is refreshed automatically inside the private study pipeline."
 
 
 def _default_memory_projection_payload(
@@ -8550,11 +8522,10 @@ def _mark_memory_projection_payload_stale(
     payload["snapshot_ready"] = False
     payload["snapshot_status"] = "SOURCE_UNAVAILABLE"
     if str(payload.get("status", "")).lower() in {"ready", "degraded"}:
-        label = "Show Future" if str(payload.get("mode", "predict")) == "future" else "Predict"
         payload["status"] = "stale"
         payload["summary"] = (
             f"{str(payload.get('summary', _memory_projection_default_note(mode)) or _memory_projection_default_note(mode)).strip()} "
-            f"The source chart is no longer available. Run {label} again."
+            "The source chart is no longer available; the private study will refresh from new eligible evidence."
         ).strip()
     return payload
 
@@ -14082,7 +14053,7 @@ class PhoenixGuardWindowTrackingAdapter:
                     "live_lightweight": True,
                     "memory_findings": {
                         **_mapping_to_dict(report.get("memory_findings", {})),
-                        "notes": ["Full memory report deferred during live capture; use Predict/Show Future for deep memory retrieval."],
+                        "notes": ["Full memory report deferred during live capture; private memory study continues automatically."],
                     },
                     "current_market_structure": current_market_structure,
                     "memory_to_current_match": memory_match,
@@ -18286,156 +18257,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 )
                 if isinstance(value, Mapping)
             ]
-            episode = normalize_tracking_episode_v1(
-                session_row.get("tracking_episode"),
-                session_id=str(session_row.get("session_id", "") or ""),
-            )
-            episode_anchor = _mapping_to_dict(episode.get("anchor", {}))
-            authoritative_episode_anchor = bool(
-                str(episode.get("state", "") or "").upper() == "ACTIVE"
-                and int(episode.get("event_cursor", 0) or 0) == 0
-                and str(episode_anchor.get("closed_candle_key", "") or "")
-            )
-            authoritative_key = (
-                str(episode_anchor.get("closed_candle_key", "") or "")
-                if authoritative_episode_anchor
-                else ""
-            )
-
-            def candidate_key(candidate: Mapping[str, Any]) -> str:
-                state = _mapping_to_dict(
-                    candidate.get("closed_candle_identity_state", {})
-                )
-                return str(
-                    candidate.get("closed_candle_key")
-                    or state.get("event_key")
-                    or ""
-                )
-
-            episode_candidates: list[dict[str, Any]] = []
-            if authoritative_episode_anchor:
-                baseline = _mapping_to_dict(episode.get("baseline_forecasts", {}))
-                baseline_scene = _mapping_to_dict(baseline.get("scene", {}))
-                anchor_identity = _mapping_to_dict(
-                    episode_anchor.get("closed_candle_identity_state", {})
-                )
-                baseline_key = candidate_key(baseline_scene)
-                if baseline_scene and baseline_key in {"", authoritative_key}:
-                    episode_candidate = copy.deepcopy(baseline_scene)
-                    if anchor_identity:
-                        episode_candidate["closed_candle_identity_state"] = (
-                            copy.deepcopy(anchor_identity)
-                        )
-                    episode_candidate["closed_candle_key"] = authoritative_key
-                    episode_candidate["closed_candle_sequence"] = int(
-                        episode_anchor.get("closed_candle_sequence", 0) or 0
-                    )
-                    episode_candidates.append(episode_candidate)
-
-            matching_session_candidate = any(
-                candidate_key(candidate) == authoritative_key
-                for candidate in [*episode_candidates, *session_candidates]
-            ) if authoritative_episode_anchor else True
-            artifact_candidates: list[dict[str, Any]] = []
-            if authoritative_episode_anchor and not matching_session_candidate:
-                raw_last_decision_path = str(
-                    session_row.get("last_decision_path", "") or ""
-                ).strip()
-                last_decision_path = Path(raw_last_decision_path) if raw_last_decision_path else None
-                artifact_paths: list[Path] = []
-                if last_decision_path is not None:
-                    if last_decision_path.is_file():
-                        artifact_paths.append(last_decision_path)
-                    artifact_dir = last_decision_path.parent
-                    if artifact_dir.is_dir():
-                        artifact_paths.extend(
-                            sorted(
-                                artifact_dir.glob("*_decision.json"),
-                                key=lambda path: (
-                                    path.stat().st_mtime_ns if path.exists() else 0
-                                ),
-                                reverse=True,
-                            )[:24]
-                        )
-                seen_paths: set[str] = set()
-                for artifact_path in artifact_paths:
-                    path_key = str(artifact_path).lower()
-                    if path_key in seen_paths:
-                        continue
-                    seen_paths.add(path_key)
-                    try:
-                        if artifact_path.stat().st_size > 32 * 1024 * 1024:
-                            continue
-                    except OSError:
-                        continue
-                    artifact = _mapping_to_dict(_read_json(artifact_path, {}))
-                    artifact_tracking = _mapping_to_dict(
-                        artifact.get("tracking_summary", {})
-                    )
-                    artifact_signal = _mapping_to_dict(
-                        artifact.get("latest_signal", {})
-                    )
-                    artifact_snapshot = _mapping_to_dict(
-                        artifact.get("forecast_snapshot_v3", {})
-                    )
-                    rows = [
-                        _mapping_to_dict(value)
-                        for value in (
-                            artifact_tracking.get("scene_forecast_contribution"),
-                            artifact_signal.get("scene_forecast_contribution"),
-                            artifact_snapshot.get("scene_forecast_contribution"),
-                        )
-                        if isinstance(value, Mapping)
-                    ]
-                    matches = [
-                        candidate
-                        for candidate in rows
-                        if candidate_key(candidate) == authoritative_key
-                    ]
-                    if matches:
-                        artifact_candidates.extend(matches)
-                        break
-
-            candidates = [
-                candidate
-                for candidate in [
-                    *episode_candidates,
-                    *artifact_candidates,
-                    *session_candidates,
-                ]
-                if not authoritative_episode_anchor
-                or candidate_key(candidate) == authoritative_key
-            ]
-            if authoritative_episode_anchor and not candidates:
-                pair = str(
-                    episode_anchor.get("pair") or episode.get("pair") or ""
-                ).upper()
-                timeframe = str(
-                    episode_anchor.get("timeframe")
-                    or episode.get("timeframe")
-                    or ""
-                ).upper()
-                sequence = int(
-                    episode_anchor.get("closed_candle_sequence", 0) or 0
-                )
-                minimal_state = _mapping_to_dict(
-                    episode_anchor.get("closed_candle_identity_state", {})
-                ) or {
-                    "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
-                    "pair": pair,
-                    "timeframe": timeframe,
-                    "event_key": authoritative_key,
-                    "event_sequence": sequence,
-                }
-                if pair and timeframe:
-                    context_key = (pair, timeframe)
-                    self._scene_candle_identity_states[context_key] = minimal_state
-                    self._scene_event_sequences[context_key] = (
-                        authoritative_key,
-                        sequence,
-                    )
-                self._scene_belief_restore_attempted = False
-                return
+            candidates = list(session_candidates)
             previous = next(
                 (
                     candidate
@@ -24596,18 +24418,6 @@ class _WorkerControl:
     capture_now_evt: threading.Event
 
 
-@dataclass(frozen=True, slots=True)
-class _ForecastActionSnapshot:
-    request_id: str
-    session_id: str
-    mode: str
-    source_payload: dict[str, Any]
-    source_chart_path: str
-    source_frame_index: int
-    source_state_version: int
-    submitted_at: str
-
-
 class ContinuousWindowTrackerService:
     def __init__(
         self,
@@ -24618,20 +24428,14 @@ class ContinuousWindowTrackerService:
         tracking_adapter: object | None = None,
         focus_selector_backend: FocusSelectionBackend | None = None,
         execution_backend: BrokerExecutionBackend | None = None,
-        tracking_episode_archive_root: Path | None = None,
         market_study_root: Path | None = None,
     ) -> None:
         self.observer_service = observer_service
         self.root_dir = Path(root_dir or (RUNTIME.data_dir / "window_tracker"))
         self.sessions_dir = self.root_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.tracking_episode_archive_root = self._resolve_tracking_episode_archive_root(
-            tracking_episode_archive_root
-        )
-        self.tracking_episode_archive_root.mkdir(parents=True, exist_ok=True)
         self.market_study_root = self._resolve_market_study_root(market_study_root)
         self.market_study_root.mkdir(parents=True, exist_ok=True)
-        self._durable_tracking_episode_retention_lock = threading.RLock()
         self.capture_backend = cast(WindowCaptureBackend, capture_backend or WindowsWindowCaptureBackend())
         self.tracking_adapter = cast(WindowTrackingAdapter, tracking_adapter or PhoenixGuardWindowTrackingAdapter())
         configure_market_study = getattr(
@@ -24649,16 +24453,6 @@ class ContinuousWindowTrackerService:
         # held across multi-megabyte JSON preparation or filesystem I/O.
         self._session_commit_locks_guard = threading.Lock()
         self._session_commit_locks: dict[str, Any] = {}
-        self._forecast_action_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="phoenixguard-forecast",
-        )
-        self._forecast_actions: dict[str, dict[str, Any]] = {}
-        self._forecast_action_futures: dict[str, Future[None]] = {}
-        self._forecast_action_keys: dict[tuple[str, str, int, int, str], str] = {}
-        self._latest_forecast_action: dict[tuple[str, str], str] = {}
-        self._forecast_action_created_epoch: dict[str, float] = {}
-        self._forecast_action_shutdown = False
         self._memory_projection_warmup_thread: threading.Thread | None = None
         self._workers: dict[str, _WorkerControl] = {}
         self._next_capture_epoch: dict[str, float] = {}
@@ -24679,40 +24473,6 @@ class ContinuousWindowTrackerService:
         self._last_emergency_hotkey_down = False
         self._start_emergency_hotkey_listener()
         self._start_memory_projection_warmup()
-
-    def _resolve_tracking_episode_archive_root(
-        self,
-        configured_root: Path | None,
-    ) -> Path:
-        """Keep episode memory outside launcher-cleaned runtime authority state."""
-
-        explicit = str(
-            configured_root
-            or os.getenv("PHOENIXGUARD_TRACKING_EPISODE_ARCHIVE_DIR", "")
-            or ""
-        ).strip()
-        if explicit:
-            return Path(explicit).expanduser()
-        runtime_roots = [PROJECT_ROOT / "runtime" / "live"]
-        configured_runtime = str(os.getenv("PHOENIXGUARD_RUNTIME_DIR", "") or "").strip()
-        if configured_runtime:
-            runtime_roots.append(Path(configured_runtime).expanduser())
-        root_resolved = self.root_dir.expanduser().resolve()
-        for runtime_root in runtime_roots:
-            try:
-                root_resolved.relative_to(runtime_root.expanduser().resolve())
-            except ValueError:
-                continue
-            return (
-                PROJECT_ROOT
-                / "data"
-                / "mobile_api"
-                / "window_tracker"
-                / "tracking_episode_archive_v1"
-            )
-        # Isolated/test service roots receive a sibling mirror, allowing a new
-        # ephemeral root to reuse the same explicit archive during restart tests.
-        return self.root_dir.parent / "tracking_episode_archive_v1"
 
     def _resolve_market_study_root(self, configured_root: Path | None) -> Path:
         """Keep lifelong Pair DNA outside launcher-cleaned live runtime data."""
@@ -24913,604 +24673,6 @@ class ContinuousWindowTrackerService:
 
     def _event_log_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
-
-    def _tracking_episode_record_path(
-        self,
-        session_id: str,
-        episode_id: str,
-    ) -> Path:
-        return (
-            self._session_dir(session_id)
-            / "tracking_episodes"
-            / f"{_slugify(episode_id, 'episode')}.json"
-        )
-
-    def _tracking_episode_ledger_path(self, session_id: str) -> Path:
-        return self._session_dir(session_id) / "tracking_episode_events.jsonl"
-
-    def _tracking_episode_state_path(self, session_id: str) -> Path:
-        return self._session_dir(session_id) / "tracking_episode_state.json"
-
-    def _durable_tracking_episode_session_dir(self, session_id: str) -> Path:
-        return self.tracking_episode_archive_root / "sessions" / _bounded_storage_slug(
-            session_id,
-            "session",
-            max_chars=96,
-        )
-
-    def _durable_tracking_episode_record_path(
-        self,
-        session_id: str,
-        episode_id: str,
-    ) -> Path:
-        return (
-            self._durable_tracking_episode_session_dir(session_id)
-            / "episodes"
-            / f"{_bounded_storage_slug(episode_id, 'episode', max_chars=112)}.json"
-        )
-
-    def _durable_tracking_episode_history_path(self, session_id: str) -> Path:
-        return self._durable_tracking_episode_session_dir(session_id) / "history.json"
-
-    def _durable_tracking_episode_ledger_path(self, session_id: str) -> Path:
-        return self._durable_tracking_episode_session_dir(session_id) / "events.jsonl"
-
-    def _durable_tracking_episode_record_max_bytes(self) -> int:
-        max_mb = min(
-            4.0,
-            _env_float(
-                "PHOENIXGUARD_TRACKING_HISTORY_RECORD_MAX_MB",
-                _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_RECORD_MB,
-                0.0625,
-            ),
-        )
-        return int(max_mb * 1024.0 * 1024.0)
-
-    def _write_bounded_durable_tracking_json(
-        self,
-        path: Path,
-        payload: Mapping[str, Any],
-    ) -> None:
-        max_bytes = self._durable_tracking_episode_record_max_bytes()
-        bounded = _bounded_durable_json_mapping(payload, max_bytes=max_bytes)
-        _write_json_atomic(path, bounded)
-
-    @staticmethod
-    def _is_reparse_or_symlink(path: Path) -> bool:
-        try:
-            attributes = int(getattr(path.lstat(), "st_file_attributes", 0) or 0)
-            return path.is_symlink() or bool(
-                attributes & int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-            )
-        except OSError:
-            return True
-
-    @classmethod
-    def _durable_tree_size_and_mtime(cls, directory: Path) -> tuple[int, float]:
-        total_bytes = 0
-        latest_mtime = 0.0
-        if cls._is_reparse_or_symlink(directory):
-            return total_bytes, latest_mtime
-        try:
-            for root, dir_names, file_names in os.walk(directory, followlinks=False):
-                root_path = Path(root)
-                dir_names[:] = [
-                    name
-                    for name in dir_names
-                    if not cls._is_reparse_or_symlink(root_path / name)
-                ]
-                for name in file_names:
-                    path = root_path / name
-                    if cls._is_reparse_or_symlink(path):
-                        continue
-                    try:
-                        metadata = path.stat()
-                    except OSError:
-                        continue
-                    total_bytes += max(0, int(metadata.st_size))
-                    latest_mtime = max(latest_mtime, float(metadata.st_mtime))
-        except OSError:
-            return total_bytes, latest_mtime
-        try:
-            latest_mtime = max(latest_mtime, float(directory.stat().st_mtime))
-        except OSError:
-            pass
-        return total_bytes, latest_mtime
-
-    def _remove_durable_tracking_session_dir(self, directory: Path) -> bool:
-        sessions_root = self.tracking_episode_archive_root / "sessions"
-        try:
-            if directory.parent.resolve() != sessions_root.resolve():
-                return False
-        except OSError:
-            return False
-        if self._is_reparse_or_symlink(directory):
-            LOGGER.warning(
-                "Refusing to prune reparse-point durable tracking history %s.",
-                directory,
-            )
-            return False
-        try:
-            shutil.rmtree(directory)
-            return True
-        except OSError:
-            LOGGER.warning(
-                "Unable to prune old durable tracking history session %s.",
-                directory,
-                exc_info=True,
-            )
-            return False
-
-    def _prune_durable_episode_records(self, session_dir: Path) -> None:
-        episode_dir = session_dir / "episodes"
-        if not episode_dir.is_dir() or self._is_reparse_or_symlink(episode_dir):
-            return
-        max_record_bytes = self._durable_tracking_episode_record_max_bytes()
-        records = sorted(
-            (
-                path
-                for path in episode_dir.glob("*.json")
-                if path.is_file() and not self._is_reparse_or_symlink(path)
-            ),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        retained = {path.name for path in records[:TRACKING_EPISODE_HISTORY_LIMIT]}
-        for record in records[:TRACKING_EPISODE_HISTORY_LIMIT]:
-            try:
-                oversized = record.stat().st_size > max_record_bytes
-            except OSError:
-                continue
-            if not oversized:
-                continue
-            self._write_bounded_durable_tracking_json(
-                record,
-                {
-                    "schema_version": "PG_TRACKING_EPISODE_V1",
-                    "session_id": session_dir.name,
-                    "episode_id": record.stem,
-                    "state": "FAILED",
-                    "revision": 0,
-                    "event_cursor": 0,
-                    "event_horizon": TRACKING_EPISODE_HORIZON,
-                    "terminal_reason": "LEGACY_RECORD_EXCEEDED_STORAGE_CAP",
-                    "storage_compaction": {
-                        "schema_version": "PG_DURABLE_STORAGE_COMPACTION_V1",
-                        "reason": "LEGACY_RECORD_EXCEEDED_STORAGE_CAP",
-                    },
-                },
-            )
-        for old_record in records[TRACKING_EPISODE_HISTORY_LIMIT:]:
-            for candidate in (
-                old_record,
-                old_record.with_suffix(old_record.suffix + ".last_good"),
-            ):
-                try:
-                    candidate.unlink(missing_ok=True)
-                except OSError:
-                    LOGGER.warning(
-                        "Unable to prune old durable tracking episode record %s.",
-                        candidate,
-                    )
-        for fallback in episode_dir.glob("*.json.last_good"):
-            primary_name = fallback.name[: -len(".last_good")]
-            try:
-                fallback_within_cap = fallback.stat().st_size <= max_record_bytes
-            except OSError:
-                fallback_within_cap = False
-            if primary_name in retained and fallback_within_cap:
-                continue
-            try:
-                fallback.unlink()
-            except OSError:
-                LOGGER.warning(
-                    "Unable to prune stale durable tracking fallback %s.",
-                    fallback,
-                )
-        stale_before = time.time() - 300.0
-        for temporary in episode_dir.glob("*.tmp"):
-            try:
-                if temporary.stat().st_mtime < stale_before:
-                    temporary.unlink()
-            except OSError:
-                LOGGER.debug(
-                    "Unable to prune stale durable tracking temporary file %s.",
-                    temporary,
-                    exc_info=True,
-                )
-
-    def _prune_durable_tracking_episode_storage_locked(
-        self,
-        *,
-        protected_session_id: str,
-    ) -> dict[str, Any]:
-        """Delete oldest inactive history until hard count and byte caps hold."""
-
-        sessions_root = self.tracking_episode_archive_root / "sessions"
-        sessions_root.mkdir(parents=True, exist_ok=True)
-        protected_name = _bounded_storage_slug(
-            protected_session_id,
-            "session",
-            max_chars=96,
-        )
-        session_dirs = [
-            path
-            for path in sessions_root.iterdir()
-            if path.is_dir() and not self._is_reparse_or_symlink(path)
-        ]
-        for session_dir in session_dirs:
-            self._prune_durable_episode_records(session_dir)
-
-        max_sessions = min(
-            128,
-            _env_int(
-                "PHOENIXGUARD_TRACKING_HISTORY_MAX_SESSIONS",
-                _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_SESSIONS,
-                1,
-            ),
-        )
-        max_total_mb = min(
-            512.0,
-            _env_float(
-                "PHOENIXGUARD_TRACKING_HISTORY_MAX_TOTAL_MB",
-                _DURABLE_TRACKING_HISTORY_DEFAULT_MAX_TOTAL_MB,
-                0.125,
-            ),
-        )
-        max_total_bytes = int(max_total_mb * 1024.0 * 1024.0)
-        removed: list[str] = []
-
-        def snapshot() -> list[tuple[Path, int, float]]:
-            rows = [
-                (path, *self._durable_tree_size_and_mtime(path))
-                for path in session_dirs
-                if path.exists()
-            ]
-            rows.sort(key=lambda row: (row[2], row[0].name))
-            return rows
-
-        rows = snapshot()
-        while len(rows) > max_sessions:
-            candidate = next(
-                (row for row in rows if row[0].name != protected_name),
-                None,
-            )
-            if candidate is None or not self._remove_durable_tracking_session_dir(
-                candidate[0]
-            ):
-                break
-            removed.append(candidate[0].name)
-            rows = snapshot()
-
-        total_bytes = sum(row[1] for row in rows)
-        while total_bytes > max_total_bytes:
-            candidate = next(
-                (row for row in rows if row[0].name != protected_name),
-                None,
-            )
-            if candidate is None or not self._remove_durable_tracking_session_dir(
-                candidate[0]
-            ):
-                break
-            removed.append(candidate[0].name)
-            rows = snapshot()
-            total_bytes = sum(row[1] for row in rows)
-
-        return {
-            "schema_version": "PG_DURABLE_TRACKING_RETENTION_REPORT_V1",
-            "protected_session": protected_name,
-            "retained_session_count": len(rows),
-            "retained_bytes": total_bytes,
-            "max_sessions": max_sessions,
-            "max_total_bytes": max_total_bytes,
-            "within_limits": len(rows) <= max_sessions
-            and total_bytes <= max_total_bytes,
-            "removed_sessions": removed,
-        }
-
-    def _prune_durable_tracking_episode_storage(
-        self,
-        *,
-        protected_session_id: str,
-    ) -> dict[str, Any]:
-        with self._durable_tracking_episode_retention_lock:
-            return self._prune_durable_tracking_episode_storage_locked(
-                protected_session_id=protected_session_id,
-            )
-
-    def _load_durable_tracking_episode_history(
-        self,
-        session_id: str,
-    ) -> list[dict[str, Any]]:
-        history_path = self._durable_tracking_episode_history_path(session_id)
-        max_bytes = self._durable_tracking_episode_record_max_bytes()
-        candidates = (
-            history_path,
-            history_path.with_suffix(history_path.suffix + ".last_good"),
-        )
-        try:
-            if any(
-                path.exists() and self._is_reparse_or_symlink(path)
-                for path in candidates
-            ):
-                LOGGER.warning(
-                    "Refusing to read reparse-point durable tracking history for %s.",
-                    session_id,
-                )
-                return []
-            if history_path.is_file() and history_path.stat().st_size > max_bytes:
-                LOGGER.warning(
-                    "Ignoring oversized durable tracking history for %s; the next terminal transition will replace it within the hard cap.",
-                    session_id,
-                )
-                return []
-            fallback_path = candidates[1]
-            if fallback_path.is_file() and fallback_path.stat().st_size > max_bytes:
-                fallback_path.unlink()
-        except OSError:
-            return []
-        raw = _mapping_to_dict(_read_json(history_path, {}))
-        return update_tracking_episode_history_v1(raw.get("episodes"), {})
-
-    def _merge_tracking_episode_history(
-        self,
-        session_id: str,
-        history: Any,
-    ) -> list[dict[str, Any]]:
-        combined = [
-            *update_tracking_episode_history_v1(history, {}),
-            *self._load_durable_tracking_episode_history(session_id),
-        ]
-        unique: dict[str, dict[str, Any]] = {}
-        for row in combined:
-            episode_id = str(row.get("episode_id", "") or "").strip()
-            if not episode_id:
-                continue
-            previous = unique.get(episode_id)
-            if previous is None or int(row.get("revision", 0) or 0) >= int(
-                previous.get("revision", 0) or 0
-            ):
-                unique[episode_id] = dict(row)
-        rows = list(unique.values())
-        rows.sort(
-            key=lambda row: str(
-                row.get("ended_at", row.get("started_at", "")) or ""
-            ),
-            reverse=True,
-        )
-        return rows[:TRACKING_EPISODE_HISTORY_LIMIT]
-
-    def _persist_durable_tracking_episode_transition(
-        self,
-        session_id: str,
-        before: Mapping[str, Any],
-        after: Mapping[str, Any],
-        *,
-        source: str,
-    ) -> None:
-        with self._durable_tracking_episode_retention_lock:
-            self._persist_durable_tracking_episode_transition_locked(
-                session_id,
-                before,
-                after,
-                source=source,
-            )
-
-    def _persist_durable_tracking_episode_transition_locked(
-        self,
-        session_id: str,
-        before: Mapping[str, Any],
-        after: Mapping[str, Any],
-        *,
-        source: str,
-    ) -> None:
-        """Mirror episode evidence outside ephemeral live-runtime cleanup."""
-
-        before_episode = normalize_tracking_episode_v1(
-            before,
-            session_id=session_id,
-        )
-        after_episode = normalize_tracking_episode_v1(
-            after,
-            session_id=session_id,
-        )
-        after_episode_id = str(after_episode.get("episode_id", "") or "").strip()
-        before_episode_id = str(before_episode.get("episode_id", "") or "").strip()
-        resetting_to_idle = bool(
-            not after_episode_id
-            and before_episode_id
-            and str(after_episode.get("state", "") or "").strip().upper() == "IDLE"
-        )
-        episode_id = after_episode_id or (before_episode_id if resetting_to_idle else "")
-        if not episode_id:
-            return
-        before_revision = int(before_episode.get("revision", 0) or 0)
-        after_revision = int(after_episode.get("revision", 0) or 0)
-        if (
-            after_episode_id
-            and str(before_episode.get("episode_id", "") or "") == episode_id
-            and before_revision == after_revision
-        ):
-            return
-        record_episode = before_episode if resetting_to_idle else after_episode
-        record_path = self._durable_tracking_episode_record_path(
-            session_id,
-            episode_id,
-        )
-        self._write_bounded_durable_tracking_json(record_path, record_episode)
-        ledger_path = self._durable_tracking_episode_ledger_path(session_id)
-        ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        transition = {
-            "schema_version": "PG_TRACKING_EPISODE_TRANSITION_V1",
-            "timestamp": str(after_episode.get("updated_at", "") or _now_iso())[:64],
-            "session_id": str(session_id)[:256],
-            "episode_id": episode_id[:256],
-            "source": str(source or "episode_transition")[:128],
-            "from_state": str(before_episode.get("state", "IDLE") or "IDLE")[:32],
-            "to_state": str(after_episode.get("state", "IDLE") or "IDLE")[:32],
-            "revision": after_revision,
-            "event_cursor": int(after_episode.get("event_cursor", 0) or 0),
-            "terminal_reason": str(after_episode.get("terminal_reason", "") or "")[:512],
-        }
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(transition, sort_keys=True) + "\n")
-        self._prune_session_event_log(
-            ledger_path,
-            max_mb=min(
-                4.0,
-                _env_float(
-                    "PHOENIXGUARD_TRACKING_HISTORY_LEDGER_MAX_MB",
-                    _DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_MAX_MB,
-                    0.03125,
-                ),
-            ),
-            keep_lines=min(
-                4096,
-                _env_int(
-                    "PHOENIXGUARD_TRACKING_HISTORY_LEDGER_TAIL_LINES",
-                    _DURABLE_TRACKING_HISTORY_DEFAULT_LEDGER_TAIL_LINES,
-                    1,
-                ),
-            ),
-        )
-
-        terminal_history = update_tracking_episode_history_v1([], record_episode)
-        if terminal_history:
-            history_path = self._durable_tracking_episode_history_path(session_id)
-            history = self._merge_tracking_episode_history(
-                session_id,
-                terminal_history,
-            )
-            self._write_bounded_durable_tracking_json(
-                history_path,
-                {
-                    "schema_version": "PG_TRACKING_EPISODE_ARCHIVE_V1",
-                    "session_id": str(session_id),
-                    "episodes": history,
-                    "updated_at": str(
-                        after_episode.get("updated_at", "")
-                        or before_episode.get("updated_at", "")
-                        or _now_iso()
-                    ),
-                },
-            )
-
-        self._prune_durable_episode_records(record_path.parent.parent)
-        retention = self._prune_durable_tracking_episode_storage_locked(
-            protected_session_id=session_id,
-        )
-        if not bool(retention.get("within_limits", False)):
-            LOGGER.warning(
-                "Protected durable tracking history for %s exceeds the global byte cap; no active-session evidence was deleted.",
-                session_id,
-            )
-
-    def _persist_tracking_episode_transition(
-        self,
-        session_id: str,
-        before: Mapping[str, Any],
-        after: Mapping[str, Any],
-        *,
-        source: str,
-    ) -> None:
-        before_episode = normalize_tracking_episode_v1(
-            before,
-            session_id=session_id,
-        )
-        after_episode = normalize_tracking_episode_v1(
-            after,
-            session_id=session_id,
-        )
-        after_episode_id = str(after_episode.get("episode_id", "") or "").strip()
-        before_episode_id = str(before_episode.get("episode_id", "") or "").strip()
-        resetting_to_idle = bool(
-            not after_episode_id
-            and before_episode_id
-            and str(after_episode.get("state", "") or "").strip().upper() == "IDLE"
-        )
-        episode_id = after_episode_id or (before_episode_id if resetting_to_idle else "")
-        if not episode_id:
-            return
-        before_revision = int(before_episode.get("revision", 0) or 0)
-        after_revision = int(after_episode.get("revision", 0) or 0)
-        if (
-            after_episode_id
-            and str(before_episode.get("episode_id", "") or "") == episode_id
-            and before_revision == after_revision
-        ):
-            return
-        try:
-            state_snapshot = {
-                key: after_episode.get(key)
-                for key in (
-                    "schema_version",
-                    "session_id",
-                    "episode_id",
-                    "state",
-                    "revision",
-                    "event_cursor",
-                    "event_horizon",
-                    "started_at",
-                    "updated_at",
-                    "stopped_at",
-                    "completed_at",
-                    "terminal_reason",
-                    "pair",
-                    "timeframe",
-                    "permission",
-                )
-            }
-            _write_json_atomic(
-                self._tracking_episode_state_path(session_id),
-                state_snapshot,
-            )
-            record_path = self._tracking_episode_record_path(
-                session_id,
-                episode_id,
-            )
-            record_episode = before_episode if resetting_to_idle else after_episode
-            _write_json_atomic(record_path, record_episode)
-            ledger_path = self._tracking_episode_ledger_path(session_id)
-            ledger_path.parent.mkdir(parents=True, exist_ok=True)
-            events = [
-                dict(cast(Mapping[str, Any], item))
-                for item in cast(Sequence[Any], record_episode.get("events", []))
-                if isinstance(item, Mapping)
-            ]
-            latest_event = events[-1] if events else {}
-            transition = {
-                "schema_version": "PG_TRACKING_EPISODE_TRANSITION_V1",
-                "timestamp": str(after_episode.get("updated_at", "") or _now_iso()),
-                "session_id": str(session_id),
-                "episode_id": episode_id,
-                "source": str(source or "episode_transition"),
-                "from_state": str(before_episode.get("state", "IDLE") or "IDLE"),
-                "to_state": str(after_episode.get("state", "IDLE") or "IDLE"),
-                "revision": after_revision,
-                "event_cursor": int(after_episode.get("event_cursor", 0) or 0),
-                "event_id": str(latest_event.get("event_id", "") or ""),
-                "terminal_reason": str(after_episode.get("terminal_reason", "") or ""),
-            }
-            with ledger_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(transition, sort_keys=True) + "\n")
-            self._prune_session_event_log(ledger_path)
-        except Exception:
-            LOGGER.exception(
-                "Unable to persist tracking episode transition for %s.",
-                session_id,
-            )
-        try:
-            self._persist_durable_tracking_episode_transition(
-                session_id,
-                before_episode,
-                after_episode,
-                source=source,
-            )
-        except Exception:
-            LOGGER.exception(
-                "Unable to persist durable tracking episode transition for %s.",
-                session_id,
-            )
 
     def _prune_session_event_log(
         self,
@@ -27801,14 +26963,6 @@ class ContinuousWindowTrackerService:
             "observer_policy": dict(_mapping_to_dict(raw.get("observer_policy", {}))),
             "status": status,
             "tracking_enabled": tracking_enabled,
-            "tracking_episode": normalize_tracking_episode_v1(
-                raw.get("tracking_episode"),
-                session_id=session_id,
-            ),
-            "tracking_episode_history": self._merge_tracking_episode_history(
-                session_id,
-                raw.get("tracking_episode_history"),
-            ),
             "created_at": str(raw.get("created_at", "") or _now_iso()),
             "updated_at": str(raw.get("updated_at", "") or _now_iso()),
             "last_capture_started_at": str(raw.get("last_capture_started_at", "") or ""),
@@ -27995,14 +27149,6 @@ class ContinuousWindowTrackerService:
                 "observer_policy": dict(observer_policy or {}),
                 "status": "awaiting_focus",
                 "tracking_enabled": False,
-                "tracking_episode": default_tracking_episode_v1(
-                    session_id=normalized_session_id
-                ),
-                # Only terminal summaries cross a launcher/runtime restart.
-                # Live episode permission always starts IDLE in a new session.
-                "tracking_episode_history": self._load_durable_tracking_episode_history(
-                    normalized_session_id
-                ),
                 "created_at": _now_iso(),
                 "updated_at": _now_iso(),
                 "last_capture_at": "",
@@ -28544,17 +27690,14 @@ class ContinuousWindowTrackerService:
 
     def latest_artifact_path(self, session_id: str, artifact_kind: str) -> Path:
         kind = str(artifact_kind or "").strip().lower()
+        if kind in {"memory-reference", "projection"}:
+            raise FileNotFoundError(kind)
         if kind in {"window", "frame"}:
             payload = self._load_session_with_display_state(session_id)
             if not payload:
                 payload = self._require_session(session_id)
         else:
             payload = self._require_session(session_id)
-        active_mode = str(payload.get("memory_projection_active_mode", "") or "").strip().lower()
-        active_projection = self._normalized_session_memory_projection(
-            payload,
-            mode="future" if active_mode == "future" else "predict",
-        )
         candidates = {
             "window": str(payload.get("last_display_window_path", "") or payload.get("last_window_path", "") or ""),
             "frame": str(payload.get("last_frame_path", "") or ""),
@@ -28563,8 +27706,6 @@ class ContinuousWindowTrackerService:
             "overlay": str(payload.get("last_overlay_path", "") or ""),
             "full-overlay": str(payload.get("last_full_overlay_path", "") or ""),
             "decision": str(payload.get("last_decision_path", "") or ""),
-            "memory-reference": str(active_projection.get("reference_image_path", "") or ""),
-            "projection": str(active_projection.get("projection_image_path", "") or ""),
         }
         raw_path = candidates.get(kind, "")
         if raw_path:
@@ -28581,8 +27722,6 @@ class ContinuousWindowTrackerService:
             "overlay": ["*_overlay.jpg", "*_overlay.jpeg", "*_overlay.png", "*_full_overlay.jpg", "*_full_overlay.jpeg", "*_full_overlay.png"],
             "full-overlay": ["*_full_overlay.jpg", "*_full_overlay.jpeg", "*_full_overlay.png", "*_overlay.png"],
             "decision": ["*_decision.json"],
-            "memory-reference": ["*_memory_reference.png"],
-            "projection": ["*_projection.png"],
         }
         for pattern in fallback_patterns.get(kind, []):
             candidates_paths = sorted(
@@ -28595,169 +27734,6 @@ class ContinuousWindowTrackerService:
                     return candidate
 
         raise FileNotFoundError(kind)
-
-    def get_tracking_episode(self, session_id: str) -> dict[str, Any]:
-        payload = self._require_session(session_id)
-        return normalize_tracking_episode_v1(
-            payload.get("tracking_episode"),
-            session_id=str(payload.get("session_id", session_id) or session_id),
-        )
-
-    def get_tracking_episode_readiness(self, session_id: str) -> dict[str, Any]:
-        payload = self._require_session(session_id)
-        readiness = tracking_episode_readiness_v1(payload)
-        readiness["schema_version"] = "PG_TRACKING_EPISODE_READINESS_V1"
-        readiness["session_id"] = str(
-            payload.get("session_id", session_id) or session_id
-        )
-        readiness["current"] = normalize_tracking_episode_v1(
-            payload.get("tracking_episode"),
-            session_id=str(payload.get("session_id", session_id) or session_id),
-        )
-        return readiness
-
-    def start_tracking_episode(self, session_id: str) -> dict[str, Any]:
-        """Start a user episode without changing capture-worker lifecycle state."""
-
-        normalized_session_id = str(session_id or "").strip()
-        with self._session_commit_lock_for(normalized_session_id):
-            payload = self._require_session(normalized_session_id)
-            normalized_session_id = str(
-                payload.get("session_id", normalized_session_id)
-                or normalized_session_id
-            )
-            before = normalize_tracking_episode_v1(
-                payload.get("tracking_episode"),
-                session_id=normalized_session_id,
-            )
-            now_iso = _now_iso()
-            after = start_tracking_episode_v1(
-                before,
-                payload,
-                episode_id=f"episode-{uuid4().hex}",
-                now_iso=now_iso,
-            )
-            if after == before:
-                return after
-            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
-                payload.get("tracking_episode_history"),
-                before,
-            )
-            payload["tracking_episode"] = after
-            payload["updated_at"] = now_iso
-            payload["__control_write_v3"] = True
-            self._save_session(payload)
-            self._persist_tracking_episode_transition(
-                normalized_session_id,
-                before,
-                after,
-                source="start_tracking",
-            )
-            self._write_session_event_log(
-                normalized_session_id,
-                "tracking_episode_started",
-                episode_id=str(after.get("episode_id", "") or ""),
-                event_horizon=int(after.get("event_horizon", 12) or 12),
-                state=str(after.get("state", "ACTIVE") or "ACTIVE"),
-            )
-            return after
-
-    def stop_tracking_episode(
-        self,
-        session_id: str,
-        *,
-        reason: str = "manual_stop",
-    ) -> dict[str, Any]:
-        """Stop only the user episode; workers, models, cache, and history stay warm."""
-
-        normalized_session_id = str(session_id or "").strip()
-        with self._session_commit_lock_for(normalized_session_id):
-            payload = self._require_session(normalized_session_id)
-            normalized_session_id = str(
-                payload.get("session_id", normalized_session_id)
-                or normalized_session_id
-            )
-            before = normalize_tracking_episode_v1(
-                payload.get("tracking_episode"),
-                session_id=normalized_session_id,
-            )
-            now_iso = _now_iso()
-            after = stop_tracking_episode_v1(
-                before,
-                session_id=normalized_session_id,
-                now_iso=now_iso,
-                reason=reason,
-            )
-            if after == before:
-                return after
-            payload["tracking_episode"] = after
-            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
-                payload.get("tracking_episode_history"),
-                after,
-            )
-            payload["updated_at"] = now_iso
-            payload["__control_write_v3"] = True
-            self._save_session(payload)
-            self._persist_tracking_episode_transition(
-                normalized_session_id,
-                before,
-                after,
-                source="stop_tracking",
-            )
-            self._write_session_event_log(
-                normalized_session_id,
-                "tracking_episode_stopped",
-                episode_id=str(after.get("episode_id", "") or ""),
-                event_cursor=int(after.get("event_cursor", 0) or 0),
-                state=str(after.get("state", "STOPPED") or "STOPPED"),
-                reason=str(reason or "manual_stop"),
-            )
-            return after
-
-    def reset_tracking_episode(self, session_id: str) -> dict[str, Any]:
-        """Reset only a terminal episode pointer; workers and model state stay warm."""
-
-        normalized_session_id = str(session_id or "").strip()
-        with self._session_commit_lock_for(normalized_session_id):
-            payload = self._require_session(normalized_session_id)
-            normalized_session_id = str(
-                payload.get("session_id", normalized_session_id)
-                or normalized_session_id
-            )
-            before = normalize_tracking_episode_v1(
-                payload.get("tracking_episode"),
-                session_id=normalized_session_id,
-            )
-            after = reset_tracking_episode_v1(
-                before,
-                session_id=normalized_session_id,
-            )
-            if after == before:
-                return after
-            now_iso = _now_iso()
-            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
-                payload.get("tracking_episode_history"),
-                before,
-            )
-            payload["tracking_episode"] = after
-            payload["updated_at"] = now_iso
-            payload["__control_write_v3"] = True
-            self._save_session(payload)
-            self._persist_tracking_episode_transition(
-                normalized_session_id,
-                before,
-                after,
-                source="reset_tracking",
-            )
-            self._write_session_event_log(
-                normalized_session_id,
-                "tracking_episode_reset",
-                archived_episode_id=str(before.get("episode_id", "") or ""),
-                archived_state=str(before.get("state", "IDLE") or "IDLE"),
-                event_cursor=int(before.get("event_cursor", 0) or 0),
-                state="IDLE",
-            )
-            return after
 
     def start_session(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -28784,7 +27760,7 @@ class ContinuousWindowTrackerService:
             # saved session can therefore still be running even though the new
             # service instance has no worker.  Treat Start as an idempotent
             # reconciliation in that state: recreate only the missing worker
-            # and retain the captured frame, forecast, episode, and history.
+            # and retain the captured frame, private council state, and history.
             with self._lock:
                 worker = self._workers.get(normalized_session_id)
                 worker_was_alive = bool(worker is not None and worker.thread.is_alive())
@@ -29642,7 +28618,7 @@ class ContinuousWindowTrackerService:
         return finish("clicked", str(click_result.get("message", f"Clicked demo {selected_side}.") or f"Clicked demo {selected_side}."))
 
     @staticmethod
-    def _normalize_forecast_action_mode(mode: object) -> str:
+    def _normalize_memory_projection_mode(mode: object) -> str:
         return "future" if str(mode or "").strip().lower() == "future" else "predict"
 
     def _memory_projection_source(
@@ -29804,22 +28780,9 @@ class ContinuousWindowTrackerService:
         source_frame_index: int,
         source_state_version: int,
         source_chart_path: str,
-        request_id: str = "",
     ) -> tuple[dict[str, Any], bool]:
         with self._lock:
             payload = self._require_session(session_id)
-            latest_request_id = self._latest_forecast_action.get((session_id, mode), "")
-            if request_id and latest_request_id != request_id:
-                return self._stale_projection_payload(projection_payload, mode=mode), False
-            if request_id:
-                action = self._forecast_actions.get(request_id)
-                if action is None or (
-                    bool(action.get("terminal", False))
-                    and str(action.get("status", "") or "").lower() == "error"
-                ):
-                    # A timed-out or shutdown action must never publish a late
-                    # forecast into a newer live session revision.
-                    return self._stale_projection_payload(projection_payload, mode=mode), False
             source_current = self._projection_source_is_current(
                 payload,
                 frame_index=source_frame_index,
@@ -29848,419 +28811,8 @@ class ContinuousWindowTrackerService:
             self._save_session(payload)
         return committed, source_current
 
-    @staticmethod
-    def _forecast_action_key(snapshot: _ForecastActionSnapshot) -> tuple[str, str, int, int, str]:
-        return (
-            snapshot.session_id,
-            snapshot.mode,
-            snapshot.source_frame_index,
-            snapshot.source_state_version,
-            snapshot.source_chart_path,
-        )
-
-    @staticmethod
-    def _public_forecast_action_payload(action: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "schema_version": _FORECAST_ACTION_SCHEMA_VERSION,
-            "request_id": str(action.get("request_id", "") or ""),
-            "session_id": str(action.get("session_id", "") or ""),
-            "mode": str(action.get("mode", "predict") or "predict"),
-            "status": str(action.get("status", "error") or "error"),
-            "terminal": bool(action.get("terminal", False)),
-            "cached": bool(action.get("cached", False)),
-            "is_current": bool(action.get("is_current", False)),
-            "snapshot_ready": bool(action.get("snapshot_ready", False)),
-            "snapshot_status": str(action.get("snapshot_status", "UNAVAILABLE") or "UNAVAILABLE"),
-            "source_frame_index": int(action.get("source_frame_index", 0) or 0),
-            "source_state_version": int(action.get("source_state_version", 0) or 0),
-            "current_frame_index": int(action.get("current_frame_index", 0) or 0),
-            "source_frame_age": max(0, int(action.get("source_frame_age", 0) or 0)),
-            "trade_authorized": False,
-            "submitted_at": str(action.get("submitted_at", "") or ""),
-            "started_at": str(action.get("started_at", "") or ""),
-            "completed_at": str(action.get("completed_at", "") or ""),
-            "summary": str(action.get("summary", "") or ""),
-            "poll_after_ms": _FORECAST_ACTION_POLL_AFTER_MS,
-            "status_url": str(action.get("status_url", "") or ""),
-        }
-
-    def _prune_forecast_actions_locked(self) -> None:
-        if len(self._forecast_actions) < _FORECAST_ACTION_MAX_RETAINED:
-            return
-        terminal_ids = sorted(
-            (
-                request_id
-                for request_id, action in self._forecast_actions.items()
-                if bool(action.get("terminal", False))
-            ),
-            key=lambda request_id: self._forecast_action_created_epoch.get(request_id, 0.0),
-        )
-        for request_id in terminal_ids:
-            if len(self._forecast_actions) < _FORECAST_ACTION_MAX_RETAINED:
-                break
-            self._forecast_actions.pop(request_id, None)
-            future = self._forecast_action_futures.get(request_id)
-            if future is None or future.done():
-                self._forecast_action_futures.pop(request_id, None)
-            self._forecast_action_created_epoch.pop(request_id, None)
-            for key, value in list(self._forecast_action_keys.items()):
-                if value == request_id:
-                    self._forecast_action_keys.pop(key, None)
-            for key, value in list(self._latest_forecast_action.items()):
-                if value == request_id:
-                    self._latest_forecast_action.pop(key, None)
-
-    def _store_cached_forecast_action_locked(
-        self,
-        snapshot: _ForecastActionSnapshot,
-        projection_payload: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        status_value = str(projection_payload.get("status", "ready") or "ready").lower()
-        completed_at = str(projection_payload.get("generated_at", "") or _now_iso())
-        action = {
-            "request_id": snapshot.request_id,
-            "session_id": snapshot.session_id,
-            "mode": snapshot.mode,
-            "status": status_value,
-            "terminal": True,
-            "cached": True,
-            "is_current": True,
-            "snapshot_ready": False,
-            "snapshot_status": "CURRENT",
-            "source_frame_index": snapshot.source_frame_index,
-            "source_state_version": snapshot.source_state_version,
-            "current_frame_index": snapshot.source_frame_index,
-            "source_frame_age": 0,
-            "trade_authorized": False,
-            "source_chart_path": snapshot.source_chart_path,
-            "submitted_at": snapshot.submitted_at,
-            "started_at": completed_at,
-            "completed_at": completed_at,
-            "summary": str(projection_payload.get("summary", "Forecast ready for the current chart.") or ""),
-            "status_url": (
-                f"/v1/mobile/window-tracker/sessions/{snapshot.session_id}"
-                f"/forecast-actions/{snapshot.request_id}"
-            ),
-        }
-        key = self._forecast_action_key(snapshot)
-        self._forecast_actions[snapshot.request_id] = action
-        self._forecast_action_keys[key] = snapshot.request_id
-        self._latest_forecast_action[(snapshot.session_id, snapshot.mode)] = snapshot.request_id
-        self._forecast_action_created_epoch[snapshot.request_id] = _now_epoch()
-        return self._public_forecast_action_payload(action)
-
-    def enqueue_memory_projection(self, session_id: str, *, mode: str) -> dict[str, Any]:
-        normalized_mode = self._normalize_forecast_action_mode(mode)
-        payload, chart_path = self._memory_projection_source(
-            session_id,
-            force_capture_if_missing=False,
-        )
-        resolved_session_id = str(payload["session_id"])
-        source_frame_index = int(payload.get("frame_index", 0) or 0)
-        source_state_version = int(payload.get("state_version", 0) or 0)
-        submitted_at = _now_iso()
-        snapshot = _ForecastActionSnapshot(
-            request_id=uuid4().hex,
-            session_id=resolved_session_id,
-            mode=normalized_mode,
-            source_payload=dict(payload),
-            source_chart_path=str(chart_path),
-            source_frame_index=source_frame_index,
-            source_state_version=source_state_version,
-            submitted_at=submitted_at,
-        )
-        key = self._forecast_action_key(snapshot)
-        with self._lock:
-            self._prune_forecast_actions_locked()
-            existing_request_id = self._forecast_action_keys.get(key, "")
-            existing_action = self._forecast_actions.get(existing_request_id)
-            if existing_action is not None:
-                existing_status = str(existing_action.get("status", "") or "").lower()
-                if not bool(existing_action.get("terminal", False)):
-                    return self._public_forecast_action_payload(existing_action)
-                if (
-                    existing_status in {"ready", "degraded"}
-                    and bool(existing_action.get("is_current", False))
-                ):
-                    existing_action["cached"] = True
-                    return self._public_forecast_action_payload(existing_action)
-
-            stored_projection = _normalize_memory_projection_payload(
-                payload.get(f"memory_projection_{normalized_mode}", {}),
-                mode=normalized_mode,
-            )
-            stored_status = str(stored_projection.get("status", "") or "").lower()
-            stored_frame_index = int(_float_or(stored_projection.get("source_frame_index", -1), -1.0))
-            stored_state_version = int(_float_or(stored_projection.get("source_state_version", -1), -1.0))
-            stored_is_current = self._projection_source_is_current(
-                payload,
-                frame_index=stored_frame_index,
-                state_version=stored_state_version,
-                chart_path=str(stored_projection.get("source_chart_path", "") or ""),
-            )
-            if stored_status in {"ready", "degraded"} and stored_is_current:
-                return self._store_cached_forecast_action_locked(snapshot, stored_projection)
-
-            pending_count = sum(
-                1
-                for future in self._forecast_action_futures.values()
-                if not future.done()
-            )
-            if self._forecast_action_shutdown:
-                raise ValueError("Forecast actions are unavailable while the tracker is shutting down.")
-            if pending_count >= _FORECAST_ACTION_MAX_PENDING:
-                raise ValueError("Forecast action queue is full. Try again shortly.")
-            action = {
-                "request_id": snapshot.request_id,
-                "session_id": resolved_session_id,
-                "mode": normalized_mode,
-                "status": "queued",
-                "terminal": False,
-                "cached": False,
-                "is_current": True,
-                "snapshot_ready": False,
-                "snapshot_status": "CURRENT",
-                "source_frame_index": source_frame_index,
-                "source_state_version": source_state_version,
-                "current_frame_index": source_frame_index,
-                "source_frame_age": 0,
-                "trade_authorized": False,
-                "source_chart_path": str(chart_path),
-                "submitted_at": submitted_at,
-                "started_at": "",
-                "completed_at": "",
-                "summary": "Forecast queued for the current chart.",
-                "status_url": (
-                    f"/v1/mobile/window-tracker/sessions/{resolved_session_id}"
-                    f"/forecast-actions/{snapshot.request_id}"
-                ),
-            }
-            self._forecast_actions[snapshot.request_id] = action
-            self._forecast_action_keys[key] = snapshot.request_id
-            self._latest_forecast_action[(resolved_session_id, normalized_mode)] = snapshot.request_id
-            self._forecast_action_created_epoch[snapshot.request_id] = _now_epoch()
-            try:
-                future = self._forecast_action_executor.submit(
-                    self._run_memory_projection_action,
-                    snapshot,
-                )
-            except RuntimeError as exc:
-                action.update(
-                    {
-                        "status": "error",
-                        "terminal": True,
-                        "is_current": False,
-                        "completed_at": _now_iso(),
-                        "summary": "Forecast could not be queued. Try again shortly.",
-                    }
-                )
-                raise ValueError(str(action["summary"])) from exc
-            self._forecast_action_futures[snapshot.request_id] = future
-            return self._public_forecast_action_payload(action)
-
-    def _refresh_forecast_action_currentness_locked(self, action: dict[str, Any]) -> None:
-        if str(action.get("status", "") or "").lower() in {"stale", "error"}:
-            return
-        session_id = str(action.get("session_id", "") or "")
-        mode = self._normalize_forecast_action_mode(action.get("mode", "predict"))
-        request_id = str(action.get("request_id", "") or "")
-        latest_request_id = self._latest_forecast_action.get((session_id, mode), "")
-        if latest_request_id and latest_request_id != request_id:
-            action.update(
-                {
-                    "status": "stale",
-                    "terminal": True,
-                    "is_current": False,
-                    "snapshot_ready": False,
-                    "snapshot_status": "SUPERSEDED",
-                    "trade_authorized": False,
-                    "completed_at": str(action.get("completed_at", "") or _now_iso()),
-                    "summary": "A newer forecast request replaced this one.",
-                }
-            )
-            return
-        # The worker owns an immutable chart path and a copy of the source
-        # payload.  Normal live captures are expected to advance while that
-        # snapshot is being processed; polling must not cancel the in-flight
-        # work merely because the live session has moved on.  Completion does
-        # the compare-and-swap check and lets the dashboard retry the newest
-        # frame when necessary.
-        if not bool(action.get("terminal", False)):
-            created_epoch = self._forecast_action_created_epoch.get(request_id, 0.0)
-            if (
-                created_epoch > 0.0
-                and (_now_epoch() - created_epoch) >= _FORECAST_ACTION_TIMEOUT_SEC
-            ):
-                future = self._forecast_action_futures.get(request_id)
-                if future is not None:
-                    future.cancel()
-                action.update(
-                    {
-                        "status": "error",
-                        "terminal": True,
-                        "is_current": False,
-                        "snapshot_ready": False,
-                        "snapshot_status": "TIMED_OUT",
-                        "trade_authorized": False,
-                        "completed_at": _now_iso(),
-                        "summary": (
-                            "Forecast initialization exceeded the safe time limit. "
-                            "Live chart tracking is still running; retry after warmup."
-                        ),
-                    }
-                )
-                return
-            else:
-                return
-        source_chart_path = str(action.get("source_chart_path", "") or "")
-        try:
-            source_artifact_available = bool(source_chart_path and Path(source_chart_path).is_file())
-        except (OSError, TypeError, ValueError):
-            source_artifact_available = False
-        if not source_artifact_available:
-            action.update(
-                {
-                    "status": "stale",
-                    "terminal": True,
-                    "is_current": False,
-                    "snapshot_ready": False,
-                    "snapshot_status": "SOURCE_UNAVAILABLE",
-                    "trade_authorized": False,
-                    "completed_at": str(action.get("completed_at", "") or _now_iso()),
-                    "summary": "The forecast source chart is no longer available.",
-                }
-            )
-            return
-        payload = self._require_session(session_id)
-        source_current = self._projection_source_is_current(
-            payload,
-            frame_index=int(action.get("source_frame_index", 0) or 0),
-            state_version=int(action.get("source_state_version", 0) or 0),
-            chart_path=str(action.get("source_chart_path", "") or ""),
-        )
-        if source_current:
-            action.update(
-                {
-                    "is_current": True,
-                    "snapshot_ready": False,
-                    "snapshot_status": "CURRENT",
-                    "current_frame_index": int(payload.get("frame_index", 0) or 0),
-                    "source_frame_age": 0,
-                    "trade_authorized": False,
-                }
-            )
-            return
-        current_frame_index = int(payload.get("frame_index", 0) or 0)
-        action.update(
-            {
-                "is_current": False,
-                "snapshot_ready": True,
-                "snapshot_status": "READY",
-                "current_frame_index": current_frame_index,
-                "source_frame_age": max(
-                    0,
-                    current_frame_index - int(action.get("source_frame_index", 0) or 0),
-                ),
-                "trade_authorized": False,
-            }
-        )
-
-    def get_memory_projection_action(self, session_id: str, request_id: str) -> dict[str, Any]:
-        with self._lock:
-            action = self._forecast_actions.get(str(request_id or ""))
-            if action is None or str(action.get("session_id", "") or "") != str(session_id or ""):
-                raise KeyError(request_id)
-            self._refresh_forecast_action_currentness_locked(action)
-            return self._public_forecast_action_payload(action)
-
-    def _run_memory_projection_action(self, snapshot: _ForecastActionSnapshot) -> None:
-        with self._lock:
-            action = self._forecast_actions.get(snapshot.request_id)
-            if action is None or bool(action.get("terminal", False)):
-                return
-            action.update(
-                {
-                    "status": "running",
-                    "started_at": _now_iso(),
-                    "summary": "Building a forecast from the current chart.",
-                }
-            )
-        try:
-            projection_payload = self._build_memory_projection_payload(
-                snapshot.source_payload,
-                snapshot.source_chart_path,
-                mode=snapshot.mode,
-                started_at=snapshot.submitted_at,
-            )
-            committed, source_current = self._commit_memory_projection_payload(
-                snapshot.session_id,
-                projection_payload,
-                mode=snapshot.mode,
-                source_frame_index=snapshot.source_frame_index,
-                source_state_version=snapshot.source_state_version,
-                source_chart_path=snapshot.source_chart_path,
-                request_id=snapshot.request_id,
-            )
-        except Exception:
-            LOGGER.exception("Forecast action %s failed.", snapshot.request_id)
-            with self._lock:
-                action = self._forecast_actions.get(snapshot.request_id)
-                if action is not None:
-                    action.update(
-                        {
-                            "status": "error",
-                            "terminal": True,
-                            "is_current": False,
-                            "completed_at": _now_iso(),
-                            "summary": "Forecast could not be completed for the current chart.",
-                        }
-                    )
-            return
-        with self._lock:
-            action = self._forecast_actions.get(snapshot.request_id)
-            if action is None:
-                return
-            if (
-                bool(action.get("terminal", False))
-                and str(action.get("status", "") or "").lower() == "error"
-            ):
-                # Polling may have expired this immutable request while a
-                # native model call was completing.  Keep the sanitized
-                # timeout result and reject this late completion.
-                return
-            latest_request_id = self._latest_forecast_action.get(
-                (snapshot.session_id, snapshot.mode),
-                "",
-            )
-            committed_status = str(committed.get("status", "degraded") or "degraded").lower()
-            snapshot_ready = bool(committed.get("snapshot_ready", False))
-            if latest_request_id != snapshot.request_id or (not source_current and not snapshot_ready):
-                committed_status = "stale"
-            if committed_status not in _FORECAST_ACTION_TERMINAL_STATUSES:
-                committed_status = "degraded"
-            action.update(
-                {
-                    "status": committed_status,
-                    "terminal": True,
-                    "cached": False,
-                    "is_current": bool(source_current and latest_request_id == snapshot.request_id),
-                    "snapshot_ready": bool(
-                        snapshot_ready and latest_request_id == snapshot.request_id
-                    ),
-                    "snapshot_status": str(
-                        committed.get("snapshot_status", "CURRENT" if source_current else "UNAVAILABLE")
-                        or "UNAVAILABLE"
-                    ),
-                    "current_frame_index": int(committed.get("current_frame_index", 0) or 0),
-                    "source_frame_age": max(0, int(committed.get("source_frame_age", 0) or 0)),
-                    "trade_authorized": False,
-                    "completed_at": _now_iso(),
-                    "summary": str(committed.get("summary", "Forecast processing completed.") or ""),
-                }
-            )
-
     def run_memory_projection(self, session_id: str, *, mode: str) -> dict[str, Any]:
-        normalized_mode = self._normalize_forecast_action_mode(mode)
+        normalized_mode = self._normalize_memory_projection_mode(mode)
         started_at = _now_iso()
         payload, chart_path = self._memory_projection_source(
             session_id,
@@ -30642,24 +29194,6 @@ class ContinuousWindowTrackerService:
         hotkey_thread = self._emergency_hotkey_thread
         if hotkey_thread is not None and hotkey_thread.is_alive():
             hotkey_thread.join(timeout=2.0)
-
-        with self._lock:
-            self._forecast_action_shutdown = True
-            for request_id, future in self._forecast_action_futures.items():
-                if future.done() or not future.cancel():
-                    continue
-                action = self._forecast_actions.get(request_id)
-                if action is not None:
-                    action.update(
-                        {
-                            "status": "error",
-                            "terminal": True,
-                            "is_current": False,
-                            "completed_at": _now_iso(),
-                            "summary": "Forecast action stopped because the tracker is shutting down.",
-                        }
-                    )
-        self._forecast_action_executor.shutdown(wait=False, cancel_futures=True)
 
         with self._lock:
             workers = list(self._workers.items())
@@ -34626,34 +33160,10 @@ class ContinuousWindowTrackerService:
                 visual_payload
             )
             visual_payload["tracking_summary"] = tracking_summary
-            # Episode observation is a visual-market concern, not an execution
-            # concern.  Fast blocked captures return before the later broker
-            # execution commit, so advance the authoritative persisted episode
-            # while the per-session commit lock is still held.
             visual_forecast_snapshot = _forecast_snapshot_v3(visual_payload)
             if visual_forecast_snapshot:
                 visual_payload["forecast_snapshot_v3"] = visual_forecast_snapshot
-            episode_before_visual_commit = normalize_tracking_episode_v1(
-                visual_payload.get("tracking_episode"),
-                session_id=str(visual_payload["session_id"]),
-            )
-            episode_after_visual_commit = advance_tracking_episode_v1(
-                episode_before_visual_commit,
-                visual_payload,
-                now_iso=visual_published_at,
-            )
-            visual_payload["tracking_episode"] = episode_after_visual_commit
-            visual_payload["tracking_episode_history"] = update_tracking_episode_history_v1(
-                visual_payload.get("tracking_episode_history"),
-                episode_after_visual_commit,
-            )
             self._save_session(visual_payload)
-            self._persist_tracking_episode_transition(
-                str(visual_payload["session_id"]),
-                episode_before_visual_commit,
-                episode_after_visual_commit,
-                source="visual_capture_commit",
-            )
         if fast_visual_only_when_blocked:
             blocked_forecast_snapshot = _forecast_snapshot_v3(visual_payload)
             blocked_decision_model_council_result = (
@@ -34956,37 +33466,45 @@ class ContinuousWindowTrackerService:
         _write_json_atomic(decision_path, decision_payload)
         mark_stage("decision_write")
 
-        history: list[dict[str, Any]] = [
+        current_market_study_v3 = _mapping_to_dict(
+            latest_signal.get("market_study_v3")
+            or tracking_summary.get("market_study_v3")
+        )
+        current_study_namespace = _market_study_namespace_v3(
+            current_market_study_v3
+        )
+        retained_history: list[dict[str, Any]] = [
             dict(cast(Mapping[str, Any], item))
             for item in cast(Sequence[Any], payload.get("recent_studies", []))
             if isinstance(item, Mapping)
+            and _history_entry_matches_study_namespace_v3(
+                item,
+                current_study_namespace,
+            )
         ]
-        history.insert(
-            0,
-            _study_entry(
-                latest_signal,
-                tracking_summary,
-                captured_at=capture_started_iso,
-                published_at=published_at,
-                frame_id=frame_index,
-                source_capture_id=(
-                    f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
-                    f"{int(capture_started_epoch * 1000.0)}"
-                ),
+        newest_history_entry = _study_entry(
+            latest_signal,
+            tracking_summary,
+            captured_at=capture_started_iso,
+            published_at=published_at,
+            frame_id=frame_index,
+            source_capture_id=(
+                f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
+                f"{int(capture_started_epoch * 1000.0)}"
             ),
+        )
+        history = (
+            [newest_history_entry, *retained_history]
+            if _history_entry_matches_study_namespace_v3(
+                newest_history_entry,
+                current_study_namespace,
+            )
+            else []
         )
         history = history[:24]
 
         with self._session_commit_lock_for(str(payload["session_id"])):
             persisted_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {}))
-            episode_before_commit = normalize_tracking_episode_v1(
-                persisted_payload.get("tracking_episode"),
-                session_id=str(payload["session_id"]),
-            )
-            # Start/Stop controls may commit while this capture is in flight.
-            # The persisted episode is authoritative under the same lock, so a
-            # stale capture can neither reopen a stopped episode nor erase it.
-            payload["tracking_episode"] = episode_before_commit
             persisted_last_capture_epoch = _float_or(persisted_payload.get("last_capture_epoch", 0.0), 0.0)
             if persisted_last_capture_epoch > float(published_epoch) + 0.001:
                 LOGGER.warning(
@@ -35140,23 +33658,7 @@ class ContinuousWindowTrackerService:
                 payload
             )
             payload["tracking_summary"] = tracking_summary
-            episode_after_commit = advance_tracking_episode_v1(
-                episode_before_commit,
-                payload,
-                now_iso=published_at,
-            )
-            payload["tracking_episode"] = episode_after_commit
-            payload["tracking_episode_history"] = update_tracking_episode_history_v1(
-                persisted_payload.get("tracking_episode_history"),
-                episode_after_commit,
-            )
             self._save_session(payload)
-            self._persist_tracking_episode_transition(
-                str(payload["session_id"]),
-                episode_before_commit,
-                episode_after_commit,
-                source="atomic_capture_commit",
-            )
             mark_stage("persist_session")
             self._write_session_event_log(
                 str(payload["session_id"]),
@@ -35686,14 +34188,6 @@ class ContinuousWindowTrackerService:
     def _public_session_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         public = _synchronize_session_versions(payload)
         session_id = str(public.get("session_id", "") or "")
-        public["tracking_episode"] = normalize_tracking_episode_v1(
-            public.get("tracking_episode"),
-            session_id=session_id,
-        )
-        public["tracking_episode_history"] = update_tracking_episode_history_v1(
-            public.get("tracking_episode_history"),
-            {},
-        )
         public["manual_focus_region"] = _public_manual_focus_region(public.get("manual_focus_region", {}))
         public["event_log_path"] = str(self._event_log_path(session_id)) if session_id else ""
         public["focus_selector"] = _public_focus_selector_state(
@@ -35856,20 +34350,28 @@ class ContinuousWindowTrackerService:
         latest_signal.setdefault("capture_interval_sec", public.get("capture_interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC))
         latest_signal.setdefault("adaptive_timer_reason", public["adaptive_timer_reason"])
         public["latest_signal"] = latest_signal
-        if not isinstance(public.get("recent_studies"), list):
-            public["recent_studies"] = []
-        public["memory_projection_predict"] = self._normalized_session_memory_projection(public, mode="predict")
-        public["memory_projection_future"] = self._normalized_session_memory_projection(public, mode="future")
-        active_mode = str(public.get("memory_projection_active_mode", "") or "").strip().lower()
-        if active_mode not in {"predict", "future"}:
-            active_mode = ""
-        public["memory_projection_active_mode"] = active_mode
-        if active_mode == "future":
-            public["memory_projection_current"] = dict(public["memory_projection_future"])
-        elif active_mode == "predict":
-            public["memory_projection_current"] = dict(public["memory_projection_predict"])
-        else:
-            public["memory_projection_current"] = _default_memory_projection_payload(mode="predict")
+        raw_public_recent_studies = public.get("recent_studies")
+        public_recent_studies: Sequence[Any] = (
+            cast(Sequence[Any], raw_public_recent_studies)
+            if isinstance(raw_public_recent_studies, list)
+            else ()
+        )
+        current_public_study = _mapping_to_dict(
+            latest_signal.get("market_study_v3")
+            or tracking_summary.get("market_study_v3")
+        )
+        current_public_namespace = _market_study_namespace_v3(
+            current_public_study
+        )
+        public["recent_studies"] = [
+            dict(cast(Mapping[str, Any], item))
+            for item in cast(Sequence[Any], public_recent_studies)
+            if isinstance(item, Mapping)
+            and _history_entry_matches_study_namespace_v3(
+                item,
+                current_public_namespace,
+            )
+        ]
 
         # Normalize artifact path fields for backward compatibility with dashboard expectations.
         # Prefer explicit chart path, otherwise fall back to display-chart or full-overlay.
@@ -35888,7 +34390,10 @@ class ContinuousWindowTrackerService:
             # Avoid raising in payload normalization; dashboard will handle missing artifacts.
             pass
 
-        return public
+        return cast(
+            dict[str, Any],
+            _strip_private_shadow_forecast_fields_v3(public),
+        )
 
 
 build_high_frequency_candle_cycle_context = _build_high_frequency_candle_cycle_context

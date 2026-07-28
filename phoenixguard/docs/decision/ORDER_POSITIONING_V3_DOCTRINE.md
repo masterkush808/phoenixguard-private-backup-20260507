@@ -5,7 +5,10 @@ Status: binding design and annotation doctrine for PhoenixGuard V3 order-positio
 
 ## Purpose
 
-PhoenixGuard must identify a defensible price area before a move, freeze that area for the tracking episode, and observe whether price approaches, respects, rejects, or invalidates it. It must not drag an entry, target, or invalidation box after every new candle and then present the moved box as if it had been predicted earlier.
+PhoenixGuard must identify a defensible price area from information available at one proven closed
+candle, publish that candidate with immutable source geometry, and then observe whether price
+approaches, respects, rejects, or invalidates it. Continuous study must not drag an entry, target,
+or invalidation box after every new candle and then present the moved box as earlier evidence.
 
 This doctrine governs visualization, weak-supervision candidate generation, human annotation, and future training data. It does not place broker orders and it does not authorize a trade. A box is evidence about positioning; only the existing validated playbook and execution-package contract can grant permission to act.
 
@@ -13,7 +16,7 @@ This doctrine governs visualization, weak-supervision candidate generation, huma
 
 Modern broker semantics are binding. Local teaching material contributes chart context, but cannot redefine an order type.
 
-| Canonical overlay | Binding meaning at the episode anchor | Required price relationship |
+| Canonical overlay | Binding meaning at the publication anchor | Required price relationship |
 | --- | --- | --- |
 | `BUY_LIMIT_ZONE` | Passive buy opportunity on a pullback into a validated area | Below current price, or explicitly at price within a documented tolerance |
 | `SELL_LIMIT_ZONE` | Passive sell opportunity on a rally into a validated area | Above current price, or explicitly at price within a documented tolerance |
@@ -44,7 +47,7 @@ The page references below use the PDF file-page index. It can differ from a book
 | --- | ---: | --- | --- |
 | *FOREX BLACK BOOK* | 60-62, 121-122, 136, 157 | Treat support and resistance as areas; draw trendlines from real structure; channel edges can locate passive opportunity; define and test entry, stop, and target rules. | A line touch is not automatic permission. Page 20 uses legacy limit-order wording that conflicts with modern FINRA/CME semantics and is not canonical. |
 | *HLZ - Market Structure And Powerful Setups* | 26, 28-29, 46, 51-53, 78, 80-81, 105, 115 | Liquidity often clusters around stops; structure breaks, order-block returns, sweeps, and lower-timeframe confirmation can locate candidate areas; protective invalidation belongs beyond the defended structure. | A liquidity sweep or named order block does not guarantee reversal. A session time is context, not execution authority. |
-| *secrets revealed $10 000 cost price-1-1* | 14, 17, 20, 26-27, 36, 41, 43-45, 51, 53, 94 | Validate trendline geometry first; use horizontal and diagonal confluence; stop-entry evidence belongs beyond a closed confirmation candle's high or low; protection belongs beyond a nearby swing with room. | Do not force a trendline to fit, chase a trigger far from the line, or continuously move an episode's original area. |
+| *secrets revealed $10 000 cost price-1-1* | 14, 17, 20, 26-27, 36, 41, 43-45, 51, 53, 94 | Validate trendline geometry first; use horizontal and diagonal confluence; stop-entry evidence belongs beyond a closed confirmation candle's high or low; protection belongs beyond a nearby swing with room. | Do not force a trendline to fit, chase a trigger far from the line, or continuously move a published candidate's original area. |
 | *The Power of Japanese Candlestick Charts* | 41, 43-44, 65, 108, 218, 235, 240-241 | Candle patterns require trend and location context; confirmation can be represented beyond pattern or confirmation extremes; windows can behave as support/resistance areas. | A candle name alone is not a zone and is not sufficient for an entry. Countertrend patterns must not override primary structure without confirmation. |
 | *The Art of Currency Trading* | 43-44, 126, 129, 133, 152, 162, 246, 254, 307, 354 | Use technical structure to position entry and invalidation; prefer convergence and pullback positioning to mid-range chasing; leave structural room beyond obvious levels; keep a major-level inventory. | Do not redraw or rescale evidence until it agrees with a desired view. Do not place protection exactly on an obvious line or round number without a justified buffer. |
 
@@ -78,7 +81,8 @@ The page references below use the PDF file-page index. It can differ from a book
 
 - Pullback and retest geometry can support passive limit areas when the current price has not already crossed or left the area.
 - A confirmed break of structure can support a stop-entry area beyond the boundary, provided the trigger is still prospective at publication time.
-- Impulse, pullback, retest, continuation, and current-candle objects are evidence for one episode plan; they must not become a new plan on every candle.
+- Impulse, pullback, retest, continuation, and current-candle objects support one causally published
+  candidate; they must not become replacement geometry on every candle.
 - Mid-range positioning, conflicting higher-timeframe structure, or inadequate room to opposing force produces `NO_VALID_ZONE`.
 
 ### Liquidity and stop clusters
@@ -92,7 +96,8 @@ The page references below use the PDF file-page index. It can differ from a book
 
 Every accepted zone must be reconstructable from the anchor frame. It requires:
 
-1. Pair, timeframe, source lock, capture timestamp, frame identity, closed-candle key, and episode identity.
+1. Pair, timeframe, source lock, capture timestamp, frame identity, closed-candle key, and immutable
+   candidate identity.
 2. Source-image hash, image size, plot bounds, chart-transform identity, pixel bounding box, and normalized bounding box.
 3. The anchor price proxy and the zone's price relationship at creation.
 4. Hard evidence anchors: candle IDs or indices and candle boxes, swing anchors, source zone IDs, or validated trendline IDs.
@@ -103,24 +108,40 @@ The semantic validator must enforce `x2 > x1`, `y2 > y1`, normalized coordinates
 
 A box must be clipped to the plot, never to broker controls, asset tabs, or decorative UI. Thin line evidence may be expanded to a visible band only by a deterministic, recorded tolerance. Expansion cannot cross the current-price relationship required by the order type without an explicit `AT_CURRENT` tolerance reason.
 
-## Episode freeze and live observation
+## Immutable publication and continuous observation
 
-The tracking episode is the unit of prediction and evaluation.
+The unit of causal evaluation is an immutable candidate published at one identity-proven closed
+candle. The surrounding market study continues indefinitely; it is not bounded by an operator
+button or a preset number of future candles.
 
-- At `Start tracking`, the first complete, source-locked closed candle establishes the episode anchor.
-- Candidate geometry is emitted once from information visible at that anchor. The original bounding boxes, order roles, evidence anchors, and rationale are immutable.
-- A later broker scroll or rescale may reproject that immutable geometry only when at least three stable closed-candle IDs prove one global baseline-to-current transform and the fit stays inside bounded scale and residual tolerances. One mutable source box can never move the plan. If the global fit is unproven, the frozen areas are hidden for that frame instead of guessed.
-- Pair, timeframe, and broker-source continuity are mandatory. Sequence and chart-transform identifiers may legitimately advance between frames; they are current-frame lineage evidence, not a reason to force the old pixel coordinates onto a changed chart.
-- The default horizon is 12 completed candle observations. A new screenshot poll is not automatically a new episode.
-- Later frames update observation state only: `UNTOUCHED`, `APPROACHING`, `TOUCHED`, `RESPECTED`, `REJECTED`, `BROKEN`, `INVALIDATED`, or `EXPIRED`.
-- Later frames may record which forecast branch is being favoured, maximum favourable excursion, maximum adverse excursion, and time to touch. They may not rewrite the starting geometry.
-- A trade moving five candles in the expected direction remains a tracked outcome of the original plan. PhoenixGuard must not issue a fresh late prediction on the fifth candle merely because current-price geometry changed.
-- A candidate can be superseded only by an explicit episode reset, pair/timeframe/source-lock change, unusable chart transform, or hard invalidation. Supersession must preserve the original record and name the reason.
-- `Stop and save` ends observation and persists the episode; it must not erase the baseline. `Reset` starts a new episode identity after the prior episode is complete or explicitly abandoned.
+- A complete, source-locked closed candle establishes the candidate publication anchor
+  automatically when all evidence gates pass.
+- Candidate geometry is emitted once from information visible at that anchor. The original bounding
+  boxes, order roles, evidence anchors, and rationale are immutable.
+- A later broker scroll or rescale may reproject that immutable geometry only when at least three
+  stable closed-candle IDs prove one global anchor-to-current transform and the fit stays inside
+  bounded scale and residual tolerances. One mutable source box can never move the candidate. If the
+  global fit is unproven, the published areas are hidden for that frame instead of guessed.
+- Pair, timeframe, and broker-source continuity are mandatory. Sequence and chart-transform
+  identifiers may legitimately advance between frames; they are current-frame lineage evidence,
+  not a reason to force old pixel coordinates onto a changed chart.
+- Every genuinely new closed candle may update observation state once: `UNTOUCHED`, `APPROACHING`,
+  `TOUCHED`, `RESPECTED`, `REJECTED`, `BROKEN`, `INVALIDATED`, or `EXPIRED`. Repeated screenshots do
+  not advance it.
+- Later observations may record maximum favourable excursion, maximum adverse excursion, path
+  efficiency, time to touch, and time in behavioral states. They may not rewrite starting geometry.
+- A move already in progress remains an outcome of its original published candidate. PhoenixGuard
+  must not issue fresh late geometry merely because current-price geometry changed.
+- A candidate can be superseded only by a pair/timeframe/source-lock change, unusable chart
+  transform, hard invalidation, or a newly qualified candidate with a distinct immutable identity.
+  Supersession preserves the original record and names the reason.
+- Stopping the capture service does not rewrite or erase durable candidate evidence. Restart resumes
+  from proven closed-candle identity and source continuity rather than a manual baseline.
 
 ## No-chase rules
 
-- A limit area is invalid at publication if price already passed through it and travelled away before the plan was frozen.
+- A limit area is invalid at publication if price already passed through it and travelled away before
+  the candidate was published.
 - A stop-entry area is invalid at publication if its confirmation boundary was already crossed on a completed candle.
 - A candidate too far from its structural anchor, formed in the middle of a range, or lacking room to opposing structure is marked `NO_VALID_ZONE`.
 - Do not move an old limit area to the latest pullback, move a stop-entry area to the newest high or low, or relabel a missed move as a current opportunity.
@@ -133,10 +154,11 @@ PhoenixGuard does not currently contain a human-labelled supervised detector for
 The honest implementation sequence is:
 
 1. Generate deterministic or weak-supervision candidates from candle geometry, validated supply/demand structure, swing anchors, trendlines, and chart transforms.
-2. Freeze candidates per episode and record their live observation history.
+2. Publish each candidate once with an immutable closed-candle anchor and record its continuous
+   observation history.
 3. Have humans accept, adjust, reject, or mark `NO_VALID_ZONE` using the V3 annotation schema.
 4. Adjudicate disagreements and quarantine ambiguous or non-causal records.
-5. Split by episode and related-source group before any training.
+5. Split by immutable source-sequence group before any training.
 6. Train a detector only after the reviewed dataset is sufficiently representative; report localization metrics by zone class and market regime, not image-direction accuracy.
 
 Until that sequence is complete, UI and documentation must say `rule-derived`, `candidate`, or `human-reviewed`. They must not say `trained detector`, `learned precision zone`, or an equivalent unsupported claim.
@@ -147,13 +169,17 @@ Until that sequence is complete, UI and documentation must say `rule-derived`, `
 - Annotators label every defensible order-position area in scope, or add `NO_VALID_ZONE` with a reason. Absence of a box is not silently treated as a negative.
 - Outcome review is a separate phase. It may add touch, respect, break, path, and excursion labels, but cannot silently alter pre-outcome geometry.
 - Each record preserves annotator, reviewer, timestamps, doctrine version, evidence anchors, confidence, and adjudication state.
-- Related frames from one episode, perceptual duplicates, crops of the same capture, and records sharing a source sequence belong to one split group.
-- Train, validation, and test assignment occurs at the episode-group level. No related frame may cross splits.
+- Related frames from one candidate lineage, perceptual duplicates, crops of the same capture, and
+  records sharing a source sequence belong to one split group.
+- Train, validation, and test assignment occurs at the source-sequence-group level. No related frame
+  may cross splits.
 - Weak-supervision proposals are `REVIEW_REQUIRED` until a human accepts their geometry and semantics.
 - Ambiguous, contradictory, non-causal, stale, or transform-uncertain records are excluded from detector training.
-- `ELIGIBLE` is fail-closed: it requires causal pre-outcome annotation, a locked double review or resolved adjudication, no active disagreement or exclusion reason, an assigned episode-group split, no future-frame visibility, and a clean semantic-validation result.
+- `ELIGIBLE` is fail-closed: it requires causal pre-outcome annotation, a locked double review or
+  resolved adjudication, no active disagreement or exclusion reason, an assigned
+  source-sequence-group split, no future-frame visibility, and a clean semantic-validation result.
 
-The machine-readable contract is [phoenixguard_order_positioning_annotation_v3.schema.json](../schemas/phoenixguard_order_positioning_annotation_v3.schema.json).
+The machine-readable contract is [phoenixguard_order_positioning_annotation_v3.schema.json](../schemas/phoenixguard_order_positioning_annotation_v3.schema.json). Its `publication` object identifies one immutable closed-candle candidate, its leakage guard groups the full candidate lineage into one data split, and its outcome records are continuous observation snapshots without a preset candle horizon.
 
 ## Acceptance gates
 
@@ -164,7 +190,7 @@ An order-position overlay is publishable only when all applicable gates pass:
 - geometry is inside the chart plot and tied to hard anchors;
 - order role and price relationship are semantically consistent;
 - the candidate is prospective rather than already crossed or chased;
-- the episode baseline is frozen and recoverable;
+- the immutable candidate anchor and original geometry are recoverable;
 - conflicting and opposing structure is recorded;
 - the public label is plain language while the internal contract remains canonical;
 - the overlay is clearly non-executing evidence;

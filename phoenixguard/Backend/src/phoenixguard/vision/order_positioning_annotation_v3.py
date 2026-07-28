@@ -432,7 +432,7 @@ def _validate_zone_semantics(
             issues,
             f"{path}.validity.created_closed_candle_key",
             "ZONE_CREATED_AFTER_ANCHOR",
-            "frozen zone must originate on the episode anchor candle",
+            "immutable zone must originate on the publication anchor candle",
         )
 
     return thesis_side, order_role, bbox_px
@@ -448,7 +448,7 @@ def validate_order_positioning_annotation_v3(
     if _text(normalized.get("schema_version")) != ANNOTATION_SCHEMA_VERSION:
         _add_issue(issues, "schema_version", "SCHEMA_VERSION_MISMATCH", "unexpected annotation schema version")
 
-    episode = _mapping_field(normalized, "episode", issues)
+    publication = _mapping_field(normalized, "publication", issues)
     frame = _mapping_field(normalized, "frame", issues)
     market_context = _mapping_field(normalized, "market_context", issues)
     review = _mapping_field(normalized, "review", issues)
@@ -496,17 +496,22 @@ def validate_order_positioning_annotation_v3(
             elif unit == "PIXEL":
                 pixel_tolerance = max(pixel_tolerance, value)
 
-    anchor_closed_candle_key = _text(episode.get("anchor_closed_candle_key"))
+    anchor_closed_candle_key = _text(publication.get("anchor_closed_candle_key"))
     frame_closed_candle_key = _text(frame.get("closed_candle_key"))
     if anchor_closed_candle_key != frame_closed_candle_key:
         _add_issue(
             issues,
             "frame.closed_candle_key",
             "ANCHOR_CANDLE_MISMATCH",
-            "frame closed candle must equal the frozen episode anchor candle",
+            "frame closed candle must equal the immutable publication anchor candle",
         )
-    if _text(episode.get("anchor_frame_id")) != _text(frame.get("frame_id")):
-        _add_issue(issues, "frame.frame_id", "ANCHOR_FRAME_MISMATCH", "frame must be the episode anchor frame")
+    if _text(publication.get("anchor_frame_id")) != _text(frame.get("frame_id")):
+        _add_issue(
+            issues,
+            "frame.frame_id",
+            "ANCHOR_FRAME_MISMATCH",
+            "frame must be the publication anchor frame",
+        )
 
     raw_zones = _sequence(annotation.get("zones"))
     normalized_zones = _sequence(normalized.get("zones"))

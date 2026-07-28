@@ -4,10 +4,16 @@ PhoenixGuard documentation is grouped by operating surface. Deep technical refer
 
 Operator-facing summaries live here; archived deep dives are in `docs/archive/`.
 
-Current live-runtime source of truth:
+Current V3 source of truth:
 
-- `architecture/PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md` - launcher-to-dashboard flow, 12-candle
-  tracking episodes, persistence, APIs, failure diagnosis, and live acceptance checks
+- `../reports/PhoenixGuard_V3_Continuous_Market_Intelligence_Blueprint_2026-07-25.pdf` -
+  structured operator-to-execution architecture and deep continuous-research blueprint
+- `architecture/PHOENIXGUARD_V3_MARKET_STUDY_BLUEPRINT.md` - continuous closed-candle study,
+  persistence, Pair DNA, hierarchical motifs, time-to-event evidence, normalized historical paths,
+  adaptive feature governance, regime drift, non-causal cross-pair associations, proof
+  certificates, operator projection, and live acceptance checks
+- `architecture/ARCHITECTURE_MAP.md` - compact launcher-to-dashboard and study-authority map
+- `runtime_endpoint_map.md` - active API surface and authority classification
 
 Top-level doc groups:
 

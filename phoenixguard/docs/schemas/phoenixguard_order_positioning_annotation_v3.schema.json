@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://808fx.local/schemas/phoenixguard_order_positioning_annotation_v3.schema.json",
-  "title": "PhoenixGuard V3 Episode-Aware Order Positioning Annotation",
-  "description": "Human-review contract for causal, episode-frozen limit, stop-entry, and protective-stop opportunity zones. This contract describes visual evidence and never authorizes or places an order.",
+  "title": "PhoenixGuard V3 Continuous-Study Order Positioning Annotation",
+  "description": "Human-review contract for causal, immutable-publication limit, stop-entry, and protective-stop opportunity zones under continuous closed-candle observation. This contract describes visual evidence and never authorizes or places an order.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,7 +10,7 @@
     "annotation_id",
     "annotation_phase",
     "geometry_source_annotation_id",
-    "episode",
+    "publication",
     "frame",
     "market_context",
     "zones",
@@ -42,8 +42,8 @@
         "null"
       ]
     },
-    "episode": {
-      "$ref": "#/$defs/episode"
+    "publication": {
+      "$ref": "#/$defs/publication"
     },
     "frame": {
       "$ref": "#/$defs/frame"
@@ -224,7 +224,7 @@
       }
     }
   ],
-  "$comment": "A semantic validator must additionally verify ordered boxes, pixel/normalized equivalence, plot containment, unique IDs, valid cross-references, side-scoped NO_VALID_ZONE consistency, price-axis orientation, and episode-group split isolation.",
+  "$comment": "A semantic validator must additionally verify ordered boxes, pixel/normalized equivalence, plot containment, unique IDs, valid cross-references, side-scoped NO_VALID_ZONE consistency, price-axis orientation, and candidate-lineage split isolation.",
   "$defs": {
     "bboxPx": {
       "description": "Pixel box [x1, y1, x2, y2]. A semantic validator must enforce x2 > x1 and y2 > y1.",
@@ -278,30 +278,29 @@
       "minItems": 4,
       "maxItems": 4
     },
-    "episode": {
+    "publication": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "episode_id",
-        "episode_revision",
+        "candidate_id",
+        "candidate_revision",
         "pair_key",
         "timeframe",
-        "started_at",
+        "published_at",
         "anchor_frame_id",
         "anchor_closed_candle_key",
-        "tracking_horizon_candles",
         "split_group_id",
-        "baseline_frozen",
+        "geometry_immutable",
         "status",
-        "supersedes_episode_id",
+        "supersedes_candidate_id",
         "supersession_reason"
       ],
       "properties": {
-        "episode_id": {
+        "candidate_id": {
           "type": "string",
           "minLength": 1
         },
-        "episode_revision": {
+        "candidate_revision": {
           "type": "integer",
           "minimum": 1
         },
@@ -313,7 +312,7 @@
           "type": "string",
           "minLength": 1
         },
-        "started_at": {
+        "published_at": {
           "type": "string",
           "format": "date-time"
         },
@@ -325,29 +324,24 @@
           "type": "string",
           "minLength": 1
         },
-        "tracking_horizon_candles": {
-          "const": 12
-        },
         "split_group_id": {
-          "description": "Stable group joining the episode and every related frame, crop, annotation revision, and outcome review.",
+          "description": "Stable group joining one immutable candidate lineage and every related frame, crop, annotation revision, and outcome review.",
           "type": "string",
           "minLength": 1
         },
-        "baseline_frozen": {
+        "geometry_immutable": {
           "const": true
         },
         "status": {
           "type": "string",
           "enum": [
-            "PENDING_FIRST_COMPLETE_FRAME",
-            "TRACKING",
-            "COMPLETE",
-            "STOPPED_AND_SAVED",
-            "ABANDONED",
+            "ACTIVE",
+            "SUPERSEDED",
+            "EXPIRED",
             "INVALIDATED"
           ]
         },
-        "supersedes_episode_id": {
+        "supersedes_candidate_id": {
           "type": [
             "string",
             "null"
@@ -357,12 +351,12 @@
           "type": "string",
           "enum": [
             "NONE",
-            "EXPLICIT_RESET",
             "PAIR_CHANGED",
             "TIMEFRAME_CHANGED",
             "SOURCE_LOCK_CHANGED",
             "CHART_TRANSFORM_UNUSABLE",
-            "HARD_INVALIDATION"
+            "HARD_INVALIDATION",
+            "QUALIFIED_SUCCESSOR"
           ]
         }
       }
@@ -1010,8 +1004,8 @@
         "prospective_at_creation",
         "already_crossed_at_creation",
         "late_after_move",
-        "stale_after_candles",
         "invalidation_rule",
+        "expiry_rule",
         "replacement_policy"
       ],
       "properties": {
@@ -1028,17 +1022,17 @@
         "late_after_move": {
           "const": false
         },
-        "stale_after_candles": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 12
-        },
         "invalidation_rule": {
           "type": "string",
           "minLength": 1
         },
+        "expiry_rule": {
+          "description": "Evidence-based terminal rule evaluated by continuous closed-candle observation; it is not a preset candle horizon.",
+          "type": "string",
+          "minLength": 1
+        },
         "replacement_policy": {
-          "const": "FROZEN_UNTIL_EPISODE_END_OR_HARD_INVALIDATION"
+          "const": "IMMUTABLE_UNTIL_SUPERSEDED_OR_INVALIDATED"
         }
       }
     },
@@ -1139,9 +1133,9 @@
       "required": [
         "geometry_unchanged_from_source",
         "observed_completed_candles",
-        "episode_complete",
+        "observation_status",
         "zone_observations",
-        "favoured_path",
+        "observed_direction",
         "reviewed_at"
       ],
       "properties": {
@@ -1150,11 +1144,17 @@
         },
         "observed_completed_candles": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 12
+          "minimum": 0
         },
-        "episode_complete": {
-          "type": "boolean"
+        "observation_status": {
+          "description": "State of this review snapshot. OPEN may be reviewed again as later closed candles arrive.",
+          "type": "string",
+          "enum": [
+            "OPEN",
+            "SUPERSEDED",
+            "EXPIRED",
+            "INVALIDATED"
+          ]
         },
         "zone_observations": {
           "type": "array",
@@ -1162,12 +1162,13 @@
             "$ref": "#/$defs/zoneObservation"
           }
         },
-        "favoured_path": {
+        "observed_direction": {
           "type": "string",
           "enum": [
-            "PRIMARY",
-            "ALTERNATIVE",
-            "NEITHER",
+            "UP",
+            "DOWN",
+            "REST",
+            "MIXED",
             "UNRESOLVED"
           ]
         },
@@ -1183,7 +1184,7 @@
       "required": [
         "zone_id",
         "state_sequence",
-        "first_touch_episode_index",
+        "first_touch_closed_candle_offset",
         "maximum_favourable_excursion_normalized",
         "maximum_adverse_excursion_normalized"
       ],
@@ -1194,7 +1195,6 @@
         },
         "state_sequence": {
           "type": "array",
-          "maxItems": 12,
           "items": {
             "type": "string",
             "enum": [
@@ -1209,13 +1209,12 @@
             ]
           }
         },
-        "first_touch_episode_index": {
+        "first_touch_closed_candle_offset": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 1,
-          "maximum": 12
+          "minimum": 1
         },
         "maximum_favourable_excursion_normalized": {
           "type": [
@@ -1319,7 +1318,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "episode_group_hash",
+        "candidate_lineage_hash",
         "source_capture_group",
         "source_sequence_id",
         "perceptual_group_id",
@@ -1329,7 +1328,7 @@
         "no_cross_split_related_frames"
       ],
       "properties": {
-        "episode_group_hash": {
+        "candidate_lineage_hash": {
           "type": "string",
           "pattern": "^[A-Fa-f0-9]{64}$"
         },
@@ -1365,7 +1364,7 @@
           "items": {
             "type": "string",
             "enum": [
-              "EPISODE",
+              "CANDIDATE_LINEAGE",
               "SOURCE_CAPTURE",
               "SOURCE_SEQUENCE",
               "PERCEPTUAL_DUPLICATE",
@@ -1377,7 +1376,7 @@
           "allOf": [
             {
               "contains": {
-                "const": "EPISODE"
+                "const": "CANDIDATE_LINEAGE"
               }
             },
             {

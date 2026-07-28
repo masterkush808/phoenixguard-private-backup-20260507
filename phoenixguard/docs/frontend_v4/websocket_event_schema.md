@@ -87,7 +87,6 @@ Payload:
     "broker_execution_state": {},
     "manual_focus_region": {},
     "focus_selector": {},
-    "memory_projection_current": {},
     "scenario_analysis": {}
   }
 }
@@ -278,8 +277,6 @@ The existing REST mutation endpoints should remain unchanged:
 - `POST /stop`
 - `POST /emergency-stop`
 - `POST /capture-once`
-- `POST /predict`
-- `POST /show-future`
 - `POST /demo-random-trade`
 - `PATCH /controls`
 - focus-region endpoints

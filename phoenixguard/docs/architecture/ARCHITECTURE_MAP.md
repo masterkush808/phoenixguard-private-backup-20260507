@@ -1,7 +1,9 @@
-# PhoenixGuard One-Page Architecture Map
+# PhoenixGuard V3 Architecture Map
 
-> For the canonical launcher-to-dashboard runtime, including 12-candle tracking episodes, see
-> [PhoenixGuard Live Tracking Blueprint](PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md).
+> The canonical deep-study contract is the
+> [PhoenixGuard V3 Market Study Blueprint](PHOENIXGUARD_V3_MARKET_STUDY_BLUEPRINT.md). PhoenixGuard
+> studies every newly proven closed candle continuously; study history does not require a manual
+> baseline or a fixed-length operator run.
 
 ## 1) Input
 
@@ -9,7 +11,8 @@
 - Entry path: `run_inference(...)` in `main.py`. Live tracker path: `ContinuousWindowTrackerService`
   in `Backend/src/phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a
   completion-scheduled loop. The canonical launcher default is 30 seconds, with bounded adaptive
-  scheduling allowed; episode progress remains closed-candle-event based.
+  scheduling allowed. Durable study progress advances only on a new, identity-proven closed-candle
+  event; repeated frames are idempotent.
 - It collects frames for the dashboard.
 - The service serves the dashboard through the mobile API.
 
@@ -41,9 +44,11 @@
    - `embed_description(chart_state, image=img)` -> `search(top_k=5)`.
    - Build few-shot context + compute memory boost.
 
-5. **Regression forecasting**
+5. **Regression evidence contributor**
 
    - `chronos.forecast_3m(chart_state, quantiles)` (`regression_module.py`).
+   - Its output is diagnostic evidence. The public study remains historical and the contributor
+     cannot grant entry or execution permission.
 
 6. **Style personalization update**
 
@@ -65,7 +70,30 @@
   - personalization style vector.
 - Built by `fused_feature_vector(...)` in `main.py`.
 
-## 4) Diagnostic Gate Layer (13 core gates + support gates)
+## 4) Continuous Closed-Candle Research Layer
+
+The V3 study lane consumes only closed candles with one declared coordinate space and chronological
+order domain. It is independent of execution authority and is bounded at every level.
+
+| Capability | V3 implementation | Contract |
+| --- | --- | --- |
+| Hierarchical multi-resolution motifs | `study/motif_lattice_v3.py` composes single-candle micro-events, 3-5 candle atoms, 7-12 candle compounds, and full swing/rest regimes. | Maximum depth four and maximum 2,048 nodes per level; descriptive historical geometry only. |
+| Time-to-event evidence | The motif module builds Kaplan-Meier-style curves for next swing, direction change, and rest end, with explicit right censoring and Greenwood intervals. | Historical duration distribution only; no future deadline, independence, or causal claim. |
+| Adaptive feature ontology | `study/adaptive_feature_ontology_v3.py` proposes features in a shadow namespace, records versioned temporal/leakage gates, promotes only passing revisions, and supports audited rollback. | A passing gate proves eligibility for public study, not causation or predictive value. |
+| Exact historical path reconstruction | The motif module reconstructs anchor-known median-range paths with MFE, MAE, efficiency, state transitions, and time in state. | Future candles never influence normalization; reconstructed paths remain historical examples. |
+| Cross-pair association graph | `study/cross_pair_association_v3.py` compares exact shared closed timestamps in compatible normalized spaces with a Granger-style variance-reduction proxy and mutual information. `study/cross_pair_coordinator_v3.py` atomically retains bounded normalized returns so independently arriving pair updates can be synchronized without fabricating a peer. | **Explicitly non-causal.** Circular-shift significance supports association only; it does not prove influence, direction, or a tradable lead. Until a genuine compatible peer and support exist, the result remains `INSUFFICIENT_SYNCHRONIZED_PAIR` or `INSUFFICIENT_SUPPORT`. |
+| Online regime drift | `study/concept_drift_v3.py` applies adjacent-window KS evidence with multiplicity control and a mean-shift floor, then creates deterministic regime partition IDs. | A partition boundary describes a distribution change; it does not predict market direction. |
+| Study claim proof certificates | `study/study_claim_proof_v3.py` binds a claim to ordered closed-candle IDs, coordinate space, order domain, bounded inputs, and derivation hashes. | A valid digest proves derivation integrity only; it does not authenticate the market source, prove causation, or authorize a trade. |
+
+`MarketStudyServiceV3` runs these capabilities from restart-safe continuous history and publishes
+bounded study keys beside Pair DNA and the exact candle ledger: `motif_lattice`, `survival_network`,
+`path_reconstruction`, `adaptive_feature_ontology`, `concept_drift`, `regime_partition`,
+`cross_pair_association`, and `claim_proofs`. Ontology and drift rebuild deterministically from the
+retained closed-candle evidence; the cross-pair coordinator owns its separate bounded atomic state.
+These services do not create a new product version, a second decision lane, or an execution
+shortcut.
+
+## 5) Diagnostic Gate Layer (13 core gates + support gates)
 
 - Executed by `gates_engine.run_all(...)` in `skill_gates.py`.
 - Gates include:
@@ -101,7 +129,7 @@
   - `LinearRouter(13->13)` scales gate scores for explainability/offline review.
   - MoE route weights are metadata only for live execution.
 
-## 5) Ensemble Decision Layer
+## 6) Ensemble Decision Layer
 
 - `ensemble.infer(...)` in `ensemble.py` fuses:
   - RL calibrated probabilities,
@@ -125,7 +153,7 @@
 - A lower-history SELL is no longer treated as an automatic wait when the live picture is already
   firing: `current_flow_continuation_ready` can override the lower-history
 
-## 6) Final Action + Outputs
+## 7) Final Action + Outputs
 
 - Final action: `BUY` / `SELL` / `HOLD`, with `HOLD` as the default until the tracker, decision
   kernel, timing engine, execution governor, calibration manifest, latency budget, cooldown, and
@@ -153,7 +181,7 @@
   - confidence gauge,
   - optional skill dashboard.
 
-## 7) Online Adaptation Loop
+## 8) Online Adaptation Loop
 
 - If memory recall exists, RL receives recall-driven update batches.
 - Router weights update from feedback history.

@@ -15,10 +15,19 @@ from phoenixguard.mobile_api.operator_workspace_v1 import build_operator_workspa
 from phoenixguard.mobile_api.window_tracker import (
     _compact_live_state_latest_signal_payload,
     _compact_live_state_market_payload,
+    _study_entry,
 )
-from phoenixguard.tracking.tracking_episode_v3 import (
-    default_tracking_episode_v1,
-    tracking_episode_history_entry_v1,
+
+
+CONTINUOUS_RESEARCH_KEYS = (
+    "motif_lattice",
+    "survival_network",
+    "path_reconstruction",
+    "adaptive_feature_ontology",
+    "concept_drift",
+    "regime_partition",
+    "cross_pair_association",
+    "claim_proofs",
 )
 
 
@@ -330,30 +339,6 @@ def _market_study() -> dict[str, object]:
     }
 
 
-def _episode_study() -> dict[str, object]:
-    return {
-        "schema_version": "PG_TRACKING_STUDY_SNAPSHOT_V3",
-        "status": "STUDIED",
-        "study_only": True,
-        "execution_authority": False,
-        "major_trend": {"side": "BUY", "slope": 0.12, "confidence": 0.82},
-        "inner_trend": {"side": "SELL", "slope": -0.04, "confidence": 0.44},
-        "current_pressure": {"side": "BUY", "slope": 0.03, "confidence": 0.3},
-        "directional_read": {
-            "side": "BUY",
-            "confidence": 0.73,
-            "status": "DIRECTIONAL_STUDY",
-        },
-        "behavior": {
-            "state": "REST",
-            "direction": "HOLD",
-            "candle_count": 3,
-            "duration_seconds": 900,
-            "market_story": "Major trend up; inner pullback; resting for 3 candles.",
-        },
-    }
-
-
 def test_market_study_survives_both_live_state_compaction_paths() -> None:
     study = _market_study()
     tracking = {"detected_market": "CAD/JPY OTC", "market_study_v3": study}
@@ -393,6 +378,12 @@ def test_operator_workspace_exposes_study_separately_from_permission() -> None:
     assert study["behavior"]["current_state"]["state"] == "REST"
     assert study["directional_read"]["side"] == "BUY"
     assert study["execution_authority"] is False
+    assert "forecast" not in study
+    for research_key in CONTINUOUS_RESEARCH_KEYS:
+        research_contract = study[research_key]
+        assert research_contract["study_only"] is True
+        assert research_contract["causal"] is False
+        assert research_contract["execution_authority"] is False
     retracement = study["retracement_study"]
     assert retracement["study_only"] is True
     assert retracement["observation_only"] is True
@@ -432,85 +423,106 @@ def test_operator_workspace_exposes_study_separately_from_permission() -> None:
     assert operator_any["permission"]["allowed"] is False
 
 
-def test_archived_episode_history_reports_regression_instead_of_wait() -> None:
-    episode = default_tracking_episode_v1(session_id="study-session")
-    episode.update(
-        {
-            "episode_id": "episode-regression",
-            "state": "STOPPED",
-            "started_at": "2026-07-24T00:00:00Z",
-            "updated_at": "2026-07-24T00:05:00Z",
-            "stopped_at": "2026-07-24T00:05:00Z",
-            "pair": "CAD/JPY OTC",
-            "timeframe": "M5",
-            "anchor": {"frame_id": 10, "market_study_v3": _episode_study()},
-            "events": [
-                {
-                    "event_id": "episode-regression:E1",
-                    "step": 1,
-                    "observed_at": "2026-07-24T00:05:00Z",
-                    "predicted_block": {"side": "BUY"},
-                    "actual_block": {"side": "BUY"},
-                    "direction_agreement": True,
-                    "after_reference": {"frame_id": 11},
-                    "market_study_v3": _episode_study(),
-                }
-            ],
-        }
-    )
-    archived = tracking_episode_history_entry_v1(episode)
+def test_automatic_recent_study_history_reports_regression_instead_of_wait() -> None:
+    completed_study = _market_study()
     operator = build_operator_workspace_v1(
         {
             "session_id": "study-session",
             "display_frame_id": 11,
-            "tracking_episode_history": [archived],
+            "tracking_summary": {"market_study_v3": completed_study},
+            "recent_studies": [
+                {
+                    "id": "closed-9",
+                    "frame_id": 11,
+                    "observed_at": 1_790_000_000.0,
+                    "market_study_v3": completed_study,
+                }
+            ],
         },
         now_epoch=1_790_000_001.0,
     )
 
     operator_history = cast(list[dict[str, Any]], operator["history"])
-    event = next(row for row in operator_history if row.get("event_index") == 1)
-    summary = next(
-        row
-        for row in operator_history
-        if row.get("id") == "episode-regression-summary"
+    study_row = next(row for row in operator_history if row.get("id") == "closed-9")
+    assert study_row["major_trend"]["side"] == "BUY"
+    assert study_row["inner_trend"]["side"] == "SELL"
+    assert study_row["behavior"]["current_state"]["state"] == "REST"
+    assert study_row["regression_read"]["side"] == "BUY"
+    assert "major trend up" in study_row["summary"].lower()
+    assert "regression read up" in study_row["summary"].lower()
+
+
+def test_normal_study_entry_populates_regression_history() -> None:
+    completed_study = _market_study()
+    entry = _study_entry(
+        {"market_study_v3": completed_study},
+        {"market_study_v3": completed_study},
+        frame_id=12,
     )
-    assert event["major_trend"]["side"] == "BUY"
-    assert event["inner_trend"]["side"] == "SELL"
-    assert event["behavior"]["state"] == "REST"
-    assert "major trend up" in event["summary"].lower()
-    assert summary["direction"] == "BUY"
-    assert "regression study" in summary["summary"].lower()
 
-
-def test_operator_projection_context_keeps_live_and_episode_studies() -> None:
-    episode = default_tracking_episode_v1(session_id="study-session")
-    episode.update(
+    assert entry["market_study_v3"] == completed_study
+    assert entry["market"] == "CAD/JPY OTC"
+    assert entry["timeframe"] == "M5"
+    operator = build_operator_workspace_v1(
         {
-            "episode_id": "episode-context",
-            "state": "ACTIVE",
-            "anchor": {"frame_id": 20, "market_study_v3": _episode_study()},
-            "events": [
+            "session_id": "normal-study-entry",
+            "display_frame_id": 12,
+            "tracking_summary": {"market_study_v3": completed_study},
+            "recent_studies": [entry],
+        }
+    )
+    history = cast(list[dict[str, Any]], operator["history"])
+    assert len(history) == 1
+    assert history[0]["major_trend"]["side"] == "BUY"
+    assert history[0]["inner_trend"]["side"] == "SELL"
+
+
+def test_operator_history_never_republishes_an_old_pair() -> None:
+    old_study = _market_study()
+    current_study = cast(dict[str, object], json.loads(json.dumps(old_study)))
+    current_study["symbol"] = "GBP/USD OTC"
+    current_study["closed_candle_key"] = "gbp-closed-12"
+
+    operator = build_operator_workspace_v1(
+        {
+            "session_id": "pair-boundary",
+            "display_frame_id": 12,
+            "tracking_summary": {"market_study_v3": current_study},
+            "recent_studies": [
                 {
-                    "event_id": "episode-context:E1",
-                    "step": 1,
-                    "observed_at": "2026-07-24T00:05:00Z",
-                    "predicted_block": {"side": "BUY"},
-                    "actual_block": {"side": "BUY"},
-                    "market_study_v3": _episode_study(),
-                }
+                    "id": "old-cad-row",
+                    "frame_id": 11,
+                    "market_study_v3": old_study,
+                },
+                {
+                    "id": "current-gbp-row",
+                    "frame_id": 12,
+                    "market_study_v3": current_study,
+                },
             ],
         }
     )
-    archived = tracking_episode_history_entry_v1(
-        {**episode, "state": "STOPPED", "stopped_at": "2026-07-24T00:06:00Z"}
-    )
+
+    history = cast(list[dict[str, Any]], operator["history"])
+    assert [row["id"] for row in history] == ["gbp-closed-12"]
+    assert history[0]["market_study_v3"]["symbol"] == "GBP/USD OTC"
+
+
+def test_operator_projection_context_keeps_live_and_automatic_history() -> None:
     bounded = _bounded_operator_projection_context(
         {
             "session_id": "study-session",
             "tracking_summary": {"market_study_v3": _market_study()},
-            "tracking_episode": episode,
-            "tracking_episode_history": [archived],
+            "recent_studies": [
+                {
+                    "id": "closed-8",
+                    "frame_id": 19,
+                    "observed_at": 1_789_999_700.0,
+                    "side": "SELL",
+                    "state": "REST",
+                    "summary": "Major trend up; inner trend down; resting.",
+                }
+            ],
         }
     )
 
@@ -518,15 +530,16 @@ def test_operator_projection_context_keeps_live_and_episode_studies() -> None:
     assert bounded_any["tracking_summary"]["market_study_v3"][
         "directional_read"
     ]["side"] == "BUY"
-    assert bounded_any["tracking_episode"]["anchor"]["market_study_v3"][
-        "major_trend"
-    ]["side"] == "BUY"
-    assert bounded_any["tracking_episode"]["events"][0]["market_study_v3"][
-        "behavior"
-    ]["state"] == "REST"
-    assert bounded_any["tracking_episode_history"][0][
-        "final_market_study_v3"
-    ]["directional_read"]["side"] == "BUY"
+    assert bounded_any["recent_studies"] == [
+        {
+            "observed_at": 1_789_999_700.0,
+            "frame_id": 19,
+            "side": "SELL",
+            "state": "REST",
+            "summary": "Major trend up; inner trend down; resting.",
+        }
+    ]
+    assert bounded_any["history"] == bounded_any["recent_studies"]
 
 
 def test_operator_projection_keeps_nested_study_evidence_without_private_payload() -> None:

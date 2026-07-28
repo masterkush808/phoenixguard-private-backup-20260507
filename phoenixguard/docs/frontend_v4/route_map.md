@@ -17,28 +17,27 @@ Source: `Backend/src/phoenixguard/mobile_api/app.py`
 | GET | `/v1/mobile/window-tracker/windows?query=Pocket Option` | Calibration | Future window picker / focus setup. |
 | GET | `/v1/mobile/window-tracker/sessions` | Live | Session list source; not directly used by current static dashboard. |
 | POST | `/v1/mobile/window-tracker/sessions` | Live / Calibration | Session creation source; not directly used by current static dashboard. |
-| GET | `/v1/mobile/window-tracker/sessions/{session_id}` | Live / Council / Chart / Replay / Simulation / Calibration / Diagnostics / Settings | Primary polling route used by `refreshSession()`. Feeds `#signal-*`, `#metric-*`, `#kernel-*`, `#surface-*`, `#history-list`, `#prediction-*`, `#scenario-heatmap`, `#focus-*`, `#telemetry-*`, and control button states. |
+| GET | `/v1/mobile/operator/state/v1/{session_id}?view=all` | Live / Council / Chart / Replay | Primary frame-atomic polling route used by `refreshOperatorState()`. It feeds current decision, entry permission, chart geometry, overlays, and regression history. |
+| GET | `/v1/mobile/window-tracker/sessions/{session_id}` | Diagnostics / Settings | Tracker state API; not directly polled by the simplified V3 dashboard. |
 
 ## Tracker Action Routes
 
-| Method | Route | Bucket | Current DOM trigger |
+| Method | Route | Bucket | Current simplified-dashboard use |
 | --- | --- | --- | --- |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/start` | Live / Settings | `#tracker-toggle` when stopped. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/stop` | Live / Settings | `#tracker-toggle` when running. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/capture-once` | Live / Calibration | `#capture-now`. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/emergency-stop` | Settings / Diagnostics | `#emergency-stop` and Ctrl+Alt+End handler. |
-| PATCH | `/v1/mobile/window-tracker/sessions/{session_id}/controls` | Settings / Simulation / Calibration | `#execution-toggle`, `#execution-mode-toggle`, `#counter-scalp-toggle`, `#scenario-toggle`, `#memory-gate-toggle`, `#identity-gate-toggle`, `#auto-memory-toggle`, `#adaptive-timer-toggle`. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/demo-random-trade` | Simulation | `#demo-trade`. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/predict` | Simulation | `#predict-now`. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/show-future` | Simulation | `#show-future`. |
+| POST | `/v1/mobile/window-tracker/sessions/{session_id}/start` | Live / Settings | Runtime/API control; no current DOM trigger. |
+| POST | `/v1/mobile/window-tracker/sessions/{session_id}/stop` | Live / Settings | Runtime/API control; no current DOM trigger. |
+| POST | `/v1/mobile/window-tracker/sessions/{session_id}/capture-once` | Live / Calibration | Runtime/API control; no current DOM trigger. |
+| POST | `/v1/mobile/window-tracker/sessions/{session_id}/emergency-stop` | Settings / Diagnostics | Runtime/API control; no current DOM trigger. |
+| PATCH | `/v1/mobile/window-tracker/sessions/{session_id}/controls` | Settings / Calibration | Runtime/API control. Private projection controls are rejected. |
+| POST | `/v1/mobile/window-tracker/sessions/{session_id}/demo-random-trade` | Simulation | Runtime/API control; no current DOM trigger. |
 
 ## Focus And Calibration Routes
 
-| Method | Route | Bucket | Current DOM trigger |
+| Method | Route | Bucket | Current simplified-dashboard use |
 | --- | --- | --- | --- |
 | PUT | `/v1/mobile/window-tracker/sessions/{session_id}/focus-region` | Calibration | Programmatic focus region set; future selector flow. |
-| DELETE | `/v1/mobile/window-tracker/sessions/{session_id}/focus-region` | Calibration | `#focus-clear`. |
-| POST | `/v1/mobile/window-tracker/sessions/{session_id}/focus-region/arm` | Calibration | `#focus-arm`. |
+| DELETE | `/v1/mobile/window-tracker/sessions/{session_id}/focus-region` | Calibration | Runtime/API control; no current DOM trigger. |
+| POST | `/v1/mobile/window-tracker/sessions/{session_id}/focus-region/arm` | Calibration | Runtime/API control; no current DOM trigger. |
 | POST | `/v1/mobile/window-tracker/sessions/{session_id}/focus-region/cancel` | Calibration | Not directly wired in current static controls; belongs with focus selector cancellation. |
 
 ## Artifact Routes
@@ -47,14 +46,18 @@ Source: `Backend/src/phoenixguard/mobile_api/app.py`
 | --- | --- | --- | --- |
 | GET | `/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-chart` | Chart | Direct chart artifact route. |
 | GET | `/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window` | Chart | Direct window artifact route. |
-| GET | `/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{artifact_kind}` | Chart / Simulation / Replay | `artifactUrl(kind)` for overlay, raw, prediction, memory, and future image families. |
+| GET | `/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{artifact_kind}` | Chart / Replay | Current chart, window, overlay, and replay artifacts only. Projection and memory-reference kinds fail closed. |
 
 ## Council And Diagnostics Routes
 
 | Method | Route | Bucket | Current DOM consumers |
 | --- | --- | --- | --- |
-| GET | `/v1/mobile/model-council/health?session_id={session_id}` | Council / Diagnostics | `runtimeTelemetryUrl()` enrichment for `#telemetry-*` and `#model-health-panel`. |
+| GET | `/v1/mobile/model-council/health?session_id={session_id}` | Council / Diagnostics | Available health route; not directly called by the simplified V3 dashboard. |
 | GET | `/v1/mobile/model-council/intelligence?session_id={session_id}` | Council | Available council intelligence route; not directly called by current dashboard. |
+| GET | `/v1/mobile/model-council/sessions/{session_id}/latest` | Council / Diagnostics | Latest public Council state; not directly called by current dashboard. |
+| GET | `/v1/mobile/model-council/latest?session_id={session_id}` | Council / Diagnostics | Alias for the latest public Council state. |
+| GET | `/v1/mobile/model-council/sessions/{session_id}/study/latest` | Council / Diagnostics | Latest study packet for the session; not directly called by current dashboard. |
+| GET | `/v1/mobile/model-council/study/latest?session_id={session_id}` | Council / Diagnostics | Alias for the latest session study packet. |
 | GET | `/v1/mobile/model-council/sessions/{session_id}/execution/latest` | Council / Diagnostics | Latest execution packet for session; route available for V4 detail panel. |
 | GET | `/v1/mobile/model-council/execution/latest?session_id={session_id}` | Council / Diagnostics | Latest execution packet with query session; route available for V4 detail panel. |
 

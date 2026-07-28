@@ -20,7 +20,11 @@ from reportlab.platypus import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "reports" / "PhoenixGuard_Trade_Study_Architecture_Blueprint_2026-07-24.pdf"
+OUT = (
+    ROOT
+    / "reports"
+    / "PhoenixGuard_V3_Continuous_Market_Intelligence_Blueprint_2026-07-25.pdf"
+)
 
 NAVY = colors.HexColor("#10233F")
 BLUE = colors.HexColor("#1E5AA8")
@@ -135,9 +139,9 @@ def header_footer(canvas, doc):
     canvas.line(doc.leftMargin, A4[1] - 1.15 * cm, A4[0] - doc.rightMargin, A4[1] - 1.15 * cm)
     canvas.setFillColor(MUTED)
     canvas.setFont("Helvetica", 7.5)
-    canvas.drawString(doc.leftMargin, A4[1] - .85 * cm, "PHOENIXGUARD  |  TRADE STUDY & EXECUTION ARCHITECTURE BLUEPRINT")
+    canvas.drawString(doc.leftMargin, A4[1] - .85 * cm, "PHOENIXGUARD V3  |  CONTINUOUS MARKET INTELLIGENCE BLUEPRINT")
     canvas.drawRightString(A4[0] - doc.rightMargin, .78 * cm, f"Page {doc.page}")
-    canvas.drawString(doc.leftMargin, .78 * cm, "Source-grounded local system blueprint • 24 July 2026")
+    canvas.drawString(doc.leftMargin, .78 * cm, "Source-grounded local system blueprint • 25 July 2026")
     canvas.restoreState()
 
 
@@ -148,11 +152,11 @@ def section(story, title):
 def build():
     OUT.parent.mkdir(parents=True, exist_ok=True)
     doc = SimpleDocTemplate(str(OUT), pagesize=A4, rightMargin=1.35*cm, leftMargin=1.35*cm,
-                            topMargin=1.65*cm, bottomMargin=1.35*cm, title="PhoenixGuard Trade Study Architecture Blueprint")
+                            topMargin=1.65*cm, bottomMargin=1.35*cm, title="PhoenixGuard V3 Continuous Market Intelligence Blueprint")
     story = []
 
-    cover = Table([[p("PHOENIXGUARD<br/>TRADE STUDY &amp;<br/>EXECUTION ARCHITECTURE", "title"),
-                    p("A source-grounded blueprint of how a broker chart becomes a studied setup, a classified opportunity, an entry decision, and — only after independent validation — an external handoff.<br/><br/>Version: FINAL_LIVE / V3<br/>Prepared: 24 July 2026", "subtitle")]],
+    cover = Table([[p("PHOENIXGUARD V3<br/>CONTINUOUS MARKET<br/>INTELLIGENCE", "title"),
+                    p("A source-grounded blueprint of how every proven closed candle becomes microstructure evidence, Pair DNA, a classified opportunity, an entry decision, and — only after independent validation — an external handoff.<br/><br/>Version: FINAL_LIVE / V3<br/>Prepared: 25 July 2026", "subtitle")]],
                   colWidths=[10.8*cm, 6.4*cm], rowHeights=[10.2*cm])
     cover.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,-1), NAVY), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
                                ("LEFTPADDING", (0,0), (-1,-1), 16), ("RIGHTPADDING", (0,0), (-1,-1), 14),
@@ -185,10 +189,10 @@ def build():
                   ["Model Council + playbook", "Evidence reconciliation, maturity and study/execution candidate output", "Bypassing packet validation"],
                   ["shooter.py package reporter", "Accepted allowance-package handshake", "Clicking, calibration, amount edits or broker timing"],
                   ["MT4 / external bridge", "Independent revalidation and optional file handoff", "Weakening the V3 contract"],
-                  ["Dashboard", "Explainable rendering and commands", "Truth, permission or episode progression"],
+                  ["Dashboard", "Explainable rendering and commands", "Truth, permission or closed-candle study progression"],
               ], [3.7*cm, 6.9*cm, 6.6*cm]),
               p("State and publication", "h2"),
-              p("A capture is published through an atomic session commit. The exact frame’s source identity, chart/window artifacts, overlay geometry, study contributors, council result, public state, and episode transition are bound together. Stale writers are rejected so a slow result cannot overwrite a newer frame. Live session artifacts are ephemeral under runtime/live; durable study memory lives under data/mobile_api/window_tracker/market_study_v3 and episode records are retained separately under data/mobile_api/window_tracker/tracking_episode_archive_v1."),
+              p("A capture is published through an atomic session commit. The exact frame’s source identity, chart/window artifacts, overlay geometry, study contributors, council result, public state, and closed-candle study transition are bound together. Stale writers are rejected so a slow result cannot overwrite a newer frame. Live session artifacts are ephemeral under runtime/live; durable study memory lives under data/mobile_api/window_tracker/market_study_v3."),
               callout("FRONTEND CONTRACT", "The dashboard is a renderer and command surface. It receives a privacy-safe operator workspace through SSE with bounded HTTP fallback; it does not recalculate market truth in the browser.", TEAL), PageBreak()]
 
     section(story, "3. How the chart is studied: capture, identity and reconstruction")
@@ -196,7 +200,7 @@ def build():
               flow(["Locked<br/>window", "Chart-plane<br/>crop", "Source / pair /<br/>timeframe lock", "Candle &amp;<br/>structure vision", "Exact-frame<br/>artifacts"], [PALE, PALE, colors.HexColor("#FCEBED"), colors.HexColor("#EAF8F6"), PALE]), Spacer(1, .25*cm),
               table(["Study output", "How it is derived", "Use downstream"], [
                   ["Market identity", "Broker surface + source lock + detected pair/timeframe", "Rejects wrong-window / mixed-instrument truth"],
-                  ["Candles", "Visible candle geometry, current forming candle and latest confirmed closed candle", "Exact micro-study, sequence identity and episode progression"],
+                  ["Candles", "Visible candle geometry, current forming candle and latest confirmed closed candle", "Exact micro-study, sequence identity and continuous history"],
                   ["Structure", "Impulse, pullback, retest, continuation, swings, support/resistance, supply/demand", "Playbook and price-location context"],
                   ["Chart transform", "Exact window-space ↔ chart-space mapping", "Keeps all overlays aligned with the frame"],
                   ["Quality / novelty", "Parse confidence, ensemble disagreement, OOD / artifact checks", "Caps confidence or forces WAIT"],
@@ -281,31 +285,34 @@ def build():
               ], [4.4*cm, 12.8*cm]),
               callout("IMPORTANT BOUNDARY", "The repository proves a controlled handoff architecture, not a promise of broker fill, price, profit or loss avoidance. Broker rules, spread, slippage, trigger conventions and fill mechanics remain external and variable.", GOLD), PageBreak()]
 
-    section(story, "9. Tracking episodes: candle-by-candle regression history")
-    story += [p("PhoenixGuard records a fixed 12-newly-completed-candle episode, not repeated screen refreshes. At Start, a unique episode ID freezes the anchor: market/timeframe, closed candle, committed plan/thesis, study baseline, permission snapshot, candidate positioning areas and a 12-event horizon. Each event then records actual movement, rest, continuation or change without rewriting the earlier study."),
-              table(["State", "Meaning", "Transition"], [
-                  ["IDLE", "No active episode", "Start after readiness"],
-                  ["ACTIVE", "Frozen baseline is being compared to new confirmed closed candles", "E1–E11 each append exactly once"],
-                  ["COMPLETED", "E12 recorded; before/after record retained", "New operator start creates next episode"],
-                  ["STOPPED", "Only the episode stops; worker and models stay warm", "Restart after operator action"],
-                  ["INVALIDATED / FAILED", "Market/timeframe/source changed or unrecoverable fault", "Restart only after readiness is restored"],
-              ], [3.0*cm, 9.5*cm, 4.7*cm]),
-              p("One event only advances when the episode is ACTIVE, pair/timeframe match, a confirmed closed-candle key exists, that key has not been processed, and its sequence is strictly newer. A historical event receives a market-study snapshot only when both its closed-candle key and sequence match exactly. A current study is never copied backward onto older reacquired events; a missing study remains honestly unavailable."),
+    section(story, "9. Continuous closed-candle research history")
+    story += [p("PhoenixGuard studies every newly proven pair/timeframe-scoped closed candle exactly once. No operator button creates a study baseline and no preset horizon ends the history. Repeated frames are idempotent; a stopped and restarted capture service resumes only after closed-candle identity and source continuity are proven."),
+              table(["Research capability", "What it adds", "Hard interpretation boundary"], [
+                  ["Motif lattice", "Single-candle micro-events; 3-5 candle atoms; 7-12 candle compounds; full swing/rest regimes", "Bounded historical composition, not a future outcome"],
+                  ["Time-to-event", "Kaplan-Meier-style next-swing, direction-change and rest-end curves, plus object-conditioned curves from matured Pair DNA", "Descriptive duration evidence, not a deadline or cause"],
+                  ["Adaptive ontology", "Pair-scoped shadow features evaluated on closed-candle train/holdout evidence, with versioned promotion and rollback", "Passing means eligible for study only"],
+                  ["Exact paths", "Anchor-known normalized path, MFE, MAE, efficiency, time in state and a bounded motif-linked trajectory library", "Historical reconstruction only"],
+                  ["Cross-pair graph", "Shared-timestamp normalized Granger-style proxy plus mutual information", "Explicitly non-causal association; no influence or entry claim"],
+                  ["Concept drift", "Bounded distribution test and deterministic regime partition identity", "Distribution change, not direction"],
+                  ["Proof certificates", "Hashes claim, inputs, derivation, closed-candle IDs, coordinate and order domains", "Integrity only; not source authentication or execution authority"],
+              ], [3.5*cm, 8.5*cm, 5.2*cm]),
+              p("Continuous integration", "h2"),
+              p("MarketStudyServiceV3 publishes bounded motif_lattice, survival_network, path_reconstruction, adaptive_feature_ontology, concept_drift, regime_partition, cross_pair_association and claim_proofs fields from restart-safe history. Pair-scoped ontology audit state persists independently; drift snapshots and append-stable partitions persist inside Pair DNA. The atomic cross-pair coordinator retains only bounded normalized returns; without a genuine synchronized peer or support it reports insufficient evidence and never creates an edge."),
               p("Continuity handling", "h2"),
-              p("Missed visual rollovers enter a fail-closed reacquisition path. Unknown gaps can remain recorded as gaps, while stable new candle identities resume progression. This protects history from double counting and from falsely attaching the latest regression to an earlier candle."), PageBreak()]
+              p("A history row receives a market-study snapshot only when its closed-candle key and monotonic sequence match exactly. Missed visual rollovers enter a fail-closed reacquisition path. Unknown gaps remain explicit; the newest study is never copied backward. Cross-pair evidence additionally requires exact shared contiguous closed timestamps and compatible normalized geometry. Granger-style variance reduction and mutual information always remain non-causal associations."), PageBreak()]
 
     section(story, "10. Operator experience, auditability and operational controls")
-    story += [p("The privacy-safe public object is PG_OPERATOR_WORKSPACE_V1. It exposes only what an operator needs: market/timeframe, major trend, inner trend, historical regression, independent entry permission with a blocking reason, freshness, E1–E12 state/history, exact-frame media and safe overlay metadata. It removes provider internals, filesystem details, raw telemetry and private strategy vocabulary."),
+    story += [p("The privacy-safe public object is PG_OPERATOR_WORKSPACE_V1. It exposes only what an operator needs: market/timeframe, major trend, inner trend, historical regression, continuous closed-candle history, independent entry permission with a blocking reason, freshness, exact-frame media and safe overlay metadata. It removes provider internals, filesystem details, raw telemetry and private strategy vocabulary."),
               table(["Operator-facing idea", "Internal implementation principle"], [
                   ["Major trend", "Larger completed-candle regression and structure"],
                   ["Inner trend", "Current swing, pullback, rest or continuation inside the major trend"],
                   ["Regression study", "One supported BUY/SELL/HOLD historical read with reasons; never permission"],
                   ["Entry status", "Separate permission contract that fails closed if packet, freshness, integrity or entry-area conditions fail"],
                   ["Buy low / sell high guidance", "Positioning guidance inside a valid area; never overrides invalidation, freshness or entry-window gates"],
-                  ["History", "Ghosted retained episode evidence; never changes current permission"],
+                  ["History", "Retained closed-candle behavior and regression evidence; never changes current permission"],
               ], [5.0*cm, 12.2*cm]),
               p("Audit and certification", "h2"),
-              bullets(["Runtime artifacts: session.json, compact_live_state.json, display_state.json, events.jsonl, tracking episode state/events, exact frame media and overlays.",
+              bullets(["Runtime artifacts: session.json, compact_live_state.json, display_state.json, events.jsonl, continuous study stores, exact frame media and overlays.",
                        "Evidence loop: allowed-entry and blocked-ENTER_NOW screenshots, future outcome scoring, progression galleries, manifests and forensic reports.",
                        "Health and topology: API health, single runtime/venv validation, model warm state, source lock, dashboard hydration, broker freshness and runtime traces.",
                        "Useful live endpoints: /v1/mobile/health; operator/state/v1/{session}; model-council execution/latest; runtime/trace/v3; and the /v3 dashboard."]),
@@ -318,19 +325,20 @@ def build():
                   ["Live tracker", "Backend/src/phoenixguard/mobile_api/window_tracker.py"],
                   ["Closed-candle resolver", "phoenixguard/decision/scene_forecast_contributor_v3.py; mobile_api/window_tracker.py resolver-to-study bridge"],
                   ["Deep V3 study", "phoenixguard/study/candle_intelligence_v3.py; behavioral_sequence_v3.py; candle_ledger_v3.py; pair_dna_v3.py; historical_similarity_v3.py; object_relationship_graph_v3.py"],
+                  ["Advanced V3 research", "phoenixguard/study/motif_lattice_v3.py; adaptive_feature_ontology_v3.py; concept_drift_v3.py; cross_pair_association_v3.py; cross_pair_coordinator_v3.py; study_claim_proof_v3.py"],
                   ["API / public state", "Backend/src/phoenixguard/mobile_api/app.py; live_state_v3.py"],
                   ["Inference", "Frontend/dashboard/main.py::run_inference"],
                   ["Vision / overlays", "phoenixguard/vision/*; tracking/market_object_tracker_v3.py; vision/v3_overlay_contract.py"],
                   ["Decision", "phoenixguard/decision/model_council_v3.py; book_strategy/*; scenario_decision_kernel.py; a_star_scenarios.py; skill_gates.py"],
                   ["Execution boundary", "phoenixguard/execution/packet_v3.py; v3_language.py; Backend/launch/shooter.py; phoenixguard_mt4_file_bridge.py"],
                   ["Dashboard", "Frontend/dashboard/static/window_tracker_dashboard.html"],
-                  ["Canonical specs", "docs/architecture/PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md; PhoenixGuard_System_Blueprint.md; docs/active_execution_paths.md; docs/execution_packet_schema_matrix.md"],
+                  ["Canonical specs", "docs/architecture/PHOENIXGUARD_V3_MARKET_STUDY_BLUEPRINT.md; PhoenixGuard_System_Blueprint.md; docs/active_execution_paths.md; docs/execution_packet_schema_matrix.md"],
               ], [4.3*cm, 12.9*cm]),
               p("Before considering a live stack healthy", "h2"),
               bullets(["Health returns 200 and exactly one logical stack owns the configured port.",
                        "The session is running; frame/capture/state identities advance across samples; pair and timeframe remain stable.",
                        "Latest window/chart/overlay artifacts, operator state and dashboard all return successfully and agree on version identity.",
-                       "Tracking readiness is explicit; a started episode freezes a baseline; only genuinely new closed candles advance it.",
+                       "Continuous study requires no manual baseline; only genuinely new identity-proven closed candles advance it.",
                        "Model health, source lock, packet freshness and package handoff status are checked separately from market analysis.",
                        "No regression read, overlay or raw signal is treated as entry permission; only a fresh validated V3 packet plus accepted allowance may cross the handoff boundary."]),
               Spacer(1, .25*cm), callout("BOTTOM LINE", "PhoenixGuard is architected as an evidence-to-permission system, not a model-to-click system. The safest reading of the product is: study broadly, classify explicitly, wait by default, and permit a handoff only through independently validated current truth.", GOLD)]

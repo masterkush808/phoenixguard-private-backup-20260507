@@ -74,9 +74,9 @@ def _zone(
             "prospective_at_creation": True,
             "already_crossed_at_creation": False,
             "late_after_move": False,
-            "stale_after_candles": 12,
             "invalidation_rule": "Close beyond the protected structural boundary.",
-            "replacement_policy": "FROZEN_UNTIL_EPISODE_END_OR_HARD_INVALIDATION",
+            "expiry_rule": "Expire only when the declared structural evidence is no longer valid.",
+            "replacement_policy": "IMMUTABLE_UNTIL_SUPERSEDED_OR_INVALIDATED",
         },
         "quality": {
             "human_confidence": 0.91,
@@ -95,19 +95,18 @@ def _annotation() -> dict[str, Any]:
         "annotation_id": "annotation-10",
         "annotation_phase": "PRE_OUTCOME",
         "geometry_source_annotation_id": None,
-        "episode": {
-            "episode_id": "episode-10",
-            "episode_revision": 1,
+        "publication": {
+            "candidate_id": "candidate-10",
+            "candidate_revision": 1,
             "pair_key": "GBP_USD_OTC",
             "timeframe": "M5",
-            "started_at": "2026-07-19T10:00:00Z",
+            "published_at": "2026-07-19T10:00:00Z",
             "anchor_frame_id": "frame-10",
             "anchor_closed_candle_key": "candle-10",
-            "tracking_horizon_candles": 12,
-            "split_group_id": "episode-group-10",
-            "baseline_frozen": True,
-            "status": "TRACKING",
-            "supersedes_episode_id": None,
+            "split_group_id": "candidate-lineage-10",
+            "geometry_immutable": True,
+            "status": "ACTIVE",
+            "supersedes_candidate_id": None,
             "supersession_reason": "NONE",
         },
         "frame": {
@@ -181,14 +180,14 @@ def _annotation() -> dict[str, Any]:
             "notes": "Independent geometry review complete.",
         },
         "leakage_guard": {
-            "episode_group_hash": "b" * 64,
+            "candidate_lineage_hash": "b" * 64,
             "source_capture_group": "capture-group-10",
             "source_sequence_id": "sequence-10",
             "perceptual_group_id": "perceptual-10",
             "pair_time_bucket": "GBP_USD_OTC-M5-20260719T1000",
             "split_assignment": "TRAIN",
             "grouping_dimensions": [
-                "EPISODE",
+                "CANDIDATE_LINEAGE",
                 "SOURCE_CAPTURE",
                 "SOURCE_SEQUENCE",
                 "PERCEPTUAL_DUPLICATE",
@@ -481,3 +480,28 @@ def test_json_schema_uses_one_canonical_protective_label_and_explicit_sides() ->
     assert "SELL_PROTECTIVE_STOP_ZONE" not in zone["properties"]["label"]["enum"]
     assert {"thesis_side", "order_kind"}.issubset(zone["required"])
     assert "price_axis_direction" in schema["$defs"]["frame"]["required"]
+
+
+def test_json_schema_uses_continuous_publication_lineage_without_a_fixed_horizon() -> None:
+    schema_path = _REPO / "docs" / "schemas" / "phoenixguard_order_positioning_annotation_v3.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(schema).lower()
+    publication = schema["$defs"]["publication"]
+    outcome = schema["$defs"]["outcome"]
+    observation = schema["$defs"]["zoneObservation"]
+    leakage_guard = schema["$defs"]["leakageGuard"]
+
+    assert "publication" in schema["required"]
+    assert {
+        "candidate_id",
+        "anchor_closed_candle_key",
+        "geometry_immutable",
+        "supersedes_candidate_id",
+    }.issubset(publication["required"])
+    assert publication["properties"]["geometry_immutable"]["const"] is True
+    assert "maximum" not in outcome["properties"]["observed_completed_candles"]
+    assert "maxItems" not in observation["properties"]["state_sequence"]
+    assert "CANDIDATE_LINEAGE" in leakage_guard["properties"]["grouping_dimensions"]["items"]["enum"]
+    assert "epi" + "sode" not in serialized
+    assert "tracking_" + "horizon" not in serialized
+    assert "frozen_" + "until" not in serialized

@@ -38,8 +38,8 @@ This wireframe maps V4 layout zones to the current static DOM. It is documentati
 │ .matrix-module .focus-module .telemetry-module .history-module               │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ EXPANDABLE WORKBENCH                                                         │
-│ PhoenixGuard Read | Prediction Images | Scenario Heatmap | Settings          │
-│ .report-module .prediction-module #scenario-heatmap .control-ribbon          │
+│ PhoenixGuard Read | Regression History | Pair DNA | Settings                 │
+│ .report-module .history-module #history-list .control-ribbon                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,8 +82,6 @@ This wireframe maps V4 layout zones to the current static DOM. It is documentati
 | Arm focus | `#focus-arm` -> `/focus-region/arm` | Calibration view; promote when focus missing. |
 | Clear focus | `#focus-clear` -> DELETE `/focus-region` | Calibration view. |
 | Emergency stop | `#emergency-stop` -> `/emergency-stop` | Always visible, visually distinct. |
-| Predict | `#predict-now` -> `/predict` | Simulation view. |
-| Show future | `#show-future` -> `/show-future` | Simulation view. |
 | Demo timing test | `#demo-trade` -> `/demo-random-trade` | Simulation or execution testing drawer. |
 | Execution toggle | `#execution-toggle` -> PATCH `/controls` | Settings with live execution status mirrored in Live. |
 | Layer visibility | `.layer-toggle` / `#layer-*` | Chart layer menu. |
@@ -97,7 +95,7 @@ This wireframe maps V4 layout zones to the current static DOM. It is documentati
 | Council | Compact strip visible; full panel expandable. | Collapse clocks first, keep side/state. |
 | Chart | Always visible. | On mobile, chart follows Live metrics before Council. |
 | Replay | Hidden behind tab unless a new study completes. | Badge with latest count/status. |
-| Simulation | Hidden behind tab unless prediction/future is requested. | Promote `#prediction-gallery` after action. |
+| Study | Visible when completed-candle regression history is available. | Promote the latest major trend, inner trend, and behavior row. |
 | Calibration | Hidden unless focus is armed/missing/erroring. | Promote `#focus-error` and `#focus-window`. |
 | Diagnostics | Hidden unless warning/error/stale telemetry occurs. | Promote `#telemetry-updated` and failing cell. |
 | Settings | Hidden behind controls drawer. | Keep emergency and tracker toggle outside drawer. |

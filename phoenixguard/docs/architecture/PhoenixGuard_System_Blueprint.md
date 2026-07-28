@@ -1,7 +1,7 @@
 # PhoenixGuard Complete System Blueprint
 
-> Current live tracking and 12-closed-candle episode behavior is documented in
-> [PhoenixGuard Live Tracking Blueprint](PHOENIXGUARD_LIVE_TRACKING_BLUEPRINT.md). This broader
+> Current continuous closed-candle study behavior is documented in the
+> [PhoenixGuard V3 Market Study Blueprint](PHOENIXGUARD_V3_MARKET_STUDY_BLUEPRINT.md). This broader
 > blueprint remains the subsystem reference.
 
 Generated: 2026-06-21
@@ -434,9 +434,9 @@ and predictor, not an unlimited recorder. The hardening adds these guards:
 
 - `Backend/tools/clean_v3_runtime_state.py --apply --delete` permanently removes disposable
   runtime/cache state without creating another archive, rejects target and nested junction/symlink redirection,
-  skips every project virtual environment, and preserves calibration files plus durable
-  tracking-episode history.
-- Durable episode persistence is capped per record, ledger, session, total bytes, and inactive
+  skips every project virtual environment, and preserves calibration files plus durable market
+  study history.
+- Durable study persistence is capped per record, ledger, session, total bytes, and inactive
   session count; the active session remains protected while oldest inactive histories are deleted
   directly without creating a second archive.
 - The market registry uses contained, sanitized session filenames, caps each encoded record, and

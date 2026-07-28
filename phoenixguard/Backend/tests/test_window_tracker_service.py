@@ -3959,7 +3959,7 @@ def test_window_tracker_builds_memory_projection_payload(monkeypatch: Any) -> No
     assert payload["market"] == "GBP/JPY OTC"
 
 
-def test_tracker_memory_projection_actions_persist_as_snapshot_when_chart_advances(
+def test_private_memory_projection_snapshots_persist_without_crossing_public_boundary(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -3989,30 +3989,53 @@ def test_tracker_memory_projection_actions_persist_as_snapshot_when_chart_advanc
     session = tracker.create_session(session_id="pocket-live")
     tracker.set_focus_region(str(session["session_id"]), [0.02, 0.02, 0.98, 0.98], source="test")
 
-    predicted = tracker.run_memory_projection(str(session["session_id"]), mode="predict")
-    assert predicted["memory_projection_active_mode"] == "predict"
-    assert predicted["memory_projection_current"]["status"] == "ready"
-    assert predicted["memory_projection_current"]["mode"] == "predict"
-    assert Path(str(predicted["memory_projection_current"]["reference_image_path"])).is_file()
-    assert Path(str(predicted["memory_projection_current"]["projection_image_path"])).is_file()
-    assert predicted["latest_signal"]["market"] == "GBP/JPY OTC"
+    public_predicted = tracker.run_memory_projection(
+        str(session["session_id"]), mode="predict"
+    )
+    assert "memory_projection_active_mode" not in public_predicted
+    assert "memory_projection_predict" not in public_predicted
+    private_predicted = tracker.require_session(str(session["session_id"]))
+    assert private_predicted["memory_projection_active_mode"] == "predict"
+    assert private_predicted["memory_projection_predict"]["status"] == "ready"
+    assert private_predicted["memory_projection_predict"]["mode"] == "predict"
+    assert Path(
+        str(private_predicted["memory_projection_predict"]["reference_image_path"])
+    ).is_file()
+    assert Path(
+        str(private_predicted["memory_projection_predict"]["projection_image_path"])
+    ).is_file()
+    assert public_predicted["latest_signal"]["market"] == "GBP/JPY OTC"
 
-    future = tracker.run_memory_projection(str(session["session_id"]), mode="future")
-    assert future["memory_projection_active_mode"] == "future"
-    assert future["memory_projection_current"]["status"] == "ready"
-    assert future["memory_projection_current"]["mode"] == "future"
-    assert Path(str(future["memory_projection_current"]["reference_image_path"])).is_file()
-    assert Path(str(future["memory_projection_current"]["projection_image_path"])).is_file()
+    public_future = tracker.run_memory_projection(
+        str(session["session_id"]), mode="future"
+    )
+    assert "memory_projection_active_mode" not in public_future
+    assert "memory_projection_future" not in public_future
+    private_future = tracker.require_session(str(session["session_id"]))
+    assert private_future["memory_projection_active_mode"] == "future"
+    assert private_future["memory_projection_future"]["status"] == "ready"
+    assert private_future["memory_projection_future"]["mode"] == "future"
+    assert Path(
+        str(private_future["memory_projection_future"]["reference_image_path"])
+    ).is_file()
+    assert Path(
+        str(private_future["memory_projection_future"]["projection_image_path"])
+    ).is_file()
 
-    refreshed = tracker.capture_once(str(session["session_id"]))
-    assert refreshed["memory_projection_future"]["status"] == "ready"
-    assert refreshed["memory_projection_future"]["is_current"] is False
-    assert refreshed["memory_projection_future"]["snapshot_ready"] is True
-    assert refreshed["memory_projection_future"]["source_frame_age"] >= 1
-    assert refreshed["memory_projection_future"]["trade_authorized"] is False
-    assert refreshed["memory_projection_future"]["actionable"] is False
-    assert refreshed["memory_projection_future"]["execution_permission"] == "WAIT_FOR_CONFIRMATION"
-    assert refreshed["latest_signal"]["market"] == "GBP/JPY OTC"
+    public_refreshed = tracker.capture_once(str(session["session_id"]))
+    assert "memory_projection_future" not in public_refreshed
+    private_refreshed = tracker.require_session(str(session["session_id"]))
+    assert private_refreshed["memory_projection_future"]["status"] == "ready"
+    assert private_refreshed["memory_projection_future"]["is_current"] is False
+    assert private_refreshed["memory_projection_future"]["snapshot_ready"] is True
+    assert private_refreshed["memory_projection_future"]["source_frame_age"] >= 1
+    assert private_refreshed["memory_projection_future"]["trade_authorized"] is False
+    assert private_refreshed["memory_projection_future"]["actionable"] is False
+    assert (
+        private_refreshed["memory_projection_future"]["execution_permission"]
+        == "WAIT_FOR_CONFIRMATION"
+    )
+    assert public_refreshed["latest_signal"]["market"] == "GBP/JPY OTC"
 
 
 def test_window_tracker_behavior_detects_box_reaction_context() -> None:
@@ -4859,7 +4882,7 @@ def test_start_session_clears_stalepackets_before_first_fresh_capture(
         tracker.latest_model_council_study_packet(str(session["session_id"]))
 
 
-def test_start_session_reconciles_missing_worker_after_api_recycle_without_resetting_history(
+def test_start_session_reconciles_missing_worker_without_resetting_automatic_history(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4872,6 +4895,21 @@ def test_start_session_reconciles_missing_worker_after_api_recycle_without_reset
     session = recycled_process.create_session(session_id="pocket-live")
     payload = recycled_process.load_session(str(session["session_id"]))
     assert payload is not None
+    preserved_study = {
+        "status": "STUDIED",
+        "closed_candle_key": "NZD/JPY OTC|M5|closed-37",
+        "symbol": "NZD/JPY OTC",
+        "timeframe": "M5",
+    }
+    preserved_history_row = {
+        "frame_id": 37,
+        "summary": "preserve-me",
+        "market_study_v3": preserved_study,
+    }
+    preserved_chart_path = tmp_path / "preserved-chart.png"
+    _surface().save(preserved_chart_path)
+    latest_signal = dict(payload.get("latest_signal", {}))
+    latest_signal["market_study_v3"] = preserved_study
     payload.update(
         {
             "manual_focus_region": {
@@ -4884,10 +4922,10 @@ def test_start_session_reconciles_missing_worker_after_api_recycle_without_reset
             "capture_count": 37,
             "last_capture_epoch": 1234.5,
             "decision_valid_until_epoch": 1294.5,
-            "recent_studies": [{"frame_id": 37, "summary": "preserve-me"}],
-            "tracking_episode_history": [
-                {"episode_id": "episode-preserved", "state": "STOPPED"}
-            ],
+            "last_chart_path": str(preserved_chart_path),
+            "latest_signal": latest_signal,
+            "recent_studies": [preserved_history_row],
+            "__control_write_v3": True,
             "model_council_study_packet": {
                 "packet_id": "study-preserved",
                 "packet_type": "STUDY_PACKET",
@@ -4912,12 +4950,7 @@ def test_start_session_reconciles_missing_worker_after_api_recycle_without_reset
     assert reconciled["frame_index"] == 37
     assert reconciled["capture_count"] == 37
     assert reconciled["last_capture_epoch"] == 1234.5
-    assert reconciled["recent_studies"] == [
-        {"frame_id": 37, "summary": "preserve-me"}
-    ]
-    assert reconciled["tracking_episode_history"] == [
-        {"episode_id": "episode-preserved", "state": "STOPPED"}
-    ]
+    assert reconciled["recent_studies"] == [preserved_history_row]
     stored = recycled_process.load_session("pocket-live")
     assert stored is not None
     assert stored["decision_valid_until_epoch"] == 1294.5
@@ -6193,9 +6226,9 @@ def test_lstm_composite_forecast_survives_bounded_cold_persistence(tmp_path: Pat
     write_json_atomic(decision_path, compact_decision)
     decision_bytes = decision_path.read_bytes()
     assert len(decision_bytes) < 1_000_000
-    assert decision_bytes.count(b'"forecast_path"') == 4
-    assert decision_bytes.count(b'"trajectory_scenarios"') == 1
-    assert decision_bytes.count(b'"features"') == 1
+    assert b'"forecast_path"' not in decision_bytes
+    assert b'"trajectory_scenarios"' not in decision_bytes
+    assert b'"forecast_snapshot_v3"' not in decision_bytes
     tracker.shutdown()
 
     cold_tracker = ContinuousWindowTrackerService(root_dir=root_dir)
@@ -6252,19 +6285,9 @@ def test_lstm_composite_forecast_survives_bounded_cold_persistence(tmp_path: Pat
 
     compact_path = cold_tracker.session_dir(session_id) / "compact_live_state.json"
     compact = json.loads(compact_path.read_text(encoding="utf-8"))
-    compact_lstm = cast(
-        dict[str, Any],
-        cast(dict[str, Any], compact["forecast_snapshot_v3"])["lstm_contribution"],
-    )
-    assert [row["step"] for row in compact_lstm["forecast_path"]] == list(range(1, 13))
-    assert len(compact_lstm["forecast_path"]) <= 12
-    compact_scenarios = cast(list[dict[str, Any]], compact_lstm["trajectory_scenarios"])
-    assert len(compact_scenarios) == 3
-    for scenario in compact_scenarios:
-        scenario_side = str(scenario["side"])
-        scenario_path = cast(list[dict[str, Any]], scenario["forecast_path"])
-        assert [row["step"] for row in scenario_path] == list(range(1, 13))
-        assert scenario_path == expected_scenario_paths[scenario_side]
+    assert "forecast_snapshot_v3" not in compact
+    assert "lstm_contribution" not in compact
+    assert "forecast_path" not in compact
     assert compact_path.stat().st_size < 256 * 1024
 
 
@@ -6478,7 +6501,7 @@ def test_order_positioning_source_snapshot_is_bounded_and_replaced_per_frame(
 
     monkeypatch.setattr(
         window_tracker_module,
-        "order_positioning_source_rows_v3",
+        "order_positioning_evidence_rows_v3",
         source_rows_stub,
     )
     snapshot_builder = cast(
@@ -8527,7 +8550,8 @@ def test_tracker_dashboard_prioritizes_decision_chart_and_history_without_techni
 
     assert "<title>808Fx Standard Hybrid System Live Tracker</title>" in dashboard_html
     assert 'id="current-move-title"' in dashboard_html
-    assert 'id="forecast-title"' in dashboard_html
+    assert 'id="inner-trend-title"' in dashboard_html
+    assert 'id="forecast-title"' not in dashboard_html
     assert 'id="permission-title"' in dashboard_html
     assert 'id="surface-stage"' in dashboard_html
     assert "object-fit: contain;" in dashboard_html
@@ -8589,13 +8613,10 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert 'data-overlay-family="market_context"' in dashboard_html
     assert 'data-overlay-family="lstm"' not in dashboard_html
     assert 'data-overlay-family="scene_forecaster"' not in dashboard_html
-    assert ".surface-trendline.family-scene-forecaster" in dashboard_html
-    assert ".surface-trendline.family-lstm" in dashboard_html
+    assert ".surface-trendline.family-scene-forecaster" not in dashboard_html
+    assert ".surface-trendline.family-lstm" not in dashboard_html
     assert "forecast: [\"two_candle\", \"scene_forecaster\", \"lstm\", \"prediction\"]" not in dashboard_html
-    assert (
-        'const RETIRED_FORECAST_FAMILIES = new Set(["two_candle", '
-        '"scene_forecaster", "lstm", "prediction"]);'
-    ) in dashboard_html
+    assert "RETIRED_FORECAST_FAMILIES" not in dashboard_html
     assert 'data-label-mode="on"' in dashboard_html
     assert 'data-label-mode="hover"' in dashboard_html
     assert 'data-label-mode="off"' in dashboard_html
@@ -8621,7 +8642,7 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert "FULL_HISTORY_READ: {objects:" not in dashboard_html
 
 
-def test_tracker_dashboard_renders_v3_lstm_composite_events_and_calibrated_band() -> None:
+def test_tracker_dashboard_has_no_retired_lstm_route_renderer() -> None:
     dashboard_html = (
         Path(__file__).resolve().parents[2]
         / "Frontend"
@@ -8630,26 +8651,18 @@ def test_tracker_dashboard_renders_v3_lstm_composite_events_and_calibrated_band(
         / "window_tracker_dashboard.html"
     ).read_text(encoding="utf-8")
 
-    assert 'isForecastBand ? "polygon" : "polyline"' in dashboard_html
-    assert '["center", "composite"].includes(forecastRole) ? " forecast-path-hit"' in dashboard_html
-    assert '["band_90", "upper_90", "lower_90"].includes(forecastRole)' in dashboard_html
-    assert "function createForecastComposite(overlay, projectedGeometry)" in dashboard_html
-    assert 'safeList(overlay.forecast_scenarios).map(function (rawScenario)' in dashboard_html
-    assert 'const points = safeList(scenario.line_points).map(function (point)' in dashboard_html
-    assert "const primaryPathPoints = pathPoints.slice(0, 13);" in dashboard_html
-    assert "primaryPathPoints.slice(1).forEach(function (point, pointOffset)" in dashboard_html
-    assert 'node.dataset.eventLabel = "E" + index;' in dashboard_html
-    assert 'stepLabel.dataset.eventLabel = "E" + index;' in dashboard_html
-    assert "surface-forecast-step-node" in dashboard_html
-    assert 'safeList(overlay.forecast_candles)' in dashboard_html
-    assert "projectedForecastCandles.length === 12" in dashboard_html
-    assert "surface-forecast-candle-body" in dashboard_html
-    assert 'interval.calibrated === true' in dashboard_html
-    assert ".surface-forecast-band.forecast-no-edge" in dashboard_html
-    assert ".surface-trendline.family-lstm.forecast-boundary" in dashboard_html
-    assert ".surface-hotspot.family-lstm.forecast-path-hit" in dashboard_html
-    assert "polyline.dataset.forecastStatus = forecastStatus.toUpperCase()" in dashboard_html
-    assert '"low_confidence", "diagnostic"' in dashboard_html
+    for retired_renderer_trace in (
+        "forecastRole",
+        "createForecastComposite",
+        "forecast_scenarios",
+        "surface-forecast-step-node",
+        "forecast_candles",
+        "surface-forecast-candle-body",
+        "surface-forecast-band",
+        "forecast-boundary",
+        "forecast-path-hit",
+    ):
+        assert retired_renderer_trace not in dashboard_html
 
 
 def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_probe() -> None:
@@ -8706,28 +8719,11 @@ def test_full_local_launcher_has_one_final_live_profile_and_keeps_broker_auto_op
     assert "--no-auto-open" not in launcher
 
 
-def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, monkeypatch: Any) -> None:
-    adapter = PhoenixGuardWindowTrackingAdapter()
-    entries = _materialize_memory_images(tmp_path / "memory-images", _sample_memory_entries())
-    monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: _StubPhoenixBank(entries))
-
-    def detect_market_selector(
-        image: Image.Image,
-        timeframe_selector: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        _ = image
-        _ = timeframe_selector
-        return {"value": "GBP/JPY OTC", "source": "headertext", "confidence": 0.90}
-
-    monkeypatch.setattr(
-        adapter,
-        "_detect_market_selector",
-        detect_market_selector,
-    )
+def test_tracker_http_surface_has_no_manual_projection_actions(tmp_path: Path) -> None:
     tracker_service = ContinuousWindowTrackerService(
         root_dir=tmp_path,
         capture_backend=_FakeCaptureBackend([_synthetic_chart_surface("sell")]),
-        tracking_adapter=adapter,
+        tracking_adapter=PhoenixGuardWindowTrackingAdapter(),
     )
     app = create_app(window_tracker_service=tracker_service)
     client = TestClient(app)
@@ -8750,51 +8746,23 @@ def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, mon
     assert focus_response.status_code == 200
 
     predict_response = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/predict")
-    assert predict_response.status_code == 202
-    predict_action = predict_response.json()
-    assert predict_action["schema_version"] == "PG_FORECAST_ACTION_V1"
-    deadline = time.monotonic() + 30.0
-    predict_status = client.get(str(predict_action["status_url"]))
-    while not bool(predict_status.json()["terminal"]) and time.monotonic() < deadline:
-        predict_status = client.get(str(predict_action["status_url"]))
-        assert predict_status.status_code == 200
-        time.sleep(0.01)
-    assert predict_status.json()["status"] == "ready"
-    predict_payload = tracker_service.get_session_snapshot(session_id)["memory_projection_current"]
-    assert predict_payload["mode"] == "predict"
-    assert predict_payload["status"] == "ready"
-    assert predict_payload["memory_retrieval"]["state"] == "ready"
-    assert predict_payload["memory_retrieval"]["entries"] == 3
-    assert predict_payload["memory_precision"]["accepted"] is True
-    assert predict_payload["primary_fit"]["top_matches"][0]["candle_regression"]["direction"] in {"BUY", "SELL", "HOLD"}
-    reference_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-memory-reference")
-    assert reference_response.status_code == 200
-    assert len(reference_response.content) > 0
-    projection_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-projection")
-    assert projection_response.status_code == 200
-    assert len(projection_response.content) > 0
+    assert predict_response.status_code == 404
 
     future_response = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/show-future")
-    assert future_response.status_code == 202
-    future_action = future_response.json()
-    deadline = time.monotonic() + 30.0
-    future_status = client.get(str(future_action["status_url"]))
-    while not bool(future_status.json()["terminal"]) and time.monotonic() < deadline:
-        future_status = client.get(str(future_action["status_url"]))
-        assert future_status.status_code == 200
-        time.sleep(0.01)
-    assert future_status.json()["status"] == "ready"
-    future_payload = tracker_service.get_session_snapshot(session_id)["memory_projection_current"]
-    assert future_payload["mode"] == "future"
-    assert future_payload["status"] == "ready"
-    assert future_payload["memory_retrieval"]["state"] == "ready"
-    assert future_payload["memory_precision"]["accepted"] is True
-    future_reference_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-memory-reference")
-    assert future_reference_response.status_code == 200
-    assert len(future_reference_response.content) > 0
-    future_projection_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-projection")
-    assert future_projection_response.status_code == 200
-    assert len(future_projection_response.content) > 0
+    assert future_response.status_code == 404
+
+    action_response = client.get(
+        f"/v1/mobile/window-tracker/sessions/{session_id}"
+        "/forecast-actions/retired-request"
+    )
+    assert action_response.status_code == 404
+    assert client.get(
+        f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-projection"
+    ).status_code == 404
+    public = tracker_service.get_session_snapshot(session_id)
+    assert "memory_projection_active_mode" not in public
+    assert "memory_projection_predict" not in public
+    assert "memory_projection_future" not in public
 
 
 def test_tracker_service_updates_capture_interval_control(tmp_path: Path) -> None:
@@ -8870,10 +8838,8 @@ def test_tracker_http_surface_updates_capture_interval_control(tmp_path: Path) -
         f"/v1/mobile/window-tracker/sessions/{session_id}/controls",
         json={
             "capture_interval_sec": 3.0,
-            "require_memory_projection": False,
             "require_market_identity": False,
             "require_timeframe_identity": True,
-            "auto_memory_projection": False,
             "adaptive_timer_enabled": False,
             "min_capture_interval_sec": 0.5,
             "max_capture_interval_sec": 10.0,
@@ -8887,10 +8853,8 @@ def test_tracker_http_surface_updates_capture_interval_control(tmp_path: Path) -
     assert update_response.status_code == 200
     payload = update_response.json()
     assert float(payload["capture_interval_sec"]) == 3.0
-    assert payload["execution_controls"]["require_memory_projection"] is False
     assert payload["execution_controls"]["require_market_identity"] is False
     assert payload["execution_controls"]["require_timeframe_identity"] is True
-    assert payload["execution_controls"]["auto_memory_projection"] is False
     assert payload["execution_controls"]["adaptive_timer_enabled"] is False
     assert float(payload["execution_controls"]["min_capture_interval_sec"]) == 0.5
     assert float(payload["execution_controls"]["max_capture_interval_sec"]) == 10.0
@@ -8898,6 +8862,49 @@ def test_tracker_http_surface_updates_capture_interval_control(tmp_path: Path) -
     assert float(payload["execution_controls"]["execution_window_sec"]) == 180.0
     assert float(payload["execution_controls"]["cooldown_sec"]) == 600.0
     assert float(payload["execution_controls"]["phoenix_report_interval_sec"]) == 24.0
+    for private_key in (
+        "auto_memory_projection",
+        "require_memory_projection",
+        "projection_focus",
+    ):
+        assert private_key not in payload["execution_controls"]
+
+
+def test_tracker_http_rejects_private_projection_controls(tmp_path: Path) -> None:
+    tracker_service = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    client = TestClient(create_app(window_tracker_service=tracker_service))
+    session_id = client.post(
+        "/v1/mobile/window-tracker/sessions",
+        json={"session_id": "private-control-boundary"},
+    ).json()["session_id"]
+
+    response = client.patch(
+        f"/v1/mobile/window-tracker/sessions/{session_id}/controls",
+        json={
+            "auto_memory_projection": False,
+            "require_memory_projection": False,
+            "projection_focus": 0.7,
+        },
+    )
+
+    assert response.status_code == 422
+    rejected_fields = {
+        str(error["loc"][-1]) for error in response.json().get("detail", [])
+    }
+    assert rejected_fields == {
+        "auto_memory_projection",
+        "require_memory_projection",
+        "projection_focus",
+    }
+    public = client.get(
+        f"/v1/mobile/window-tracker/sessions/{session_id}"
+    ).json()
+    public_controls = cast(dict[str, Any], public["execution_controls"])
+    assert not rejected_fields.intersection(public_controls)
 
 
 def test_tracker_capture_preserves_concurrent_control_updates(tmp_path: Path) -> None:
@@ -9669,133 +9676,6 @@ def test_tracker_live_execution_uses_fixed_amount_and_fake_click_backend(tmp_pat
     assert "Model Council V3 executable packet required" in result["broker_execution_state"]["message"]
     assert result["broker_execution_state"]["amount"] == "preserve"
     assert result["broker_execution_state"]["active_trade"] == {}
-
-
-def test_fast_visual_blocked_capture_persists_active_episode_reacquiring_before_return(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    episode_id = "episode-active-e0-fast-visual"
-    anchor_key = "anchor-closed-e0"
-    scene: dict[str, Any] = {
-        "pair": "GBP/USD OTC",
-        "timeframe": "M5",
-        "market_identity_confirmed": True,
-        "timeframe_identity_confirmed": True,
-        "closed_candle_key": anchor_key,
-        "closed_candle_sequence": 0,
-        "closed_candle_transition_reason": "AMBIGUOUS_SCREENSHOT_REUSES_EVENT",
-        "closed_candle_match_scores": {
-            "coverage_degradation_observed": True,
-        },
-        "closed_candle_identity_state": {
-            "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
-            "pair": "GBP/USD OTC",
-            "timeframe": "M5",
-            "event_key": anchor_key,
-            "event_sequence": 0,
-            "latest_closed": {"track_id": "50", "side": "BUY"},
-            "forming": {"track_id": "51", "side": "SELL"},
-            "confirmed_event_batch": [],
-            "transition_count": 0,
-            "reacquisition": {
-                "status": "NOT_CONFIRMED",
-                "reason": "FORMER_LIVE_BAR_MATCH_AMBIGUOUS",
-                "confirmed_closed_count": 0,
-            },
-        },
-        "line_points": [[index / 12.0, 0.5] for index in range(13)],
-        "forecast_candles": [{"step": index} for index in range(1, 13)],
-        "forecast_scenarios": [
-            {"role": "base"},
-            {"role": "bull"},
-            {"role": "bear"},
-        ],
-    }
-
-    class _AmbiguousEpisodeTrackingAdapter(_FakeTrackingAdapter):
-        def study(
-            self,
-            image: Image.Image,
-            *,
-            session_payload: Mapping[str, Any] | None = None,
-        ) -> TrackingStudy:
-            study = super().study(image, session_payload=session_payload)
-            study.tracking_summary["detected_market"] = "GBP/USD OTC"
-            study.tracking_summary["scene_forecast_contribution"] = scene
-            study.latest_signal["market"] = "GBP/USD OTC"
-            study.latest_signal["scene_forecast_contribution"] = scene
-            return study
-
-    monkeypatch.setenv("PHOENIXGUARD_FAST_VISUAL_ONLY_WHEN_NOT_EXECUTABLE", "1")
-    tracker = ContinuousWindowTrackerService(
-        root_dir=tmp_path,
-        capture_backend=_FakeCaptureBackend([_synthetic_broker_window()]),
-        tracking_adapter=_AmbiguousEpisodeTrackingAdapter("BUY"),
-    )
-    session_id = str(tracker.create_session(session_id="pocket-live")['session_id'])
-    _focus_session_without_preview(tracker, session_id)
-    payload = tracker.load_session_payload(session_id)
-    controls = dict(payload["execution_controls"])
-    controls.update({"live_execution_enabled": True, "execution_mode": "live"})
-    payload["execution_controls"] = controls
-    payload["tracking_enabled"] = True
-    payload["status"] = "running"
-    payload["tracking_episode"] = {
-        "schema_version": "PG_TRACKING_EPISODE_V1",
-        "session_id": session_id,
-        "episode_id": episode_id,
-        "state": "ACTIVE",
-        "revision": 1,
-        "event_horizon": 12,
-        "event_cursor": 0,
-        "started_at": "2026-07-18T00:00:00+00:00",
-        "updated_at": "2026-07-18T00:00:00+00:00",
-        "pair": "GBP/USD OTC",
-        "timeframe": "M5",
-        "anchor": {
-            "pair": "GBP/USD OTC",
-            "timeframe": "M5",
-            "closed_candle_key": anchor_key,
-            "closed_candle_sequence": 0,
-            "closed_candle_identity_state": scene[
-                "closed_candle_identity_state"
-            ],
-        },
-        "baseline_forecasts": {"scene": scene, "lstm": {}, "memory": {}},
-        "committed_plan": {},
-        "events": [],
-        "processed_closed_candle_keys": [],
-        "last_processed_closed_candle_key": anchor_key,
-        "last_processed_closed_candle_sequence": 0,
-        "observation_state": {
-            "schema_version": "PG_TRACKING_EPISODE_OBSERVATION_V1",
-            "status": "WAITING_FOR_BASELINE",
-            "reason": "NO_ACTIVE_BASELINE",
-            "unresolved_gap": False,
-        },
-    }
-    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
-
-    _allow_next_capture(tracker, session_id)
-    result = tracker.capture_once(session_id)
-    persisted = tracker.load_session_payload(session_id)
-    returned_episode = cast(dict[str, Any], result["tracking_episode"])
-    persisted_episode = cast(dict[str, Any], persisted["tracking_episode"])
-    decision = json.loads(Path(str(result["last_decision_path"])).read_text(encoding="utf-8"))
-
-    assert decision["decision_artifact_state"] == (
-        "visual_only_blocked_no_execution_packet"
-    )
-    for episode in (returned_episode, persisted_episode):
-        assert episode["episode_id"] == episode_id
-        assert episode["state"] == "ACTIVE"
-        assert episode["event_cursor"] == 0
-        assert episode["observation_state"]["status"] == "REACQUIRING"
-        assert episode["observation_state"]["unresolved_gap"] is True
-        assert episode["observation_state"]["status"] != "WAITING_FOR_BASELINE"
-
-
 def test_tracker_live_execution_clicks_sell_with_swing_expiry(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     tracker = ContinuousWindowTrackerService(
@@ -11782,104 +11662,6 @@ def test_scene_candle_identity_and_geometry_restore_across_process_restart() -> 
     assert restored["belief_tracker_checkpoint"] == checkpoint
     assert getattr(adapter, "_scene_belief_tracker") is not original_tracker
     assert getattr(adapter, "_scene_belief_restore_attempted") is True
-
-
-def test_active_e0_anchor_recovers_matching_identity_from_older_decision_artifact(
-    tmp_path: Path,
-) -> None:
-    adapter = PhoenixGuardWindowTrackingAdapter()
-    anchor_identity = {
-        "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
-        "pair": "GBPUSD_OTC",
-        "timeframe": "M5",
-        "event_key": "anchor-closed-event",
-        "event_sequence": 0,
-        "latest_closed": {"track_id": "50", "side": "BUY"},
-        "forming": {"track_id": "51", "side": "SELL"},
-    }
-    anchor_scene = {
-        "closed_candle_identity_state": anchor_identity,
-        "closed_candle_key": "anchor-closed-event",
-        "closed_candle_sequence": 0,
-        "line_points": [[index / 12.0, 0.5] for index in range(13)],
-        "forecast_candles": [{"step": index} for index in range(1, 13)],
-        "forecast_scenarios": [
-            {"role": "base"},
-            {"role": "bull"},
-            {"role": "bear"},
-        ],
-    }
-    wrong_scene = {
-        "closed_candle_identity_state": {
-            **anchor_identity,
-            "event_key": "wrong-new-baseline",
-            "event_sequence": 1,
-        },
-        "closed_candle_key": "wrong-new-baseline",
-        "closed_candle_sequence": 1,
-    }
-    artifact_dir = tmp_path / "artifacts"
-    old_path = artifact_dir / "000139_anchor_decision.json"
-    new_path = artifact_dir / "000141_wrong_decision.json"
-    write_json_atomic(
-        old_path,
-        {"forecast_snapshot_v3": {"scene_forecast_contribution": anchor_scene}},
-    )
-    write_json_atomic(
-        new_path,
-        {"forecast_snapshot_v3": {"scene_forecast_contribution": wrong_scene}},
-    )
-    restore = cast(
-        Callable[[Mapping[str, Any]], None],
-        getattr(adapter, "_restore_scene_belief_checkpoint"),
-    )
-
-    restore(
-        {
-            "session_id": "pocket-live-8788",
-            "last_decision_path": str(new_path),
-            "tracking_episode": {
-                "schema_version": "PG_TRACKING_EPISODE_V1",
-                "session_id": "pocket-live-8788",
-                "episode_id": "episode-active-e0",
-                "state": "ACTIVE",
-                "revision": 1,
-                "event_cursor": 0,
-                "pair": "GBPUSD_OTC",
-                "timeframe": "M5",
-                "anchor": {
-                    "pair": "GBPUSD_OTC",
-                    "timeframe": "M5",
-                    "closed_candle_key": "anchor-closed-event",
-                    "closed_candle_sequence": 0,
-                },
-            },
-            "tracking_summary": {"scene_forecast_contribution": wrong_scene},
-            "forecast_snapshot_v3": {"scene_forecast_contribution": wrong_scene},
-        }
-    )
-
-    context_key = ("GBPUSD_OTC", "M5")
-    identity_states = cast(
-        dict[tuple[str, str], dict[str, Any]],
-        getattr(adapter, "_scene_candle_identity_states"),
-    )
-    event_sequences = cast(
-        dict[tuple[str, str], tuple[str, int]],
-        getattr(adapter, "_scene_event_sequences"),
-    )
-    forecast_cache = cast(
-        dict[tuple[str, str, str], dict[str, Any]],
-        getattr(adapter, "_scene_forecast_cache"),
-    )
-    assert identity_states[context_key]["event_key"] == "anchor-closed-event"
-    assert event_sequences[context_key] == ("anchor-closed-event", 0)
-    assert forecast_cache[("GBPUSD_OTC", "M5", "anchor-closed-event")][
-        "line_points"
-    ] == anchor_scene["line_points"]
-    assert getattr(adapter, "_scene_belief_restore_attempted") is True
-
-
 def test_real_tracking_adapter_reads_sell_pressure_from_downtrend_surface() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
 

@@ -1607,10 +1607,10 @@ def resolve_precision_overlays_v3(
                 raw.get("display_label")
                 or raw.get("short_label")
                 or raw.get("label"),
-                "SCENE FORECASTER E1-E12",
+                "SCENE MODEL SHADOW STUDY",
             )
             if "SCENE" not in scene_label.upper():
-                scene_label = "SCENE FORECASTER E1-E12"
+                scene_label = "SCENE MODEL SHADOW STUDY"
             row["raw_display_label"] = scene_label
             row["display_label"] = scene_label
             row["short_label"] = scene_label

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 
 ORDER_POSITIONING_CANDIDATE_SCHEMA_VERSION = "PG_ORDER_POSITIONING_CANDIDATES_V3"
-ORDER_POSITIONING_PLAN_SCHEMA_VERSION = "PG_ORDER_POSITIONING_PLAN_V3"
-ORDER_POSITIONING_ACTUAL_SCHEMA_VERSION = "PG_ORDER_POSITIONING_ACTUAL_V3"
-ORDER_POSITIONING_HORIZON_STEPS = 12
+ORDER_POSITIONING_MAX_WINDOW_STEPS = 32
 ORDER_POSITIONING_REPROJECTION_SCHEMA_VERSION = "PG_ORDER_POSITIONING_REPROJECTION_V1"
 
 OrderIntentV3 = Literal["ENTRY_LIMIT", "ENTRY_STOP", "PROTECTIVE_STOP"]
@@ -36,7 +33,6 @@ _STOP_SOURCE_TYPES = {
 }
 _TRENDLINE_TYPES = {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"}
 _ENTRY_INTENTS = {"ENTRY_LIMIT", "ENTRY_STOP"}
-_DYNAMIC_ZONE_FIELDS = {"status", "status_reason", "last_updated_step"}
 _MIN_SOURCE_CONFIDENCE = 0.70
 _MIN_SOURCE_TRUTH = 0.70
 _MIN_ANCHOR_QUALITY = 0.65
@@ -401,7 +397,8 @@ def _reaction_window_contract(
     if (
         origin_x is None
         or step_x is None
-        or horizon_steps != ORDER_POSITIONING_HORIZON_STEPS
+        or horizon_steps is None
+        or not 1 <= horizon_steps <= ORDER_POSITIONING_MAX_WINDOW_STEPS
         or not 0.0 <= origin_x < 1.0
         or not 0.0 < step_x <= _MAX_REACTION_STEP_NORM
     ):
@@ -824,7 +821,7 @@ def _candidate_blocked(
         "coordinate_mode": _NORMALIZED_MODE,
         "chart_bounds": [0.0, 0.0, 1.0, 1.0],
         "current_price_y_norm": None,
-        "horizon_steps": ORDER_POSITIONING_HORIZON_STEPS,
+        "horizon_steps": 0,
         "candidate_zones": [],
         "rejected_sources": [],
         "blockers": list(dict.fromkeys(blockers)),
@@ -1124,7 +1121,7 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
         "geometry_role": _REACTION_WINDOW_GEOMETRY_ROLE,
         "reaction_window_anchor": _REACTION_WINDOW_ANCHOR,
         "reaction_window": reaction_window,
-        "horizon_steps": ORDER_POSITIONING_HORIZON_STEPS,
+        "horizon_steps": _integer(reaction_window.get("horizon_steps")) or 0,
         "timing": {
             "verified": True,
             "favorable_candles_since_origin": favorable_candles,
@@ -1142,426 +1139,13 @@ def build_order_positioning_candidates_v3(session: Mapping[str, Any]) -> dict[st
     }
 
 
-def _static_zone(zone: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in zone.items() if key not in _DYNAMIC_ZONE_FIELDS}
-
-
-def _geometry_snapshot(zones: Sequence[Mapping[str, Any]]) -> str:
-    static = [_static_zone(zone) for zone in zones]
-    return json.dumps(static, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-
-
-def _geometry_fingerprint(snapshot: str) -> str:
-    return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
-
-
-def _reprojection_anchor_snapshot(anchors: Any) -> str:
-    return json.dumps(
-        _reprojection_anchors(anchors),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-
-
-def order_positioning_plan_anchors_valid_v3(plan: Mapping[str, Any]) -> bool:
-    snapshot = _text(plan.get("reprojection_anchor_snapshot"))
-    fingerprint = _text(plan.get("reprojection_anchor_fingerprint"))
-    if not snapshot or not fingerprint:
-        return False
-    return bool(
-        _geometry_fingerprint(snapshot) == fingerprint
-        and _reprojection_anchor_snapshot(plan.get("reprojection_anchors")) == snapshot
-        and len(_reprojection_anchors(plan.get("reprojection_anchors")))
-        >= _MIN_REPROJECTION_ANCHORS
-    )
-
-
-def order_positioning_plan_geometry_valid_v3(plan: Mapping[str, Any]) -> bool:
-    snapshot = _text(plan.get("geometry_snapshot"))
-    fingerprint = _text(plan.get("geometry_fingerprint"))
-    zones = _rows(plan.get("zones"))
-    return bool(
-        snapshot
-        and fingerprint
-        and zones
-        and _geometry_fingerprint(snapshot) == fingerprint
-        and _geometry_snapshot(zones) == snapshot
-    )
-
-
-def _plan_blocked(reason: str) -> dict[str, Any]:
-    return {
-        "schema_version": ORDER_POSITIONING_PLAN_SCHEMA_VERSION,
-        "status": "BLOCKED",
-        "advance_status": "REJECTED",
-        "blockers": [reason],
-        "frozen": False,
-        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
-        "coordinate_mode": _NORMALIZED_MODE,
-        "zones": [],
-        "step": 0,
-        "horizon_steps": ORDER_POSITIONING_HORIZON_STEPS,
-        "reset_available": False,
-    }
-
-
-def freeze_order_positioning_plan_v3(
-    candidate: Mapping[str, Any],
-    episode_id: str,
-    baseline_closed_candle_key: str,
-    origin_frame_id: int | str,
-    frozen_at: str,
-) -> dict[str, Any]:
-    """Freeze candidate geometry once, at the closed-candle episode baseline."""
-
-    if _text(candidate.get("schema_version")) != ORDER_POSITIONING_CANDIDATE_SCHEMA_VERSION:
-        return _plan_blocked("CANDIDATE_SCHEMA_INVALID")
-    if _upper(candidate.get("status")) != "READY":
-        return _plan_blocked("CANDIDATE_NOT_READY")
-    if _upper(candidate.get("coordinate_mode")) != _NORMALIZED_MODE:
-        return _plan_blocked("CANDIDATE_COORDINATE_MODE_INVALID")
-    if _box(candidate.get("chart_bounds")) != [0.0, 0.0, 1.0, 1.0]:
-        return _plan_blocked("CANDIDATE_CHART_BOUNDS_INVALID")
-    for key in ("sequence_id", "chart_transform_id", "broker_source_lock_id"):
-        if not _text(candidate.get(key)):
-            return _plan_blocked(f"CANDIDATE_{key.upper()}_MISSING")
-    for key in ("market", "timeframe"):
-        if not _text(candidate.get(key)):
-            return _plan_blocked(f"CANDIDATE_{key.upper()}_MISSING")
-    display_band_norm = _finite(candidate.get("display_band_norm"))
-    if (
-        _upper(candidate.get("price_axis_orientation"))
-        != "SCREEN_Y_INCREASES_DOWN"
-        or display_band_norm is None
-        or not 0.0 < display_band_norm <= _MAX_DISPLAY_BAND_NORM
-    ):
-        return _plan_blocked("CANDIDATE_PRICE_GEOMETRY_CONTRACT_INVALID")
-    if not _text(episode_id):
-        return _plan_blocked("EPISODE_ID_MISSING")
-    if not _text(baseline_closed_candle_key):
-        return _plan_blocked("BASELINE_CLOSED_CANDLE_KEY_MISSING")
-    if not _text(frozen_at):
-        return _plan_blocked("FROZEN_AT_MISSING")
-    if _text(origin_frame_id) != _text(candidate.get("frame_id")):
-        return _plan_blocked("ORIGIN_FRAME_MISMATCH")
-
-    candidate_zones = _rows(candidate.get("candidate_zones"))
-    if not candidate_zones:
-        return _plan_blocked("CANDIDATE_ZONES_MISSING")
-    zone_ids = [_text(zone.get("zone_id")) for zone in candidate_zones]
-    if any(not zone_id for zone_id in zone_ids) or len(zone_ids) != len(set(zone_ids)):
-        return _plan_blocked("CANDIDATE_ZONE_IDS_INVALID")
-    if any(
-        _upper(zone.get("coordinate_mode")) != _NORMALIZED_MODE
-        or _box(zone.get("chart_bounds")) != [0.0, 0.0, 1.0, 1.0]
-        or not _inside(_box(zone.get("bounds")), [0.0, 0.0, 1.0, 1.0])
-        for zone in candidate_zones
-    ):
-        return _plan_blocked("CANDIDATE_ZONE_GEOMETRY_INVALID")
-    reprojection_anchors = _reprojection_anchors(candidate.get("reprojection_anchors"))
-    if len(reprojection_anchors) < _MIN_REPROJECTION_ANCHORS:
-        return _plan_blocked("CANDIDATE_REPROJECTION_ANCHORS_MISSING")
-
-    frozen_zones: list[dict[str, Any]] = []
-    for candidate_zone in candidate_zones:
-        zone = dict(candidate_zone)
-        zone["status"] = (
-            "STANDBY"
-            if _upper(zone.get("intent")) == "PROTECTIVE_STOP"
-            else "WAITING"
-        )
-        zone["status_reason"] = "geometry frozen at the episode baseline"
-        zone["last_updated_step"] = 0
-        frozen_zones.append(zone)
-
-    snapshot = _geometry_snapshot(frozen_zones)
-    fingerprint = _geometry_fingerprint(snapshot)
-    anchor_snapshot = _reprojection_anchor_snapshot(reprojection_anchors)
-    anchor_fingerprint = _geometry_fingerprint(anchor_snapshot)
-    plan_id = _stable_id(
-        "order-plan",
-        [
-            _text(episode_id),
-            _text(baseline_closed_candle_key),
-            _text(candidate.get("sequence_id")),
-            _upper(candidate.get("side")),
-        ],
-    )
-    return {
-        "schema_version": ORDER_POSITIONING_PLAN_SCHEMA_VERSION,
-        "plan_id": plan_id,
-        "episode_id": _text(episode_id),
-        "baseline_closed_candle_key": _text(baseline_closed_candle_key),
-        "origin_frame_id": _text(origin_frame_id),
-        "frozen_at": _text(frozen_at),
-        "frozen": True,
-        "status": "TRACKING",
-        "advance_status": "NOT_STARTED",
-        "side": _upper(candidate.get("side")),
-        "sequence_id": _text(candidate.get("sequence_id")),
-        "chart_transform_id": _text(candidate.get("chart_transform_id")),
-        "broker_source_lock_id": _text(candidate.get("broker_source_lock_id")),
-        "market": _upper(candidate.get("market")),
-        "timeframe": _upper(candidate.get("timeframe")),
-        "coordinate_mode": _NORMALIZED_MODE,
-        "price_axis_orientation": "SCREEN_Y_INCREASES_DOWN",
-        "display_band_norm": _finite(candidate.get("display_band_norm")),
-        "display_band_basis": _text(candidate.get("display_band_basis")),
-        "chart_bounds": [0.0, 0.0, 1.0, 1.0],
-        "zones": frozen_zones,
-        "reprojection_anchors": reprojection_anchors,
-        "reprojection_anchor_snapshot": anchor_snapshot,
-        "reprojection_anchor_fingerprint": anchor_fingerprint,
-        "geometry_snapshot": snapshot,
-        "geometry_fingerprint": fingerprint,
-        "step": 0,
-        "horizon_steps": ORDER_POSITIONING_HORIZON_STEPS,
-        "last_closed_candle_key": _text(baseline_closed_candle_key),
-        "blockers": [],
-        "reset_available": False,
-    }
-
-
-def _trusted_snapshot_zones(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
-    snapshot = _text(plan.get("geometry_snapshot"))
-    if not snapshot:
-        return []
-    try:
-        decoded: Any = json.loads(snapshot)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    return _rows(decoded)
-
-
-def _rejected_advance(plan: Mapping[str, Any], reason: str) -> dict[str, Any]:
-    output = dict(plan)
-    trusted = _trusted_snapshot_zones(plan)
-    current_zones = _rows(plan.get("zones"))
-    if trusted:
-        statuses = {
-            _text(zone.get("zone_id")): {
-                key: zone.get(key)
-                for key in _DYNAMIC_ZONE_FIELDS
-                if key in zone
-            }
-            for zone in current_zones
-        }
-        restored: list[dict[str, Any]] = []
-        for static in trusted:
-            row = dict(static)
-            row.update(statuses.get(_text(static.get("zone_id")), {}))
-            restored.append(row)
-        output["zones"] = restored
-    output["advance_status"] = "REJECTED"
-    output["blockers"] = [reason]
-    return output
-
-
-def _actual_geometry(actual: Mapping[str, Any]) -> tuple[float, float, float] | None:
-    high = _finite(actual.get("high_y_norm"))
-    low = _finite(actual.get("low_y_norm"))
-    close = _finite(actual.get("close_y_norm"))
-    if high is None or low is None or close is None:
-        return None
-    top, bottom = min(high, low), max(high, low)
-    if not 0.0 <= top <= close <= bottom <= 1.0:
-        return None
-    return top, bottom, close
-
-
-def _intersects(top: float, bottom: float, bounds: Sequence[float]) -> bool:
-    return bottom >= bounds[1] and top <= bounds[3]
-
-
-def _approaching(close: float, bounds: Sequence[float]) -> bool:
-    return _distance_to_box(close, bounds) <= _APPROACH_DISTANCE_NORM
-
-
-def _favorable_beyond(side: str, close: float, bounds: Sequence[float]) -> bool:
-    return close < bounds[1] if side == "BUY" else close > bounds[3]
-
-
-def _stop_breached(order_kind: str, top: float, bottom: float, bounds: Sequence[float]) -> bool:
-    return top <= bounds[1] if order_kind == "BUY_STOP" else bottom >= bounds[3]
-
-
-def _entry_status(
-    zone: Mapping[str, Any],
-    *,
-    top: float,
-    bottom: float,
-    close: float,
-    final_step: bool,
-) -> tuple[str, str]:
-    status = _upper(zone.get("status"))
-    bounds = _box(zone.get("bounds"))
-    side = _upper(zone.get("side"))
-    intent = _upper(zone.get("intent"))
-    touched = _intersects(top, bottom, bounds)
-    activated = (
-        touched
-        if intent == "ENTRY_LIMIT"
-        else _stop_breached(_upper(zone.get("order_kind")), top, bottom, bounds)
-    )
-    if status == "FAILED":
-        return "FAILED", "the paired protective boundary was previously reached"
-    if status == "EXPIRED":
-        return "EXPIRED", "the entry area previously expired"
-    if status == "FAVORED":
-        return "FAVORED", "the frozen entry area previously produced favorable progress"
-    if status == "ACTIVATED":
-        if _favorable_beyond(side, close, bounds):
-            return "FAVORED", "closed candle progressed beyond the frozen entry area"
-        return "ACTIVATED", "entry area was reached; frozen geometry remains unchanged"
-    if activated:
-        return "ACTIVATED", "closed candle reached the frozen entry area"
-    if final_step:
-        return "EXPIRED", "twelve closed-candle observations ended without activation"
-    if _approaching(close, bounds):
-        return "APPROACHING", "price is approaching the frozen entry area"
-    return "WAITING", "waiting for price to reach the frozen entry area"
-
-
-def advance_order_positioning_plan_v3(
-    plan: Mapping[str, Any], actual: Mapping[str, Any], step: int
-) -> dict[str, Any]:
-    """Advance only zone statuses from one verified, completed candle.
-
-    ``actual`` must be a normalized, source-locked closed candle with
-    ``high_y_norm``, ``low_y_norm``, and ``close_y_norm``. Static zone fields
-    are protected by a SHA-256 fingerprint and are never recomputed here.
-    """
-
-    if _text(plan.get("schema_version")) != ORDER_POSITIONING_PLAN_SCHEMA_VERSION:
-        return _plan_blocked("PLAN_SCHEMA_INVALID")
-    if plan.get("frozen") is not True:
-        return _rejected_advance(plan, "PLAN_NOT_FROZEN")
-    if _upper(plan.get("status")) != "TRACKING":
-        return _rejected_advance(plan, "PLAN_NOT_TRACKING")
-
-    zones = _rows(plan.get("zones"))
-    if not zones:
-        return _rejected_advance(plan, "FROZEN_GEOMETRY_MISSING")
-    if not order_positioning_plan_geometry_valid_v3(plan):
-        return _rejected_advance(plan, "FROZEN_GEOMETRY_CHANGED")
-    if not order_positioning_plan_anchors_valid_v3(plan):
-        return _rejected_advance(plan, "FROZEN_REPROJECTION_ANCHORS_CHANGED")
-
-    previous_step = _integer(plan.get("step"))
-    if previous_step is None or step != previous_step + 1:
-        return _rejected_advance(plan, "STEP_MUST_ADVANCE_BY_ONE")
-    horizon = _integer(plan.get("horizon_steps"))
-    if horizon != ORDER_POSITIONING_HORIZON_STEPS or not 1 <= step <= horizon:
-        return _rejected_advance(plan, "STEP_OUTSIDE_TWELVE_CANDLE_HORIZON")
-
-    if _text(actual.get("schema_version")) != ORDER_POSITIONING_ACTUAL_SCHEMA_VERSION:
-        return _rejected_advance(plan, "ACTUAL_SCHEMA_INVALID")
-    if actual.get("verified") is not True or actual.get("is_closed") is not True:
-        return _rejected_advance(plan, "ACTUAL_CANDLE_UNVERIFIED_OR_OPEN")
-    if _upper(actual.get("coordinate_mode")) != _NORMALIZED_MODE:
-        return _rejected_advance(plan, "ACTUAL_COORDINATE_MODE_INVALID")
-    if _box(actual.get("chart_bounds")) != [0.0, 0.0, 1.0, 1.0]:
-        return _rejected_advance(plan, "ACTUAL_CHART_BOUNDS_INVALID")
-    if not _text(actual.get("frame_id")):
-        return _rejected_advance(plan, "ACTUAL_FRAME_ID_MISSING")
-    for key in ("sequence_id", "chart_transform_id", "broker_source_lock_id"):
-        if not _text(actual.get(key)):
-            return _rejected_advance(plan, f"ACTUAL_{key.upper()}_MISSING")
-    if _text(actual.get("broker_source_lock_id")) != _text(
-        plan.get("broker_source_lock_id")
-    ):
-        return _rejected_advance(plan, "ACTUAL_BROKER_SOURCE_LOCK_ID_MISMATCH")
-    if _upper(actual.get("market")) != _upper(plan.get("market")):
-        return _rejected_advance(plan, "ACTUAL_MARKET_IDENTITY_MISMATCH")
-    if _upper(actual.get("timeframe")) != _upper(plan.get("timeframe")):
-        return _rejected_advance(plan, "ACTUAL_TIMEFRAME_IDENTITY_MISMATCH")
-    closed_candle_key = _text(actual.get("closed_candle_key"))
-    if not closed_candle_key or closed_candle_key == _text(
-        plan.get("last_closed_candle_key")
-    ):
-        return _rejected_advance(plan, "ACTUAL_CLOSED_CANDLE_KEY_NOT_NEW")
-    geometry = _actual_geometry(actual)
-    if geometry is None:
-        return _rejected_advance(plan, "ACTUAL_CANDLE_GEOMETRY_INVALID")
-    top, bottom, close = geometry
-    final_step = step == horizon
-
-    advanced: list[dict[str, Any]] = []
-    entry_statuses: dict[str, str] = {}
-    for source in zones:
-        zone = dict(source)
-        if _upper(zone.get("intent")) in _ENTRY_INTENTS:
-            status, reason = _entry_status(
-                zone,
-                top=top,
-                bottom=bottom,
-                close=close,
-                final_step=final_step,
-            )
-            zone["status"] = status
-            zone["status_reason"] = reason
-            zone["last_updated_step"] = step
-            entry_statuses[_text(zone.get("zone_id"))] = status
-        advanced.append(zone)
-
-    protective_activated: set[str] = set()
-    for zone in advanced:
-        if _upper(zone.get("intent")) != "PROTECTIVE_STOP":
-            continue
-        protected_id = _text(zone.get("protected_entry_zone_id"))
-        entry_status = entry_statuses.get(protected_id, "WAITING")
-        bounds = _box(zone.get("bounds"))
-        if _upper(zone.get("status")) == "ACTIVATED":
-            zone["status"] = "ACTIVATED"
-            zone["status_reason"] = "protective boundary was previously reached"
-            protective_activated.add(protected_id)
-        elif entry_status in {"ACTIVATED", "FAVORED"}:
-            if _stop_breached(_upper(zone.get("order_kind")), top, bottom, bounds):
-                zone["status"] = "ACTIVATED"
-                zone["status_reason"] = "protective boundary was reached"
-                protective_activated.add(protected_id)
-            else:
-                zone["status"] = "ARMED"
-                zone["status_reason"] = "entry activated; protective boundary is armed"
-        elif final_step:
-            zone["status"] = "EXPIRED"
-            zone["status_reason"] = "protected entry did not activate in the episode"
-        else:
-            zone["status"] = "STANDBY"
-            zone["status_reason"] = "protective boundary waits for its entry area"
-        zone["last_updated_step"] = step
-
-    for zone in advanced:
-        if _text(zone.get("zone_id")) in protective_activated:
-            zone["status"] = "FAILED"
-            zone["status_reason"] = "the paired protective boundary was reached"
-
-    output = dict(plan)
-    output["zones"] = advanced
-    output["step"] = step
-    output["last_closed_candle_key"] = closed_candle_key
-    output["last_actual_frame_id"] = _text(actual.get("frame_id"))
-    output["advance_status"] = "APPLIED"
-    output["blockers"] = []
-    output["status"] = "COMPLETE" if final_step else "TRACKING"
-    output["reset_available"] = final_step
-    return output
-
-
 __all__ = [
-    "ORDER_POSITIONING_ACTUAL_SCHEMA_VERSION",
     "ORDER_POSITIONING_CANDIDATE_SCHEMA_VERSION",
-    "ORDER_POSITIONING_HORIZON_STEPS",
-    "ORDER_POSITIONING_PLAN_SCHEMA_VERSION",
+    "ORDER_POSITIONING_MAX_WINDOW_STEPS",
     "ORDER_POSITIONING_REPROJECTION_SCHEMA_VERSION",
-    "advance_order_positioning_plan_v3",
     "build_order_positioning_candidates_v3",
     "fit_order_positioning_reprojection_v3",
-    "freeze_order_positioning_plan_v3",
     "inverse_reproject_order_positioning_y_v3",
-    "order_positioning_plan_anchors_valid_v3",
-    "order_positioning_plan_geometry_valid_v3",
     "order_positioning_stop_confirmation_reason_v3",
     "reproject_order_positioning_bounds_v3",
 ]

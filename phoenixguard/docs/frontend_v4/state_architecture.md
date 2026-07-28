@@ -91,7 +91,6 @@ The frontend should treat the API response as a projection, not as storage schem
 | `trade_intent` | Canonical executable trade intent when available. |
 | `scenario_analysis` | A* scenario generation output. |
 | `model_council_result` / `model_council` / `model_council_packet` | Model Council V3 decision state and packet. |
-| `memory_projection_predict` / `memory_projection_future` / `memory_projection_current` | Memory projection state selected by active mode. |
 | `recent_studies` | Compact history list for dashboard trend/history cards. |
 | `last_*_path` | Server-side artifact paths used by the backend; frontend should prefer artifact URLs. |
 

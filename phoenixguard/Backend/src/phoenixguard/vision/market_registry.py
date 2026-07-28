@@ -371,7 +371,7 @@ def _encode_registry_entry(entry: Mapping[str, object]) -> bytes:
 
 
 def _compact_registry_file(session_file: Path) -> None:
-    """Atomically retain a recent bounded tail; durable tracking episodes live elsewhere."""
+    """Atomically retain a recent bounded tail; Pair DNA persists separately."""
 
     session_file = _assert_resolved_containment(session_file, REGISTRY_DIR)
 

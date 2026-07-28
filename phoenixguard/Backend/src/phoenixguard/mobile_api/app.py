@@ -24,7 +24,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from phoenixguard.core.config import RUNTIME, VOICE, VoiceConfig
@@ -45,10 +45,6 @@ from phoenixguard.runtime.realtime_performance_v3 import (
 from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
 from phoenixguard.runtime.tracker_bootstrap import tracker_session_runtime_state
 from phoenixguard.tracing import configure_tracing, instrument_fastapi_app
-from phoenixguard.tracking.tracking_episode_v3 import (
-    TrackingEpisodeReadinessError,
-    TrackingEpisodeStateError,
-)
 from phoenixguard.voice.control import (
     apply_voice_preferences,
     execute_voice_command,
@@ -80,7 +76,6 @@ from .live_state_v3 import (
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
     compact_session_payload,
-    project_public_lstm_contribution_v3,
 )
 from .frame_ingest import build_frame_ingest_router
 from .model_strength import (
@@ -92,8 +87,6 @@ from .observer import SignalObserverService
 from .operator_workspace_v1 import (
     OPERATOR_WORKSPACE_SCHEMA_VERSION,
     build_operator_workspace_v1,
-    project_public_tracking_episode_v1,
-    public_tracking_readiness_message_v1,
     retracement_graph_contract_v3,
     retracement_pair_contract_v3,
     retracement_study_contract_v3,
@@ -157,10 +150,6 @@ _OPERATOR_VIEW_TO_OVERLAY_MODE = {
     "zones": "INSPECTOR",
     "plan": "INSPECTOR",
     "market_context": "INSPECTOR",
-    "two-candle": "INSPECTOR",
-    "scene-forecaster": "INSPECTOR",
-    "lstm": "INSPECTOR",
-    "forecast": "INSPECTOR",
     "history": "INSPECTOR",
 }
 
@@ -185,74 +174,8 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
     "zones": frozenset({"supply_demand"}),
     "plan": frozenset({"council", "triggers", "targets", "invalidation"}),
     "market_context": frozenset({"market_context"}),
-    "two-candle": frozenset({"two_candle"}),
-    "scene-forecaster": frozenset({"scene_forecaster"}),
-    "lstm": frozenset({"lstm"}),
-    "forecast": frozenset(
-        {"two_candle", "scene_forecaster", "lstm", "prediction"}
-    ),
     "history": frozenset({"history", "major_swings", "local_swings"}),
 }
-
-_SCENE_FORECAST_OVERLAY_FIELDS = frozenset(
-    {
-        "forecast_engine",
-        "forecast_provider",
-        "forecast_provider_status",
-        "forecast_id",
-        "forecast_revision",
-        "belief_revision",
-        "belief_state",
-        "committed_side",
-        "candidate_side",
-        "change_probability",
-        "confirmation_events",
-        "required_events",
-        "closed_candle_key",
-        "closed_candle_sequence",
-        "forecast_computed_frame_id",
-        "source_forecast_frame_id",
-        "geometry_projected_frame_id",
-        "geometry_frame_match_verified",
-        "geometry_reprojected_from_cache",
-        "geometry_projection_provenance",
-        "detector_coverage_rebase_applied",
-        "cache_replaced_for_detector_coverage_rebase",
-        "scene_feature_audit",
-    }
-)
-
-
-def _preserve_scene_forecast_overlay_fields(
-    normalized: Mapping[str, object],
-    raw: Mapping[str, object],
-) -> dict[str, object]:
-    row = dict(normalized)
-    for key in _SCENE_FORECAST_OVERLAY_FIELDS:
-        value = raw.get(key)
-        if value not in (None, "", [], {}):
-            row[key] = value
-    if str(raw.get("forecast_engine") or "").strip().upper() == "SCENE_FORECASTER_V3":
-        scene_label = str(
-            raw.get("display_label")
-            or raw.get("short_label")
-            or raw.get("label")
-            or "SCENE FORECASTER E1-E12"
-        ).strip()
-        if "SCENE" not in scene_label.upper():
-            scene_label = "SCENE FORECASTER E1-E12"
-        row.update(
-            {
-                "label": scene_label,
-                "display_label": scene_label,
-                "short_label": scene_label,
-                "raw_display_label": scene_label,
-                "display_label_status": "CANONICAL",
-                "unmapped_display_label": "",
-            }
-        )
-    return row
-
 
 def _env_float_at_least(name: str, default: float, minimum: float) -> float:
     raw = os.getenv(name, str(default)) or str(default)
@@ -772,36 +695,13 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "frame_id",
         "coordinate_space",
         "coordinate_units",
-        "forecast_role",
-        "forecast_status",
-        "forecast_authorized",
-        "forecast_direction",
-        "body_bias",
-        "direction_conflict",
-        "path_confidence_status",
-        "forecast_band_points",
-        "forecast_candles",
-        "forecast_scenarios",
-        "forecast_anchor",
-        "geometry_kind",
-        "forecast_coordinate_space",
-        "forecast_coordinate_units",
-        "trajectory_mode",
-        "trajectory_mode_probability_calibrated",
-        "interval",
-        "horizon_unit",
-        "clock_time_assumption",
-        "baseline_locked",
-        "uncertainty_level",
-        "forecast_quality_status",
-        "trade_authorization_status",
         "semantic_id",
         "anchor_id",
         "overlay_semantic_revision",
         "overlay_geometry_revision",
         # These are presentation semantics, not execution telemetry. The
         # dashboard needs them to distinguish a mutable current reference from
-        # a verified preview or an immutable saved tracking area.
+        # a verified preview.
         "positioning_mode",
         "positioning_status",
         "positioning_basis",
@@ -810,11 +710,122 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "geometry_role",
         "reaction_window_anchor",
         "source_bounds",
-        *_SCENE_FORECAST_OVERLAY_FIELDS,
     }
 )
 
-_SAFE_OPERATOR_POSITIONING_MODES = frozenset({"REFERENCE", "PREVIEW", "FROZEN"})
+_SAFE_OPERATOR_PUBLIC_FAMILIES = frozenset(
+    {
+        "chart_bounds",
+        "current_candles",
+        "major_swings",
+        "local_swings",
+        "supply_demand",
+        "order_positioning",
+        "trendlines",
+        "triggers",
+        "targets",
+        "invalidation",
+        "council",
+        "history",
+        "market_context",
+    }
+)
+_RETIRED_OPERATOR_FORECAST_TYPES = frozenset(
+    {
+        "prediction_path",
+        "angle_vector",
+        "outlook",
+        "two_candle_study",
+        "lstm_study",
+        "scene_forecast_study",
+        "projected_candles",
+        "forward_projection",
+        "forecast_path",
+        "future_path",
+        "prediction_angle",
+    }
+)
+_RETIRED_OPERATOR_FORECAST_KINDS = frozenset(
+    {
+        "movement_angle",
+        "possible_path",
+        "near_term_read",
+        "future_blocks",
+        "visual_outlook",
+    }
+)
+_RETIRED_PUBLIC_FORECAST_OVERLAY_LAYERS = frozenset(
+    {
+        "prediction",
+        "prediction_path",
+        "forecast",
+        "forecast_path",
+        "future",
+        "future_path",
+    }
+)
+_RETIRED_PUBLIC_FORECAST_GEOMETRY_KEYS = frozenset(
+    {
+        "forecast_anchor",
+        "forecast_band_points",
+        "forecast_candles",
+        "forecast_path",
+        "forecast_scenarios",
+        "future_path",
+    }
+)
+
+
+def _is_retired_public_forecast_overlay(value: Mapping[str, object]) -> bool:
+    """Reject raw and normalized legacy future geometry fail closed."""
+
+    nested = value.get("overlay")
+    row = (
+        cast(Mapping[str, object], nested)
+        if isinstance(nested, Mapping)
+        else value
+    )
+    overlay_type = str(
+        row.get("type")
+        or row.get("overlay_type")
+        or value.get("type")
+        or value.get("overlay_type")
+        or ""
+    ).strip().lower()
+    overlay_kind = str(row.get("kind") or value.get("kind") or "").strip().lower()
+    layer = str(row.get("layer") or value.get("layer") or "").strip().lower()
+    group = str(row.get("group") or value.get("group") or "").strip().lower()
+    if (
+        overlay_type in _RETIRED_OPERATOR_FORECAST_TYPES
+        or overlay_kind in _RETIRED_OPERATOR_FORECAST_KINDS
+        or layer in _RETIRED_PUBLIC_FORECAST_OVERLAY_LAYERS
+        or group == "outlook"
+    ):
+        return True
+    if any(key in row or key in value for key in _RETIRED_PUBLIC_FORECAST_GEOMETRY_KEYS):
+        return True
+    provenance = " ".join(
+        str(row.get(key) or value.get(key) or "").strip().lower()
+        for key in (
+            "source_agent",
+            "source_key",
+            "source_rule",
+            "role",
+            "schema_version",
+        )
+    )
+    return any(
+        token in provenance
+        for token in (
+            "scene_forecast",
+            "lstm_candle_sequence",
+            "two_candle_study",
+            "forecast_path",
+            "future_path",
+        )
+    )
+
+_SAFE_OPERATOR_POSITIONING_MODES = frozenset({"REFERENCE", "PREVIEW"})
 _SAFE_OPERATOR_POSITIONING_GEOMETRY_ROLE = "FORWARD_REACTION_WINDOW"
 _SAFE_OPERATOR_POSITIONING_REACTION_ANCHOR = "LATEST_COMPLETED_CANDLE"
 _SAFE_OPERATOR_POSITIONING_STATES = frozenset(
@@ -837,15 +848,31 @@ _SAFE_OPERATOR_POSITIONING_STATES = frozenset(
 
 _PRIVATE_PROJECTION_SNAPSHOT_KEYS = frozenset(
     {
+        "auto_memory_projection",
         "forecast_snapshot_v3",
+        "high_frequency_forecast",
+        "lstm_candle_sequence_contribution_v3",
+        "lstm_contribution",
+        "memory_projection_active_mode",
+        "memory_projection_current",
+        "memory_projection_future",
+        "memory_projection_predict",
+        "micro_candle_forecast",
         "operator_overlay_snapshot_v1",
         "operator_overlay_snapshot",
-        # Frozen episode evidence is an internal projection source.  Public
-        # callers use the dedicated neutral episode DTO instead.
-        "tracking_episode",
-        "tracking_episode_history",
-        "tracking_episode_readiness",
+        "prediction_overlay",
+        "scene_forecast_contribution",
+        "scene_forecast_contribution_v3",
+        "timing_forecast",
+        "two_candle_study",
+        "two_candle_study_v3",
+        "projection_focus",
+        "require_memory_projection",
     }
+)
+
+_RETIRED_PUBLIC_PROJECTION_ARTIFACT_KINDS = frozenset(
+    {"memory-reference", "projection"}
 )
 
 _PUBLIC_RESPONSE_OMIT = object()
@@ -965,23 +992,17 @@ def _strip_private_projection_snapshots(
         if is_private_host_path_field(field_name, value):
             return _PUBLIC_RESPONSE_OMIT
         if isinstance(value, Mapping):
+            mapping_value = cast(Mapping[str, object], value)
+            if _is_retired_public_forecast_overlay(mapping_value):
+                return _PUBLIC_RESPONSE_OMIT
             output: dict[str, object] = {}
             for raw_key, nested in cast(Mapping[object, object], value).items():
                 key = str(raw_key)
-                if key in _PRIVATE_PROJECTION_SNAPSHOT_KEYS:
+                if (
+                    key in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
+                    or key.strip().lower().startswith("forecast_")
+                ):
                     continue
-                if key in {
-                    "lstm_contribution",
-                    "lstm_candle_sequence_contribution_v3",
-                    "lstm_council_evidence_v3",
-                }:
-                    nested = (
-                        project_public_lstm_contribution_v3(
-                            cast(Mapping[str, Any], nested)
-                        )
-                        if isinstance(nested, Mapping)
-                        else {}
-                    )
                 sanitized = sanitize(nested, field_name=key)
                 if sanitized is not _PUBLIC_RESPONSE_OMIT:
                     output[key] = sanitized
@@ -1089,319 +1110,6 @@ def _operator_overlay_lineage_matches(
     )
 
 
-def _safe_operator_forecast_scenarios(
-    value: object,
-    *,
-    normalized: bool,
-) -> list[dict[str, object]]:
-    """Bound nested scenario geometry at the final public DTO boundary."""
-
-    def safe_forecast_candles(raw_value: object) -> list[dict[str, object]]:
-        if not isinstance(raw_value, Sequence) or isinstance(
-            raw_value,
-            (str, bytes, bytearray),
-        ):
-            return []
-        candles: list[dict[str, object]] = []
-        for raw_candle in cast(Sequence[object], raw_value)[:12]:
-            if not isinstance(raw_candle, Mapping):
-                continue
-            candle = cast(Mapping[str, object], raw_candle)
-            step = int(_epoch_float(candle.get("step"), 0.0))
-            coordinates = {
-                key: _epoch_float(candle.get(key), float("nan"))
-                for key in (
-                    "x_norm",
-                    "open_y_norm",
-                    "high_y_norm",
-                    "low_y_norm",
-                    "close_y_norm",
-                )
-            }
-            if step <= 0 or any(value != value for value in coordinates.values()):
-                continue
-            if normalized:
-                if any(
-                    not -0.000001 <= value <= 1.000001
-                    for value in coordinates.values()
-                ):
-                    continue
-                coordinates = {
-                    key: max(0.0, min(1.0, value))
-                    for key, value in coordinates.items()
-                }
-            elif any(value < 0.0 for value in coordinates.values()):
-                continue
-            movement_side = str(
-                candle.get("movement_side") or "NEUTRAL"
-            ).strip().upper()
-            if movement_side not in {"BUY", "SELL", "NEUTRAL"}:
-                movement_side = "NEUTRAL"
-            body_bias = str(candle.get("body_bias") or movement_side).strip().upper()
-            if body_bias not in {"BUY", "SELL", "NEUTRAL"}:
-                body_bias = movement_side
-            label = re.sub(
-                r"[\x00-\x1f\x7f]",
-                "",
-                str(candle.get("label") or f"E{step}"),
-            ).strip()[:16]
-            candles.append(
-                {
-                    "step": step,
-                    "label": label or f"E{step}",
-                    **{
-                        key: round(value, 6)
-                        for key, value in coordinates.items()
-                    },
-                    "movement_side": movement_side,
-                    "body_bias": body_bias,
-                    "direction_conflict": candle.get("direction_conflict") is True,
-                }
-            )
-        if [
-            int(_epoch_float(candle.get("step"), 0.0)) for candle in candles
-        ] != list(range(1, 13)):
-            return []
-        return candles
-
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return []
-    scenarios: list[dict[str, object]] = []
-    selected_seen = False
-    for item in cast(Sequence[object], value)[:3]:
-        if not isinstance(item, Mapping):
-            continue
-        raw = cast(Mapping[str, object], item)
-        raw_points = raw.get("line_points")
-        if not isinstance(raw_points, Sequence) or isinstance(
-            raw_points,
-            (str, bytes, bytearray),
-        ):
-            continue
-        points: list[list[float]] = []
-        invalid_geometry = False
-        for raw_point in cast(Sequence[object], raw_points)[:13]:
-            if not isinstance(raw_point, Sequence) or isinstance(
-                raw_point,
-                (str, bytes, bytearray),
-            ):
-                continue
-            point = cast(Sequence[object], raw_point)
-            if len(point) < 2:
-                continue
-            x = _epoch_float(point[0], float("nan"))
-            y = _epoch_float(point[1], float("nan"))
-            if x != x or y != y:
-                continue
-            if normalized:
-                if not (-0.000001 <= x <= 1.000001 and -0.000001 <= y <= 1.000001):
-                    invalid_geometry = True
-                    break
-                x = max(0.0, min(1.0, x))
-                y = max(0.0, min(1.0, y))
-            elif x < 0.0 or y < 0.0:
-                invalid_geometry = True
-                break
-            points.append([round(x, 6), round(y, 6)])
-        if (
-            invalid_geometry
-            or len(points) != 13
-            or any(right[0] <= left[0] for left, right in zip(points, points[1:]))
-        ):
-            continue
-        side = str(raw.get("side") or "NEUTRAL").strip().upper()
-        side = side if side in {"BUY", "SELL", "NEUTRAL"} else "NEUTRAL"
-        role = str(raw.get("role") or "").strip().lower()
-        role = role if role in {"base", "bull", "bear"} else ""
-        forecast_candles = safe_forecast_candles(raw.get("forecast_candles"))
-        if role and len(forecast_candles) != 12:
-            continue
-        probability = _epoch_float(raw.get("probability"), 0.0)
-        selected = raw.get("selected") is True and not selected_seen
-        selected_seen = selected_seen or selected
-        event_count = 12
-        label = re.sub(
-            r"[\x00-\x1f\x7f]",
-            "",
-            str(raw.get("label") or f"{side} PATH"),
-        ).strip()[:32]
-        scenario: dict[str, object] = {
-            "side": side,
-            "label": label or f"{side} PATH",
-            "probability": round(max(0.0, min(1.0, probability)), 6),
-            "probability_calibrated": raw.get("probability_calibrated") is True,
-            "selected": selected,
-            "raw_selected": raw.get("raw_selected") is True,
-            "candidate": raw.get("candidate") is True,
-            "line_points": points,
-            "event_count": event_count,
-        }
-        if role:
-            scenario["role"] = role
-            scenario["forecast_candles"] = forecast_candles
-        scenarios.append(scenario)
-    scenarios.sort(
-        key=lambda scenario: (
-            not bool(scenario["selected"]),
-            -float(cast(float, scenario["probability"])),
-        )
-    )
-    roles = {str(scenario.get("role") or "") for scenario in scenarios}
-    role_complete = roles == {"base", "bull", "bear"}
-    legacy_side_complete = not any(roles) and {
-        str(scenario["side"]) for scenario in scenarios
-    } == {"BUY", "SELL", "NEUTRAL"}
-    if (
-        len(scenarios) != 3
-        or not (role_complete or legacy_side_complete)
-        or sum(bool(scenario["selected"]) for scenario in scenarios) != 1
-    ):
-        return []
-    return scenarios
-
-
-def _safe_operator_forecast_anchor(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        return {}
-    raw = cast(Mapping[str, object], value)
-    x_norm = _epoch_float(raw.get("x_norm"), float("nan"))
-    y_norm = _epoch_float(raw.get("y_norm"), float("nan"))
-    if (
-        x_norm != x_norm
-        or y_norm != y_norm
-        or not 0.0 <= x_norm <= 1.0
-        or not 0.0 <= y_norm <= 1.0
-    ):
-        return {}
-    output: dict[str, object] = {
-        "x_norm": round(x_norm, 6),
-        "y_norm": round(y_norm, 6),
-    }
-    if "verified_latest_close" in raw:
-        output["verified_latest_close"] = raw.get("verified_latest_close") is True
-    raw_source = str(raw.get("source") or "").strip().upper()
-    if raw_source:
-        output["source"] = (
-            raw_source
-            if raw_source
-            in {
-                "TRACKER_LATEST_CLOSE",
-                "TRACKER_LATEST_CLOSED_CANDLE",
-                "MODEL_CAUSAL_CANDLE",
-            }
-            else "MODEL_CAUSAL_CANDLE"
-        )
-    return output
-
-
-def _safe_operator_forecast_bundle_complete(row: Mapping[str, object]) -> bool:
-    line_points = row.get("line_points")
-    candles = row.get("forecast_candles")
-    scenarios = row.get("forecast_scenarios")
-    anchor = row.get("forecast_anchor")
-    if (
-        not isinstance(line_points, Sequence)
-        or isinstance(line_points, (str, bytes, bytearray))
-        or not isinstance(candles, Sequence)
-        or isinstance(candles, (str, bytes, bytearray))
-        or not isinstance(scenarios, Sequence)
-        or isinstance(scenarios, (str, bytes, bytearray))
-        or not isinstance(anchor, Mapping)
-    ):
-        return False
-    candle_rows = [
-        cast(Mapping[str, object], candle)
-        for candle in cast(Sequence[object], candles)
-        if isinstance(candle, Mapping)
-    ]
-    if (
-        len(candle_rows) != 12
-        or [int(_epoch_float(candle.get("step"), 0.0)) for candle in candle_rows]
-        != list(range(1, 13))
-    ):
-        return False
-    scenario_rows = [
-        cast(Mapping[str, object], scenario)
-        for scenario in cast(Sequence[object], scenarios)
-        if isinstance(scenario, Mapping)
-    ]
-    block_only_lstm = bool(
-        str(row.get("family") or "").lower() == "lstm"
-        and str(row.get("geometry_kind") or "").lower() == "future_blocks"
-    )
-    if block_only_lstm:
-        if len(cast(Sequence[object], line_points)) != 0:
-            return False
-        anchor_mapping = cast(Mapping[str, object], anchor)
-        first_candle = candle_rows[0]
-        anchor_x = _epoch_float(anchor_mapping.get("x_norm"), float("nan"))
-        anchor_y = _epoch_float(anchor_mapping.get("y_norm"), float("nan"))
-        first_x = _epoch_float(first_candle.get("x_norm"), float("nan"))
-        first_open_y = _epoch_float(
-            first_candle.get("open_y_norm"),
-            float("nan"),
-        )
-        return bool(
-            anchor_x == anchor_x
-            and anchor_y == anchor_y
-            and first_x == first_x
-            and first_open_y == first_open_y
-            and 0.0 <= anchor_x < first_x <= 1.0
-            and abs(anchor_y - first_open_y) <= 1e-6
-        )
-    if len(cast(Sequence[object], line_points)) != 13:
-        return False
-    raw_first_point = cast(Sequence[object], line_points)[0]
-    first_point = (
-        cast(Sequence[object], raw_first_point)
-        if isinstance(raw_first_point, Sequence)
-        and not isinstance(raw_first_point, (str, bytes, bytearray))
-        else ()
-    )
-    anchor_mapping = cast(Mapping[str, object], anchor)
-    anchor_matches = bool(
-        len(first_point) >= 2
-        and abs(
-            _epoch_float(first_point[0], float("nan"))
-            - _epoch_float(anchor_mapping.get("x_norm"), float("nan"))
-        )
-        <= 1e-6
-        and abs(
-            _epoch_float(first_point[1], float("nan"))
-            - _epoch_float(anchor_mapping.get("y_norm"), float("nan"))
-        )
-        <= 1e-6
-    )
-    if not anchor_matches:
-        return False
-    selected = [scenario for scenario in scenario_rows if scenario.get("selected") is True]
-    if len(scenario_rows) != 3 or len(selected) != 1:
-        return False
-    selected_points = selected[0].get("line_points")
-    if (
-        not isinstance(selected_points, Sequence)
-        or isinstance(selected_points, (str, bytes, bytearray))
-        or len(cast(Sequence[object], selected_points)) != 13
-    ):
-        return False
-    for main_point, selected_point in zip(
-        cast(Sequence[object], line_points),
-        cast(Sequence[object], selected_points),
-    ):
-        if (
-            not isinstance(main_point, Sequence)
-            or isinstance(main_point, (str, bytes, bytearray))
-            or not isinstance(selected_point, Sequence)
-            or isinstance(selected_point, (str, bytes, bytearray))
-            or len(cast(Sequence[object], main_point)) < 2
-            or len(cast(Sequence[object], selected_point)) < 2
-            or abs(_epoch_float(main_point[0], float("nan")) - _epoch_float(selected_point[0], float("nan"))) > 1e-6
-            or abs(_epoch_float(main_point[1], float("nan")) - _epoch_float(selected_point[1], float("nan"))) > 1e-6
-        ):
-            return False
-    return True
-
-
 def _safe_operator_normalized_rectangle(value: object) -> list[float]:
     if not isinstance(value, Sequence) or isinstance(
         value,
@@ -1434,11 +1142,30 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
     for item in cast(Sequence[object], value):
         if not isinstance(item, Mapping):
             continue
+        raw_item = cast(Mapping[str, object], item)
+        if _is_retired_public_forecast_overlay(raw_item):
+            continue
         row = {
-            key: cast(Mapping[str, object], item).get(key)
+            key: raw_item.get(key)
             for key in _SAFE_OPERATOR_OVERLAY_KEYS
             if key in item
         }
+        family = str(row.get("family") or "").strip().lower()
+        overlay_type = str(row.get("type") or "").strip().lower()
+        overlay_kind = str(row.get("kind") or "").strip().lower()
+        layer = str(row.get("layer") or "").strip().lower()
+        group = str(row.get("group") or "").strip().lower()
+        if (
+            family not in _SAFE_OPERATOR_PUBLIC_FAMILIES
+            or overlay_type in _RETIRED_OPERATOR_FORECAST_TYPES
+            or overlay_kind in _RETIRED_OPERATOR_FORECAST_KINDS
+            or layer == "prediction_path"
+            or group == "outlook"
+        ):
+            # Persisted snapshots cross this boundary again.  Reject the
+            # retired forward-study vocabulary before any saved row can be
+            # merged into a current V3 operator frame.
+            continue
         positioning_keys = (
             "positioning_mode",
             "positioning_status",
@@ -1458,9 +1185,6 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             reaction_window_anchor = str(
                 row.get("reaction_window_anchor") or ""
             ).strip().upper()
-            geometry_contract_present = bool(
-                geometry_role or reaction_window_anchor
-            )
             geometry_contract_valid = bool(
                 geometry_role == _SAFE_OPERATOR_POSITIONING_GEOMETRY_ROLE
                 and reaction_window_anchor
@@ -1473,17 +1197,9 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             if (
                 positioning_mode not in _SAFE_OPERATOR_POSITIONING_MODES
                 or positioning_status not in _SAFE_OPERATOR_POSITIONING_STATES
-                or immutable_geometry != (positioning_mode == "FROZEN")
+                or immutable_geometry
                 or not evidence_only
-                or (
-                    positioning_mode != "FROZEN"
-                    and not geometry_contract_valid
-                )
-                or (
-                    positioning_mode == "FROZEN"
-                    and geometry_contract_present
-                    and not geometry_contract_valid
-                )
+                or not geometry_contract_valid
                 or (
                     source_bounds_present
                     and (not geometry_contract_valid or not source_bounds)
@@ -1521,31 +1237,6 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
         else:
             for positioning_key in positioning_keys:
                 row.pop(positioning_key, None)
-        if "forecast_scenarios" in row:
-            normalized = str(
-                row.get("forecast_coordinate_units")
-                or row.get("coordinate_units")
-                or "normalized"
-            ).strip().lower() != "pixels"
-            row["forecast_scenarios"] = _safe_operator_forecast_scenarios(
-                row.get("forecast_scenarios"),
-                normalized=normalized,
-            )
-        if "forecast_anchor" in row:
-            row["forecast_anchor"] = _safe_operator_forecast_anchor(
-                row.get("forecast_anchor")
-            )
-        if "trajectory_mode" in row:
-            trajectory_mode = str(row.get("trajectory_mode") or "NEUTRAL").strip().upper()
-            row["trajectory_mode"] = (
-                trajectory_mode
-                if trajectory_mode in {"BUY", "SELL", "NEUTRAL"}
-                else "NEUTRAL"
-            )
-        if "trajectory_mode_probability_calibrated" in row:
-            row["trajectory_mode_probability_calibrated"] = (
-                row.get("trajectory_mode_probability_calibrated") is True
-            )
         for revision_key in (
             "semantic_id",
             "anchor_id",
@@ -1563,11 +1254,6 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             # V3 normalization may preserve both aliases.  The operator DTO
             # sends one canonical copy to avoid paying twice for path geometry.
             row.pop("points", None)
-        if (
-            str(row.get("forecast_role") or "").lower() == "composite"
-            and not _safe_operator_forecast_bundle_complete(row)
-        ):
-            continue
         if row.get("id") and row.get("family") and row.get("frame_id"):
             output.append(row)
     return output
@@ -1710,10 +1396,6 @@ def _stale_diagnostic_operator_overlays(value: object) -> list[dict[str, object]
     for row in rows:
         if str(row.get("lifecycle") or "").lower() != "historical":
             row["lifecycle"] = "stale_diagnostic"
-        if row.get("forecast_role"):
-            row["forecast_status"] = "STALE"
-            row["forecast_authorized"] = False
-            row["trade_authorization_status"] = "NO_EDGE"
     return rows
 
 
@@ -1812,33 +1494,6 @@ def _operator_projection_source_revision(
         != study_signature
     ):
         return None
-    episode_revision: dict[str, object] = {}
-    episode_state_path = display_path.with_name("tracking_episode_state.json")
-    episode_identity_before = atomic_file_identity(episode_state_path)
-    if episode_identity_before is not None:
-        try:
-            raw_episode_state = json.loads(
-                episode_state_path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            raw_episode_state = None
-        episode_identity_after = atomic_file_identity(episode_state_path)
-        if (
-            episode_identity_after == episode_identity_before
-            and isinstance(raw_episode_state, Mapping)
-        ):
-            episode_state = cast(Mapping[str, object], raw_episode_state)
-            episode_revision = {
-                "episode_id": str(episode_state.get("episode_id") or ""),
-                "state": str(episode_state.get("state") or "IDLE"),
-                "revision": int(
-                    _epoch_float(episode_state.get("revision"), 0.0)
-                ),
-                "event_cursor": int(
-                    _epoch_float(episode_state.get("event_cursor"), 0.0)
-                ),
-                "state_file": episode_identity_after,
-            }
     revision_payload = {
         "session_id": requested_session_id,
         "frame_id": frame_id,
@@ -1847,7 +1502,6 @@ def _operator_projection_source_revision(
         "display_signature": display_signature,
         "study_signature": study_signature,
         "display_file": display_identity_after,
-        "tracking_episode": episode_revision,
     }
     return (
         json.dumps(revision_payload, sort_keys=True, separators=(",", ":")),
@@ -3527,6 +3181,8 @@ class WindowTrackerFocusRegionRequest(BaseModel):
 
 
 class WindowTrackerControlUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     capture_interval_sec: float | None = Field(
         default=None,
         ge=_WINDOW_TRACKER_MIN_CAPTURE_INTERVAL_SEC,
@@ -3555,8 +3211,6 @@ class WindowTrackerControlUpdateRequest(BaseModel):
     allow_live_momentum_entries: bool | None = None
     allow_opposing_force_reactions: bool | None = None
     scenario_generation_enabled: bool | None = None
-    auto_memory_projection: bool | None = None
-    require_memory_projection: bool | None = None
     live_momentum_memory_advisory: bool | None = None
     require_market_identity: bool | None = None
     require_timeframe_identity: bool | None = None
@@ -3610,7 +3264,6 @@ class WindowTrackerControlUpdateRequest(BaseModel):
     min_conf_latest: float | None = Field(default=None, ge=0.0, le=1.0)
     history_depth: int | None = Field(default=None, ge=1, le=24)
     label_density: int | None = Field(default=None, ge=1, le=30)
-    projection_focus: float | None = Field(default=None, ge=0.0, le=1.0)
     debug_depth: int | None = Field(default=None, ge=0, le=24)
     fuse_timeframe_overlays: bool | None = None
     min_actionable_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -3634,60 +3287,6 @@ class WindowTrackerDemoTradeRequest(BaseModel):
     side: str | None = None
     expiry_seconds: int = Field(default=180, ge=60, le=3600)
     force: bool = False
-
-
-class WindowTrackerEpisodeStopRequest(BaseModel):
-    reason: str = Field(default="manual_stop", min_length=1, max_length=160)
-
-
-def _public_tracking_episode_response(
-    episode: Mapping[str, object],
-    readiness: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    projection_input: dict[str, object] = {"tracking_episode": dict(episode)}
-    if readiness is not None:
-        projection_input["tracking_episode_readiness"] = dict(readiness)
-    return project_public_tracking_episode_v1(projection_input)
-
-
-def _public_tracking_episode_readiness_response(
-    value: Mapping[str, object],
-) -> dict[str, object]:
-    raw_reasons = value.get("reasons")
-    reasons: list[str] = []
-    if isinstance(raw_reasons, Sequence) and not isinstance(
-        raw_reasons,
-        (str, bytes, bytearray),
-    ):
-        for raw_reason in cast(Sequence[object], raw_reasons):
-            reason = public_tracking_readiness_message_v1(raw_reason)
-            if reason and reason not in reasons:
-                reasons.append(reason)
-    ready = value.get("ready") is True
-    message = (
-        "The chart is ready. Start Tracking when you want to anchor the 12-event study."
-        if ready
-        else reasons[0]
-        if reasons
-        else "The chart is still preparing the tracking baseline."
-    )
-    current = value.get("current")
-    current_episode: Mapping[str, object] = (
-        cast(Mapping[str, object], current)
-        if isinstance(current, Mapping)
-        else cast(Mapping[str, object], {})
-    )
-    return {
-        "schema_version": "PG_TRACKING_EPISODE_READINESS_PUBLIC_V1",
-        "ready": ready,
-        "message": message,
-        "reasons": reasons,
-        "event_horizon": 12,
-        "current": _public_tracking_episode_response(
-            current_episode,
-            value,
-        ),
-    }
 
 
 class VoicePreferenceUpdateRequest(BaseModel):
@@ -3822,49 +3421,6 @@ def _bounded_operator_projection_context(
                 for row in rows
             ]
         return str(value)[:4096]
-
-    def bounded_forecast_value(value: object, *, depth: int = 0) -> object:
-        if depth >= 4:
-            return {}
-        if isinstance(value, Mapping):
-            safe: dict[str, object] = {}
-            value_mapping = cast(Mapping[str, object], value)
-            for index, (key, nested) in enumerate(value_mapping.items()):
-                key_text = str(key)
-                if index >= 48:
-                    break
-                if key_text in {
-                    "features",
-                    "normalized_features",
-                    "raw_model_logits",
-                    "raw_logits",
-                    "input_tensor",
-                    "source_path",
-                } or key_text.startswith("raw_model_"):
-                    continue
-                safe[key_text] = bounded_forecast_value(nested, depth=depth + 1)
-            return safe
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return [
-                bounded_forecast_value(item, depth=depth + 1)
-                for item in list(cast(Sequence[object], value))[-16:]
-            ]
-        return bounded_value(value, depth=depth, sequence_limit=16)
-
-    def bounded_scalar_fields(
-        value: object,
-        keys: Sequence[str],
-    ) -> dict[str, object]:
-        if not isinstance(value, Mapping):
-            return {}
-        source = cast(Mapping[str, object], value)
-        output: dict[str, object] = {}
-        for key in keys:
-            nested = source.get(key)
-            if nested is None or isinstance(nested, (str, int, float, bool)):
-                if nested not in (None, ""):
-                    output[key] = nested
-        return output
 
     def bounded_market_study(value: object) -> dict[str, object]:
         if not isinstance(value, Mapping):
@@ -4464,433 +4020,6 @@ def _bounded_operator_projection_context(
             result["directional_read"] = directional
         return result
 
-    def bounded_episode_rows(
-        value: object,
-        keys: Sequence[str],
-        *,
-        limit: int = 12,
-    ) -> list[dict[str, object]]:
-        if not isinstance(value, Sequence) or isinstance(
-            value,
-            (str, bytes, bytearray),
-        ):
-            return []
-        return [
-            row
-            for item in list(cast(Sequence[object], value))[:limit]
-            if (row := bounded_scalar_fields(item, keys))
-        ]
-
-    def bounded_point_pairs(value: object, *, limit: int = 13) -> list[list[float]]:
-        if not isinstance(value, Sequence) or isinstance(
-            value,
-            (str, bytes, bytearray),
-        ):
-            return []
-        points: list[list[float]] = []
-        for raw_point in list(cast(Sequence[object], value))[:limit]:
-            if not isinstance(raw_point, Sequence) or isinstance(
-                raw_point,
-                (str, bytes, bytearray),
-            ):
-                return []
-            pair = list(cast(Sequence[object], raw_point))
-            if len(pair) < 2:
-                return []
-            x_value, y_value = pair[:2]
-            if (
-                isinstance(x_value, bool)
-                or isinstance(y_value, bool)
-                or not isinstance(x_value, (int, float))
-                or not isinstance(y_value, (int, float))
-            ):
-                return []
-            points.append([float(x_value), float(y_value)])
-        return points
-
-    def bounded_path_comparison(value: object) -> dict[str, object]:
-        if not isinstance(value, Mapping):
-            return {}
-        source = cast(Mapping[str, object], value)
-        output = bounded_scalar_fields(
-            source,
-            (
-                "schema_version",
-                "verdict",
-                "favored_path_id",
-                "verdict_summary",
-            ),
-        )
-        raw_paths = source.get("paths")
-        paths: list[dict[str, object]] = []
-        if isinstance(raw_paths, Sequence) and not isinstance(
-            raw_paths,
-            (str, bytes, bytearray),
-        ):
-            for raw_path in list(cast(Sequence[object], raw_paths))[:2]:
-                path = bounded_scalar_fields(
-                    raw_path,
-                    ("id", "label", "direction", "summary"),
-                )
-                if not isinstance(raw_path, Mapping):
-                    continue
-                raw_path_mapping = cast(Mapping[str, object], raw_path)
-                points = bounded_point_pairs(raw_path_mapping.get("points"))
-                steps = bounded_episode_rows(
-                    raw_path_mapping.get("steps"),
-                    ("step", "open_level", "close_level", "direction"),
-                )
-                if points:
-                    path["points"] = points
-                if steps:
-                    path["steps"] = steps
-                if path:
-                    paths.append(path)
-        if paths:
-            output["paths"] = paths
-
-        for key, fields in (
-            (
-                "anchor",
-                ("status", "label", "direction", "close_level"),
-            ),
-            (
-                "forming_at_start",
-                (
-                    "status",
-                    "label",
-                    "direction",
-                    "open_level",
-                    "current_level",
-                ),
-            ),
-            (
-                "forecast_bias",
-                ("status", "label", "summary", "direction"),
-            ),
-            (
-                "entry_thesis",
-                ("status", "label", "summary", "direction"),
-            ),
-            (
-                "trade_permission",
-                ("status", "label", "summary"),
-            ),
-        ):
-            selected = bounded_scalar_fields(source.get(key), fields)
-            if selected:
-                output[key] = selected
-
-        entry_location = bounded_scalar_fields(
-            source.get("entry_location"),
-            (
-                "status",
-                "label",
-                "summary",
-                "direction",
-                "preferred_location",
-                "top_level",
-                "bottom_level",
-            ),
-        )
-        if isinstance(source.get("entry_location"), Mapping):
-            raw_entry_location = cast(
-                Mapping[str, object],
-                source["entry_location"],
-            )
-            progress = bounded_scalar_fields(
-                raw_entry_location.get("progress"),
-                ("status",),
-            )
-            if progress:
-                entry_location["progress"] = progress
-        if entry_location:
-            output["entry_location"] = entry_location
-
-        transform = bounded_scalar_fields(
-            source.get("transform_contract"),
-            ("status",),
-        )
-        if transform:
-            output["transform_contract"] = transform
-        return output
-
-    def bounded_tracking_episode(value: object) -> dict[str, object]:
-        if not isinstance(value, Mapping):
-            return {}
-        episode = cast(Mapping[str, object], value)
-        output = bounded_scalar_fields(
-            episode,
-            (
-                "schema_version",
-                "session_id",
-                "episode_id",
-                "state",
-                "revision",
-                "event_horizon",
-                "event_cursor",
-                "started_at",
-                "updated_at",
-                "stopped_at",
-                "completed_at",
-                "terminal_reason",
-                "pair",
-                "timeframe",
-            ),
-        )
-
-        committed = episode.get("committed_plan")
-        if isinstance(committed, Mapping):
-            committed_mapping = cast(Mapping[str, object], committed)
-            committed_plan: dict[str, object] = {}
-            for key, fields in (
-                (
-                    "decision",
-                    ("execution_action", "action", "side"),
-                ),
-                (
-                    "model_council",
-                    ("final_side",),
-                ),
-                (
-                    "signal_thesis",
-                    ("committed_side", "side"),
-                ),
-            ):
-                selected = bounded_scalar_fields(committed_mapping.get(key), fields)
-                if selected:
-                    committed_plan[key] = selected
-            if committed_plan:
-                output["committed_plan"] = committed_plan
-
-        forecasts = episode.get("baseline_forecasts")
-        if isinstance(forecasts, Mapping):
-            forecast_mapping = cast(Mapping[str, object], forecasts)
-            scene = forecast_mapping.get("scene")
-            lstm = forecast_mapping.get("lstm")
-            scene_mapping: Mapping[str, object] = (
-                cast(Mapping[str, object], scene)
-                if isinstance(scene, Mapping)
-                else cast(Mapping[str, object], {})
-            )
-            lstm_mapping: Mapping[str, object] = (
-                cast(Mapping[str, object], lstm)
-                if isinstance(lstm, Mapping)
-                else cast(Mapping[str, object], {})
-            )
-            forecast_candles = bounded_episode_rows(
-                scene_mapping.get("forecast_candles"),
-                (
-                    "step",
-                    "x_norm",
-                    "open_y_norm",
-                    "high_y_norm",
-                    "low_y_norm",
-                    "close_y_norm",
-                    "movement_side",
-                    "side",
-                    "body_bias",
-                    "direction",
-                    "direction_conflict",
-                ),
-            )
-            forecast_path = bounded_episode_rows(
-                lstm_mapping.get("forecast_path"),
-                (
-                    "step",
-                    "x_norm",
-                    "expected_open_norm",
-                    "expected_high_norm",
-                    "expected_low_norm",
-                    "expected_close_norm",
-                    "movement_direction",
-                    "direction",
-                    "candle_body_direction",
-                    "body_bias",
-                ),
-            )
-            baseline: dict[str, object] = {}
-            if forecast_candles:
-                baseline["scene"] = {"forecast_candles": forecast_candles}
-            if forecast_path:
-                baseline["lstm"] = {"forecast_path": forecast_path}
-            if baseline:
-                output["baseline_forecasts"] = baseline
-
-        observation_state = bounded_scalar_fields(
-            episode.get("observation_state"),
-            (
-                "status",
-                "unresolved_gap",
-            ),
-        )
-        if observation_state:
-            output["observation_state"] = observation_state
-
-        raw_anchor = episode.get("anchor")
-        if isinstance(raw_anchor, Mapping):
-            anchor_mapping = cast(Mapping[str, object], raw_anchor)
-            anchor = bounded_scalar_fields(
-                anchor_mapping,
-                ("frame_id", "captured_at", "pair", "timeframe"),
-            )
-            anchor_study = bounded_market_study(
-                anchor_mapping.get("market_study_v3")
-            )
-            if anchor_study:
-                anchor["market_study_v3"] = anchor_study
-            if anchor:
-                output["anchor"] = anchor
-
-        path_comparison = bounded_path_comparison(episode.get("path_comparison"))
-        if path_comparison:
-            output["path_comparison"] = path_comparison
-
-        events: list[dict[str, object]] = []
-        raw_events = episode.get("events")
-        if isinstance(raw_events, Sequence) and not isinstance(
-            raw_events,
-            (str, bytes, bytearray),
-        ):
-            for raw_event in list(cast(Sequence[object], raw_events))[:12]:
-                event = bounded_scalar_fields(
-                    raw_event,
-                    (
-                        "event_id",
-                        "episode_id",
-                        "step",
-                        "event_index",
-                        "observed_at",
-                        "direction_agreement",
-                        "result_available",
-                        "favored_path_id",
-                        "observed_close_level",
-                    ),
-                )
-                if not isinstance(raw_event, Mapping):
-                    continue
-                raw_event_mapping = cast(Mapping[str, object], raw_event)
-                predicted = bounded_scalar_fields(
-                    raw_event_mapping.get("predicted_block"),
-                    ("side",),
-                )
-                actual = bounded_scalar_fields(
-                    raw_event_mapping.get("actual_block"),
-                    ("side", "status", "reason"),
-                )
-                if predicted:
-                    event["predicted_block"] = predicted
-                if actual:
-                    event["actual_block"] = actual
-                raw_path_fit = raw_event_mapping.get("path_fit_by_id")
-                if isinstance(raw_path_fit, Mapping):
-                    path_fit: dict[str, object] = {}
-                    raw_path_fit_mapping = cast(
-                        Mapping[str, object],
-                        raw_path_fit,
-                    )
-                    for path_id in ("PATH_A", "PATH_B"):
-                        fit = bounded_scalar_fields(
-                            raw_path_fit_mapping.get(path_id),
-                            ("status", "direction_agreement"),
-                        )
-                        if fit:
-                            path_fit[path_id] = fit
-                    if path_fit:
-                        event["path_fit_by_id"] = path_fit
-                entry_progress = bounded_scalar_fields(
-                    raw_event_mapping.get("entry_location_progress"),
-                    ("status",),
-                )
-                if entry_progress:
-                    event["entry_location_progress"] = entry_progress
-                event_study = bounded_market_study(
-                    raw_event_mapping.get("market_study_v3")
-                )
-                if event_study:
-                    event["market_study_v3"] = event_study
-                if event:
-                    events.append(event)
-        if events:
-            output["events"] = events
-        return output
-
-    def bounded_tracking_episode_history(value: object) -> list[dict[str, object]]:
-        if not isinstance(value, Sequence) or isinstance(
-            value,
-            (str, bytes, bytearray),
-        ):
-            return []
-        output: list[dict[str, object]] = []
-        for item in list(cast(Sequence[object], value))[:24]:
-            archive = bounded_scalar_fields(
-                item,
-                (
-                    "schema_version",
-                    "episode_id",
-                    "state",
-                    "revision",
-                    "pair",
-                    "timeframe",
-                    "started_at",
-                    "ended_at",
-                    "terminal_reason",
-                    "event_cursor",
-                    "event_horizon",
-                    "direction_agreement_count",
-                    "direction_observation_count",
-                    "mean_displacement_error",
-                    "anchor_frame_id",
-                ),
-            )
-            if not isinstance(item, Mapping):
-                continue
-            item_mapping = cast(Mapping[str, object], item)
-            events = bounded_episode_rows(
-                item_mapping.get("events"),
-                (
-                    "event_id",
-                    "step",
-                    "observed_at",
-                    "predicted_side",
-                    "actual_side",
-                    "direction_agreement",
-                    "frame_id",
-                ),
-            )
-            raw_archive_events = item_mapping.get("events")
-            if (
-                events
-                and isinstance(raw_archive_events, Sequence)
-                and not isinstance(raw_archive_events, (str, bytes, bytearray))
-            ):
-                for event, raw_event in zip(
-                    events,
-                    cast(Sequence[object], raw_archive_events),
-                    strict=False,
-                ):
-                    if not isinstance(raw_event, Mapping):
-                        continue
-                    event_study = bounded_market_study(
-                        cast(Mapping[str, object], raw_event).get(
-                            "market_study_v3"
-                        )
-                    )
-                    if event_study:
-                        event["market_study_v3"] = event_study
-            if events:
-                archive["events"] = events
-            for study_key in (
-                "baseline_market_study_v3",
-                "final_market_study_v3",
-            ):
-                study = bounded_market_study(item_mapping.get(study_key))
-                if study:
-                    archive[study_key] = study
-            if archive:
-                output.append(archive)
-        return output
-
     context: dict[str, object] = {}
     for key in (
         "session_id",
@@ -4927,58 +4056,6 @@ def _bounded_operator_projection_context(
     ):
         if key in live_state:
             context[key] = bounded_value(live_state[key], sequence_limit=16)
-
-    # Preserve exactly the nested fields needed to project one immutable
-    # 12-event baseline.  The generic depth limiter intentionally remains
-    # shallow for every other runtime object, and public routes remove this
-    # internal source after the operator DTO is built.
-    bounded_episode = bounded_tracking_episode(live_state.get("tracking_episode"))
-    if bounded_episode:
-        context["tracking_episode"] = bounded_episode
-    bounded_episode_history = bounded_tracking_episode_history(
-        live_state.get("tracking_episode_history")
-    )
-    if bounded_episode_history:
-        context["tracking_episode_history"] = bounded_episode_history
-    raw_episode_readiness = live_state.get("tracking_episode_readiness")
-    if isinstance(raw_episode_readiness, Mapping):
-        readiness_mapping = cast(Mapping[str, object], raw_episode_readiness)
-        readiness: dict[str, object] = {
-            **bounded_scalar_fields(readiness_mapping, ("ready",)),
-            "reasons": [
-                str(reason)[:180]
-                for reason in cast(Sequence[object], readiness_mapping.get("reasons", []))[:8]
-                if isinstance(reason, str) and reason.strip()
-            ]
-            if isinstance(readiness_mapping.get("reasons"), Sequence)
-            and not isinstance(
-                readiness_mapping.get("reasons"),
-                (str, bytes, bytearray),
-            )
-            else [],
-        }
-        context["tracking_episode_readiness"] = readiness
-
-    raw_forecast = live_state.get("forecast_snapshot_v3")
-    if isinstance(raw_forecast, Mapping):
-        raw_forecast_mapping = cast(Mapping[str, object], raw_forecast)
-        forecast: dict[str, object] = {}
-        for key in (
-            "schema_version",
-            "source_frame_id",
-            "observed_epoch",
-            "stale",
-            "diagnostic_only",
-            "high_frequency_forecast",
-            "two_candle_study",
-            "scene_forecast_contribution",
-            "lstm_contribution",
-        ):
-            if key not in raw_forecast_mapping:
-                continue
-            forecast[key] = bounded_forecast_value(raw_forecast_mapping[key])
-        if forecast:
-            context["forecast_snapshot_v3"] = forecast
 
     raw_tracking = live_state.get("tracking_summary")
     if isinstance(raw_tracking, Mapping):
@@ -5070,12 +4147,17 @@ def _bounded_operator_projection_context(
             "status",
             "summary",
             "setup",
+            "market",
+            "timeframe",
         ):
             if key in raw_row_mapping:
                 row[key] = bounded_value(raw_row_mapping[key], sequence_limit=8)
         for key in ("current_movement", "pressure_event"):
             if key in raw_row_mapping:
                 row[key] = bounded_value(raw_row_mapping[key], sequence_limit=8)
+        study = bounded_market_study(raw_row_mapping.get("market_study_v3"))
+        if study:
+            row["market_study_v3"] = study
         if row:
             bounded_history.append(row)
     if bounded_history:
@@ -5143,9 +4225,6 @@ def _merge_operator_projection_input(
             "tracking_enabled",
             "last_capture_epoch",
             "broker_source_lock_id",
-            "tracking_episode",
-            "tracking_episode_history",
-            "tracking_episode_readiness",
         ):
             if key in service_snapshot:
                 service_context[key] = service_snapshot[key]
@@ -5223,20 +4302,6 @@ def create_app(
     ] = {}
     operator_projection_refreshing: set[str] = set()
     operator_projection_refresh_context = threading.local()
-
-    def invalidate_operator_projection_cache(session_id: str) -> None:
-        """Remove a projection after an explicit episode state transition.
-
-        An already-running refresh is allowed to finish, but its cache write is
-        separately guarded by the complete source-revision token below.  That
-        prevents a pre-control projection from repopulating this entry.
-        """
-
-        requested_session_id = str(session_id or "").strip()
-        if not requested_session_id:
-            return
-        with operator_projection_cache_lock:
-            operator_projection_cache.pop(requested_session_id, None)
 
     def get_mobile_service() -> MobileApiService:
         mobile_service = getattr(app.state, "mobile_service", None)
@@ -5799,21 +4864,6 @@ def create_app(
             "line_points",
             "points",
             "path",
-            "forecast_band_points",
-            "forecast_candles",
-            "forecast_scenarios",
-            "forecast_anchor",
-            "forecast_coordinate_space",
-            "forecast_coordinate_units",
-            "forecast_direction",
-            "trajectory_mode",
-            "trajectory_mode_probability_calibrated",
-            "body_bias",
-            "direction_conflict",
-            "path_confidence_status",
-            "forecast_quality_status",
-            "trade_authorization_status",
-            "interval",
             "anchors",
             "start_point",
             "end_point",
@@ -5861,15 +4911,13 @@ def create_app(
             "story",
             "trendline_role",
             "semantic_family",
-            *_SCENE_FORECAST_OVERLAY_FIELDS,
         }
 
         def compact_overlay_object(value: object) -> dict[str, object]:
             raw_row = _mapping_to_plain_dict(value)
-            row = _preserve_scene_forecast_overlay_fields(
-                normalize_v3_overlay_object(raw_row, strict=False),
-                raw_row,
-            )
+            if _is_retired_public_forecast_overlay(raw_row):
+                return {}
+            row = normalize_v3_overlay_object(raw_row, strict=False)
 
             def compact_anchor_candles() -> list[int]:
                 raw_anchors = row.get("anchor_candles")
@@ -5955,7 +5003,11 @@ def create_app(
             rows: list[object] = []
             for item in items:
                 if isinstance(item, Mapping):
-                    rows.append(compact_overlay_object(cast(Mapping[str, object], item)))
+                    compact_row = compact_overlay_object(
+                        cast(Mapping[str, object], item)
+                    )
+                    if compact_row:
+                        rows.append(compact_row)
             return rows
 
         def compact_overlays_payload(value: object) -> dict[str, object]:
@@ -6445,14 +5497,19 @@ def create_app(
         visible_rows: list[dict[str, object]] = []
         all_rows: list[dict[str, object]] = []
         for source_object in source_objects:
-            if bool(source_object.get("precision_rejected", False)):
+            if (
+                bool(source_object.get("precision_rejected", False))
+                or _is_retired_public_forecast_overlay(source_object)
+            ):
                 continue
             try:
-                normalized = _preserve_scene_forecast_overlay_fields(
-                    normalize_v3_overlay_object(source_object, strict=False),
+                normalized = normalize_v3_overlay_object(
                     source_object,
+                    strict=False,
                 )
             except Exception:
+                continue
+            if _is_retired_public_forecast_overlay(normalized):
                 continue
             all_rows.append(normalized)
             if active_mode == "CLEAN_LIVE" and normalized.get("visible_default") is False:
@@ -6539,12 +5596,8 @@ def create_app(
     def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
         public_payload = _strip_private_projection_snapshots(payload)
         public_payload.pop("live_visual_state", None)
-        # The durable episode contains the frozen internal forecast evidence.
-        # It is consumed by the operator projector, which emits a narrow public
-        # DTO, and must never be serialized by the general compact endpoint.
-        public_payload.pop("tracking_episode", None)
-        public_payload.pop("tracking_episode_history", None)
-        public_payload.pop("tracking_episode_readiness", None)
+        # Internal projection snapshots are consumed behind narrow public DTO
+        # boundaries and must never be serialized by the compact endpoint.
         existing_command_center = public_payload.get("decision_command_center")
         if isinstance(existing_command_center, Mapping):
             public_payload["decision_command_center"] = _refresh_decision_command_center_freshness_v3(
@@ -7500,6 +6553,9 @@ def create_app(
         """Project a cached canonical workspace without changing its surface."""
 
         projected = dict(base_state)
+        # Forecast was removed from PG_OPERATOR_WORKSPACE_V1.  Drop any
+        # process-local legacy cache field at the final response boundary.
+        projected.pop("forecast", None)
         projected_overlays = projected.get("overlays")
         public_families = _OPERATOR_VIEW_TO_PUBLIC_FAMILIES[operator_view]
         if public_families is not None and isinstance(projected_overlays, list):
@@ -7520,9 +6576,6 @@ def create_app(
             freshness["state"] = "STALE"
             freshness["label"] = "Updating on the next complete frame"
             projected["freshness"] = freshness
-            forecast = _mapping_to_plain_dict(projected.get("forecast"))
-            forecast["state"] = "STALE"
-            projected["forecast"] = forecast
         if stale_while_refreshing or decision_expired:
             permission = _mapping_to_plain_dict(projected.get("permission"))
             permission.update(
@@ -7660,30 +6713,6 @@ def create_app(
             requested_session_id,
             projection_source,
         )
-        authoritative_waiting_for_new_frame = waiting_for_new_frame
-        if safe_snapshot is not None and not authoritative_waiting_for_new_frame:
-            # A cold projection can be rebuilt from an exact-lineage overlay
-            # snapshot while the live-state cache still reflects the prior
-            # accepted frame.  Consult the lightweight session authority before
-            # calling restored geometry current; persistence is intentionally
-            # not part of the pure workspace projector's input contract.
-            try:
-                latest_session = read_window_tracker_session(
-                    requested_session_id
-                )
-            except (KeyError, OSError, ValueError):
-                latest_session = {}
-            latest_visual_observation = _mapping_to_plain_dict(
-                latest_session.get("visual_observation_v3")
-            )
-            authoritative_waiting_for_new_frame = bool(
-                str(latest_visual_observation.get("status") or "")
-                .strip()
-                .upper()
-                == "WAITING_FOR_NEW_FRAME"
-                and latest_visual_observation.get("new_visual_evidence")
-                is not True
-            )
         if waiting_for_new_frame:
             if safe_snapshot is not None:
                 operator_state["overlays"] = _stale_diagnostic_operator_overlays(
@@ -7812,43 +6841,6 @@ def create_app(
             operator_state.get("overlays"),
             response_frame_id,
         )
-        if authoritative_waiting_for_new_frame and safe_snapshot is not None:
-            # Restored geometry remains visible on the exact broker frame, but
-            # it is still the last valid outlook rather than a newly observed
-            # forecast.  Execution permission is already fail-closed by the
-            # waiting session contract; keep the forecast wording consistent.
-            forecast = _mapping_to_plain_dict(operator_state.get("forecast"))
-            forecast["state"] = "STALE"
-            forecast_direction = str(
-                forecast.get("direction") or ""
-            ).strip().upper()
-            if forecast_direction in {"BUY", "SELL"}:
-                movement_word = (
-                    "upward" if forecast_direction == "BUY" else "downward"
-                )
-                forecast["summary"] = (
-                    f"The last valid outlook pointed {movement_word}. "
-                    "It remains observation only while waiting for a new chart update."
-                )
-            operator_state["forecast"] = forecast
-        forecast_state = str(
-            _mapping_to_plain_dict(operator_state.get("forecast")).get("state")
-            or ""
-        ).strip().upper()
-        if authoritative_waiting_for_new_frame or forecast_state == "STALE":
-            # Exact-frame recovery may keep geometry visually current, but a
-            # stale outlook can never retain a previously authorized role.
-            # This guard also covers a compact-cache race where the waiting
-            # visual-observation flag arrives one poll after the stale forecast.
-            fail_closed_rows = _safe_operator_overlay_rows(
-                operator_state.get("overlays")
-            )
-            for row in fail_closed_rows:
-                if row.get("forecast_role"):
-                    row["forecast_status"] = "STALE"
-                    row["forecast_authorized"] = False
-                    row["trade_authorization_status"] = "NO_EDGE"
-            operator_state["overlays"] = fail_closed_rows
         final_source_revision = _operator_projection_source_revision(
             requested_session_id
         )
@@ -7860,10 +6852,9 @@ def create_app(
             and final_source_revision[0] == source_revision[0]
             and response_frame_number == source_revision[1]
         ):
-            # Cache only when every source-revision field, including frozen
-            # episode id/state/revision/cursor, stayed unchanged for the whole
-            # projection.  Same-frame Start/Stop must not let an in-flight old
-            # build repopulate the cache after explicit invalidation.
+            # Cache only when every atomic source-revision field stayed
+            # unchanged for the whole projection.  A concurrent frame update
+            # must not let an in-flight old build repopulate the cache.
             cache_revision = source_revision
         if cache_revision is not None:
             with operator_projection_cache_lock:
@@ -9567,6 +8558,17 @@ def create_app(
         safe_name = Path(str(artifact_name or "")).name
         if not safe_name or safe_name != str(artifact_name or ""):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid artifact name.")
+        private_artifact_stem = Path(safe_name).stem.strip().lower()
+        if (
+            private_artifact_stem == "projection"
+            or private_artifact_stem.endswith("_projection")
+            or private_artifact_stem == "memory_reference"
+            or private_artifact_stem.endswith("_memory_reference")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Artifact not found.",
+            )
         try:
             tracker = get_window_tracker_service()
             artifact_dir = tracker.session_dir(session_id) / "artifacts"
@@ -9590,6 +8592,12 @@ def create_app(
         mode: str | None = None,
         layers: str | None = None,
     ) -> Response:
+        normalized_artifact_kind = str(artifact_kind or "").strip().lower()
+        if normalized_artifact_kind in _RETIRED_PUBLIC_PROJECTION_ARTIFACT_KINDS:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Artifact not found.",
+            )
         v3_response = render_v3_overlay_artifact_response(session_id, artifact_kind, mode, layers)
         if v3_response is not None:
             return v3_response
@@ -10038,142 +9046,6 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/current")
-    def get_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
-        session_id: str,
-    ) -> dict[str, object]:
-        try:
-            tracker = get_window_tracker_service()
-            episode = cast(
-                Mapping[str, object],
-                tracker.get_tracking_episode(session_id),
-            )
-            readiness = cast(
-                Mapping[str, object],
-                tracker.get_tracking_episode_readiness(session_id),
-            )
-            return _public_tracking_episode_response(episode, readiness)
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Window tracker session not found.",
-            ) from exc
-
-    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/readiness")
-    def get_tracker_tracking_episode_readiness(  # pyright: ignore[reportUnusedFunction]
-        session_id: str,
-    ) -> dict[str, object]:
-        try:
-            readiness = cast(
-                Mapping[str, object],
-                get_window_tracker_service().get_tracking_episode_readiness(
-                    session_id
-                ),
-            )
-            return _public_tracking_episode_readiness_response(readiness)
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Window tracker session not found.",
-            ) from exc
-
-    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/start")
-    def start_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
-        session_id: str,
-    ) -> dict[str, object]:
-        try:
-            tracker = get_window_tracker_service()
-            episode = cast(
-                Mapping[str, object],
-                tracker.start_tracking_episode(session_id),
-            )
-            invalidate_operator_projection_cache(session_id)
-            readiness = cast(
-                Mapping[str, object],
-                tracker.get_tracking_episode_readiness(session_id),
-            )
-            return _public_tracking_episode_response(episode, readiness)
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Window tracker session not found.",
-            ) from exc
-        except TrackingEpisodeReadinessError as exc:
-            public_reasons = [
-                message
-                for reason in exc.reasons
-                if (message := public_tracking_readiness_message_v1(reason))
-            ]
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "TRACKING_EPISODE_NOT_READY",
-                    "message": (
-                        public_reasons[0]
-                        if public_reasons
-                        else "The chart is still preparing the tracking baseline."
-                    ),
-                    "reasons": list(dict.fromkeys(public_reasons)),
-                },
-            ) from exc
-
-    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/stop")
-    def stop_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
-        session_id: str,
-        request: WindowTrackerEpisodeStopRequest | None = None,
-    ) -> dict[str, object]:
-        try:
-            tracker = get_window_tracker_service()
-            episode = cast(
-                Mapping[str, object],
-                tracker.stop_tracking_episode(
-                    session_id,
-                    reason=(request.reason if request is not None else "manual_stop"),
-                ),
-            )
-            invalidate_operator_projection_cache(session_id)
-            readiness = cast(
-                Mapping[str, object],
-                tracker.get_tracking_episode_readiness(session_id),
-            )
-            return _public_tracking_episode_response(episode, readiness)
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Window tracker session not found.",
-            ) from exc
-
-    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/reset")
-    def reset_tracker_tracking_episode(  # pyright: ignore[reportUnusedFunction]
-        session_id: str,
-    ) -> dict[str, object]:
-        try:
-            tracker = get_window_tracker_service()
-            episode = cast(
-                Mapping[str, object],
-                tracker.reset_tracking_episode(session_id),
-            )
-            invalidate_operator_projection_cache(session_id)
-            readiness = cast(
-                Mapping[str, object],
-                tracker.get_tracking_episode_readiness(session_id),
-            )
-            return _public_tracking_episode_response(episode, readiness)
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Window tracker session not found.",
-            ) from exc
-        except TrackingEpisodeStateError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "TRACKING_EPISODE_RESET_NOT_ALLOWED",
-                    "message": str(exc),
-                    "state": exc.state,
-                },
-            ) from exc
-
     @app.post("/v1/mobile/window-tracker/sessions/{session_id}/start")
     def start_tracker_session(session_id: str) -> dict[str, object]:
         try:
@@ -10244,53 +9116,6 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/predict")
-    def predict_tracker_session_from_memory(
-        session_id: str,
-        response: Response,
-    ) -> dict[str, object]:
-        try:
-            action = get_window_tracker_service().enqueue_memory_projection(session_id, mode="predict")
-            if not bool(action.get("terminal", False)):
-                response.status_code = status.HTTP_202_ACCEPTED
-            return cast(dict[str, object], action)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/show-future")
-    def show_future_tracker_session_from_memory(
-        session_id: str,
-        response: Response,
-    ) -> dict[str, object]:
-        try:
-            action = get_window_tracker_service().enqueue_memory_projection(session_id, mode="future")
-            if not bool(action.get("terminal", False)):
-                response.status_code = status.HTTP_202_ACCEPTED
-            return cast(dict[str, object], action)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/forecast-actions/{request_id}")
-    def get_tracker_forecast_action(
-        session_id: str,
-        request_id: str,
-    ) -> dict[str, object]:
-        try:
-            action = get_window_tracker_service().get_memory_projection_action(
-                session_id,
-                request_id,
-            )
-            return cast(dict[str, object], action)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Forecast action not found.") from exc
-
-    # Keep strict unused-symbol analysis aware of the FastAPI decorator registration.
-    _ = get_tracker_forecast_action
-
     @app.patch("/v1/mobile/window-tracker/sessions/{session_id}/controls")
     def update_tracker_session_controls(
         session_id: str,
@@ -10323,8 +9148,6 @@ def create_app(
                 allow_live_momentum_entries=request.allow_live_momentum_entries,
                 allow_opposing_force_reactions=request.allow_opposing_force_reactions,
                 scenario_generation_enabled=request.scenario_generation_enabled,
-                auto_memory_projection=request.auto_memory_projection,
-                require_memory_projection=request.require_memory_projection,
                 live_momentum_memory_advisory=request.live_momentum_memory_advisory,
                 require_market_identity=request.require_market_identity,
                 require_timeframe_identity=request.require_timeframe_identity,
@@ -10370,7 +9193,6 @@ def create_app(
                 min_conf_latest=request.min_conf_latest,
                 history_depth=request.history_depth,
                 label_density=request.label_density,
-                projection_focus=request.projection_focus,
                 debug_depth=request.debug_depth,
                 fuse_timeframe_overlays=request.fuse_timeframe_overlays,
                 min_actionable_confidence=request.min_actionable_confidence,
@@ -10532,8 +9354,6 @@ def create_app(
         emergency_stop_tracker_session,
         capture_tracker_session_once,
         execute_tracker_demo_random_trade,
-        predict_tracker_session_from_memory,
-        show_future_tracker_session_from_memory,
         update_tracker_session_controls,
         voice_status,
         voice_commands,

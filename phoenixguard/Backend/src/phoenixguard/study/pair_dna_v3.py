@@ -32,6 +32,12 @@ from phoenixguard.study._persistence_v3 import (
 )
 from phoenixguard.study.behavioral_sequence_v3 import BEHAVIORAL_SEQUENCE_SCHEMA_VERSION
 from phoenixguard.study.candle_intelligence_v3 import CANDLE_INTELLIGENCE_SCHEMA_VERSION
+from phoenixguard.study.concept_drift_v3 import (
+    CONCEPT_DRIFT_STATE_SCHEMA_VERSION,
+    CONCEPT_DRIFT_STUDY_SCHEMA_VERSION,
+    ConceptDriftValidationError,
+    OnlineConceptDriftDetectorV3,
+)
 
 
 PAIR_DNA_SCHEMA_VERSION = "PG_PAIR_DNA_STORE_V3"
@@ -61,6 +67,9 @@ MAX_PAIR_DNA_OBJECT_TYPES = 256
 MAX_PAIR_DNA_REGIMES = 128
 DEFAULT_MAX_RETRACEMENT_BUCKETS = 2_048
 MAX_RETRACEMENT_STUDY_ROWS = 2_048
+DEFAULT_MAX_CONCEPT_DRIFT_PARTITIONS = 64
+MAX_PAIR_DNA_CONCEPT_DRIFT_PARTITIONS = 1_024
+MAX_RECENT_SEQUENCE_OBJECT_TYPES = 32
 RETRACEMENT_CONFLUENCE_STUDY_SCHEMA_VERSION = (
     "PG_RETRACEMENT_CONFLUENCE_STUDY_V3"
 )
@@ -255,6 +264,25 @@ def _empty_retracement_aggregate() -> dict[str, Any]:
     }
 
 
+def _empty_concept_drift_memory() -> dict[str, Any]:
+    return {
+        "schema_version": CONCEPT_DRIFT_STUDY_SCHEMA_VERSION,
+        "state_schema_version": CONCEPT_DRIFT_STATE_SCHEMA_VERSION,
+        "status": "NOT_STARTED",
+        "current_regime_partition_id": None,
+        "partition_count": 0,
+        "partitions": [],
+        "detector_state": None,
+        "study_only": True,
+        "observation_only": True,
+        "causal": False,
+        "predicts_direction": False,
+        "execution_authority": False,
+        "grants_entry_permission": False,
+        "grants_execution_permission": False,
+    }
+
+
 def _empty_profile(symbol: str, timeframe: str, pair_id: str) -> dict[str, Any]:
     return {
         "pair_id": pair_id,
@@ -293,6 +321,7 @@ def _empty_profile(symbol: str, timeframe: str, pair_id: str) -> dict[str, Any]:
         "outcome_correlations": {},
         "association_overflow_count": 0,
         "retracement_confluence": _empty_retracement_aggregate(),
+        "concept_drift": _empty_concept_drift_memory(),
         "recent_sequences": [],
         "seen_sequence_ids": [],
         "identity_ledger": {
@@ -1114,6 +1143,103 @@ def _validate_retracement_aggregate(
     }
 
 
+def _validate_recent_sequences(value: object, *, field: str) -> list[dict[str, Any]]:
+    recent = _required_rows(value, field=field)
+    canonical: list[dict[str, Any]] = []
+    for index, source in enumerate(recent):
+        row = dict(source)
+        raw_object_types = row.get("object_types", [])
+        if not isinstance(raw_object_types, list):
+            raise PairDNAValidationError(
+                f"{field}[{index}].object_types must be a list"
+            )
+        raw_object_type_items = cast(list[object], raw_object_types)
+        if len(raw_object_type_items) > MAX_RECENT_SEQUENCE_OBJECT_TYPES:
+            raise PairDNAValidationError(
+                f"{field}[{index}].object_types exceeds the bound"
+            )
+        object_types = [
+            _canonical_identity(
+                value,
+                field=f"{field}[{index}].object_types[{object_index}]",
+                maximum=128,
+            )
+            for object_index, value in enumerate(raw_object_type_items)
+        ]
+        if len(object_types) != len(set(object_types)):
+            raise PairDNAValidationError(
+                f"{field}[{index}].object_types contains duplicates"
+            )
+        row["object_types"] = sorted(object_types)
+        canonical.append(row)
+    return canonical
+
+
+def _validate_concept_drift_memory(
+    value: object,
+    *,
+    field: str,
+    symbol: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    source = _mapping(value)
+    if not source:
+        return _empty_concept_drift_memory()
+    detector_state = source.get("detector_state")
+    if detector_state is None:
+        empty = _empty_concept_drift_memory()
+        if source.get("status") not in {None, "NOT_STARTED"}:
+            raise PairDNAValidationError(
+                f"{field} cannot publish partitions without detector state"
+            )
+        return empty
+    if not isinstance(detector_state, Mapping):
+        raise PairDNAValidationError(f"{field}.detector_state must be a mapping")
+    try:
+        detector = OnlineConceptDriftDetectorV3.from_snapshot(
+            cast(Mapping[str, Any], detector_state),
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+    except ConceptDriftValidationError as exc:
+        raise PairDNAValidationError(f"{field}.detector_state: {exc}") from exc
+    public = detector.snapshot()
+    canonical_partitions = deepcopy(cast(list[dict[str, Any]], public["partitions"]))
+    supplied_partitions = source.get("partitions")
+    if supplied_partitions is not None and supplied_partitions != canonical_partitions:
+        raise PairDNAValidationError(
+            f"{field}.partitions does not match detector state"
+        )
+    supplied_count = source.get("partition_count")
+    if supplied_count is not None and _integer(
+        supplied_count, field=f"{field}.partition_count"
+    ) != len(canonical_partitions):
+        raise PairDNAValidationError(
+            f"{field}.partition_count does not match detector state"
+        )
+    current_partition = str(public["current_regime_partition_id"])
+    if source.get("current_regime_partition_id") not in {None, current_partition}:
+        raise PairDNAValidationError(
+            f"{field}.current_regime_partition_id does not match detector state"
+        )
+    return {
+        "schema_version": CONCEPT_DRIFT_STUDY_SCHEMA_VERSION,
+        "state_schema_version": CONCEPT_DRIFT_STATE_SCHEMA_VERSION,
+        "status": "READY",
+        "current_regime_partition_id": current_partition,
+        "partition_count": len(canonical_partitions),
+        "partitions": canonical_partitions,
+        "detector_state": detector.persistence_snapshot(),
+        "study_only": True,
+        "observation_only": True,
+        "causal": False,
+        "predicts_direction": False,
+        "execution_authority": False,
+        "grants_entry_permission": False,
+        "grants_execution_permission": False,
+    }
+
+
 def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]:
     pair_id = str(profile.get("pair_id") or "")
     if pair_id != key:
@@ -1142,7 +1268,7 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
             "success_count": _integer(row.get("success_count"), field=f"correlations.{feature}.success_count"),
             "realized_return_sum": _finite(row.get("realized_return_sum"), field=f"correlations.{feature}.realized_return_sum", default=0.0),
         }
-    recent_sequences = _required_rows(
+    recent_sequences = _validate_recent_sequences(
         profile.get("recent_sequences"),
         field=f"profiles.{key}.recent_sequences",
     )
@@ -1162,6 +1288,12 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
     retracement_confluence = _validate_retracement_aggregate(
         profile.get("retracement_confluence"),
         field=f"profiles.{key}.retracement_confluence",
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+    concept_drift = _validate_concept_drift_memory(
+        profile.get("concept_drift"),
+        field=f"profiles.{key}.concept_drift",
         symbol=symbol,
         timeframe=timeframe,
     )
@@ -1211,6 +1343,7 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
             field=f"profiles.{key}.association_overflow_count",
         ),
         "retracement_confluence": retracement_confluence,
+        "concept_drift": concept_drift,
         "recent_sequences": recent_sequences,
         "seen_sequence_ids": seen_sequence_ids,
         "identity_ledger": _validate_identity_ledger(
@@ -1230,6 +1363,7 @@ def _validate_state(
     max_pairs: int,
     recent_sequence_limit: int,
     max_retracement_buckets: int,
+    max_concept_drift_partitions: int,
 ) -> dict[str, Any]:
     if raw.get("schema_version") != PAIR_DNA_SCHEMA_VERSION:
         raise PairDNAValidationError(f"pair DNA schema must be {PAIR_DNA_SCHEMA_VERSION}")
@@ -1253,6 +1387,13 @@ def _validate_state(
         if len(cast(list[str], retracement.get("recent_study_ids", []))) > recent_sequence_limit:
             raise PairDNAValidationError(
                 "pair DNA recent retracement identity bound was exceeded"
+            )
+        concept_drift = _mapping(profile.get("concept_drift"))
+        if int(concept_drift.get("partition_count", 0) or 0) > (
+            max_concept_drift_partitions
+        ):
+            raise PairDNAValidationError(
+                "pair DNA concept-drift partition bound was exceeded"
             )
         profiles[str(key)] = profile
     return {
@@ -1844,6 +1985,19 @@ def _apply_study(
             max_buckets=max_retracement_buckets,
         )
 
+    matured_object_types: list[str] = []
+    if has_stable_evidence:
+        matured_object_types = sorted(
+            {
+                _canonical_identity(
+                    row.get("object_type") or row.get("type"),
+                    field="objects.object_type",
+                    maximum=128,
+                )
+                for row in objects
+                if str(row.get("object_type") or row.get("type") or "").strip()
+            }
+        )[:MAX_RECENT_SEQUENCE_OBJECT_TYPES]
     recent = _rows(profile.get("recent_sequences"))
     recent.append(
         {
@@ -1858,6 +2012,7 @@ def _apply_study(
             "inner_trend": str(_mapping(behavior_study.get("inner_trend")).get("label") or "UNKNOWN"),
             "current_state": str(_mapping(behavior_study.get("current_state")).get("state") or "UNKNOWN"),
             "coordinate_space": coordinate_space,
+            "object_types": matured_object_types,
         }
     )
     profile["recent_sequences"] = recent[-recent_sequence_limit:]
@@ -2003,6 +2158,30 @@ def _derived_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     ]
     retracement["empirical_partitions"] = empirical_partitions
     result["retracement_confluence"] = retracement
+    concept_drift = _mapping(result.get("concept_drift"))
+    detector_configuration = _mapping(
+        _mapping(concept_drift.get("detector_state")).get("configuration")
+    )
+    concept_drift.pop("detector_state", None)
+    concept_drift["contract"] = {
+        "partition_history_is_append_stable": True,
+        "detector_configuration_is_fixed_after_first_record": True,
+        "raw_feature_window_is_private": True,
+        "maximum_regime_partitions": int(
+            detector_configuration.get(
+                "max_regime_partitions",
+                DEFAULT_MAX_CONCEPT_DRIFT_PARTITIONS,
+            )
+        ),
+        "study_only": True,
+        "observation_only": True,
+        "causal": False,
+        "predicts_direction": False,
+        "execution_authority": False,
+        "grants_entry_permission": False,
+        "grants_execution_permission": False,
+    }
+    result["concept_drift"] = concept_drift
     correlations = _mapping(result.get("outcome_correlations"))
     result["outcome_association_contract"] = {
         "analysis_kind": "MARGINAL_AND_PAIRWISE_FEATURE_ASSOCIATION",
@@ -2028,6 +2207,99 @@ def _derived_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _assert_append_stable_concept_drift(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> None:
+    old_state = _mapping(existing.get("detector_state"))
+    if not old_state:
+        return
+    new_state = _required_mapping(
+        incoming.get("detector_state"), field="concept_drift.detector_state"
+    )
+    for field in ("stream", "configuration", "stream_digest"):
+        if old_state.get(field) != new_state.get(field):
+            raise PairDNAValidationError(
+                "concept-drift detector scope and configuration are immutable"
+            )
+    old_last = old_state.get("last_order_index")
+    new_last = new_state.get("last_order_index")
+    if old_last is not None and (
+        new_last is None or int(new_last) < int(old_last)
+    ):
+        raise PairDNAValidationError(
+            "concept-drift detector high-water mark cannot move backward"
+        )
+    if old_last == new_last and old_state.get("state_digest") != new_state.get(
+        "state_digest"
+    ):
+        raise PairDNAValidationError(
+            "concept-drift state changed without a new closed candle"
+        )
+
+    old_partitions = _required_rows(
+        existing.get("partitions"), field="concept_drift.partitions"
+    )
+    new_partitions = _required_rows(
+        incoming.get("partitions"), field="concept_drift.partitions"
+    )
+    if len(new_partitions) < len(old_partitions):
+        raise PairDNAValidationError(
+            "concept-drift partition history cannot shrink"
+        )
+    immutable_fields = (
+        "regime_partition_id",
+        "ordinal",
+        "created_by",
+        "drift_evidence_digest",
+    )
+    for index, old_partition in enumerate(old_partitions):
+        new_partition = new_partitions[index]
+        if any(
+            old_partition.get(field) != new_partition.get(field)
+            for field in immutable_fields
+        ):
+            raise PairDNAValidationError(
+                "concept-drift prior partition identity cannot change"
+            )
+        if old_partition.get("start_order_index") is not None and (
+            old_partition.get("start_candle_id")
+            != new_partition.get("start_candle_id")
+            or old_partition.get("start_order_index")
+            != new_partition.get("start_order_index")
+        ):
+            raise PairDNAValidationError(
+                "concept-drift prior partition start cannot change"
+            )
+        if old_partition.get("status") == "CLOSED":
+            if old_partition != new_partition:
+                raise PairDNAValidationError(
+                    "concept-drift closed partition history is immutable"
+                )
+            continue
+        if len(new_partitions) == len(old_partitions):
+            allowed_first_anchor = (
+                old_last is None
+                and old_partition.get("start_order_index") is None
+                and new_partition.get("status") == "ACTIVE"
+                and new_partition.get("start_order_index") is not None
+                and new_partition.get("end_order_index") is None
+            )
+            if old_partition != new_partition and not allowed_first_anchor:
+                raise PairDNAValidationError(
+                    "concept-drift active partition changed without an append"
+                )
+            continue
+        if (
+            new_partition.get("status") != "CLOSED"
+            or new_partition.get("end_candle_id") is None
+            or new_partition.get("end_order_index") is None
+        ):
+            raise PairDNAValidationError(
+                "concept-drift prior active partition can only close at an append"
+            )
+
+
 class PairDNAStoreV3:
     """Transactional JSON store for bounded per-pair cumulative studies."""
 
@@ -2038,12 +2310,14 @@ class PairDNAStoreV3:
         max_pairs: int = DEFAULT_MAX_PAIR_PROFILES,
         recent_sequence_limit: int = DEFAULT_RECENT_SEQUENCE_LIMIT,
         max_retracement_buckets: int = DEFAULT_MAX_RETRACEMENT_BUCKETS,
+        max_concept_drift_partitions: int = DEFAULT_MAX_CONCEPT_DRIFT_PARTITIONS,
         lock_timeout_seconds: float = 5.0,
     ) -> None:
         self.path = Path(path)
         self.max_pairs = int(max_pairs)
         self.recent_sequence_limit = int(recent_sequence_limit)
         self.max_retracement_buckets = int(max_retracement_buckets)
+        self.max_concept_drift_partitions = int(max_concept_drift_partitions)
         self.lock_timeout_seconds = float(lock_timeout_seconds)
         if not 1 <= self.max_pairs <= 4096:
             raise PairDNAValidationError("max_pairs must be in [1, 4096]")
@@ -2052,6 +2326,14 @@ class PairDNAStoreV3:
         if not 1 <= self.max_retracement_buckets <= 4096:
             raise PairDNAValidationError(
                 "max_retracement_buckets must be in [1, 4096]"
+            )
+        if not (
+            1
+            <= self.max_concept_drift_partitions
+            <= MAX_PAIR_DNA_CONCEPT_DRIFT_PARTITIONS
+        ):
+            raise PairDNAValidationError(
+                "max_concept_drift_partitions must be in [1, 1024]"
             )
         if not 0.0 < self.lock_timeout_seconds <= 60.0:
             raise PairDNAValidationError("lock_timeout_seconds must be in (0, 60]")
@@ -2065,6 +2347,7 @@ class PairDNAStoreV3:
             max_pairs=self.max_pairs,
             recent_sequence_limit=self.recent_sequence_limit,
             max_retracement_buckets=self.max_retracement_buckets,
+            max_concept_drift_partitions=self.max_concept_drift_partitions,
         )
 
     def record_study(
@@ -2170,6 +2453,9 @@ class PairDNAStoreV3:
                     max_pairs=self.max_pairs,
                     recent_sequence_limit=self.recent_sequence_limit,
                     max_retracement_buckets=self.max_retracement_buckets,
+                    max_concept_drift_partitions=(
+                        self.max_concept_drift_partitions
+                    ),
                 )
                 write_json_atomic(self.path, canonical)
         except StudyPersistenceError:
@@ -2181,6 +2467,140 @@ class PairDNAStoreV3:
             "execution_authority": False,
             "pair_id": pair_id,
             "profile": _derived_profile(profile),
+        }
+
+    def record_concept_drift_state(
+        self,
+        *,
+        symbol: object,
+        timeframe: object,
+        detector_state: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one append-stable, bounded detector state for a pair."""
+
+        canonical_symbol = _canonical_identity(
+            symbol, field="symbol", maximum=64
+        )
+        canonical_timeframe = _canonical_identity(
+            timeframe, field="timeframe", maximum=32
+        )
+        pair_id = pair_profile_key_v3(canonical_symbol, canonical_timeframe)
+        try:
+            detector = OnlineConceptDriftDetectorV3.from_snapshot(
+                detector_state,
+                symbol=canonical_symbol,
+                timeframe=canonical_timeframe,
+            )
+        except ConceptDriftValidationError as exc:
+            raise PairDNAValidationError(
+                f"concept_drift.detector_state: {exc}"
+            ) from exc
+        public = detector.snapshot()
+        if int(public["partition_count"]) > self.max_concept_drift_partitions:
+            raise PairDNAValidationError(
+                "pair DNA concept-drift partition bound was exceeded"
+            )
+        incoming = _validate_concept_drift_memory(
+            {
+                "status": "READY",
+                "current_regime_partition_id": public[
+                    "current_regime_partition_id"
+                ],
+                "partition_count": public["partition_count"],
+                "partitions": public["partitions"],
+                "detector_state": detector.persistence_snapshot(),
+            },
+            field="concept_drift",
+            symbol=canonical_symbol,
+            timeframe=canonical_timeframe,
+        )
+
+        with exclusive_store_lock(
+            self.path, timeout_seconds=self.lock_timeout_seconds
+        ):
+            state = self._load()
+            profiles = _mapping(state.get("profiles"))
+            if pair_id not in profiles and len(profiles) >= self.max_pairs:
+                raise PairDNAValidationError(
+                    "Pair DNA capacity reached; concept drift cannot create another profile"
+                )
+            profile = _mapping(profiles.get(pair_id)) or _empty_profile(
+                canonical_symbol,
+                canonical_timeframe,
+                pair_id,
+            )
+            existing = _mapping(profile.get("concept_drift"))
+            _assert_append_stable_concept_drift(existing, incoming)
+            old_state = _mapping(existing.get("detector_state"))
+            new_state = _mapping(incoming.get("detector_state"))
+            if old_state.get("state_digest") == new_state.get("state_digest"):
+                return {
+                    "schema_version": PAIR_DNA_SCHEMA_VERSION,
+                    "status": "UNCHANGED",
+                    "study_only": True,
+                    "execution_authority": False,
+                    "pair_id": pair_id,
+                    "concept_drift": _derived_profile(profile)["concept_drift"],
+                }
+            ordinal = int(state.get("next_ordinal", 1))
+            profile["concept_drift"] = incoming
+            profile["updated_ordinal"] = ordinal
+            profiles[pair_id] = profile
+            state["profiles"] = profiles
+            state["next_ordinal"] = ordinal + 1
+            canonical = _validate_state(
+                state,
+                max_pairs=self.max_pairs,
+                recent_sequence_limit=self.recent_sequence_limit,
+                max_retracement_buckets=self.max_retracement_buckets,
+                max_concept_drift_partitions=(
+                    self.max_concept_drift_partitions
+                ),
+            )
+            write_json_atomic(self.path, canonical)
+            stored_profile = _mapping(canonical["profiles"][pair_id])
+        return {
+            "schema_version": PAIR_DNA_SCHEMA_VERSION,
+            "status": "RECORDED",
+            "study_only": True,
+            "execution_authority": False,
+            "pair_id": pair_id,
+            "concept_drift": _derived_profile(stored_profile)["concept_drift"],
+        }
+
+    def get_concept_drift_state(
+        self,
+        symbol: object,
+        timeframe: object,
+    ) -> dict[str, Any]:
+        """Return private detector state for service restoration only."""
+
+        pair_id = pair_profile_key_v3(symbol, timeframe)
+        with exclusive_store_lock(
+            self.path, timeout_seconds=self.lock_timeout_seconds
+        ):
+            state = self._load()
+        profile = _mapping(_mapping(state.get("profiles")).get(pair_id))
+        concept_drift = _mapping(profile.get("concept_drift"))
+        detector_state = _mapping(concept_drift.get("detector_state"))
+        if not detector_state:
+            return {
+                "schema_version": PAIR_DNA_SCHEMA_VERSION,
+                "status": "NOT_FOUND",
+                "private_state": True,
+                "study_only": True,
+                "execution_authority": False,
+                "pair_id": pair_id,
+                "detector_state": None,
+            }
+        return {
+            "schema_version": PAIR_DNA_SCHEMA_VERSION,
+            "status": "READY",
+            "private_state": True,
+            "study_only": True,
+            "execution_authority": False,
+            "pair_id": pair_id,
+            "detector_state": deepcopy(detector_state),
         }
 
     def get_profile(self, symbol: object, timeframe: object) -> dict[str, Any]:
@@ -2242,6 +2662,7 @@ def update_pair_dna_v3(
 
 
 __all__ = [
+    "DEFAULT_MAX_CONCEPT_DRIFT_PARTITIONS",
     "DEFAULT_MAX_PAIR_PROFILES",
     "DEFAULT_MAX_RETRACEMENT_BUCKETS",
     "DEFAULT_RECENT_SEQUENCE_LIMIT",
@@ -2252,6 +2673,8 @@ __all__ = [
     "PAIR_DNA_DEDUPE_SEGMENT_CAPACITY",
     "PAIR_DNA_DEDUPE_SEGMENT_HASHES",
     "PAIR_DNA_SCHEMA_VERSION",
+    "MAX_PAIR_DNA_CONCEPT_DRIFT_PARTITIONS",
+    "MAX_RECENT_SEQUENCE_OBJECT_TYPES",
     "RETRACEMENT_CONFLUENCE_STUDY_SCHEMA_VERSION",
     "PairDNAStoreV3",
     "PairDNAValidationError",

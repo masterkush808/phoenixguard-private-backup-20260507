@@ -33,15 +33,28 @@ Defined in `Backend/src/phoenixguard/mobile_api/app.py`.
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/stop` | Stop tracker | Runtime control |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/emergency-stop` | Stop tracker immediately | Runtime control |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/capture-once` | Single capture | Capture producer |
-| `GET /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/readiness` | Validate the fixed 12-event baseline inputs | Episode readiness |
-| `GET /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/current` | Read current/retained episode progress | Episode state |
-| `POST /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/start` | Freeze and start one 12-closed-candle episode | Episode control |
-| `POST /v1/mobile/window-tracker/sessions/{session_id}/tracking-episodes/stop` | Stop only the episode and retain its record | Episode control |
-| `POST /v1/mobile/window-tracker/sessions/{session_id}/predict` | Tracker prediction action | Diagnostic/analysis |
-| `POST /v1/mobile/window-tracker/sessions/{session_id}/show-future` | Future projection action | Diagnostic |
-| `GET /v1/mobile/window-tracker/sessions/{session_id}/forecast-actions/{request_id}` | Poll an immutable forecast action | Diagnostic/analysis |
 | `PATCH /v1/mobile/window-tracker/sessions/{session_id}/controls` | Update tracker controls | Runtime setup |
 | `GET /v3/mobile/window-tracker/dashboard[/<session_id>]` | Canonical V3 HTML dashboard; `/v1/...` remains a compatibility alias | Diagnostic |
+
+Continuous market study has no manual baseline-control API. Starting the tracker starts capture;
+each new pair/timeframe-scoped closed-candle identity advances the study exactly once, while repeated
+frames remain idempotent. The current bounded study is delivered through the tracker session,
+operator workspace, SSE, compact live state, and V3 dashboard surfaces.
+
+`MarketStudyServiceV3` integrates the bounded research services into that continuous pipeline. Its
+study object carries `motif_lattice`, `survival_network`, `path_reconstruction`,
+`adaptive_feature_ontology`, `concept_drift`, `regime_partition`, `cross_pair_association`, and
+`claim_proofs`. The pair-scoped ontology persists its bounded audit state, while concept-drift
+snapshots and append-stable regime partitions persist inside Pair DNA and replay idempotently.
+The atomic cross-pair coordinator retains only bounded normalized returns and compares distinct pairs
+only at exact shared closed timestamps; without a compatible peer or sufficient support it publishes
+`INSUFFICIENT_SYNCHRONIZED_PAIR` or `INSUFFICIENT_SUPPORT`, never a synthetic edge.
+
+These are study-only fields inside the existing market-study object, not new action endpoints. Raw
+identities, full feature windows, persistence details, and private evidence still require an explicit
+allowlist before reaching an operator surface. All Granger-style and mutual-information results are
+explicitly non-causal associations; they do not establish influence, predict a direction, or
+authorize entry.
 
 ## Model Council Daemon
 
