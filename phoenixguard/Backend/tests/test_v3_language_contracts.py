@@ -39,7 +39,7 @@ def _execution_packet(**overrides: Any) -> Payload:
         capture_count=13,
         state_version=14,
         side="BUY",
-        expiry_seconds=300,
+        expiry_seconds=900,
         created_epoch=NOW - 0.2,
         valid_until_epoch=NOW + 4.0,
         input_frame_hash="frame-current",
@@ -129,6 +129,17 @@ def test_pg_execution_packet_v3_requires_expiry_seconds() -> None:
     result = validate_execution_packet_language(_execution_packet(execution={"expiry_seconds": 0}), now_epoch=NOW)
     assert result.rejected
     assert "MISSING_EXPIRY_SECONDS" in result.reason_codes
+
+
+def test_pg_execution_packet_v3_rejects_duration_under_fifteen_minutes() -> None:
+    packet = _execution_packet()
+    packet["execution"]["expiry_seconds"] = 899
+    packet["execution"]["time_sequence"]["target_seconds"] = 899
+
+    result = validate_execution_packet_language(packet, now_epoch=NOW)
+
+    assert result.rejected
+    assert "EXPIRY_BELOW_MINIMUM_STUDIED_DURATION" in result.reason_codes
 
 
 def test_pg_execution_packet_v3_requires_time_sequence() -> None:

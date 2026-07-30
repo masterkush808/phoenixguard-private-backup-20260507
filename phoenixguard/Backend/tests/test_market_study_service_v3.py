@@ -55,6 +55,49 @@ def _candles(_offset: float, sequence: int) -> list[dict[str, object]]:
     return rows
 
 
+def _resolver_bound_jpclf_candles(sequence: int) -> list[dict[str, object]]:
+    rows = _candles(0.0, sequence)
+    for offset, row in enumerate(rows):
+        event_sequence = sequence + offset
+        row.update(
+            {
+                "identity_stable": True,
+                "stable_candle_identity": f"jpclf-close-{event_sequence}",
+                "identity_proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+                "closed_candle_sequence": event_sequence,
+                "resolver_bound_row_index": offset,
+            }
+        )
+    return rows
+
+
+def _jpclf_time_proof(
+    sequence: int,
+    *,
+    timestamp_source: str = "SOURCE_CLOSE_TIME",
+) -> dict[str, object]:
+    closed_sequence = sequence + 7
+    close_epoch_seconds = closed_sequence * 300
+    observed_epoch_seconds = close_epoch_seconds + 5
+    return {
+        "schema_version": "PG_PROVEN_CLOSED_CANDLE_TIME_V3",
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "closed_candle_key": f"jpclf-close-{closed_sequence}",
+        "closed_candle_sequence": closed_sequence,
+        "close_epoch_seconds": close_epoch_seconds,
+        "timestamp_semantic": "BAR_CLOSE",
+        "timestamp_source": timestamp_source,
+        "proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+        "bound_row_index": 7,
+        "transition_count": 1,
+        "source_cadence_seconds": 300,
+        "observed_epoch_seconds": observed_epoch_seconds,
+        "observation_latency_seconds": 5,
+        "contiguous_from_previous": sequence > 0,
+    }
+
+
 def _pixel_candles(
     sequence: int,
     *,
@@ -1116,3 +1159,208 @@ def test_object_survival_uses_only_matured_pair_dna_history() -> None:
     )
     assert pending["status"] == "INSUFFICIENT_MATURED_OBJECT_HISTORY"
     assert pending["curves"] == []
+
+
+def test_market_study_tracks_admitted_jpclf_clock_through_final_interval(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "jpclf-market-study"
+    first = MarketStudyServiceV3(root).study(
+        _resolver_bound_jpclf_candles(0),
+        symbol="USD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="jpclf-close-7",
+        closed_candle_sequence=7,
+        regime="UPTREND",
+        regression=_regression(),
+        contract_duration_seconds=900,
+        closed_candle_time_proof=_jpclf_time_proof(0),
+    )
+    timing = first["path_clock_liquidity"]  # type: ignore[index]
+    assert first["path_clock_liquidity_v3"] == timing
+    assert timing["status"] == "BUILDING_HISTORY"
+    assert timing["new_entry_eligible"] is True
+    assert timing["active_anchor_count"] == 1
+
+    second = MarketStudyServiceV3(root).study(
+        _resolver_bound_jpclf_candles(1),
+        symbol="USD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="jpclf-close-8",
+        closed_candle_sequence=8,
+        regime="UPTREND",
+        regression=_regression(),
+        contract_duration_seconds=60,
+        closed_candle_time_proof=_jpclf_time_proof(1),
+    )
+    late = second["path_clock_liquidity"]  # type: ignore[index]
+    assert late["new_entry_eligible"] is False
+    assert late["active_tracking_continues_below_floor"] is True
+    assert late["timing_read"]["remaining_seconds"] == 600
+    assert late["timing_read"]["elapsed_seconds"] == 300
+    assert late["timing_read"]["timing_veto"] is True
+
+    MarketStudyServiceV3(root).study(
+        _resolver_bound_jpclf_candles(2),
+        symbol="USD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="jpclf-close-9",
+        closed_candle_sequence=9,
+        regime="UPTREND",
+        regression=_regression(),
+        contract_duration_seconds=None,
+        closed_candle_time_proof=_jpclf_time_proof(2),
+    )
+    matured = MarketStudyServiceV3(root).study(
+        _resolver_bound_jpclf_candles(3),
+        symbol="USD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="jpclf-close-10",
+        closed_candle_sequence=10,
+        regime="UPTREND",
+        regression=_regression(),
+        contract_duration_seconds=899,
+        closed_candle_time_proof=_jpclf_time_proof(3),
+    )["path_clock_liquidity"]
+    assert matured["trajectory_count"] == 1  # type: ignore[index]
+    assert matured["pair_dna_partition"]["contains_trajectory_points"] is False  # type: ignore[index]
+    assert matured["promotion_gate"]["passed"] is False  # type: ignore[index]
+    assert matured["timing_read"]["timing_supports_entry"] is False  # type: ignore[index]
+    assert "path_mru" not in _nested_keys(matured)
+    assert "PATH_CLOCK" not in (root / "pair_dna_v3.json").read_text(
+        encoding="utf-8"
+    )
+    side_files = list((root / "path_clock_liquidity_v3").glob("*.json"))
+    assert len(side_files) == 1
+    assert '"points"' in side_files[0].read_text(encoding="utf-8")
+
+
+def test_same_closed_key_can_upgrade_from_missing_to_valid_time_proof(
+    tmp_path: Path,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "jpclf-proof-upgrade")
+    candles = _resolver_bound_jpclf_candles(0)
+    common: dict[str, Any] = {
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "closed_candle_key": "jpclf-close-7",
+        "closed_candle_sequence": 7,
+        "regime": "UPTREND",
+        "regression": _regression(),
+        "contract_duration_seconds": 900,
+    }
+
+    censored = service.study(candles, **common)
+    assert censored["path_clock_liquidity"]["status"] == (  # type: ignore[index]
+        "CENSORED_INVALID_TIMING_EVIDENCE"
+    )
+
+    proof = _jpclf_time_proof(0)
+    upgraded = service.study(
+        candles,
+        **common,
+        closed_candle_time_proof=proof,
+    )
+    timing = upgraded["path_clock_liquidity"]  # type: ignore[index]
+    assert timing["status"] == "BUILDING_HISTORY"
+    assert timing["time_proof_audit"]["schema_version"] == (  # type: ignore[index]
+        "PG_PROVEN_CLOSED_CANDLE_TIME_V3"
+    )
+    assert "closed_candle_time_proof" not in upgraded
+
+    repeated = service.study(
+        candles,
+        **common,
+        closed_candle_time_proof=proof,
+    )
+    assert repeated == upgraded
+
+
+def test_conflicting_time_proof_for_same_closed_key_is_not_hidden_by_cache(
+    tmp_path: Path,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "jpclf-proof-conflict")
+    candles = _resolver_bound_jpclf_candles(0)
+    common: dict[str, Any] = {
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "closed_candle_key": "jpclf-close-7",
+        "closed_candle_sequence": 7,
+        "regime": "UPTREND",
+        "regression": _regression(),
+        "contract_duration_seconds": 900,
+    }
+    accepted = service.study(
+        candles,
+        **common,
+        closed_candle_time_proof=_jpclf_time_proof(0),
+    )
+    assert accepted["path_clock_liquidity"]["status"] == "BUILDING_HISTORY"  # type: ignore[index]
+
+    conflicting = _jpclf_time_proof(
+        0,
+        timestamp_source="RESOLVER_BOUND_BOUNDARY_GRID",
+    )
+    rejected = service.study(
+        candles,
+        **common,
+        closed_candle_time_proof=conflicting,
+    )
+    timing = rejected["path_clock_liquidity"]  # type: ignore[index]
+    assert timing["status"] == "CENSORED_INVALID_TIMING_EVIDENCE"
+    assert "conflicts with different JPCLF evidence" in timing["reason"]
+
+
+def test_service_filters_unbound_rows_and_forwards_valid_time_proof_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MarketStudyServiceV3(tmp_path / "jpclf-proof-forwarding")
+    bound = _resolver_bound_jpclf_candles(0)
+    leading_unbound = dict(bound[0])
+    trailing_unbound = dict(bound[-1])
+    for row, candle_id, timestamp in (
+        (leading_unbound, "unbound-before", -300),
+        (trailing_unbound, "unbound-after", 2_400),
+    ):
+        row.update({"candle_id": candle_id, "timestamp": timestamp})
+        row.pop("identity_stable", None)
+        row.pop("stable_candle_identity", None)
+        row.pop("identity_proof_source", None)
+        row.pop("closed_candle_sequence", None)
+        row.pop("resolver_bound_row_index", None)
+    candles = [leading_unbound, *bound, trailing_unbound]
+    proof = _jpclf_time_proof(0)
+    observed_calls: list[dict[str, Any]] = []
+    original_observe = service.path_clock_liquidity.observe_closed_candle
+
+    def capture_observe(**kwargs: Any) -> dict[str, Any]:
+        observed_calls.append(kwargs)
+        return original_observe(**kwargs)
+
+    monkeypatch.setattr(
+        service.path_clock_liquidity,
+        "observe_closed_candle",
+        capture_observe,
+    )
+    result = service.study(
+        candles,
+        symbol="USD/CAD OTC",
+        timeframe="M5",
+        closed_candle_key="jpclf-close-7",
+        closed_candle_sequence=7,
+        regime="UPTREND",
+        regression=_regression(),
+        contract_duration_seconds=900,
+        closed_candle_time_proof=proof,
+    )
+
+    assert result["path_clock_liquidity"]["status"] == "BUILDING_HISTORY"  # type: ignore[index]
+    assert len(observed_calls) == 1
+    forwarded = observed_calls[0]
+    assert forwarded["closed_candle_time_proof"] is proof
+    assert len(forwarded["candles"]) == len(bound)
+    assert forwarded["candles"][7]["stable_candle_identity"] == (
+        "EXPLICIT:jpclf-close-7"
+    )
+    assert forwarded["candles"][7]["timestamp"] == 2_100

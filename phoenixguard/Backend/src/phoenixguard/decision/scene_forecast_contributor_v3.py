@@ -6,6 +6,7 @@ import math
 import re
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 from typing import Any, cast
 
 from phoenixguard.decision.chronos_scene_forecaster_v3 import (
@@ -109,6 +110,16 @@ _SOURCE_TIME_ID_FIELDS_V3 = frozenset(
         "close_time",
     }
 )
+_SOURCE_CLOSE_TIME_FIELDS_V3 = (
+    "closed_candle_epoch",
+    "close_time",
+)
+_SOURCE_OPEN_TIME_FIELDS_V3 = (
+    "bar_open_time",
+    "open_time",
+    "open_timestamp",
+    "candle_open_epoch",
+)
 
 
 def _timeframe_seconds_v3(value: object) -> int | None:
@@ -131,12 +142,23 @@ def _timeframe_seconds_v3(value: object) -> int | None:
     return seconds if seconds <= 31_536_000 else None
 
 
-def _source_time_seconds_v3(observation: Mapping[str, Any]) -> float | None:
-    field = str(observation.get("source_identity_field") or "").strip()
-    if field not in _SOURCE_TIME_ID_FIELDS_V3:
-        return None
-    value = _finite(observation.get("source_identity_value"))
-    if value is None or value < 0.0:
+def _normalized_source_time_seconds_v3(value: object) -> float | None:
+    numeric = _finite(value)
+    if numeric is None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        # A naive wall-clock value has no stable market-time meaning. Keep the
+        # resolver fail-closed instead of assuming the host timezone.
+        if parsed.tzinfo is None:
+            return None
+        numeric = parsed.timestamp()
+    value = float(numeric)
+    if value < 0.0:
         return None
     magnitude = abs(value)
     if magnitude >= 1e17:
@@ -148,13 +170,87 @@ def _source_time_seconds_v3(observation: Mapping[str, Any]) -> float | None:
     return value
 
 
+def _source_time_evidence_v3(candle: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain source time independently from the source bar identity.
+
+    A broker row can legitimately carry both ``source_bar_id`` and a market
+    timestamp. The id proves which candle it is; the timestamp proves clock
+    spacing. Collapsing both into one first-match field loses one of those two
+    proofs, so the observation contract carries them separately.
+    """
+
+    candidates: list[tuple[str, str, object, float]] = []
+    for semantics, fields in (
+        ("BAR_CLOSE", _SOURCE_CLOSE_TIME_FIELDS_V3),
+        ("BAR_OPEN", _SOURCE_OPEN_TIME_FIELDS_V3),
+    ):
+        for field in fields:
+            raw = candle.get(field)
+            if raw in (None, ""):
+                continue
+            seconds = _normalized_source_time_seconds_v3(raw)
+            if seconds is not None:
+                candidates.append((field, semantics, raw, seconds))
+    if not candidates:
+        return {
+            "source_time_field": "",
+            "source_time_value": "",
+            "source_time_seconds": None,
+            "source_time_semantics": "",
+            "source_time_conflict": False,
+        }
+
+    by_semantics: dict[str, list[tuple[str, str, object, float]]] = {}
+    for candidate in candidates:
+        by_semantics.setdefault(candidate[1], []).append(candidate)
+    conflict = any(
+        max(row[3] for row in rows) - min(row[3] for row in rows) > 1e-6
+        for rows in by_semantics.values()
+    )
+    # Direct close time is the strongest timestamp semantic. Open time remains
+    # useful when no close timestamp exists and is converted by the downstream
+    # proven-timeframe bridge.
+    selected = next(
+        (row for row in candidates if row[1] == "BAR_CLOSE"),
+        candidates[0],
+    )
+    return {
+        "source_time_field": selected[0],
+        "source_time_value": selected[2],
+        "source_time_seconds": selected[3],
+        "source_time_semantics": selected[1],
+        "source_time_conflict": conflict,
+    }
+
+
+def _source_time_seconds_v3(observation: Mapping[str, Any]) -> float | None:
+    if observation.get("source_time_conflict") is True:
+        return None
+    value = _finite(observation.get("source_time_seconds"))
+    if value is not None and value >= 0.0:
+        return value
+    # Backward-compatible read for persisted resolver states written before the
+    # independent source-time fields existed.
+    field = str(observation.get("source_identity_field") or "").strip()
+    if field not in _SOURCE_TIME_ID_FIELDS_V3:
+        return None
+    return _normalized_source_time_seconds_v3(
+        observation.get("source_identity_value")
+    )
+
+
 def _source_time_step_count_v3(
     prior: Mapping[str, Any],
     current: Mapping[str, Any],
     *,
     timeframe: str,
 ) -> int | None:
-    if str(prior.get("source_identity_field") or "") != str(
+    prior_semantics = str(prior.get("source_time_semantics") or "").strip()
+    current_semantics = str(current.get("source_time_semantics") or "").strip()
+    if prior_semantics or current_semantics:
+        if not prior_semantics or prior_semantics != current_semantics:
+            return None
+    elif str(prior.get("source_identity_field") or "") != str(
         current.get("source_identity_field") or ""
     ):
         return None
@@ -292,6 +388,7 @@ def _visual_candle_observation_v3(
     index: int,
 ) -> dict[str, Any]:
     immutable = _immutable_candle_identity_v3(candle)
+    source_time = _source_time_evidence_v3(candle)
     top = _axis_value(candle, "wick_top_px", "wick_top", "high_y_px", "high_y")
     bottom = _axis_value(
         candle,
@@ -326,6 +423,7 @@ def _visual_candle_observation_v3(
         "close_norm": _finite(candle.get("close_norm")),
         "source_identity_field": immutable[0] if immutable else "",
         "source_identity_value": immutable[1] if immutable else "",
+        **source_time,
     }
 
 
@@ -1297,6 +1395,12 @@ def resolve_closed_candle_identity_v3(
         prior_closed,
         current_closed,
         timeframe=timeframe_key,
+    )
+    scores["source_time_conflict_prior"] = bool(
+        prior_closed.get("source_time_conflict", False)
+    )
+    scores["source_time_conflict_current"] = bool(
+        current_closed.get("source_time_conflict", False)
     )
     scores["source_time_step_count"] = source_time_steps or 0
     scores["source_one_step_horizon_proven"] = source_time_steps == 1

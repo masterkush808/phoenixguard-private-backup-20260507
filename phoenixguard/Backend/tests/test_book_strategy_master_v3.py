@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from phoenixguard.decision.book_strategy_master_v3 import (
@@ -11,6 +12,7 @@ from phoenixguard.decision.book_strategy_master_v3 import (
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.market_play_engine_v3 import analyze_market_play_v3
 from phoenixguard.decision.model_council_v3 import ModelCouncilV3
+from phoenixguard.decision.model_council import legacy_engine as model_council_legacy
 from phoenixguard.decision.playbook_ai_intelligence_v3 import build_playbook_ai_intelligence_v3
 
 
@@ -193,6 +195,123 @@ def _attach_executable_identity_lock(snapshot: dict[str, Any]) -> None:
             "viewport_hash": "chart-viewport-a",
             "broker_surface_hash": "broker-a",
             "instrument_identity_lock": identity_lock,
+        }
+    )
+
+
+def _countertrend_sniper_snapshot(*, late: bool = False) -> dict[str, Any]:
+    snapshot = _strategy_snapshot("BUY")
+    _attach_candle_movement_fixture(snapshot, "BUY")
+    _attach_executable_identity_lock(snapshot)
+    snapshot["candidate_side"] = "SELL"
+    snapshot["action"] = "SELL"
+    snapshot["buy_score"] = 0.72
+    snapshot["sell_score"] = 0.78
+    snapshot["global_structure"]["global_side"] = "BUY"
+    snapshot["local_micro_structure"]["local_side"] = "BUY"
+    snapshot["market_context"].update(
+        {
+            "global_side": "BUY",
+            "local_side": "BUY",
+            "dominant_side": "BUY",
+            "current_location": "SUPPLY_ZONE",
+            "inside_valid_trigger_zone": False,
+            "opposing_force_distance_ok": False,
+            "is_late_chase": late,
+            "middle_safe": False,
+        }
+    )
+    snapshot["zone_liquidity"] = {
+        "side": "HOLD",
+        "zone_type": "REFERENCE",
+        "inside_valid_trigger_zone": False,
+    }
+    tested_supply = {
+        **_zone("countertrend_sniper_supply_001", "SUPPLY", side="SELL", inside=True, distance=0.02),
+        "role": "resistance",
+        "zone_family": "SUPPLY_ZONE",
+        "touch_count": 9,
+        "reaction_count": 5,
+        "retest_count": 9,
+        "last_touch_age_candles": 0,
+        "freshness_state": "TESTED_TWICE",
+        "zone_pattern": "DROP_BASE_DROP",
+        "significance_score": 0.94,
+    }
+    snapshot["zones"] = [
+        tested_supply,
+        _zone("countertrend_sniper_demand_target_001", "DEMAND", side="BUY", distance=0.46),
+    ]
+    snapshot["risk_opposing_force"] = {
+        "side": "BUY",
+        "distance_to_opposing_force": 0.03,
+        "opposing_force_distance_norm": 0.03,
+        "minimum_required_distance": 0.22,
+        "distance_ok": False,
+        "risk_state": "NEAR_OPPOSING_FORCE",
+        "zone": tested_supply,
+    }
+    snapshot["current_candle_acceptance"].update(
+        {
+            "phase": "VALID",
+            "candle_phase": "VALID",
+            "entry_allowed": True,
+            "current_candle_closed": True,
+            "upper_shadow_range_ratio": 0.46,
+            "lower_shadow_range_ratio": 0.08,
+            "close_location_value": 0.24,
+            "closed_rejection_confirmed": True,
+            "trigger_closed_candle_key": "EURGBP|M5|closed|901",
+            "trigger_frame_id": 901,
+            "too_late": late,
+        }
+    )
+    snapshot["angle_features"].update(
+        {
+            "late_chase_risk": late,
+            "post_impulse_wait_required": late,
+        }
+    )
+    snapshot["timing"] = {"state": "READY", "side": "SELL", "expiry_seconds": 300}
+    candle_context = snapshot["candle_movement_context_v3"]
+    candle_context["current_leg"] = {
+        "side": "BUY",
+        "candle_count": 6,
+        "stage": "MATURE",
+        "move_stage": "MATURE",
+        "strength": 0.75,
+    }
+    candle_context["move_stage"] = "MATURE"
+    candle_context["visible_candle_count"] = 56
+    candle_context["opposing_force_room"] = {
+        "estimated_room_candles": 10,
+        "estimated_candles_to_force": 10,
+        "opposing_force_ok": False,
+    }
+    snapshot["candle_movement_context"] = candle_context
+    return snapshot
+
+
+def _advance_countertrend_sniper_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    frame_id: int,
+    capture_count: int,
+    state_version: int,
+) -> None:
+    snapshot.update(
+        {
+            "frame_id": frame_id,
+            "capture_count": capture_count,
+            "state_version": state_version,
+            "input_frame_hash": f"frame_{frame_id}",
+            "previous_frame_hash": f"frame_{frame_id - 1}",
+        }
+    )
+    snapshot["current_candle_acceptance"].update(
+        {
+            "trigger_closed_candle_key": f"EURGBP|M5|closed|{frame_id}",
+            "trigger_frame_id": frame_id,
         }
     )
 
@@ -1984,6 +2103,248 @@ def test_model_council_publishes_packet_for_tested_resistance_sell_reaction_with
     assert expected_move["expected_candle_count"] >= 8
     assert expected_move["expected_duration_sec"] >= 40 * 60
     assert expected_move["professional_trade_plan"]["profit_discipline"]["micro_horizon_is_diagnostic_only"] is True
+
+
+def test_countertrend_sniper_closed_rejection_enters_before_same_side_move_confirms() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _countertrend_sniper_snapshot()
+    second_snapshot = _countertrend_sniper_snapshot()
+
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    _advance_countertrend_sniper_snapshot(
+        second_snapshot,
+        frame_id=1984,
+        capture_count=1984,
+        state_version=2984,
+    )
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    promotion = result["countertrend_sniper_promotion_v3"]
+
+    assert result["candle_movement_context_v3"]["current_leg"]["side"] == "BUY"
+    assert result["model_council"]["final_side"] == "SELL"
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert result["execution"]["enabled"] is True
+    assert result["book_strategy"]["maturity_state"] == "ENTER_NOW"
+    assert result["book_strategy"]["evidence"]["countertrend_sniper_promotion_ready"] is True
+    assert result["book_strategy"]["evidence"]["professional_reaction_is_current_truth"] is True
+    preliminary = result["book_strategy"]["evidence"][
+        "countertrend_sniper_promotion_v3"
+    ]
+    assert preliminary["phase"] == "PRELIMINARY"
+    assert preliminary["preliminary_non_authoritative"] is True
+    assert preliminary["authoritative"] is False
+    assert preliminary["promotion_ready"] is True
+    assert promotion["classification"] == "ENTER_NOW"
+    assert promotion["phase"] == "VALIDATED"
+    assert promotion["authoritative"] is True
+    assert promotion["validated_entry_mode"] == "COUNTERTREND_SNIPER"
+    assert promotion["entry_permission_authorized"] is True
+    assert promotion["movement_confirmation_bypass_allowed"] is True
+    assert promotion["movement_confirmation_substitute"] == "CLOSED_CANDLE_OPPOSING_FORCE_REJECTION"
+    assert promotion["gates"]["closed_candle_rejection"] is True
+    assert promotion["gates"]["ensemble_lane_score"] is True
+    assert promotion["gates"]["identity_locked"] is True
+    assert promotion["gates"]["live_fresh"] is True
+    assert promotion["ensemble_basis"]["final_execution_score"] >= promotion["ensemble_basis"]["lane_required_score"]
+    assert promotion["ensemble_basis"]["candidate_side_score"] >= promotion["ensemble_basis"]["lane_required_score"]
+    assert promotion["ensemble_basis"]["global_side_score"] == promotion["ensemble_basis"]["opposite_side_score"]
+    assert promotion["ensemble_basis"]["aligned_role_count"] >= 2
+    assert promotion["ensemble_basis"]["aligned_role_confidence_sum"] > promotion["ensemble_basis"]["opposed_role_confidence_sum"]
+    assert promotion["lineage"]["packet_id"] == result["packet_id"]
+    assert promotion["lineage"]["session_id"] == result["session_id"]
+    assert promotion["lineage"]["symbol"] == result["symbol"]
+    assert promotion["lineage"]["timeframe"] == result["timeframe"]
+    assert promotion["lineage"]["frame_id"] == result["frame_id"]
+    assert promotion["lineage"]["capture_count"] == result["capture_count"]
+    assert promotion["lineage"]["state_version"] == result["state_version"]
+    assert promotion["lineage"]["input_frame_hash"] == result["live_integrity"]["input_frame_hash"]
+    assert promotion["lineage"]["instrument_identity_hash"] == result["instrument_identity_hash"]
+    assert promotion["lineage"]["trigger_closed_candle_key"] == result["trigger_closed_candle_key"]
+    assert promotion["lineage"]["trigger_frame_id"] == result["trigger_frame_id"] == result["frame_id"]
+    assert promotion["lineage"]["opportunity_id"] == result["execution_opportunity_window_v3"]["opportunity_id"]
+    assert promotion["lineage"]["opportunity_key"] == result["execution_opportunity_window_v3"]["opportunity_key"]
+    assert promotion["lineage"]["valid_until_epoch"] == result["execution_opportunity_window_v3"]["valid_until_epoch"]
+    assert promotion["lineage"]["integrity_valid"] is True
+    assert promotion["lineage"]["lineage_rejected"] is False
+    assert promotion["broker_click_authority"] is False
+    assert result["allowance_package"]["countertrend_sniper_promotion_v3"]["classification"] == "ENTER_NOW"
+
+
+def test_book_strategy_consumes_only_exact_non_authoritative_preliminary_sniper_proof() -> None:
+    snapshot = _countertrend_sniper_snapshot()
+    snapshot["professional_thesis_resolution_v3"] = {
+        "thesis_state": "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+        "authority_side": "SELL",
+        "global_side": "BUY",
+        "opposing_force_reaction_ready": True,
+        "opposing_force_rejection_confirmed": True,
+        "opposing_force_is_near": True,
+        "opposing_force_is_proven": True,
+        "opposing_force_zone_side": "SELL",
+        "opposing_force_zone_last_touch_age_candles": 0,
+        "current_pressure_defends_against_opposing_force": False,
+    }
+    base_promotion = {
+        "schema_version": "PG_COUNTERTREND_SNIPER_PROMOTION_V3",
+        "phase": "PRELIMINARY",
+        "preliminary_non_authoritative": True,
+        "authoritative": False,
+        "active": True,
+        "promotion_ready": True,
+        "side": "SELL",
+        "gates": {"closed_candle_rejection": True},
+    }
+    execution_lane = {
+        "name": "SNIPER_ZONE_ENTRY",
+        "side": "SELL",
+        "accepted": True,
+        "professional_reaction_lane_authority": True,
+        "wave_context": {
+            "professional_reaction_path_ready": True,
+            "professional_reaction_has_actionable_room": True,
+        },
+    }
+
+    def evaluate_with(promotion: dict[str, Any]) -> dict[str, Any]:
+        working = deepcopy(snapshot)
+        working["countertrend_sniper_promotion_v3"] = promotion
+        return evaluate_book_strategy_master_v3(
+            working,
+            market={
+                "market_context": working["market_context"],
+                "market_play": {
+                    "primary_play": "BEARISH_REVERSAL_FORMING",
+                    "play_stage": "LIVE_TOUCH_REJECTION",
+                },
+                "price_location": {"relative_location": "SUPPLY_ZONE"},
+                "zones": working["zones"],
+            },
+            candidate_side="SELL",
+            execution_lane=execution_lane,
+            timing_decision={
+                "entry_now_allowed": True,
+                "entry_timing": {"next_condition": "none"},
+            },
+            current_candle=working["current_candle_acceptance"],
+            timing_mode="ENTER_NOW",
+            final_score_passed=True,
+            timing_enter_now=True,
+            lane_score=0.78,
+            lane_required_score=0.70,
+        )
+
+    preliminary_result = evaluate_with(base_promotion)
+    validated_alias = {**base_promotion, "phase": "VALIDATED"}
+    string_boolean_alias = {**base_promotion, "promotion_ready": "READY"}
+
+    assert preliminary_result["evidence"]["countertrend_sniper_promotion_ready"] is True
+    assert evaluate_with(validated_alias)["evidence"]["countertrend_sniper_promotion_ready"] is False
+    assert evaluate_with(string_boolean_alias)["evidence"]["countertrend_sniper_promotion_ready"] is False
+
+
+def test_countertrend_sniper_sell_cannot_borrow_point_99_buy_score() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _countertrend_sniper_snapshot()
+    second_snapshot = _countertrend_sniper_snapshot()
+    for snapshot in (first_snapshot, second_snapshot):
+        snapshot["buy_score"] = 0.99
+        snapshot["sell_score"] = 0.10
+        snapshot["min_dominance_margin"] = 0.0
+
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    _advance_countertrend_sniper_snapshot(
+        second_snapshot,
+        frame_id=1985,
+        capture_count=1985,
+        state_version=2985,
+    )
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    promotion = result["countertrend_sniper_promotion_v3"]
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert "execution_packet" not in result
+    assert promotion["side"] == "SELL"
+    assert promotion["ensemble_basis"]["candidate_side_score"] == 0.10
+    assert promotion["ensemble_basis"]["global_side_score"] == 0.99
+    assert promotion["gates"]["candidate_directional_score"] is False
+    assert promotion["entry_permission_authorized"] is False
+
+
+def test_countertrend_packet_mutation_is_revalidated_or_fails_closed(
+    monkeypatch: Any,
+) -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _countertrend_sniper_snapshot()
+    second_snapshot = _countertrend_sniper_snapshot()
+    real_validate = model_council_legacy.validate_execution_packet_v3
+    validation_calls = 0
+
+    def reject_second_validation(packet: Any, **kwargs: Any) -> Any:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls % 2 == 0:
+            tampered_packet = dict(packet)
+            tampered_packet["packet_type"] = "STUDY_PACKET"
+            return real_validate(tampered_packet, **kwargs)
+        return real_validate(packet, **kwargs)
+
+    monkeypatch.setattr(
+        model_council_legacy,
+        "validate_execution_packet_v3",
+        reject_second_validation,
+    )
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    _advance_countertrend_sniper_snapshot(
+        second_snapshot,
+        frame_id=1986,
+        capture_count=1986,
+        state_version=2986,
+    )
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    promotion = result["countertrend_sniper_promotion_v3"]
+
+    assert validation_calls >= 2
+    assert result["post_mutation_packet_validation"]["ok"] is False
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert "execution_packet" not in result
+    assert "model_council_packet" not in result
+    assert promotion["classification"] == "INVALIDATED"
+    assert promotion["entry_permission_authorized"] is False
+    assert promotion["movement_confirmation_bypass_allowed"] is False
+    assert promotion["broker_click_authority"] is False
+
+
+def test_countertrend_sniper_late_rejection_is_missed_and_never_executable() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _countertrend_sniper_snapshot(late=True)
+    second_snapshot = _countertrend_sniper_snapshot(late=True)
+
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    _advance_countertrend_sniper_snapshot(
+        second_snapshot,
+        frame_id=1994,
+        capture_count=1994,
+        state_version=2994,
+    )
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    promotion = result["countertrend_sniper_promotion_v3"]
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert "execution_packet" not in result
+    assert promotion["active"] is True
+    assert promotion["classification"] == "MISSED_DO_NOT_CHASE"
+    assert promotion["validated_entry_mode"] == "NONE"
+    assert promotion["entry_permission_authorized"] is False
+    assert promotion["movement_confirmation_bypass_allowed"] is False
+    assert promotion["gates"]["not_late"] is False
+    assert "Do not chase" in promotion["next_required"]
 
 
 def test_model_council_blocks_tested_resistance_reaction_when_target_room_is_tiny() -> None:

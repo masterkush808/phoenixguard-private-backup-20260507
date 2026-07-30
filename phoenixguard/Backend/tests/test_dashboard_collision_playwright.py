@@ -51,6 +51,31 @@ def _operator_payload(
             "state": "LIVE",
             "updated_at": observed_at,
             "history_count": 2,
+            "stream": {
+                "enabled": True,
+                "state": "RUNNING",
+                "acquisition_fps": 7.875,
+                "observed_frames": 12_480,
+                "accepted_keyframes": 318,
+                "dropped_frames": 4,
+                "duplicate_frames": 2_106,
+                "last_frame_epoch": observed_at,
+                "last_keyframe_epoch": observed_at - 1,
+                "last_reason": "Visual change accepted",
+                "stream_generation": 3,
+                "market_read": {
+                    "schema_version": "PG_CPU_STREAM_MARKET_READ_V3",
+                    "state": "MOVING",
+                    "summary": "Live stream sees the chart moving now.",
+                    "fresh": True,
+                    "observed_at": observed_at,
+                    "direction": "NEUTRAL",
+                    "direction_available": False,
+                    "forming_candle": True,
+                    "closed_candle": False,
+                    "can_grant_entry_permission": False,
+                },
+            },
         },
         "freshness": {
             "state": "FRESH",
@@ -288,6 +313,7 @@ def _dashboard_page(
     viewport: tuple[int, int] = (1440, 1000),
     delayed_artifact_frames: dict[int, float] | None = None,
     with_event_source: bool = False,
+    session_payload: dict[str, Any] | None = None,
 ) -> Generator[Page, None, None]:
     html = _renderable_dashboard_html()
     context = browser.new_context(
@@ -312,6 +338,7 @@ def _dashboard_page(
 
     page.route("http://dashboard.test/**", route_dashboard)
     payload_json = json.dumps(payload).replace("</", "<\\/")
+    session_payload_json = json.dumps(session_payload).replace("</", "<\\/")
     event_source_bootstrap = (
         """
         window.__EVENT_SOURCES = [];
@@ -351,6 +378,7 @@ def _dashboard_page(
     page.add_init_script(
         f"""
         window.__OPERATOR_PAYLOAD = {payload_json};
+        window.__SESSION_PAYLOAD = {session_payload_json};
         window.__FETCH_URLS = [];
         window.__FETCH_REQUESTS = [];
         window.__OPERATOR_FETCH_DELAY_MS = 0;
@@ -358,7 +386,9 @@ def _dashboard_page(
         Object.defineProperty(window, "Worker", {{value: undefined, configurable: true}});
         const nativeSetTimeout = window.setTimeout.bind(window);
         window.setTimeout = (callback, delay, ...args) => {{
-          if (Number(delay || 0) >= 2500) return 0;
+          // Suppress the real dashboard's recurring two-second fallback in
+          // deterministic tests; individual refreshes are triggered directly.
+          if (Number(delay || 0) >= 1900) return 0;
           return nativeSetTimeout(callback, delay, ...args);
         }};
         window.fetch = (input, options = {{}}) => {{
@@ -367,11 +397,15 @@ def _dashboard_page(
           window.__FETCH_URLS.push(href);
           window.__FETCH_REQUESTS.push({{href, method}});
           const isOperatorState = href.includes("/v1/mobile/operator/state/v1/");
+          const isSessionState = href === "/v1/mobile/window-tracker/sessions/operator-test"
+            && window.__SESSION_PAYLOAD !== null;
           const body = isOperatorState
             ? window.__OPERATOR_PAYLOAD
+            : isSessionState
+            ? window.__SESSION_PAYLOAD
             : {{detail: "not found"}};
           const respond = () => new Response(JSON.stringify(body), {{
-            status: isOperatorState ? 200 : 404,
+            status: isOperatorState || isSessionState ? 200 : 404,
             headers: {{"Content-Type": "application/json"}},
           }});
           const delay = isOperatorState
@@ -447,9 +481,138 @@ def test_live_session_stream_coalesces_updates_into_atomic_operator_refreshes(
                 "method": "GET",
             }
         ]
-        assert page.locator("#beginner-next-read").inner_text() == (
-            "Live stream delivered the newest decision state."
+        assert "Live stream delivered the newest decision state." in page.locator(
+            "#beginner-next-read"
+        ).inner_text()
+
+
+def test_live_session_stream_updates_forming_read_and_completed_history_immediately(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["history"] = []
+    payload["three_questions"] = {
+        "studied_direction_current": {
+            "side": "SELL",
+            "confidence": 0,
+            "answer": "The last completed study favored the upward regression.",
+        }
+    }
+    payload["tracking"]["market_study_v3"] = {
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "closed_candle_key": "closed-41",
+        "closed_candle_sequence": 41,
+        "observed_at": 4_102_444_500.0,
+        "regression": {
+            "major_trend": {"side": "BUY", "confidence": 0.81},
+            "inner_trend": {"side": "SELL", "confidence": 0.67},
+        },
+        "directional_read": {"side": "BUY"},
+        "behavior": {"market_story": "The upward market entered a pullback."},
+        "candle_intelligence": {
+            "latest": {
+                "closed": True,
+                "direction": "SELL",
+                "type": "bearish rejection",
+                "relation_to_previous": "inside",
+            }
+        },
+    }
+
+    initial_session = {
+        "session_id": "operator-test",
+        "cpu_stream_v3": {
+            "enabled": True,
+            "requested": True,
+            "status": "running",
+            "last_capture_epoch": 4_102_444_505.0,
+            "observer": {
+                "status": "healthy",
+                "last_captured_epoch": 4_102_444_505.0,
+                "last_decision": {"temporal_evidence": {"state": "duplicate"}},
+            },
+        },
+        "tracking_summary": {
+            "market_study_v3": copy.deepcopy(
+                payload["tracking"]["market_study_v3"]
+            )
+        },
+    }
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        with_event_source=True,
+        session_payload=initial_session,
+    ) as page:
+        assert page.locator(".history-item").count() == 1
+        assert "forming moving" in page.locator("#inner-trend-title").inner_text()
+        assert "0%" not in page.locator("#direction-study-confidence").inner_text()
+
+        next_study = copy.deepcopy(payload["tracking"]["market_study_v3"])
+        next_study.update(
+            {
+                "closed_candle_key": "closed-42",
+                "closed_candle_sequence": 42,
+                "observed_at": 4_102_444_560.0,
+            }
         )
+        updated_operator = copy.deepcopy(payload)
+        updated_operator["revision"] = 43
+        updated_operator["freshness"]["observed_at"] = 4_102_444_565.0
+        updated_operator["tracking"]["stream"]["last_frame_epoch"] = (
+            4_102_444_565.0
+        )
+        updated_operator["tracking"]["stream"]["market_read"].update(
+            {
+                "state": "RESTING",
+                "summary": "Live stream sees the chart resting now.",
+                "fresh": True,
+                "observed_at": 4_102_444_565.0,
+            }
+        )
+        page.evaluate(
+            """
+            update => {
+              window.__OPERATOR_PAYLOAD = update.operator;
+              window.__EVENT_SOURCES[0].emit("SESSION_UPDATE", {
+                cpu_stream_v3: {
+                  enabled: true,
+                  requested: true,
+                  status: "running",
+                  last_capture_epoch: 4102444565,
+                  observer: {
+                    status: "healthy",
+                    last_captured_epoch: 4102444565,
+                    last_decision: {
+                      temporal_evidence: {state: "motion", direction: "SELL"}
+                    },
+                    counters: {frames_observed: 12501, keyframes_selected: 319}
+                  }
+                },
+                tracking_summary: {market_study_v3: update.study}
+              });
+            }
+            """,
+            {"study": next_study, "operator": updated_operator},
+        )
+
+        page.wait_for_function(
+            "() => window.PhoenixGuardDashboard.getState().revision === 43"
+        )
+        assert "forming resting" in page.locator("#inner-trend-title").inner_text()
+        assert "moving down" not in page.locator("#inner-trend-title").inner_text()
+        assert "Last completed candle:" in page.locator(
+            "#beginner-next-read"
+        ).inner_text()
+        assert "Live forming stream:" in page.locator(
+            "#beginner-next-read"
+        ).inner_text()
+        assert page.locator("#direction-study-confidence").inner_text() == (
+            "Forming read · not closed"
+        )
+        assert page.locator(".history-item").count() == 2
+        assert page.locator("#history-count").inner_text() == "2 observations"
 
 
 def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
@@ -572,7 +735,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         request_count = page.evaluate("window.__FETCH_REQUESTS.length")
         page.locator("#refresh-view").click()
         page.wait_for_function(
-            "count => window.__FETCH_REQUESTS.length === count + 1",
+            "count => window.__FETCH_REQUESTS.length === count + 2",
             arg=request_count,
         )
 
@@ -754,21 +917,253 @@ def test_market_story_and_history_prefer_v3_regression_study(
     ]
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
-        assert page.locator("#story-step-one-label").inner_text() == "MAJOR TREND"
-        assert page.locator("#story-step-two-label").inner_text() == "INNER TREND"
-        assert page.locator("#story-step-three-label").inner_text() == "REGRESSION STUDY"
-        assert page.locator("#current-move-title").inner_text() == "Uptrend"
-        assert page.locator("#inner-trend-title").inner_text() == "Downward pullback"
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#story-step-one-label").inner_text() == "QUESTION 1"
+        assert page.locator("#story-step-two-label").inner_text() == "QUESTION 2"
+        assert page.locator("#story-step-three-label").inner_text() == "QUESTION 3"
+        assert page.locator("#current-move-title").inner_text() == "From an upward market"
+        assert page.locator("#inner-trend-title").inner_text() == (
+            "SELL studied · completed BUY · forming moving"
+        )
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert "two rests" in page.locator("#beginner-entry-read").inner_text().lower()
-        assert "downward pullback" in page.locator("#beginner-story-summary").inner_text().lower()
+        assert "downward pullback" in page.locator("#beginner-next-read").inner_text().lower()
 
         latest = page.locator('[data-history-id="study-e3"]')
         assert latest.locator(".history-major-trend").inner_text() == "Major · uptrend"
         assert latest.locator(".history-inner-trend").inner_text() == "Inner · down"
         assert latest.locator(".history-side").inner_text() == "DOWN CONTINUE"
         assert latest.locator(".history-regression").inner_text() == "REGRESSION MATCH"
+
+
+def test_three_question_contract_is_the_plain_language_source_of_truth(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="SELL_NOW")
+    payload["three_questions"] = {
+        "market_origin_history": {
+            "question": "Where is the market from, and how did history behave?",
+            "headline": "From a strong upward market",
+            "answer": "Price climbed in two swings, rested twice, then rejected the upper zone.",
+            "state": "UPTREND_WITH_REJECTION",
+            "side": "BUY",
+            "confidence": 0.91,
+            "evidence": ["Two upward swings", "Two completed rests"],
+            "updated_at": 4_102_444_500.0,
+        },
+        "studied_direction_current": {
+            "question": "Which direction was studied, and what is being studied now?",
+            "headline": "SELL was studied · SELL remains active",
+            "answer": "The ensemble is studying a countertrend sell from the upper reaction area.",
+            "state": "ACTIVE_SELL_STUDY",
+            "side": "SELL",
+            "confidence": 0.87,
+            "evidence": "Upper rejection and downward candle pressure agree.",
+            "updated_at": 4_102_444_500.0,
+        },
+        "entry_now": {
+            "question": "Should the trade be entered now?",
+            "headline": "YES — SELL NOW",
+            "answer": "Enter SELL inside the verified upper reaction area; do not chase lower.",
+            "state": "ENTER",
+            "side": "SELL",
+            "confidence": 0.84,
+            "evidence": "The ensemble and current trigger agree.",
+            "updated_at": 4_102_444_500.0,
+            "enter_now": True,
+            "action": "SELL_NOW",
+            "reason": "The current rejection confirms the studied sell while location is valid.",
+            "next_trigger": "Exit the idea if the upper reaction area fails.",
+            "timing_state": "ENTER_NOW",
+        },
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator(".decision-question").count() == 3
+        assert page.locator("#market-origin-question").inner_text() == (
+            "Where is the market from, and how did history behave?"
+        )
+        assert page.locator("#direction-study-question").inner_text() == (
+            "Which direction was studied, and what is being studied now?"
+        )
+        assert page.locator("#entry-now-question").inner_text() == (
+            "What is the best decision to do right now?"
+        )
+        assert page.locator("#current-move-title").inner_text() == (
+            "From a strong upward market"
+        )
+        assert "rested twice" in page.locator("#beginner-now-read").inner_text()
+        assert page.locator("#market-origin-confidence").inner_text() == (
+            "91% model confidence"
+        )
+        assert page.locator("#inner-trend-title").inner_text() == (
+            "SELL studied · completed BUY · forming moving"
+        )
+        assert "countertrend sell" in page.locator("#beginner-next-read").inner_text()
+        assert page.locator("#direction-study-confidence").inner_text() == (
+            "87% model confidence"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "YES — SELL NOW"
+        )
+        assert page.locator("#beginner-confidence").inner_text() == (
+            "84% ensemble study score"
+        )
+        assert "do not chase lower" in page.locator("#beginner-instruction").inner_text()
+        assert "current rejection confirms" in page.locator("#beginner-reason").inner_text()
+        assert "upper reaction area fails" in page.locator(
+            "#beginner-next-condition"
+        ).inner_text()
+        assert page.locator("#beginner-decision-shell").get_attribute(
+            "data-tone"
+        ) == "sell"
+        assert page.locator(".evidence-details").get_attribute("open") is None
+
+
+def test_continuous_observation_health_stays_compact_until_details_are_opened(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+        assert page.locator(".decision-question").count() == 3
+        status = page.locator("#stream-observation")
+        assert status.is_visible()
+        assert status.get_attribute("data-state") == "running"
+        assert page.locator("#stream-observation-label").inner_text() == (
+            "Continuous observation · live"
+        )
+        assert page.locator("video").count() == 0
+
+        details = page.locator(".evidence-details")
+        assert details.get_attribute("open") is None
+        assert page.locator("#stream-observation-detail").is_hidden()
+        details.locator("summary").click()
+        assert page.locator("#stream-observation-detail").is_visible()
+        detail = page.locator("#stream-observation-detail").inner_text()
+        assert "7.88 FPS acquisition" in detail
+        assert "12,480 frames observed" in detail
+        assert "318 keyframes accepted" in detail
+        assert "4 dropped" in detail
+        assert "2,106 duplicates" in detail
+        assert "generation 3" in detail
+        assert "Visual change accepted" in detail
+
+
+@pytest.mark.parametrize(
+    ("permission_action", "entry_patch"),
+    [
+        (
+            "WAIT",
+            {
+                "headline": "YES — SELL NOW",
+                "answer": "Enter SELL now.",
+                "state": "ENTER_NOW",
+                "side": "SELL",
+                "enter_now": True,
+                "action": "SELL_NOW",
+                "timing_state": "ENTER_NOW",
+            },
+        ),
+        (
+            "SELL_NOW",
+            {
+                "headline": "YES — BUY NOW",
+                "answer": "Enter BUY now.",
+                "state": "ENTER_NOW",
+                "side": "BUY",
+                "enter_now": True,
+                "action": "BUY_NOW",
+                "timing_state": "ENTER_NOW",
+            },
+        ),
+        (
+            "SELL_NOW",
+            {
+                "headline": "YES — SELL NOW",
+                "answer": "Enter SELL now.",
+                "state": "ENTER_NOW",
+                "side": "SELL",
+                "enter_now": False,
+                "action": "SELL_NOW",
+                "timing_state": "ENTER_NOW",
+            },
+        ),
+        (
+            "WAIT",
+            {
+                "headline": "YES — SELL NOW",
+                "answer": "Enter SELL now.",
+                "state": "FORMING",
+                "side": "SELL",
+                "enter_now": False,
+                "action": "DO_NOT_ENTER",
+                "timing_state": "FORMING",
+            },
+        ),
+    ],
+)
+def test_three_question_entry_answer_cannot_override_or_conflict_with_permission(
+    chromium_browser: Browser,
+    permission_action: str,
+    entry_patch: dict[str, Any],
+) -> None:
+    payload = _operator_payload(action=permission_action)
+    payload["three_questions"] = {
+        "entry_now": entry_patch
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert "do not enter" in page.locator("#beginner-instruction").inner_text().lower()
+        assert page.locator("#beginner-decision-shell").get_attribute("data-tone") == "hold"
+
+
+def test_live_yes_is_invalidated_immediately_when_refresh_loses_connection(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(
+        chromium_browser, _operator_payload(action="SELL_NOW")
+    ) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        page.evaluate(
+            """
+            () => {
+              window.fetch = () => Promise.reject(new Error('network unavailable'));
+              window.PhoenixGuardDashboard.refresh({force: true});
+            }
+            """
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#beginner-decision-title')?.textContent === 'NO — CONNECTION LOST'"
+        )
+        assert page.locator("#beginner-decision-shell").get_attribute("data-tone") == "blocked"
+        assert "do not enter" in page.locator("#beginner-instruction").inner_text().lower()
+
+
+def test_live_yes_closes_at_its_client_verified_expiry(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="SELL_NOW")
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        page.evaluate(
+            """
+            () => {
+              const payload = structuredClone(window.__OPERATOR_PAYLOAD);
+              payload.revision += 1;
+              payload.permission.expires_at = (Date.now() / 1000) + 1.25;
+              payload.permission.valid_for_seconds = 1.25;
+              window.__OPERATOR_PAYLOAD = payload;
+              window.renderOperatorState(payload);
+            }
+            """
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        page.wait_for_function(
+            "() => document.querySelector('#beginner-decision-title')?.textContent === 'NO — WINDOW EXPIRED'",
+            timeout=5_000,
+        )
+        assert page.locator("#beginner-decision-shell").get_attribute("data-tone") == "blocked"
 
 
 @pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
@@ -940,7 +1335,15 @@ def test_simple_is_default_and_explore_does_not_restore_workspace_navigation(
         fetch_urls = page.evaluate("window.__FETCH_URLS.slice()")
         assert fetch_urls
         assert any("/v1/mobile/operator/state/v1/" in url for url in fetch_urls)
-        assert all("/v1/mobile/operator/state/v1/" in url for url in fetch_urls)
+        assert any(
+            url == "/v1/mobile/window-tracker/sessions/operator-test"
+            for url in fetch_urls
+        )
+        assert all(
+            "/v1/mobile/operator/state/v1/" in url
+            or url == "/v1/mobile/window-tracker/sessions/operator-test"
+            for url in fetch_urls
+        )
 
 
 def test_overlay_explorer_updates_aria_state_locally_from_the_atomic_all_pool(
@@ -1287,6 +1690,46 @@ def test_current_order_areas_have_independent_always_visible_controls(
         )
 
 
+def test_precision_entry_trigger_count_can_activate_its_hidden_family(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["overlays"].append(
+        {
+            "id": "precision-entry-current",
+            "type": "entry",
+            "side": "SELL",
+            "group": "plan",
+            "family": "triggers",
+            "layer": "triggers",
+            "kind": "precision_entry",
+            "kind_label": "Precision entry",
+            "label": "Entry area",
+            "bounds": [0.72, 0.21, 0.79, 0.29],
+            "points": [],
+            "line_points": [],
+            "confidence": 0.76,
+            "lifecycle": "current",
+            "frame_id": 42,
+            "coordinate_space": "chart",
+            "coordinate_units": "normalized",
+        }
+    )
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        control = page.locator('[data-overlay-kind-control="precision_entry"]')
+        assert control.locator("[data-order-kind-count]").inner_text() == "1"
+        assert control.get_attribute("data-available") == "true"
+        assert control.is_disabled() is False
+        assert control.get_attribute("aria-pressed") == "false"
+        assert page.locator('[data-overlay-id="precision-entry-current"]').count() == 0
+
+        control.click()
+
+        assert control.get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-overlay-id="precision-entry-current"]').count() == 1
+
+
 
 def test_order_area_controls_remain_atomic_while_the_next_image_decodes(
     chromium_browser: Browser,
@@ -1618,16 +2061,36 @@ def test_mobile_overlay_library_has_tappable_controls_without_page_overflow(
         )
 
 
+@pytest.mark.parametrize("viewport", [(390, 844), (360, 800)])
+def test_mobile_first_viewport_contains_the_actual_entry_answer(
+    chromium_browser: Browser,
+    viewport: tuple[int, int],
+) -> None:
+    with _dashboard_page(
+        chromium_browser, _operator_payload(), viewport=viewport
+    ) as page:
+        box = page.locator("#beginner-decision-title").bounding_box()
+        assert box is not None
+        assert box["y"] >= 0
+        assert box["y"] + box["height"] <= viewport[1], (viewport, box)
+        instruction_box = page.locator("#beginner-instruction").bounding_box()
+        assert instruction_box is not None
+        assert instruction_box["y"] + instruction_box["height"] <= viewport[1], (
+            viewport,
+            instruction_box,
+        )
+
+
 def test_ended_sell_pressure_and_current_up_move_keep_entry_closed_and_study_uptrend(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload(action="WAIT")) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
-        assert page.locator("#current-move-title").inner_text() == "Uptrend"
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#current-move-title").inner_text() == "From an upward market"
         assert "rising" in page.locator("#beginner-now-read").inner_text().lower()
         pressure = page.locator("#pressure-event")
         assert pressure.get_attribute("data-state") == "ended"
-        pressure_text = pressure.inner_text().lower()
+        pressure_text = (pressure.text_content() or "").lower()
         assert "ended" in pressure_text
         assert "current sell pressure" not in pressure_text
         assert "sell" not in page.locator("#current-move-title").inner_text().lower()
@@ -1680,9 +2143,9 @@ def test_retracement_evidence_shows_current_and_full_pair_support_without_permis
             "full Pair DNA 14; 71.8% experimental/nonstandard — current graph 1, "
             "full Pair DNA 9. Observation only; never entry permission."
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
         assert page.locator("#beginner-confidence").inner_text() == (
-            "No entry permission"
+            "No entry confirmation"
         )
 
         page.evaluate("payload => window.renderOperatorState(payload)", updated)
@@ -1693,7 +2156,7 @@ def test_retracement_evidence_shows_current_and_full_pair_support_without_permis
         assert page.evaluate(
             "() => document.activeElement === document.querySelector('.evidence-details summary')"
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
 
         page.evaluate(
             "() => window.renderUnavailableState(new Error('Workspace offline'))"
@@ -1738,7 +2201,7 @@ def test_zero_retracement_support_waits_for_history_and_stays_observation_only(
             "for the 70.5% OTE reference and the 71.8% experimental, nonstandard "
             "level. Observation only; never entry permission."
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
 
 
 def test_partial_retracement_dto_does_not_claim_unknown_full_support_is_zero(
@@ -1781,7 +2244,7 @@ def test_fresh_explicit_buy_permission_renders_buy_now(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload(action="BUY_NOW")) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "BUY NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "YES — BUY NOW"
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert "Buy low · entry open" in (
             page.locator("#beginner-evidence-safety").text_content() or ""
@@ -1806,7 +2269,7 @@ def test_fresh_explicit_sell_permission_renders_sell_high(
     with _dashboard_page(
         chromium_browser, _operator_payload(action="SELL_NOW")
     ) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "SELL NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert "Sell high · entry open" in (
             page.locator("#beginner-evidence-safety").text_content() or ""
@@ -1830,18 +2293,18 @@ def test_open_setup_wait_keeps_entry_closed_while_permission_refreshes(
 ) -> None:
     payload = _operator_payload(action="WAIT", window_open=True)
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "CLOSED"
+        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert (
             page.locator("#beginner-confidence").inner_text()
-            == "Permission refreshing"
+            == "No entry confirmation"
         )
         instruction = page.locator("#beginner-instruction").inner_text().lower()
-        assert instruction == "no trade entry is open."
+        assert instruction == "do not enter this trade yet."
         reason = page.locator("#beginner-reason").inner_text().lower()
         assert "setup window remains open" in reason
         assert "current-frame permission is refreshing" in reason
-        assert "wait for current-frame permission" in page.locator(
+        assert "refreshes current-frame permission" in page.locator(
             "#beginner-next-condition"
         ).inner_text().lower()
         assert "Setup window · verifying" in (

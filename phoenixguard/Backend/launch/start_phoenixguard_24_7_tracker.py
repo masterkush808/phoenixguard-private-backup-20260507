@@ -167,7 +167,7 @@ def _live_fast_display_heartbeat(
         return last_heartbeat_epoch
     # Display-only captures are opt-in.  Advancing display authority while the
     # model worker is still studying the prior capture creates a chart/model
-    # frame split, so strict forecast geometry has no safe path to render.
+    # frame split, so strict study geometry has no safe path to render.
     enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "0") or "0").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return last_heartbeat_epoch
@@ -623,10 +623,62 @@ def _status_file_payload(
 
 
 def _session_needs_worker_restart(session: dict[str, Any], capture_interval_sec: float) -> bool:
-    return tracker_session_is_stale(
+    snapshot_is_stale = tracker_session_is_stale(
         session,
         max_capture_staleness_sec=max(30.0, float(capture_interval_sec) * 30.0),
         decision_stale_grace_sec=max(8.0, float(capture_interval_sec) * 8.0),
+    )
+    if not snapshot_is_stale:
+        return False
+
+    # In streaming mode a quiet chart can legitimately produce no new heavy
+    # study frame for many minutes: duplicate pixels are intentionally not
+    # counted as fresh candle evidence.  A current CPU observer heartbeat proves
+    # that the worker and locked surface are still alive, so restarting solely
+    # because the last accepted snapshot is old creates a destructive loop.
+    # Keep closed-candle freshness fail-closed elsewhere; this exemption governs
+    # process liveness only.
+    cpu_stream = _as_json_dict(session.get("cpu_stream_v3"))
+    stream_status = str(cpu_stream.get("status", "") or "").strip().lower()
+    stream_available = cpu_stream.get("available") is True
+    stream_enabled = cpu_stream.get("enabled") is not False
+    try:
+        heartbeat_epoch = max(
+            float(cpu_stream.get("status_updated_epoch", 0.0) or 0.0),
+            float(cpu_stream.get("last_capture_epoch", 0.0) or 0.0),
+        )
+    except (TypeError, ValueError):
+        heartbeat_epoch = 0.0
+    heartbeat_budget_sec = max(
+        8.0,
+        min(30.0, max(0.5, float(capture_interval_sec)) * 2.0),
+    )
+    stream_is_current = bool(
+        stream_status in {"active", "running"}
+        and stream_available
+        and stream_enabled
+        and heartbeat_epoch > 0.0
+        and -1.0 <= time.time() - heartbeat_epoch <= heartbeat_budget_sec
+    )
+    if not stream_is_current:
+        return True
+
+    # A material keyframe stuck in the one-slot handoff is different from a
+    # quiet duplicate stream.  Let the supervisor recover that genuinely stale
+    # heavy-study lane after a bounded grace period.
+    keyframe_pending = bool(
+        cpu_stream.get("pending_keyframe") is True
+        or cpu_stream.get("in_flight_keyframe") is True
+    )
+    try:
+        last_event_epoch = float(cpu_stream.get("last_event_epoch", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        last_event_epoch = 0.0
+    keyframe_grace_sec = max(60.0, max(0.5, float(capture_interval_sec)) * 4.0)
+    return bool(
+        keyframe_pending
+        and last_event_epoch > 0.0
+        and time.time() - last_event_epoch > keyframe_grace_sec
     )
 
 
@@ -792,7 +844,7 @@ def _ensure_session(
         max_capture_interval_sec=max(1.0, float(capture_interval_sec)),
         min_capture_interval_sec=0.5,
         broker_surface_cache_sec=float(os.getenv("PHOENIXGUARD_BROKER_SURFACE_CACHE_SEC", "30") or "30"),
-        cooldown_sec=float(os.getenv("PHOENIXGUARD_EXECUTION_COOLDOWN_SEC", "600") or "600"),
+        cooldown_sec=float(os.getenv("PHOENIXGUARD_EXECUTION_COOLDOWN_SEC", "900") or "900"),
         loss_guard_enabled=str(os.getenv("PHOENIXGUARD_LOSS_GUARD_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"},
         loss_guard_max_consecutive_losses=int(os.getenv("PHOENIXGUARD_LOSS_GUARD_MAX_CONSECUTIVE_LOSSES", "2") or "2"),
         loss_guard_window_sec=float(os.getenv("PHOENIXGUARD_LOSS_GUARD_WINDOW_SEC", "5400") or "5400"),
@@ -906,6 +958,12 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_TRUST_LOCKED_WINDOW_DESCRIPTOR", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MIN_CAPTURE_INTERVAL_SEC", "0.5")
+    # CPU-first continuous observation.  This is the acquisition cadence, not
+    # the expensive model cadence: duplicate/rest frames are rejected and only
+    # the latest material keyframe can wake the existing V3 study worker.
+    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_ENABLED", "1")
+    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_FPS", "0.25")
+    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC", "15.0")
     base_url = f"http://{args.host}:{args.port}"
     dashboard_url = f"{base_url}/v3/mobile/window-tracker/dashboard/{args.session_id}?launch_epoch_ms={int(time.time() * 1000.0)}"
     configured_focus_region = _parse_focus_region(args.focus_region)
@@ -1221,7 +1279,7 @@ def main() -> int:
                         )
                         _stop_process(api_proc)
                         break
-                elif bool(runtime_state.get("stale", False)):
+                elif _session_needs_worker_restart(session, args.capture_interval):
                     print(
                         "Tracker session is stale; restarting tracker worker: "
                         f"{runtime_state.get('reason', 'stale runtime state')}",

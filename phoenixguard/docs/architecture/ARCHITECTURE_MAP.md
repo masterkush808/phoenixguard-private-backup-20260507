@@ -12,7 +12,10 @@
   in `Backend/src/phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a
   completion-scheduled loop. The canonical launcher default is 30 seconds, with bounded adaptive
   scheduling allowed. Durable study progress advances only on a new, identity-proven closed-candle
-  event; repeated frames are idempotent.
+  event; repeated frames are idempotent. The CPU observer treats byte-identical frames as capture
+  health rather than market rest; an explicitly locked chart may use a rate-limited,
+  identity-verified visible recovery that synthesizes no input and re-admits at most one recovery
+  keyframe.
 - It collects frames for the dashboard.
 - The service serves the dashboard through the mobile API.
 
@@ -81,13 +84,14 @@ order domain. It is independent of execution authority and is bounded at every l
 | Time-to-event evidence | The motif module builds Kaplan-Meier-style curves for next swing, direction change, and rest end, with explicit right censoring and Greenwood intervals. | Historical duration distribution only; no future deadline, independence, or causal claim. |
 | Adaptive feature ontology | `study/adaptive_feature_ontology_v3.py` proposes features in a shadow namespace, records versioned temporal/leakage gates, promotes only passing revisions, and supports audited rollback. | A passing gate proves eligibility for public study, not causation or predictive value. |
 | Exact historical path reconstruction | The motif module reconstructs anchor-known median-range paths with MFE, MAE, efficiency, state transitions, and time in state. | Future candles never influence normalization; reconstructed paths remain historical examples. |
+| Joint Path-Clock Liquidity Field | `study/path_clock_liquidity_v3.py` estimates stop-before-target survival over normalized path, remaining contract clock, and a five-axis liquidity state. `study/path_clock_liquidity_store_v3.py` owns restart-safe anchors, trajectories, freezes, replay calibration, and the compact Pair DNA partition. The tracker admits clock evidence only through a source-backed or one-rollover boundary certificate bound to the resolver key, sequence, and row. | New anchors require 900-7,200 seconds. Capture time is never candle time, gaps are censored rather than interpolated, active anchors keep learning through the final clock, raw paths stay in the bounded side store, and timing may veto but never grant entry permission. |
 | Cross-pair association graph | `study/cross_pair_association_v3.py` compares exact shared closed timestamps in compatible normalized spaces with a Granger-style variance-reduction proxy and mutual information. `study/cross_pair_coordinator_v3.py` atomically retains bounded normalized returns so independently arriving pair updates can be synchronized without fabricating a peer. | **Explicitly non-causal.** Circular-shift significance supports association only; it does not prove influence, direction, or a tradable lead. Until a genuine compatible peer and support exist, the result remains `INSUFFICIENT_SYNCHRONIZED_PAIR` or `INSUFFICIENT_SUPPORT`. |
 | Online regime drift | `study/concept_drift_v3.py` applies adjacent-window KS evidence with multiplicity control and a mean-shift floor, then creates deterministic regime partition IDs. | A partition boundary describes a distribution change; it does not predict market direction. |
 | Study claim proof certificates | `study/study_claim_proof_v3.py` binds a claim to ordered closed-candle IDs, coordinate space, order domain, bounded inputs, and derivation hashes. | A valid digest proves derivation integrity only; it does not authenticate the market source, prove causation, or authorize a trade. |
 
 `MarketStudyServiceV3` runs these capabilities from restart-safe continuous history and publishes
 bounded study keys beside Pair DNA and the exact candle ledger: `motif_lattice`, `survival_network`,
-`path_reconstruction`, `adaptive_feature_ontology`, `concept_drift`, `regime_partition`,
+`path_reconstruction`, `path_clock_liquidity`, `adaptive_feature_ontology`, `concept_drift`, `regime_partition`,
 `cross_pair_association`, and `claim_proofs`. Ontology and drift rebuild deterministically from the
 retained closed-candle evidence; the cross-pair coordinator owns its separate bounded atomic state.
 These services do not create a new product version, a second decision lane, or an execution
@@ -143,8 +147,8 @@ shortcut.
 - Live tracker decisions additionally pass SMC and significant S/R evidence into
   `Backend/src/phoenixguard/decision/decision_kernel.py`, where those signals join the structure family before
   the final trade-mode
-- Live broker timing is map-aware instead of fixed to an M3/M5 shortcut.
-- `window_tracker.py` builds an `opposing_force_timing_v1` profile.
+- Live broker timing is map-aware and JPCLF-aware instead of fixed to an M3/M5 shortcut.
+- `window_tracker.py` builds `jpclf_aware_timing_v3` with a hard 15-minute duration floor.
 - The profile keeps the large Global/Local target horizon when the path is clear and scores
   buy-high/sell-low extreme risk.
 - It maps significant opposing S/R forces from history.

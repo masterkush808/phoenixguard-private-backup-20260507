@@ -187,6 +187,7 @@
             "motif_lattice",
             "survival_network",
             "path_reconstruction",
+            "path_clock_liquidity",
             "adaptive_feature_ontology",
             "concept_drift",
             "regime_partition",
@@ -234,6 +235,26 @@
         ],
         "normalization": "median candle range computed only from geometry known at the anchor",
         "authority": "historical reconstruction only"
+      },
+      "joint_path_clock_liquidity_field": {
+        "axes": [
+          "median_range_normalized_path",
+          "elapsed_and_remaining_contract_clock",
+          "five_axis_liquidity_state"
+        ],
+        "liquidity_features": [
+          "wick_entropy",
+          "repeated_area_touches",
+          "late_sweep_motif_distance",
+          "body_wick_asymmetry",
+          "object_co_presence_density"
+        ],
+        "duration_policy": "new anchors require 900 through 7200 seconds; admitted anchors continue through the final clock but cannot open a new entry below 900 seconds remaining",
+        "close_time_proof": "source bar identity and source market time are independent evidence; screenshot-only time requires one resolver-confirmed close bracketed across one exact timeframe boundary and bound to the same pair, timeframe, event key, sequence, and row",
+        "forbidden_clock_substitutes": "capture time, publish time, frame number, x position, an initial screenshot baseline, and interpolated gap timestamps",
+        "promotion_gate": "minimum replay support plus simultaneous improvement in direction, timing, sweep survival, and calibration",
+        "persistence": "raw paths and freezes stay in a dedicated bounded atomic side store; Pair DNA receives compact aggregates only",
+        "authority": "timing may delay or veto an existing permission but can never create direction, entry permission, or execution authority"
       },
             "cross_pair_association_graph": {
                 "requirements": "distinct pairs, exact shared closed timestamps, one compatible normalized coordinate space, and one order domain",

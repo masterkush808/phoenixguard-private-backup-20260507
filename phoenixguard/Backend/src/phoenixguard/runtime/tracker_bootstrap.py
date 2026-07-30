@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence, cast
 
+from phoenixguard.core.timing_policy_v3 import (
+    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+)
+
 
 def _float(value: Any, default: float = 0.0) -> float:
     try:
@@ -40,7 +44,7 @@ def build_locked_tracker_controls(
     max_capture_interval_sec: float = 1.0,
     max_executions_per_window: int = 1,
     execution_window_sec: float = 10.0 * 60.0,
-    cooldown_sec: float = 10.0 * 60.0,
+    cooldown_sec: float = float(MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS),
     loss_guard_enabled: bool = True,
     loss_guard_max_consecutive_losses: int = 2,
     loss_guard_window_sec: float = 90.0 * 60.0,
@@ -59,7 +63,7 @@ def build_locked_tracker_controls(
         "continuous_model_feed_enabled": True,
         "high_frequency_timeframe": "M5",
         "high_frequency_horizon_candles": 2,
-        "high_frequency_expiry_seconds": 600,
+        "high_frequency_expiry_seconds": MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
         "high_frequency_entry_grace_sec": 45.0,
         "high_frequency_min_confidence": 0.44,
         "scenario_generation_enabled": False,

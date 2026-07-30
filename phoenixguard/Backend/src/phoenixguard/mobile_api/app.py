@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -29,6 +30,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from phoenixguard.core.config import RUNTIME, VOICE, VoiceConfig
 from phoenixguard.business import register_business_routes
+from phoenixguard.decision.countertrend_sniper_v3 import (
+    COUNTERTREND_SNIPER_LINEAGE_KEYS,
+    COUNTERTREND_SNIPER_SCHEMA_VERSION,
+    COUNTERTREND_SNIPER_VALIDATED_PHASE,
+    build_countertrend_sniper_lineage_v3,
+)
 from phoenixguard.execution.floating_state_reducer import build_floating_state
 from phoenixguard.execution.sequence_context import sequence_context_readiness_report
 from phoenixguard.execution.v3_language import public_language_scorecard
@@ -87,6 +94,8 @@ from .observer import SignalObserverService
 from .operator_workspace_v1 import (
     OPERATOR_WORKSPACE_SCHEMA_VERSION,
     build_operator_workspace_v1,
+    path_clock_liquidity_contract_v3,
+    refresh_operator_streaming_read_v3,
     retracement_graph_contract_v3,
     retracement_pair_contract_v3,
     retracement_study_contract_v3,
@@ -105,6 +114,7 @@ from .window_tracker import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
 _default_service: MobileApiService | None = None
 _default_observer_service: SignalObserverService | None = None
 _default_window_tracker_service: ContinuousWindowTrackerService | None = None
@@ -534,11 +544,54 @@ def _direct_live_state_compact_session_path(session_id: str) -> Path:
     return session_path
 
 
+_DirectWindowTrackerStreamFileSignature = tuple[str, int, int]
+_DirectWindowTrackerStreamSignature = tuple[
+    _DirectWindowTrackerStreamFileSignature,
+    _DirectWindowTrackerStreamFileSignature | None,
+]
+
+
+def _direct_stream_file_signature(
+    path: Path,
+) -> _DirectWindowTrackerStreamFileSignature | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _read_direct_cpu_stream_sidecar_v3(
+    path: Path,
+    *,
+    session_id: str,
+) -> tuple[str, dict[str, object]]:
+    """Read one small runtime sidecar without touching the heavy session file."""
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "retry", {}
+    if not isinstance(raw, Mapping):
+        return "invalid", {}
+    payload = dict(cast(Mapping[str, object], raw))
+    if (
+        str(payload.get("schema_version", "") or "") != "PG_CPU_STREAM_RUNTIME_V3"
+        or str(payload.get("session_id", "") or "") != session_id
+    ):
+        return "invalid", {}
+    return "ok", payload
+
+
 def _direct_window_tracker_stream_snapshot(
     session_id: str,
-    previous_signature: tuple[str, int, int] | None,
-) -> tuple[str, tuple[str, int, int] | None, dict[str, object] | None]:
-    """Read the compact stream sidecar only when its atomic-file signature changes."""
+    previous_signature: _DirectWindowTrackerStreamSignature | None,
+) -> tuple[
+    str,
+    _DirectWindowTrackerStreamSignature | None,
+    dict[str, object] | None,
+]:
+    """Read only changed compact/CPU sidecars for the low-latency stream."""
 
     if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
         "0",
@@ -553,27 +606,145 @@ def _direct_window_tracker_stream_snapshot(
     session_path = _direct_live_state_session_path(requested_session_id)
     compact_path = session_path.with_name("compact_live_state.json")
     source_path = compact_path if compact_path.is_file() else session_path
-    try:
-        stat = source_path.stat()
-    except OSError:
+    source_signature = _direct_stream_file_signature(source_path)
+    if source_signature is None:
         return "unavailable", previous_signature, None
-    signature = (str(source_path), int(stat.st_mtime_ns), int(stat.st_size))
+    cpu_stream_path = session_path.with_name("cpu_stream_v3.json")
+    cpu_stream_signature = _direct_stream_file_signature(cpu_stream_path)
+    signature: _DirectWindowTrackerStreamSignature = (
+        source_signature,
+        cpu_stream_signature,
+    )
     if signature == previous_signature:
         return "unchanged", signature, None
-    try:
-        raw = json.loads(source_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        # Atomic replacement can briefly race the stat/read pair. Preserve the
-        # old signature so the next 200 ms pass retries instead of suppressing it.
-        return "retry", previous_signature, None
-    if not isinstance(raw, Mapping):
-        return "retry", previous_signature, None
-    payload = dict(cast(Mapping[str, object], raw))
-    if str(payload.get("session_id", requested_session_id) or requested_session_id) != requested_session_id:
-        return "retry", previous_signature, None
-    if source_path == session_path:
-        payload = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], payload)))
+
+    source_changed = previous_signature is None or previous_signature[0] != source_signature
+    cpu_stream_changed = (
+        previous_signature is None or previous_signature[1] != cpu_stream_signature
+    )
+    payload: dict[str, object]
+    if source_changed:
+        try:
+            raw = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            # Atomic replacement can briefly race the stat/read pair. Preserve the
+            # old signature so the next 200 ms pass retries instead of suppressing it.
+            return "retry", previous_signature, None
+        if not isinstance(raw, Mapping):
+            return "retry", previous_signature, None
+        payload = dict(cast(Mapping[str, object], raw))
+        if (
+            str(payload.get("session_id", requested_session_id) or requested_session_id)
+            != requested_session_id
+        ):
+            return "retry", previous_signature, None
+        if source_path == session_path:
+            payload = cast(
+                dict[str, object],
+                compact_session_payload(cast(Mapping[str, Any], payload)),
+            )
+    else:
+        # The browser merges SESSION_UPDATE objects. A CPU-only event therefore
+        # needs no compact/full-session reread and cannot rebuild heavy operator state.
+        payload = {"session_id": requested_session_id}
+
+    if cpu_stream_signature is not None:
+        sidecar_state, cpu_stream_payload = _read_direct_cpu_stream_sidecar_v3(
+            cpu_stream_path,
+            session_id=requested_session_id,
+        )
+        if sidecar_state == "retry":
+            return "retry", previous_signature, None
+        payload["cpu_stream_v3"] = cpu_stream_payload
+    elif cpu_stream_changed:
+        # Explicitly clear a removed runtime record in the browser's merge state.
+        payload["cpu_stream_v3"] = {}
     return "updated", signature, payload
+
+
+def _window_tracker_stream_fingerprint_v3(payload: Mapping[str, Any]) -> str:
+    """Fingerprint compact market truth plus bounded CPU-stream heartbeat state."""
+
+    latest_signal = cast(
+        Mapping[str, object],
+        payload.get("latest_signal")
+        if isinstance(payload.get("latest_signal"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
+    tracking = cast(
+        Mapping[str, object],
+        payload.get("tracking_summary")
+        if isinstance(payload.get("tracking_summary"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
+    packet_raw = payload.get("model_council_packet") or payload.get(
+        "execution_packet"
+    )
+    if isinstance(packet_raw, Mapping):
+        packet_map = cast(Mapping[str, object], packet_raw)
+    else:
+        latest_packet = latest_signal.get("model_council_packet")
+        packet_map = (
+            cast(Mapping[str, object], latest_packet)
+            if isinstance(latest_packet, Mapping)
+            else _EMPTY_OBJECT_MAPPING
+        )
+    cpu_stream = cast(
+        Mapping[str, object],
+        payload.get("cpu_stream_v3")
+        if isinstance(payload.get("cpu_stream_v3"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
+    observer = cast(
+        Mapping[str, object],
+        cpu_stream.get("observer")
+        if isinstance(cpu_stream.get("observer"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
+    last_decision = cast(
+        Mapping[str, object],
+        observer.get("last_decision")
+        if isinstance(observer.get("last_decision"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
+    temporal = cast(
+        Mapping[str, object],
+        last_decision.get("temporal_evidence")
+        if isinstance(last_decision.get("temporal_evidence"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
+    parts: dict[str, object] = {
+        "capture_count": payload.get("capture_count"),
+        "last_capture_epoch": payload.get("last_capture_epoch"),
+        "state_version": payload.get("state_version"),
+        "display_frame_id": payload.get("display_frame_id"),
+        "source_capture_id": payload.get("source_capture_id"),
+        "chart_frame_id": payload.get("chart_frame_id"),
+        "overlay_frame_id": payload.get("overlay_frame_id"),
+        "full_overlay_frame_id": payload.get("full_overlay_frame_id"),
+        "model_vote_frame_id": payload.get("model_vote_frame_id"),
+        "last_window_path": payload.get("last_window_path")
+        or payload.get("last_frame_path"),
+        "last_display_window_path": payload.get("last_display_window_path"),
+        "last_chart_path": payload.get("last_chart_path"),
+        "last_overlay_path": payload.get("last_overlay_path"),
+        "last_full_overlay_path": payload.get("last_full_overlay_path"),
+        "signal_id": latest_signal.get("signal_id"),
+        "published_epoch": latest_signal.get("published_epoch"),
+        "hf_cycle": latest_signal.get("high_frequency_candle_cycle"),
+        "tracking_updated": tracking.get("published_at"),
+        "packet_id": packet_map.get("packet_id"),
+        "cpu_status_updated": cpu_stream.get("status_updated_epoch"),
+        "cpu_status": cpu_stream.get("status"),
+        "cpu_observed_frames": cpu_stream.get("observed_frames"),
+        "cpu_last_capture": cpu_stream.get("last_capture_epoch"),
+        "cpu_last_event": cpu_stream.get("last_event_epoch"),
+        "cpu_observer_frame_seq": observer.get("frame_seq"),
+        "cpu_stream_generation": observer.get("stream_generation"),
+        "cpu_temporal_frame_seq": temporal.get("frame_seq"),
+        "cpu_temporal_state": temporal.get("state"),
+    }
+    return json.dumps(parts, sort_keys=True, default=str)
 
 
 def _direct_window_tracker_display_state_path(session_id: str) -> Path:
@@ -910,15 +1081,224 @@ def _is_private_tracker_session_key(key: object) -> bool:
     )
 
 
+def _bounded_public_cpu_stream_v3(value: object) -> dict[str, object]:
+    """Project CPU stream telemetry without hashes, window identity, or authority."""
+
+    source = _as_mapping(value)
+    if not source:
+        return {}
+
+    def safe_text(raw: object, *, limit: int = 160) -> str:
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw or ""))
+        text = re.sub(r"\s+", " ", text).strip()[:limit]
+        if (
+            not text
+            or re.match(r"^[A-Za-z]:[\\/]", text)
+            or "\\" in text
+            or text.startswith(("/", "~"))
+            or "://" in text
+        ):
+            return ""
+        return text
+
+    def safe_number(raw: object) -> int | float | None:
+        if isinstance(raw, bool):
+            return None
+        try:
+            number = float(cast(Any, raw))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number):
+            return None
+        return int(number) if number.is_integer() else round(number, 6)
+
+    output: dict[str, object] = {}
+    for key in (
+        "schema_version",
+        "status",
+        "mode",
+        "full_model_policy",
+    ):
+        text = safe_text(source.get(key), limit=80)
+        if text:
+            output[key] = text
+    for key in (
+        "requested",
+        "enabled",
+        "available",
+        "pending_keyframe",
+        "in_flight_keyframe",
+    ):
+        if isinstance(source.get(key), bool):
+            output[key] = source.get(key) is True
+    for key in (
+        "target_fps",
+        "actual_fps",
+        "acquisition_fps",
+        "keyframe_slot_capacity",
+        "started_epoch",
+        "last_capture_epoch",
+        "last_event_epoch",
+        "status_updated_epoch",
+        "observed_frames",
+        "accepted_events",
+        "dropped_keyframes",
+        "capture_errors",
+        "recoveries",
+        "stale_generation_drops",
+        "study_gate_requeues",
+        "coalesced_keyframe_drops",
+    ):
+        number = safe_number(source.get(key))
+        if number is not None:
+            output[key] = number
+
+    observer_source = _as_mapping(source.get("observer"))
+    observer: dict[str, object] = {}
+    if isinstance(observer_source.get("cpu_only"), bool):
+        observer["cpu_only"] = observer_source.get("cpu_only") is True
+    stream_id = safe_text(observer_source.get("stream_id"), limit=96)
+    if stream_id:
+        observer["stream_id"] = stream_id
+    for key in (
+        "frame_seq",
+        "stream_generation",
+        "last_captured_epoch",
+        "last_keyframe_epoch",
+    ):
+        number = safe_number(observer_source.get(key))
+        if number is not None:
+            observer[key] = number
+    for key in ("status", "state"):
+        text = safe_text(observer_source.get(key), limit=40)
+        if text:
+            observer[key] = text
+    counters_source = _as_mapping(observer_source.get("counters"))
+    counters: dict[str, object] = {}
+    for key in (
+        "frames_observed",
+        "keyframes_selected",
+        "full_frame_ring_drops",
+        "downsample_ring_drops",
+        "latest_frame_wins_drops",
+        "duplicate_frames",
+        "material_change_frames",
+        "heartbeat_keyframes",
+    ):
+        number = safe_number(counters_source.get(key))
+        if number is not None:
+            counters[key] = number
+    if counters:
+        observer["counters"] = counters
+
+    rings_source = _as_mapping(observer_source.get("rings"))
+    rings: dict[str, object] = {}
+    for ring_name in ("full_frames", "downsamples"):
+        ring_source = _as_mapping(rings_source.get(ring_name))
+        ring: dict[str, object] = {}
+        for key in ("size", "capacity", "dropped"):
+            number = safe_number(ring_source.get(key))
+            if number is not None:
+                ring[key] = number
+        if ring:
+            rings[ring_name] = ring
+    if rings:
+        observer["rings"] = rings
+
+    memory_source = _as_mapping(observer_source.get("memory"))
+    memory: dict[str, object] = {}
+    for key in (
+        "current_full_frame_bytes",
+        "current_downsample_bytes",
+        "current_estimated_pixel_bytes",
+        "configured_upper_bound_pixel_bytes",
+        "max_frame_pixels",
+    ):
+        number = safe_number(memory_source.get(key))
+        if number is not None:
+            memory[key] = number
+    if memory:
+        observer["memory"] = memory
+
+    last_decision_source = _as_mapping(observer_source.get("last_decision"))
+    temporal_source = _as_mapping(last_decision_source.get("temporal_evidence"))
+    temporal: dict[str, object] = {
+        "direction": "NEUTRAL",
+        "direction_available": False,
+        "forming_candle": True,
+        "closed_candle": False,
+        "can_grant_entry_permission": False,
+        "execution_authority": False,
+        "broker_click_authority": False,
+    }
+    state = safe_text(temporal_source.get("state"), limit=40)
+    if state:
+        temporal["state"] = state
+    for key in ("frame_seq", "stream_generation"):
+        number = safe_number(temporal_source.get(key))
+        if number is not None:
+            temporal[key] = number
+    if temporal_source:
+        observer["last_decision"] = {"temporal_evidence": temporal}
+    if observer:
+        output["observer"] = observer
+
+    def safe_lineage(raw: object) -> dict[str, object]:
+        source_lineage = _as_mapping(raw)
+        lineage: dict[str, object] = {}
+        schema_version = safe_text(source_lineage.get("schema_version"), limit=80)
+        if schema_version:
+            lineage["schema_version"] = schema_version
+        stream_id = safe_text(source_lineage.get("stream_id"), limit=96)
+        if stream_id:
+            lineage["stream_id"] = stream_id
+        for key in ("stream_generation", "frame_seq"):
+            number = safe_number(source_lineage.get(key))
+            if number is not None:
+                lineage[key] = number
+        captured_epoch = safe_number(source_lineage.get("captured_epoch"))
+        if captured_epoch is not None:
+            lineage["captured_epoch"] = captured_epoch
+        accepted_reason = safe_text(source_lineage.get("accepted_reason"), limit=200)
+        if accepted_reason:
+            lineage["accepted_reason"] = accepted_reason
+        temporal_lineage_source = _as_mapping(source_lineage.get("temporal_evidence"))
+        temporal_lineage: dict[str, object] = {}
+        for key in ("state", "selection_reason"):
+            text = safe_text(temporal_lineage_source.get(key), limit=120)
+            if text:
+                temporal_lineage[key] = text
+        if temporal_lineage:
+            lineage["temporal_evidence"] = temporal_lineage
+        if source_lineage:
+            lineage["broker_click_authority"] = False
+        return lineage
+
+    for key in ("last_observation_lineage", "last_keyframe_lineage"):
+        lineage = safe_lineage(source.get(key))
+        if lineage:
+            output[key] = lineage
+    output["can_grant_entry_permission"] = False
+    output["execution_authority"] = False
+    output["broker_click_authority"] = False
+    return output
+
+
 def _sanitize_public_tracker_session_value(value: object) -> object:
     """Recursively remove host and model internals from a public session value."""
 
     if isinstance(value, Mapping):
-        return {
-            str(key): _sanitize_public_tracker_session_value(nested)
-            for key, nested in cast(Mapping[object, object], value).items()
-            if not _is_private_tracker_session_key(key)
-        }
+        output: dict[str, object] = {}
+        for key, nested in cast(Mapping[object, object], value).items():
+            if _is_private_tracker_session_key(key):
+                continue
+            public_key = str(key)
+            output[public_key] = (
+                _bounded_public_cpu_stream_v3(nested)
+                if public_key.strip().lower() == "cpu_stream_v3"
+                else _sanitize_public_tracker_session_value(nested)
+            )
+        return output
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [
             _sanitize_public_tracker_session_value(nested)
@@ -2414,6 +2794,174 @@ def _first_positive_int(*values: object) -> int:
     return 0
 
 
+def _first_nonempty_text(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalized_instrument_text(value: object) -> str:
+    return "".join(
+        character
+        for character in str(value or "").strip().upper()
+        if character.isalnum()
+    )
+
+
+def _packet_execution_opportunity_v3(
+    packet: Mapping[str, object],
+) -> dict[str, object]:
+    allowance = _mapping_to_plain_dict(packet.get("allowance_package"))
+    council = _mapping_to_plain_dict(packet.get("model_council"))
+    for candidate in (
+        packet.get("execution_opportunity_window_v3"),
+        allowance.get("execution_opportunity_window_v3"),
+        council.get("execution_opportunity_window_v3"),
+    ):
+        if isinstance(candidate, Mapping) and candidate:
+            return dict(cast(Mapping[str, object], candidate))
+    return {}
+
+
+def _safe_execution_lineage_v3(
+    packet: Mapping[str, object],
+) -> dict[str, object]:
+    """Project only equality-checkable identity from one validated packet.
+
+    ``model_council_packet_from_payload`` has already applied the executable
+    packet validator.  This projection deliberately excludes the execution
+    body, allowance package, prices, gates, and broker handoff authority.
+    """
+
+    if str(packet.get("schema_version") or "").strip() != "PG_EXECUTION_PACKET_V3":
+        return {}
+    lineage = cast(
+        dict[str, object],
+        build_countertrend_sniper_lineage_v3(cast(Mapping[str, Any], packet)),
+    )
+    required_text = (
+        "packet_id",
+        "opportunity_id",
+        "session_id",
+        "symbol",
+        "timeframe",
+        "input_frame_hash",
+        "instrument_identity_hash",
+        "trigger_closed_candle_key",
+        "opportunity_key",
+    )
+    required_positive = (
+        "frame_id",
+        "capture_count",
+        "state_version",
+        "trigger_frame_id",
+    )
+    if (
+        any(not str(lineage[key] or "").strip() for key in required_text)
+        or any(_first_positive_int(lineage[key]) <= 0 for key in required_positive)
+        or _epoch_float(lineage.get("valid_until_epoch"), 0.0) <= 0.0
+        or lineage["integrity_valid"] is not True
+        or lineage["lineage_rejected"] is not False
+        or _first_positive_int(lineage["trigger_frame_id"])
+        != _first_positive_int(lineage["frame_id"])
+    ):
+        return {}
+    return lineage
+
+
+def _promotion_candidate_from_sources(
+    packet: Mapping[str, object],
+    sources: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    paths = (
+        ("countertrend_sniper_promotion_v3",),
+        ("allowance_package", "countertrend_sniper_promotion_v3"),
+        ("model_council", "countertrend_sniper_promotion_v3"),
+        ("model_council_result", "countertrend_sniper_promotion_v3"),
+        ("model_council_result", "book_strategy", "countertrend_sniper_promotion_v3"),
+        ("model_council_result", "model_council", "countertrend_sniper_promotion_v3"),
+        ("model_council_study_packet", "countertrend_sniper_promotion_v3"),
+        ("study_packet", "countertrend_sniper_promotion_v3"),
+    )
+    for source in (packet, *sources):
+        for path in paths:
+            current: object = source
+            for key in path:
+                mapping = _as_object_mapping(current)
+                if not mapping:
+                    current = None
+                    break
+                current = mapping.get(key)
+            if isinstance(current, Mapping) and current:
+                return dict(cast(Mapping[str, object], current))
+    return {}
+
+
+def _validated_countertrend_projection_v3(
+    packet: Mapping[str, object],
+    lineage: Mapping[str, object],
+    sources: Sequence[Mapping[str, object]],
+    *,
+    now_epoch: float,
+) -> dict[str, object]:
+    promotion = _promotion_candidate_from_sources(packet, sources)
+    promotion_lineage = _mapping_to_plain_dict(promotion.get("lineage"))
+    execution = _mapping_to_plain_dict(packet.get("execution"))
+    packet_side = str(execution.get("side") or "").strip().upper()
+    if not promotion or not lineage or not promotion_lineage:
+        return {}
+    if any(
+        promotion_lineage.get(field) != lineage.get(field)
+        for field in COUNTERTREND_SNIPER_LINEAGE_KEYS
+    ):
+        return {}
+    if not (
+        str(promotion.get("schema_version") or "").strip()
+        == COUNTERTREND_SNIPER_SCHEMA_VERSION
+        and str(promotion.get("phase") or "").strip().upper()
+        == COUNTERTREND_SNIPER_VALIDATED_PHASE
+        and _explicit_bool(promotion.get("active")) is True
+        and str(promotion.get("classification") or "").strip().upper()
+        == "ENTER_NOW"
+        and str(promotion.get("side") or "").strip().upper() == packet_side
+        and packet_side in {"BUY", "SELL"}
+        and _explicit_bool(promotion.get("entry_permission_authorized")) is True
+        and _explicit_bool(
+            promotion.get("movement_confirmation_bypass_allowed")
+        )
+        is True
+        and _explicit_bool(promotion.get("execution_packet_present")) is True
+        and str(promotion.get("validated_entry_mode") or "").strip().upper()
+        == "COUNTERTREND_SNIPER"
+        and _explicit_bool(promotion.get("broker_click_authority")) is False
+        and lineage.get("integrity_valid") is True
+        and lineage.get("lineage_rejected") is False
+        and _epoch_float(lineage.get("valid_until_epoch"), 0.0) > now_epoch
+    ):
+        return {}
+    return {
+        "schema_version": COUNTERTREND_SNIPER_SCHEMA_VERSION,
+        "phase": COUNTERTREND_SNIPER_VALIDATED_PHASE,
+        "active": True,
+        "classification": "ENTER_NOW",
+        "side": packet_side,
+        "against_global_side": str(
+            promotion.get("against_global_side") or "HOLD"
+        ).strip().upper(),
+        "validated_entry_mode": "COUNTERTREND_SNIPER",
+        "entry_permission_authorized": True,
+        "movement_confirmation_bypass_allowed": True,
+        "execution_packet_present": True,
+        "movement_confirmation_substitute": "CLOSED_CANDLE_OPPOSING_FORCE_REJECTION",
+        "broker_click_authority": False,
+        "lineage": {
+            field: lineage.get(field) for field in COUNTERTREND_SNIPER_LINEAGE_KEYS
+        },
+    }
+
+
 def _compact_overlay_row_frame_ids(
     payload: Mapping[str, object],
 ) -> tuple[set[int], bool]:
@@ -2449,18 +2997,34 @@ def _execution_packet_matches_current_payload(
 ) -> bool:
     result = _mapping_to_plain_dict(payload.get("model_council_result"))
     tracking = _mapping_to_plain_dict(payload.get("tracking_summary"))
-    current_frame = _first_positive_int(
-        payload.get("model_vote_frame_id"),
-        payload.get("frame_index"),
-        tracking.get("model_vote_frame_id"),
-        tracking.get("frame_index"),
-        result.get("frame_id"),
-        result.get("frame_index"),
-    )
+    latest_signal = _mapping_to_plain_dict(payload.get("latest_signal"))
+    frame_authorities = {
+        value
+        for value in (
+            _first_positive_int(payload.get("display_frame_id")),
+            _first_positive_int(payload.get("chart_frame_id")),
+            _first_positive_int(payload.get("model_vote_frame_id")),
+            _first_positive_int(payload.get("frame_id")),
+            _first_positive_int(payload.get("frame_index")),
+            _first_positive_int(tracking.get("display_frame_id")),
+            _first_positive_int(tracking.get("model_vote_frame_id")),
+            _first_positive_int(tracking.get("frame_id")),
+            _first_positive_int(tracking.get("frame_index")),
+            _first_positive_int(result.get("frame_id")),
+            _first_positive_int(result.get("frame_index")),
+        )
+        if value > 0
+    }
     current_capture = _first_positive_int(
         payload.get("capture_count"),
         tracking.get("capture_count"),
         result.get("capture_count"),
+    )
+    current_state = _first_positive_int(
+        payload.get("state_version"),
+        payload.get("decision_version"),
+        tracking.get("state_version"),
+        result.get("state_version"),
     )
     packet_frame = _first_positive_int(
         packet.get("frame_id"),
@@ -2468,13 +3032,75 @@ def _execution_packet_matches_current_payload(
         packet.get("model_vote_frame_id"),
     )
     packet_capture = _first_positive_int(packet.get("capture_count"))
-    if current_frame > 0 and packet_frame != current_frame:
+    packet_state = _first_positive_int(packet.get("state_version"))
+    if frame_authorities and any(packet_frame != frame for frame in frame_authorities):
         return False
     if current_capture > 0 and packet_capture != current_capture:
         return False
+    if current_state > 0 and packet_state != current_state:
+        return False
     current_session_id = str(payload.get("session_id") or "").strip()
     packet_session_id = str(packet.get("session_id") or "").strip()
-    if current_session_id and packet_session_id and current_session_id != packet_session_id:
+    if current_session_id and current_session_id != packet_session_id:
+        return False
+    packet_instrument = _mapping_to_plain_dict(packet.get("instrument_context"))
+    current_symbol = _first_nonempty_text(
+        tracking.get("detected_market"),
+        latest_signal.get("market"),
+        latest_signal.get("symbol"),
+        payload.get("symbol"),
+        payload.get("market"),
+    )
+    packet_symbol = _first_nonempty_text(
+        packet.get("symbol"),
+        packet_instrument.get("display_symbol"),
+    )
+    if (
+        current_symbol
+        and _normalized_instrument_text(current_symbol)
+        != _normalized_instrument_text(packet_symbol)
+    ):
+        return False
+    current_timeframe = _first_nonempty_text(
+        tracking.get("detected_timeframe"),
+        latest_signal.get("focus_timeframe"),
+        latest_signal.get("timeframe"),
+        payload.get("timeframe"),
+    ).upper()
+    packet_timeframe = _first_nonempty_text(
+        packet.get("timeframe"),
+        packet_instrument.get("timeframe"),
+    ).upper()
+    if current_timeframe and current_timeframe != packet_timeframe:
+        return False
+    packet_live_integrity = _mapping_to_plain_dict(packet.get("live_integrity"))
+    current_input_hash = _first_nonempty_text(
+        payload.get("input_frame_hash"),
+        payload.get("frame_hash"),
+        tracking.get("input_frame_hash"),
+        tracking.get("frame_hash"),
+        latest_signal.get("input_frame_hash"),
+        latest_signal.get("frame_hash"),
+        result.get("input_frame_hash"),
+    )
+    packet_input_hash = _first_nonempty_text(
+        packet_live_integrity.get("input_frame_hash"),
+        packet.get("input_frame_hash"),
+    )
+    if current_input_hash and current_input_hash != packet_input_hash:
+        return False
+    current_instrument_hash = _first_nonempty_text(
+        payload.get("instrument_identity_hash"),
+        tracking.get("instrument_identity_hash"),
+        latest_signal.get("instrument_identity_hash"),
+    )
+    packet_instrument_hash = _first_nonempty_text(
+        packet.get("instrument_identity_hash"),
+        build_countertrend_sniper_lineage_v3(
+            cast(Mapping[str, Any], packet)
+        ).get("instrument_identity_hash"),
+    )
+    if current_instrument_hash and current_instrument_hash != packet_instrument_hash:
         return False
     return True
 
@@ -2494,6 +3120,42 @@ def _current_execution_packet_from_payload(
     packet = model_council_packet_from_payload(source)
     if not packet or not _execution_packet_matches_current_payload(packet, payload):
         return {}
+    # The validated packet finder returns a persistence-safe compact packet.
+    # Rebind only immutable trigger lineage from the exact raw packet id so the
+    # public command can prove equality without copying execution authority.
+    pending: list[tuple[Mapping[str, Any], int]] = [(source, 0)]
+    packet_id = _first_nonempty_text(packet.get("packet_id"))
+    while pending:
+        row, depth = pending.pop(0)
+        if depth > 4:
+            continue
+        if (
+            _first_nonempty_text(row.get("packet_id")) == packet_id
+            and str(row.get("schema_version") or "").strip()
+            == "PG_EXECUTION_PACKET_V3"
+        ):
+            for key in (
+                "input_frame_hash",
+                "instrument_identity_hash",
+                "trigger_closed_candle_key",
+                "trigger_frame_id",
+            ):
+                if row.get(key) not in (None, ""):
+                    packet[key] = row.get(key)
+            break
+        for key in (
+            "model_council_packet",
+            "execution_packet",
+            "latest_model_council_packet",
+            "latest_execution_packet",
+            "model_council_result",
+            "model_council_state",
+            "latest_signal",
+            "tracking_summary",
+        ):
+            nested = row.get(key)
+            if isinstance(nested, Mapping):
+                pending.append((cast(Mapping[str, Any], nested), depth + 1))
     return cast(dict[str, object], packet)
 
 
@@ -2665,10 +3327,22 @@ def _decision_command_center_summary_v3(
         fresh = None
     age_ms = max(0.0, (current_epoch - created_epoch) * 1000.0) if created_epoch > 0.0 else 0.0
 
-    execution_packet_present = any(
-        bool(_current_execution_packet_from_payload(source))
-        for source in sources
+    current_execution_packet: dict[str, object] = {}
+    for source in sources:
+        current_execution_packet = _current_execution_packet_from_payload(source)
+        if current_execution_packet:
+            break
+    execution_packet_present = bool(current_execution_packet)
+    execution_lineage = _safe_execution_lineage_v3(current_execution_packet)
+    countertrend_projection = _validated_countertrend_projection_v3(
+        current_execution_packet,
+        execution_lineage,
+        sources,
+        now_epoch=current_epoch,
     )
+    packet_opportunity = _packet_execution_opportunity_v3(current_execution_packet)
+    if execution_lineage and packet_opportunity:
+        opportunity_window = packet_opportunity
     blocker = str(
         promotion.get("denied_at")
         or promotion.get("true_blocker")
@@ -2740,6 +3414,10 @@ def _decision_command_center_summary_v3(
             "lineage_rejected",
             "anchor_reused",
             "out_of_order_ignored",
+            "opportunity_id",
+            "opportunity_key",
+            "opened_frame_id",
+            "trigger_frame_id",
         )
         if opportunity_window.get(key) not in (None, "", [], {})
     }
@@ -2763,6 +3441,9 @@ def _decision_command_center_summary_v3(
         "book_strategy_playbook": playbook,
         "horizon": horizon_summary,
         "execution_opportunity_window_v3": opportunity_window_summary,
+        "execution_packet_id": str(execution_lineage.get("packet_id") or ""),
+        "execution_lineage": execution_lineage,
+        "countertrend_sniper_promotion_v3": countertrend_projection,
         "sides": side_summaries,
         "buy_score": cast(Mapping[str, object], side_summaries["BUY"])["score"],
         "sell_score": cast(Mapping[str, object], side_summaries["SELL"])["score"],
@@ -2794,6 +3475,15 @@ def _refresh_decision_command_center_freshness_v3(
     fresh: bool | None = valid_until_epoch >= current_epoch if valid_until_epoch > 0.0 else None
     refreshed["fresh"] = fresh
     refreshed["freshness_status"] = "PASS" if fresh is True else "STALE" if fresh is False else "UNKNOWN"
+    execution_lineage = _mapping_to_plain_dict(refreshed.get("execution_lineage"))
+    execution_valid_until = _epoch_float(
+        execution_lineage.get("valid_until_epoch"),
+        0.0,
+    )
+    if execution_lineage and execution_valid_until <= current_epoch:
+        # Retain bounded identity for an honest STALE explanation, but never
+        # let a cached command continue claiming a current execution packet.
+        refreshed["execution_packet_present"] = False
     opportunity_window = _mapping_to_plain_dict(refreshed.get("execution_opportunity_window_v3"))
     opportunity_valid_until = _epoch_float(
         opportunity_window.get("valid_until_epoch_sec") or opportunity_window.get("valid_until_epoch"),
@@ -3201,7 +3891,7 @@ class WindowTrackerControlUpdateRequest(BaseModel):
     high_frequency_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     high_frequency_timeframe: str | None = None
     high_frequency_entry_grace_sec: float | None = Field(default=None, ge=0.0, le=180.0)
-    high_frequency_expiry_seconds: int | None = Field(default=None, ge=60, le=3600)
+    high_frequency_expiry_seconds: int | None = Field(default=None, ge=900, le=7200)
     high_frequency_horizon_candles: int | None = Field(default=None, ge=1, le=12)
     execution_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     overlay_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -3285,7 +3975,7 @@ class WindowTrackerControlUpdateRequest(BaseModel):
 
 class WindowTrackerDemoTradeRequest(BaseModel):
     side: str | None = None
-    expiry_seconds: int = Field(default=180, ge=60, le=3600)
+    expiry_seconds: int = Field(default=900, ge=900, le=7200)
     force: bool = False
 
 
@@ -4018,6 +4708,12 @@ def _bounded_operator_projection_context(
                     directional["reasons"] = reasons
         if directional:
             result["directional_read"] = directional
+        path_clock_liquidity = path_clock_liquidity_contract_v3(
+            source.get("path_clock_liquidity_v3")
+            or source.get("path_clock_liquidity")
+        )
+        if path_clock_liquidity:
+            result["path_clock_liquidity_v3"] = path_clock_liquidity
         return result
 
     context: dict[str, object] = {}
@@ -4341,17 +5037,32 @@ def create_app(
 
     def read_window_tracker_session(session_id: str) -> dict[str, object]:
         tracker_service = get_window_tracker_service()
+
+        def _with_cpu_stream_runtime(payload: Mapping[str, object]) -> dict[str, object]:
+            public = dict(payload)
+            health_getter = getattr(tracker_service, "cpu_stream_health_v3", None)
+            if callable(health_getter):
+                try:
+                    public["cpu_stream_v3"] = health_getter(session_id, public)
+                except Exception:
+                    LOGGER.debug(
+                        "Unable to attach CPU stream runtime health for %s.",
+                        session_id,
+                        exc_info=True,
+                    )
+            return public
+
         compact_snapshot = _direct_window_tracker_compact_session_snapshot(session_id)
         if compact_snapshot is not None:
-            return compact_snapshot
+            return _with_cpu_stream_runtime(compact_snapshot)
         if not explicit_window_tracker_service:
             direct_snapshot = _direct_window_tracker_session_snapshot(session_id)
             if direct_snapshot is not None:
-                return direct_snapshot
+                return _with_cpu_stream_runtime(direct_snapshot)
         snapshot_getter = getattr(tracker_service, "get_session_snapshot", None)
         if callable(snapshot_getter):
-            return cast(dict[str, object], snapshot_getter(session_id))
-        return cast(dict[str, object], tracker_service.get_session(session_id))
+            return _with_cpu_stream_runtime(cast(dict[str, object], snapshot_getter(session_id)))
+        return _with_cpu_stream_runtime(cast(dict[str, object], tracker_service.get_session(session_id)))
 
     def get_voice_config() -> VoiceConfig:
         return getattr(app.state, "voice_config", resolved_voice_config)
@@ -6595,6 +7306,20 @@ def create_app(
                 }
             )
             projected["permission"] = permission
+        projected_session_id = str(projected.get("session_id", "") or "").strip()
+        if projected_session_id:
+            try:
+                runtime_session = read_window_tracker_session(projected_session_id)
+                projected = refresh_operator_streaming_read_v3(
+                    projected,
+                    runtime_session,
+                )
+            except Exception:
+                LOGGER.debug(
+                    "Unable to attach live CPU stream strip for %s.",
+                    projected_session_id,
+                    exc_info=True,
+                )
         assert projected.get("schema_version") == OPERATOR_WORKSPACE_SCHEMA_VERSION
         return projected
 
@@ -8953,52 +9678,10 @@ def create_app(
         every changed session snapshot as soon as the tracker publishes it.
         """
 
-        def _fingerprint(payload: Mapping[str, Any]) -> str:
-            latest_signal_raw: object = payload.get("latest_signal")
-            latest_signal: Mapping[str, object]
-            if isinstance(latest_signal_raw, Mapping):
-                latest_signal = cast(Mapping[str, object], latest_signal_raw)
-            else:
-                latest_signal = _EMPTY_OBJECT_MAPPING
-            tracking_raw: object = payload.get("tracking_summary")
-            tracking: Mapping[str, object]
-            if isinstance(tracking_raw, Mapping):
-                tracking = cast(Mapping[str, object], tracking_raw)
-            else:
-                tracking = _EMPTY_OBJECT_MAPPING
-            packet_raw: object = payload.get("model_council_packet") or payload.get("execution_packet")
-            if isinstance(packet_raw, Mapping):
-                packet_map: Mapping[str, object] = cast(Mapping[str, object], packet_raw)
-            else:
-                latest_packet: object = latest_signal.get("model_council_packet")
-                packet_map = cast(Mapping[str, object], latest_packet) if isinstance(latest_packet, Mapping) else _EMPTY_OBJECT_MAPPING
-            parts: dict[str, object] = {
-                "capture_count": payload.get("capture_count"),
-                "last_capture_epoch": payload.get("last_capture_epoch"),
-                "state_version": payload.get("state_version"),
-                "display_frame_id": payload.get("display_frame_id"),
-                "source_capture_id": payload.get("source_capture_id"),
-                "chart_frame_id": payload.get("chart_frame_id"),
-                "overlay_frame_id": payload.get("overlay_frame_id"),
-                "full_overlay_frame_id": payload.get("full_overlay_frame_id"),
-                "model_vote_frame_id": payload.get("model_vote_frame_id"),
-                "last_window_path": payload.get("last_window_path") or payload.get("last_frame_path"),
-                "last_display_window_path": payload.get("last_display_window_path"),
-                "last_chart_path": payload.get("last_chart_path"),
-                "last_overlay_path": payload.get("last_overlay_path"),
-                "last_full_overlay_path": payload.get("last_full_overlay_path"),
-                "signal_id": latest_signal.get("signal_id"),
-                "published_epoch": latest_signal.get("published_epoch"),
-                "hf_cycle": latest_signal.get("high_frequency_candle_cycle"),
-                "tracking_updated": tracking.get("published_at"),
-                "packet_id": packet_map.get("packet_id"),
-            }
-            return json.dumps(parts, sort_keys=True, default=str)
-
         def _events() -> Iterator[str]:
             last_fingerprint = ""
             last_keepalive = 0.0
-            last_direct_signature: tuple[str, int, int] | None = None
+            last_direct_signature: _DirectWindowTrackerStreamSignature | None = None
             while True:
                 now = time.time()
                 payload: dict[str, object] | None = None
@@ -9026,7 +9709,9 @@ def create_app(
                         last_keepalive = now
                     time.sleep(0.2)
                     continue
-                fingerprint = _fingerprint(cast(Mapping[str, Any], payload))
+                fingerprint = _window_tracker_stream_fingerprint_v3(
+                    cast(Mapping[str, Any], payload)
+                )
                 if fingerprint != last_fingerprint:
                     last_fingerprint = fingerprint
                     body = json.dumps(

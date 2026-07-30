@@ -10,7 +10,17 @@ from datetime import datetime, timezone
 from typing import Any, cast
 from urllib.parse import quote
 
+from phoenixguard.core.timing_policy_v3 import (
+    MAXIMUM_STUDIED_TRADE_DURATION_SECONDS,
+    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+)
 from phoenixguard.decision.entry_window_policy_v3 import entry_location_guidance_v3
+from phoenixguard.decision.countertrend_sniper_v3 import (
+    COUNTERTREND_SNIPER_LINEAGE_KEYS,
+    COUNTERTREND_SNIPER_PRELIMINARY_PHASE,
+    COUNTERTREND_SNIPER_SCHEMA_VERSION,
+    COUNTERTREND_SNIPER_VALIDATED_PHASE,
+)
 from phoenixguard.decision.order_positioning_evidence_v3 import (
     build_current_order_positioning_candidate_v3,
     build_current_order_reference_map_v3,
@@ -54,6 +64,7 @@ _TOP_LEVEL_KEYS = (
     "session_id",
     "revision",
     "market",
+    "three_questions",
     "tracking",
     "freshness",
     "current_move",
@@ -63,6 +74,39 @@ _TOP_LEVEL_KEYS = (
     "overlays",
     "history",
 )
+
+_CPU_STREAM_COUNTER_LIMIT = 1_000_000_000_000
+_CPU_STREAM_FRESHNESS_MIN_BUDGET_SEC = 8.0
+_CPU_STREAM_FRESHNESS_MAX_BUDGET_SEC = 45.0
+_CPU_STREAM_OBSERVED_PERIOD_MULTIPLIER = 3.0
+_CPU_STREAM_TARGET_PERIOD_MULTIPLIER = 4.0
+_CPU_STREAM_MARKET_READ_SCHEMA_VERSION = "PG_CPU_STREAM_MARKET_READ_V3"
+_CPU_STREAM_STATE_ALIASES = {
+    "ACTIVE": "RUNNING",
+    "RUNNING": "RUNNING",
+    "LIVE": "RUNNING",
+    "STREAMING": "RUNNING",
+    "STARTING": "STARTING",
+    "CONNECTING": "STARTING",
+    "WARMING": "STARTING",
+    "WAITING": "STARTING",
+    "FALLBACK_SNAPSHOT": "DEGRADED",
+    "SNAPSHOT_FALLBACK": "DEGRADED",
+    "DEGRADED_SNAPSHOT_FALLBACK": "DEGRADED",
+    "DEGRADED": "DEGRADED",
+    "DELAYED": "DEGRADED",
+    "SLOW": "DEGRADED",
+    "STARVED": "DEGRADED",
+    "PAUSED": "PAUSED",
+    "DISABLED": "DISABLED",
+    "STOPPED": "STOPPED",
+    "IDLE": "STOPPED",
+    "INACTIVE": "STOPPED",
+    "OFFLINE": "OFFLINE",
+    "ERROR": "OFFLINE",
+    "FAILED": "OFFLINE",
+    "UNAVAILABLE": "OFFLINE",
+}
 
 _OVERLAY_PRESENTATION: dict[str, tuple[str, str, str]] = {
     "CHART_BOUNDS": ("chart", "Chart area", "structure"),
@@ -899,6 +943,231 @@ def _window_label(*, is_open: bool, valid_for_seconds: float | None) -> str:
     return f"Open · {seconds}s remaining"
 
 
+def _countertrend_sniper_promotion_source(
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    return _first_mapping(
+        payload,
+        ("decision_command_center", "countertrend_sniper_promotion_v3"),
+        ("model_council_result", "book_strategy", "countertrend_sniper_promotion_v3"),
+        ("model_council_result", "countertrend_sniper_promotion_v3"),
+        ("model_council_result", "model_council", "countertrend_sniper_promotion_v3"),
+        ("model_council_study_packet", "countertrend_sniper_promotion_v3"),
+        ("study_packet", "countertrend_sniper_promotion_v3"),
+        ("countertrend_sniper_promotion_v3",),
+    )
+
+
+def _instrument_token(value: object) -> str:
+    return "".join(
+        character
+        for character in _text(value, "").upper()
+        if character.isalnum()
+    )
+
+
+def _first_identity_text(*values: object) -> str:
+    for value in values:
+        resolved = _text(value, "")
+        if resolved:
+            return resolved
+    return ""
+
+
+def _countertrend_bypass_validation_v3(
+    payload: Mapping[str, Any],
+    command: Mapping[str, Any],
+    *,
+    selected_side: str,
+    now_epoch: float,
+) -> tuple[bool, str]:
+    """Validate an opposing-force movement substitute against live identity.
+
+    A projected promotion is evidence, not authority.  The bypass becomes
+    usable only when its complete lineage exactly equals the command's bounded
+    lineage and that lineage still belongs to the chart currently displayed.
+    """
+
+    promotion = _mapping(command.get("countertrend_sniper_promotion_v3"))
+    if not promotion:
+        return False, "ABSENT"
+    classification = _text(promotion.get("classification"), "").upper()
+    phase = _text(promotion.get("phase"), "").upper()
+    if phase == COUNTERTREND_SNIPER_PRELIMINARY_PHASE or classification == "FORMING":
+        return False, "PRELIMINARY"
+    command_lineage = _mapping(command.get("execution_lineage"))
+    promotion_lineage = _mapping(promotion.get("lineage"))
+    if not command_lineage or not promotion_lineage:
+        return False, "INVALIDATED"
+    if any(
+        promotion_lineage.get(field) != command_lineage.get(field)
+        for field in COUNTERTREND_SNIPER_LINEAGE_KEYS
+    ):
+        return False, "INVALIDATED"
+    if not (
+        _text(promotion.get("schema_version"), "")
+        == COUNTERTREND_SNIPER_SCHEMA_VERSION
+        and phase == COUNTERTREND_SNIPER_VALIDATED_PHASE
+        and _explicit_bool(promotion.get("active")) is True
+        and classification == "ENTER_NOW"
+        and _side(promotion.get("side")) == selected_side
+        and selected_side in _DIRECTIONAL_SIDES
+        and _explicit_bool(promotion.get("entry_permission_authorized")) is True
+        and _explicit_bool(
+            promotion.get("movement_confirmation_bypass_allowed")
+        )
+        is True
+        and _explicit_bool(promotion.get("execution_packet_present")) is True
+        and _text(promotion.get("validated_entry_mode"), "").upper()
+        == "COUNTERTREND_SNIPER"
+        and _explicit_bool(promotion.get("broker_click_authority")) is False
+        and _explicit_bool(command.get("execution_packet_present")) is True
+    ):
+        return False, "INVALIDATED"
+
+    required_text = (
+        "packet_id",
+        "opportunity_id",
+        "session_id",
+        "symbol",
+        "timeframe",
+        "input_frame_hash",
+        "instrument_identity_hash",
+        "trigger_closed_candle_key",
+        "opportunity_key",
+    )
+    required_positive = (
+        "frame_id",
+        "capture_count",
+        "state_version",
+        "trigger_frame_id",
+    )
+    if (
+        any(not _text(command_lineage.get(field), "") for field in required_text)
+        or any(_integer(command_lineage.get(field)) <= 0 for field in required_positive)
+        or _explicit_bool(command_lineage.get("integrity_valid")) is not True
+        or _explicit_bool(command_lineage.get("lineage_rejected")) is not False
+        or _integer(command_lineage.get("trigger_frame_id"))
+        != _integer(command_lineage.get("frame_id"))
+    ):
+        return False, "INVALIDATED"
+    valid_until_epoch = _epoch(command_lineage.get("valid_until_epoch"))
+    if valid_until_epoch is None or valid_until_epoch <= now_epoch:
+        return False, "STALE"
+
+    packet_id = _text(command_lineage.get("packet_id"), "")
+    if _text(command.get("execution_packet_id"), "") != packet_id:
+        return False, "INVALIDATED"
+    opportunity = _first_mapping(
+        command,
+        ("execution_opportunity_window_v3",),
+        ("opportunity",),
+    )
+    if (
+        _text(opportunity.get("opportunity_id"), "")
+        != _text(command_lineage.get("opportunity_id"), "")
+        or _text(opportunity.get("opportunity_key"), "")
+        != _text(command_lineage.get("opportunity_key"), "")
+    ):
+        return False, "INVALIDATED"
+
+    tracking = _mapping(payload.get("tracking_summary"))
+    latest_signal = _mapping(payload.get("latest_signal"))
+    current_session = _text(payload.get("session_id"), "")
+    current_symbol = _first_identity_text(
+        tracking.get("detected_market"),
+        latest_signal.get("market"),
+        latest_signal.get("symbol"),
+        payload.get("symbol"),
+        payload.get("market"),
+    )
+    current_timeframe = _first_identity_text(
+        tracking.get("detected_timeframe"),
+        latest_signal.get("focus_timeframe"),
+        latest_signal.get("timeframe"),
+        payload.get("timeframe"),
+    ).upper()
+    if (
+        not current_session
+        or _text(command_lineage.get("session_id"), "") != current_session
+        or not current_symbol
+        or _instrument_token(command_lineage.get("symbol"))
+        != _instrument_token(current_symbol)
+        or not current_timeframe
+        or _text(command_lineage.get("timeframe"), "").upper()
+        != current_timeframe
+    ):
+        return False, "INVALIDATED"
+
+    display_frame = _integer(
+        payload.get("display_frame_id"),
+        payload.get("chart_frame_id"),
+        payload.get("frame_id"),
+        tracking.get("display_frame_id"),
+        tracking.get("frame_id"),
+        tracking.get("frame_index"),
+    )
+    current_capture = _integer(
+        payload.get("capture_count"),
+        tracking.get("capture_count"),
+    )
+    current_state_version = _integer(
+        payload.get("state_version"),
+        payload.get("decision_version"),
+        tracking.get("state_version"),
+    )
+    if not (display_frame > 0 and current_capture > 0 and current_state_version > 0):
+        return False, "INVALIDATED"
+    if (
+        _integer(command_lineage.get("frame_id")) != display_frame
+        or _integer(command_lineage.get("trigger_frame_id")) != display_frame
+        or _integer(command_lineage.get("capture_count")) != current_capture
+        or _integer(command_lineage.get("state_version"))
+        != current_state_version
+    ):
+        return False, "INVALIDATED"
+
+    current_input_hash = _first_identity_text(
+        payload.get("input_frame_hash"),
+        payload.get("frame_hash"),
+        tracking.get("input_frame_hash"),
+        tracking.get("frame_hash"),
+        latest_signal.get("input_frame_hash"),
+        latest_signal.get("frame_hash"),
+    )
+    current_instrument_hash = _first_identity_text(
+        payload.get("instrument_identity_hash"),
+        tracking.get("instrument_identity_hash"),
+        latest_signal.get("instrument_identity_hash"),
+    )
+    if not current_input_hash:
+        return False, "INVALIDATED"
+    if current_input_hash != _text(command_lineage.get("input_frame_hash"), ""):
+        return False, "INVALIDATED"
+    if (
+        current_instrument_hash
+        and current_instrument_hash
+        != _text(command_lineage.get("instrument_identity_hash"), "")
+    ):
+        return False, "INVALIDATED"
+    current_study = _mapping(tracking.get("market_study_v3")) or _mapping(
+        latest_signal.get("market_study_v3")
+    )
+    current_trigger_key = _first_identity_text(
+        payload.get("trigger_closed_candle_key"),
+        tracking.get("trigger_closed_candle_key"),
+        latest_signal.get("trigger_closed_candle_key"),
+        current_study.get("closed_candle_key"),
+    )
+    if not current_trigger_key:
+        return False, "INVALIDATED"
+    if current_trigger_key != _text(
+        command_lineage.get("trigger_closed_candle_key"), ""
+    ):
+        return False, "INVALIDATED"
+    return True, "VALIDATED"
+
+
 def _permission_contract(
     payload: Mapping[str, Any],
     command: Mapping[str, Any],
@@ -927,6 +1196,14 @@ def _permission_contract(
         and current_move.get("observed_at") is not None
         and selected_side in _DIRECTIONAL_SIDES
     )
+    countertrend_sniper_bypass, _countertrend_validation_state = (
+        _countertrend_bypass_validation_v3(
+            payload,
+            command,
+            selected_side=selected_side,
+            now_epoch=now_epoch,
+        )
+    )
     pressure_side = _text(pressure_event.get("direction"), "NEUTRAL").upper()
     pressure_state = _text(pressure_event.get("state"), "UNKNOWN").upper()
     contradictory_pressure = (
@@ -940,13 +1217,19 @@ def _permission_contract(
         and execution_present
         and live_execution_enabled
         and opportunity_open
-        and movement_matches
-        and not contradictory_pressure
+        and (movement_matches or countertrend_sniper_bypass)
+        and (not contradictory_pressure or countertrend_sniper_bypass)
     )
     action = f"{selected_side}_NOW" if allowed else "WAIT"
     if allowed:
         movement_word = "buy" if selected_side == "BUY" else "sell"
-        message = f"A verified {movement_word} entry window is open. {entry_guidance}"
+        if countertrend_sniper_bypass:
+            message = (
+                f"A verified countertrend sniper {movement_word} entry window is open. "
+                f"Closed-candle rejection is the validated trigger. {entry_guidance}"
+            )
+        else:
+            message = f"A verified {movement_word} entry window is open. {entry_guidance}"
         next_condition = (
             "Use only the current verified window; stop and wait if live truth changes."
         )
@@ -2251,18 +2534,15 @@ def _continuous_study_history_summary(study: Mapping[str, object]) -> str:
 
 def _history_contract(
     payload: Mapping[str, Any],
+    *,
+    current_symbol: str = "",
+    current_timeframe: str = "",
 ) -> list[dict[str, object]]:
     """Return bounded automatic closed-candle studies in chronological order."""
 
-    tracking_summary = _mapping(payload.get("tracking_summary"))
-    latest_signal = _mapping(payload.get("latest_signal"))
-    current_study = _market_study_contract(
-        tracking_summary.get("market_study_v3")
-        or latest_signal.get("market_study_v3")
-    )
-    current_symbol = _text(current_study.get("symbol"), "").upper()
-    current_timeframe = _text(current_study.get("timeframe"), "").upper()
-    if not current_symbol or not current_timeframe:
+    resolved_symbol = _text(current_symbol, "").upper()
+    resolved_timeframe = _text(current_timeframe, "").upper()
+    if not resolved_symbol or not resolved_timeframe:
         return []
 
     history: list[dict[str, object]] = []
@@ -2286,9 +2566,10 @@ def _history_contract(
         ):
             continue
         if (
-            _text(study.get("symbol"), "").upper() != current_symbol
+            _instrument_token(study.get("symbol"))
+            != _instrument_token(resolved_symbol)
             or _text(study.get("timeframe"), "").upper()
-            != current_timeframe
+            != resolved_timeframe
         ):
             continue
         directional = _mapping(study.get("directional_read"))
@@ -2609,6 +2890,1266 @@ def _retracement_partition_contract(value: object) -> dict[str, object]:
     return result
 
 
+def _plain_direction(side: str) -> str:
+    if side == "BUY":
+        return "upward"
+    if side == "SELL":
+        return "downward"
+    return "sideways or unresolved"
+
+
+def _dominant_side(counts: Mapping[str, int]) -> str:
+    directional = {
+        side: max(0, int(counts.get(side, 0)))
+        for side in _DIRECTIONAL_SIDES
+    }
+    maximum = max(directional.values(), default=0)
+    winners = [side for side, count in directional.items() if count == maximum and count > 0]
+    return winners[0] if len(winners) == 1 else "NEUTRAL"
+
+
+def _path_clock_direction_side_v3(*values: object) -> str:
+    for value in values:
+        token = _text(value, "", limit=16).upper()
+        if token in _DIRECTIONAL_SIDES:
+            return token
+        if token in {"UP", "UPWARD", "BULLISH"}:
+            return "BUY"
+        if token in {"DOWN", "DOWNWARD", "BEARISH"}:
+            return "SELL"
+    return "NEUTRAL"
+
+
+def path_clock_liquidity_contract_v3(value: object) -> dict[str, object]:
+    """Return the compact public JPCLF contract and discard trajectory internals.
+
+    The operator projection deliberately retains only one current timing read,
+    its promotion proof summary, and bounded replay-calibration metrics.  Raw
+    trajectories, neighbours, liquidity vectors, freezes, and persistence data
+    never cross this boundary.
+    """
+
+    source = _mapping(value)
+    if (
+        not source
+        or source.get("study_only") is not True
+        or source.get("execution_authority") is not False
+        or source.get("can_grant_entry_permission") is True
+    ):
+        return {}
+
+    scope = _mapping(source.get("scope"))
+    lineage = _mapping(source.get("lineage"))
+    duration_policy = _mapping(source.get("duration_policy"))
+    timing = (
+        _mapping(source.get("timing_read"))
+        or _mapping(source.get("current_estimate"))
+        or _mapping(source.get("live_estimate"))
+        or _mapping(source.get("recommended_scenario"))
+        or _mapping(source.get("recommendation"))
+    )
+    if not timing and any(
+        key in source
+        for key in (
+            "contract_duration_seconds",
+            "remaining_seconds",
+            "survival_probability",
+            "timing_supports_entry",
+            "timing_veto",
+        )
+    ):
+        timing = source
+
+    minimum_duration = _number(
+        source.get("minimum_eligible_duration_seconds")
+        if source.get("minimum_eligible_duration_seconds") is not None
+        else source.get("minimum_duration_seconds")
+        if source.get("minimum_duration_seconds") is not None
+        else duration_policy.get("minimum_eligible_duration_seconds")
+    )
+    maximum_duration = _number(
+        source.get("maximum_studied_duration_seconds")
+        if source.get("maximum_studied_duration_seconds") is not None
+        else duration_policy.get("maximum_studied_duration_seconds")
+    )
+    symbol = _safe_public_text(
+        source.get("symbol") or scope.get("symbol") or lineage.get("symbol"),
+        "",
+        limit=64,
+    )
+    timeframe = _safe_public_text(
+        source.get("timeframe") or scope.get("timeframe") or lineage.get("timeframe"),
+        "",
+        limit=32,
+    ).upper()
+    closed_candle_key = _safe_identifier(
+        source.get("closed_candle_key")
+        or lineage.get("closed_candle_key")
+        or timing.get("closed_candle_key"),
+        "",
+    )
+    result: dict[str, object] = {
+        "schema_version": _safe_public_text(
+            source.get("schema_version"),
+            "PG_PATH_CLOCK_LIQUIDITY_FIELD_V3",
+            limit=96,
+        ),
+        "status": _safe_public_text(source.get("status"), "PENDING", limit=64).upper(),
+        "reason": _safe_public_text(source.get("reason"), "", limit=320),
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "closed_candle_key": closed_candle_key,
+        "closed_candle_sequence": _integer(
+            source.get("closed_candle_sequence")
+            if source.get("closed_candle_sequence") is not None
+            else lineage.get("closed_candle_sequence")
+        ),
+        "minimum_eligible_duration_seconds": (
+            int(minimum_duration)
+            if minimum_duration is not None and minimum_duration.is_integer()
+            else round(minimum_duration, 6)
+            if minimum_duration is not None
+            else None
+        ),
+        "maximum_studied_duration_seconds": (
+            int(maximum_duration)
+            if maximum_duration is not None and maximum_duration.is_integer()
+            else round(maximum_duration, 6)
+            if maximum_duration is not None
+            else None
+        ),
+        "mature": _explicit_bool(source.get("mature")) is True,
+        "promoted": _explicit_bool(source.get("promoted")) is True,
+        "freshness_state": _safe_public_text(
+            source.get("freshness_state") or source.get("freshness"),
+            "",
+            limit=32,
+        ).upper(),
+    }
+    if duration_policy:
+        duration_policy_status = _safe_public_text(
+            duration_policy.get("status"), "", limit=64
+        ).upper()
+    else:
+        duration_policy_status = _safe_public_text(
+            source.get("duration_policy_status"), "", limit=64
+        ).upper()
+    if duration_policy_status:
+        result["duration_policy_status"] = duration_policy_status
+    duration_policy_eligible = _explicit_bool(
+        duration_policy.get("new_entry_eligible")
+        if duration_policy.get("new_entry_eligible") is not None
+        else source.get("duration_policy_eligible")
+    )
+    if duration_policy_eligible is not None:
+        result["duration_policy_eligible"] = duration_policy_eligible
+
+    if timing:
+        timing_side = _path_clock_direction_side_v3(
+            timing.get("side"),
+            timing.get("studied_direction"),
+            timing.get("direction"),
+        )
+        timing_read: dict[str, object] = {
+            "status": _safe_public_text(timing.get("status"), "PENDING", limit=64).upper(),
+            "state": _safe_public_text(timing.get("state"), "", limit=64).upper(),
+            "reason": _safe_public_text(timing.get("reason"), "", limit=320),
+            "side": timing_side,
+        }
+        scalar_integer_fields = (
+            "contract_duration_seconds",
+            "candidate_horizon_seconds",
+            "elapsed_seconds",
+            "remaining_seconds",
+            "support_count",
+            "minimum_support",
+            "audited_neighbor_count",
+            "excluded_early_target_count",
+        )
+        for key in scalar_integer_fields:
+            raw = timing.get(key)
+            if _number(raw) is not None:
+                timing_read[key] = _integer(raw)
+        for key in (
+            "current_path_mru",
+            "stop_distance_mru",
+            "move_size_mru",
+            "survival_probability",
+            "probability_worst_drawdown_still_ahead",
+        ):
+            numeric = _number(timing.get(key))
+            if numeric is not None:
+                timing_read[key] = round(numeric, 6)
+        for key in ("observed_at", "valid_until"):
+            numeric = _number(timing.get(key))
+            if numeric is not None:
+                timing_read[key] = round(numeric, 6)
+        for key in (
+            "eligible",
+            "contract_admitted",
+            "new_entry_eligible",
+            "timing_supports_entry",
+            "timing_veto",
+        ):
+            boolean = _explicit_bool(timing.get(key))
+            if boolean is not None:
+                timing_read[key] = boolean
+        target_time = _mapping(timing.get("target_time_seconds"))
+        if target_time:
+            timing_read["target_time_seconds"] = {
+                key: round(numeric, 3)
+                for key in ("p10", "median", "p90")
+                if (numeric := _number(target_time.get(key))) is not None
+            }
+        result["timing_read"] = timing_read
+
+    promotion_source = (
+        _mapping(source.get("promotion_gate"))
+        or _mapping(source.get("promotion"))
+        or _mapping(source.get("maturation_gate"))
+    )
+    if promotion_source:
+        promotion: dict[str, object] = {
+            "status": _safe_public_text(
+                promotion_source.get("status"), "RETAIN_BASELINE", limit=64
+            ).upper(),
+        }
+        for key in ("passed", "all_axes_improved"):
+            boolean = _explicit_bool(promotion_source.get(key))
+            if boolean is not None:
+                promotion[key] = boolean
+        for key in ("minimum_replays", "eligible_replay_count"):
+            if _number(promotion_source.get(key)) is not None:
+                promotion[key] = _integer(promotion_source.get(key))
+        support = _mapping(promotion_source.get("support"))
+        if support:
+            promotion["support"] = {
+                key: _integer(raw)
+                for key in ("baseline", "candidate")
+                if (raw := support.get(key)) is not None and _number(raw) is not None
+            } | ({"passed": True} if support.get("passed") is True else {})
+        result["promotion_gate"] = promotion
+
+    replay_source = (
+        _mapping(source.get("replay_score"))
+        or _mapping(source.get("calibration"))
+        or _mapping(source.get("replay_calibration"))
+    )
+    if replay_source:
+        metrics = _mapping(replay_source.get("metrics")) or replay_source
+        replay: dict[str, object] = {}
+        for key in (
+            "audited_replay_count",
+            "eligible_replay_count",
+            "excluded_early_move_count",
+            "sweep_outcome_count",
+        ):
+            if _number(replay_source.get(key)) is not None:
+                replay[key] = _integer(replay_source.get(key))
+        safe_metrics: dict[str, object] = {}
+        for key in (
+            "directional_accuracy",
+            "timing_accuracy",
+            "sweep_survival_rate",
+            "calibration_score",
+            "expected_calibration_error",
+            "brier_score",
+        ):
+            numeric = _number(metrics.get(key))
+            if numeric is not None:
+                safe_metrics[key] = round(numeric, 6)
+        if safe_metrics:
+            replay["metrics"] = safe_metrics
+        if replay:
+            result["replay_calibration"] = replay
+    return result
+
+
+def _path_clock_timing_effect_v3(
+    timing_contract: Mapping[str, object],
+    *,
+    current_symbol: str,
+    current_timeframe: str,
+    study_closed_candle_key: str,
+    studied_side: str,
+    freshness_state: str,
+    now_epoch: float,
+) -> dict[str, object]:
+    """Evaluate JPCLF as an asymmetric timing brake, never an authority source."""
+
+    if not timing_contract:
+        return {
+            "present": False,
+            "mature": False,
+            "timing_supports_entry": False,
+            "timing_veto": False,
+            "state": "UNAVAILABLE",
+            "reason": "No mature timing study is published yet.",
+        }
+
+    timing = _mapping(timing_contract.get("timing_read"))
+    promotion = _mapping(timing_contract.get("promotion_gate"))
+    contract_status = _text(timing_contract.get("status"), "PENDING").upper()
+    timing_status = _text(timing.get("status"), "PENDING").upper()
+    timing_side = _path_clock_direction_side_v3(timing.get("side"))
+    source_symbol = _safe_public_text(timing_contract.get("symbol"), "", limit=64)
+    source_timeframe = _safe_public_text(
+        timing_contract.get("timeframe"), "", limit=32
+    ).upper()
+    source_key = _safe_identifier(timing_contract.get("closed_candle_key"), "")
+    lineage_matches = bool(
+        source_symbol
+        and source_timeframe
+        and source_key
+        and _instrument_token(source_symbol) == _instrument_token(current_symbol)
+        and source_timeframe == current_timeframe.upper()
+        and source_key == study_closed_candle_key
+        and timing_side in _DIRECTIONAL_SIDES
+        and timing_side == studied_side
+    )
+    source_freshness = _text(
+        timing_contract.get("freshness_state"), "", limit=32
+    ).upper()
+    timing_valid_until = _number(timing.get("valid_until"))
+    freshness_matches = bool(
+        freshness_state == "FRESH"
+        and source_freshness not in {"STALE", "EXPIRED", "WAITING", "INVALID"}
+        and (timing_valid_until is None or timing_valid_until > now_epoch)
+    )
+    promotion_passed = bool(
+        promotion.get("passed") is True
+        and promotion.get("all_axes_improved") is True
+        and _text(promotion.get("status"), "", limit=64).upper()
+        in {"PROMOTION_ELIGIBLE", "PROMOTED", "PASSED"}
+    ) or bool(
+        timing_contract.get("promoted") is True
+        and timing_contract.get("mature") is True
+    )
+    maturity_claimed = bool(
+        timing_contract.get("mature") is True
+        or contract_status in {"MATURE", "PROMOTED", "READY"}
+        or (
+            timing_status
+            in {
+                "STUDIED",
+                "MATURE",
+                "SUPPORTED",
+                "READY",
+                "TIMING_SUPPORT",
+                "TIMING_VETO",
+            }
+            and promotion_passed
+        )
+        or (
+            contract_status == "STUDIED"
+            and timing_status in {"TIMING_SUPPORT", "TIMING_VETO"}
+            and promotion_passed
+        )
+    )
+    eligible = timing.get("eligible") is True
+    explicit_support = _explicit_bool(timing.get("timing_supports_entry"))
+    explicit_veto = _explicit_bool(timing.get("timing_veto"))
+    minimum_duration = _number(
+        timing_contract.get("minimum_eligible_duration_seconds")
+    )
+    maximum_duration = _number(
+        timing_contract.get("maximum_studied_duration_seconds")
+    )
+    duration_policy_status = _text(
+        timing_contract.get("duration_policy_status"), "", limit=64
+    ).upper()
+    contract_duration = _number(timing.get("contract_duration_seconds"))
+    remaining_seconds = _number(timing.get("remaining_seconds"))
+    duration_policy_valid = bool(
+        minimum_duration == float(MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS)
+        and (
+            maximum_duration is None
+            or maximum_duration == float(MAXIMUM_STUDIED_TRADE_DURATION_SECONDS)
+        )
+        and contract_duration is not None
+        and MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        <= contract_duration
+        <= MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+    )
+    remaining_window_eligible = bool(
+        remaining_seconds is not None
+        and remaining_seconds >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+    )
+    timing_evidence_unavailable = bool(
+        contract_status == "CENSORED_INVALID_TIMING_EVIDENCE"
+        or duration_policy_status == "NOT_ALIGNED_TO_CLOSED_CANDLE_GRID"
+        or timing.get("contract_admitted") is False
+        or timing_status
+        in {
+            "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE",
+            "INVALID_TIMING_EVIDENCE",
+            "UNPROVEN_CLOSED_CANDLE_TIME",
+        }
+    )
+    fully_mature = bool(
+        maturity_claimed
+        and promotion_passed
+        and timing_status
+        in {
+            "STUDIED",
+            "MATURE",
+            "SUPPORTED",
+            "READY",
+            "TIMING_SUPPORT",
+            "TIMING_VETO",
+        }
+        and eligible
+        and lineage_matches
+        and freshness_matches
+        and duration_policy_valid
+        and remaining_window_eligible
+        and not timing_evidence_unavailable
+        and (explicit_support is not None or explicit_veto is not None)
+    )
+    unsafe_mature_claim = bool(
+        maturity_claimed
+        and (
+            not lineage_matches
+            or not freshness_matches
+            or not duration_policy_valid
+            or not remaining_window_eligible
+            or timing_evidence_unavailable
+        )
+    )
+    hard_duration_veto = bool(
+        timing
+        and (
+            not duration_policy_valid
+            or not remaining_window_eligible
+            or duration_policy_status
+            in {
+                "EXCLUDED_UNDER_15_MINUTES",
+                "EXCLUDED_ABOVE_BOUNDED_HORIZON",
+            }
+        )
+    )
+    timing_evidence_veto = bool(
+        timing_evidence_unavailable
+        or (
+            timing
+            and timing.get("new_entry_eligible") is False
+            and not hard_duration_veto
+        )
+    )
+    timing_veto = bool(
+        explicit_veto is True
+        or unsafe_mature_claim
+        or hard_duration_veto
+        or timing_evidence_veto
+    )
+    timing_supports = bool(
+        fully_mature and explicit_support is True and explicit_veto is not True
+    )
+
+    if (
+        minimum_duration != float(MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS)
+        or (
+            maximum_duration is not None
+            and maximum_duration != float(MAXIMUM_STUDIED_TRADE_DURATION_SECONDS)
+        )
+        or contract_duration is None
+        or contract_duration > MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+    ):
+        state = "INVALID_DURATION_POLICY"
+        reason = "The timing contract does not carry the canonical 15-minute to two-hour V3 duration policy."
+    elif (
+        contract_duration < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        or not remaining_window_eligible
+        or duration_policy_status == "EXCLUDED_UNDER_15_MINUTES"
+    ):
+        state = "UNDER_15_MINUTES"
+        reason = "Do not start this move with less than 15 minutes of room."
+    elif timing_evidence_unavailable:
+        state = "TIMING_EVIDENCE_UNAVAILABLE"
+        reason = (
+            "Exact contiguous closed-candle timing is not proven for this chart yet; "
+            "the system will not invent a survival probability."
+        )
+    elif maturity_claimed and not lineage_matches:
+        state = "INVALID_LINEAGE"
+        reason = "Timing evidence does not match this pair, timeframe, candle, and direction."
+    elif maturity_claimed and not freshness_matches:
+        state = "STALE"
+        reason = "The mature timing read is not fresh for the current completed-candle study."
+    elif fully_mature and timing_veto:
+        state = "DELAY"
+        reason = _safe_public_text(
+            timing.get("reason"),
+            "Historical path, clock, and liquidity evidence says delay this entry.",
+            limit=320,
+        )
+    elif fully_mature and timing_supports:
+        state = "SUPPORTED"
+        reason = _safe_public_text(
+            timing.get("reason"),
+            "Historical path, clock, and liquidity evidence supports this timing.",
+            limit=320,
+        )
+    else:
+        state = "BUILDING"
+        reason = "Timing history is still building and cannot grant entry permission."
+
+    return {
+        "present": True,
+        "mature": fully_mature,
+        "maturity_claimed": maturity_claimed,
+        "lineage_matches": lineage_matches,
+        "fresh": freshness_matches,
+        "duration_policy_valid": duration_policy_valid,
+        "remaining_window_eligible": remaining_window_eligible,
+        "timing_evidence_proven": not timing_evidence_unavailable,
+        "source_status": contract_status,
+        "source_timing_status": timing_status,
+        "minimum_duration_seconds": MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+        "contract_duration_seconds": (
+            int(contract_duration) if contract_duration is not None else None
+        ),
+        "remaining_seconds": (
+            int(remaining_seconds) if remaining_seconds is not None else None
+        ),
+        "valid_until": timing_valid_until,
+        "side": timing_side,
+        "timing_supports_entry": timing_supports,
+        "timing_veto": timing_veto,
+        "state": state,
+        "reason": reason,
+    }
+
+
+def _three_question_brief_v3(
+    payload: Mapping[str, Any],
+    *,
+    command: Mapping[str, Any],
+    market: Mapping[str, object],
+    market_study: Mapping[str, object],
+    history: Sequence[Mapping[str, object]],
+    freshness: Mapping[str, object],
+    current_move: Mapping[str, object],
+    pressure_event: Mapping[str, object],
+    permission: Mapping[str, object],
+    now_epoch: float,
+) -> dict[str, object]:
+    """Answer the only three questions the public operator surface must resolve.
+
+    Directional study evidence deliberately remains visible when execution is
+    unavailable.  Entry permission is projected only by the third answer and is
+    never inferred from trend, regression, a council score, or a missed move.
+    """
+
+    regression = _mapping(market_study.get("regression"))
+    behavior = _mapping(market_study.get("behavior"))
+    current_behavior = _mapping(behavior.get("current_state"))
+    directional = _mapping(market_study.get("directional_read"))
+    pair_dna = _mapping(market_study.get("pair_dna"))
+    path_clock_liquidity = _mapping(
+        market_study.get("path_clock_liquidity_v3")
+    )
+
+    major = _mapping(regression.get("major_trend"))
+    inner = _mapping(regression.get("inner_trend"))
+    regression_pressure = _mapping(regression.get("current_pressure"))
+    major_side = _side(major.get("side"))
+    inner_side = _side(inner.get("side"))
+    regression_side = _side(directional.get("side"))
+    behavior_side = _side(current_behavior.get("direction"))
+    behavior_state = _safe_public_text(
+        current_behavior.get("state"), "Unknown", limit=32
+    ).upper()
+    behavior_candles = _integer(current_behavior.get("candle_count"))
+    behavior_duration = _integer(current_behavior.get("duration_seconds"))
+
+    current_symbol = _safe_public_text(market.get("symbol"), "Unknown", limit=64)
+    current_timeframe = _safe_public_text(
+        market.get("timeframe"), "Unknown", limit=32
+    ).upper()
+    study_symbol = _safe_public_text(
+        market_study.get("symbol"), "Unknown", limit=64
+    )
+    study_timeframe = _safe_public_text(
+        market_study.get("timeframe"), "Unknown", limit=32
+    ).upper()
+    has_completed_study_identity = bool(
+        _text(market_study.get("status"), "").upper() == "STUDIED"
+        and _safe_identifier(market_study.get("closed_candle_key"), "")
+        and study_symbol != "Unknown"
+        and study_timeframe != "UNKNOWN"
+    )
+    study_matches_current_market = bool(
+        has_completed_study_identity
+        and current_symbol != "Unknown"
+        and current_timeframe != "UNKNOWN"
+        and _instrument_token(study_symbol) == _instrument_token(current_symbol)
+        and study_timeframe == current_timeframe
+    )
+    identity_proven = study_matches_current_market
+    identity_mismatch = bool(
+        has_completed_study_identity and not study_matches_current_market
+    )
+    freshness_state = _text(freshness.get("state"), "UNKNOWN").upper()
+    last_completed_only = identity_proven and freshness_state != "FRESH"
+
+    history_major_counts = {"BUY": 0, "SELL": 0}
+    history_regression_counts = {"BUY": 0, "SELL": 0}
+    for row in history:
+        row_major = _side(_mapping(row.get("major_trend")).get("side"))
+        row_regression = _side(_mapping(row.get("regression_read")).get("side"))
+        if row_major in _DIRECTIONAL_SIDES:
+            history_major_counts[row_major] += 1
+        if row_regression in _DIRECTIONAL_SIDES:
+            history_regression_counts[row_regression] += 1
+    history_dominant_side = _dominant_side(history_regression_counts)
+    origin_side = (
+        major_side if major_side in _DIRECTIONAL_SIDES else history_dominant_side
+    ) if identity_proven else "NEUTRAL"
+
+    if identity_proven:
+        behavior_phrase = ""
+        if behavior_state != "UNKNOWN":
+            duration_phrase = (
+                f" over {behavior_duration} seconds" if behavior_duration > 0 else ""
+            )
+            candle_phrase = (
+                f" for {behavior_candles} completed candle"
+                f"{'' if behavior_candles == 1 else 's'}"
+                if behavior_candles > 0
+                else ""
+            )
+            directional_phrase = (
+                f" {_plain_direction(behavior_side)}"
+                if behavior_side in _DIRECTIONAL_SIDES
+                else ""
+            )
+            behavior_phrase = (
+                f" The latest completed behavior is{directional_phrase} "
+                f"{behavior_state.replace('_', ' ').lower()}"
+                f"{candle_phrase}{duration_phrase}."
+            )
+        inner_phrase = (
+            f" The inner trend is {_plain_direction(inner_side)}."
+            if inner_side in _DIRECTIONAL_SIDES
+            else ""
+        )
+        history_phrase = (
+            f" {len(history)} identity-matched closed-candle history "
+            f"observation{'' if len(history) == 1 else 's'} are available."
+            if history
+            else ""
+        )
+        answer = (
+            f"The market comes from {_plain_direction(origin_side)} major structure."
+            f"{inner_phrase}{behavior_phrase}{history_phrase}"
+        )
+        headline_prefix = "Last completed study: " if last_completed_only else ""
+        behavior_headline = (
+            f"; now {behavior_state.replace('_', ' ').lower()}"
+            if behavior_state != "UNKNOWN"
+            else ""
+        )
+        history_headline = (
+            f"{headline_prefix}{_plain_direction(origin_side).capitalize()} history"
+            f"{behavior_headline}"
+        )
+        history_state = "LAST_COMPLETED" if last_completed_only else "CURRENT"
+    elif identity_mismatch:
+        history_headline = (
+            f"Last evidence was {study_symbol} {study_timeframe}, not "
+            f"{current_symbol} {current_timeframe}"
+        )
+        answer = (
+            f"The completed study belongs to {study_symbol} {study_timeframe}. "
+            f"The chart now shows {current_symbol} {current_timeframe}, so that old "
+            "pair and timeframe cannot describe where this market came from."
+        )
+        history_state = "MISMATCHED_EVIDENCE"
+    else:
+        history_headline = "Not enough completed study evidence"
+        answer = (
+            "The system has not published an identity-proven completed market study, "
+            "so it cannot honestly describe where this market came from yet."
+        )
+        history_state = "INSUFFICIENT_EVIDENCE"
+
+    updated_at = _epoch(
+        freshness.get("observed_at"),
+        history[-1].get("observed_at") if history else None,
+    )
+    history_answer: dict[str, object] = {
+        "question": "Where is the market from, and how did history behave?",
+        "headline": history_headline,
+        "answer": answer,
+        "state": history_state,
+        "side": origin_side,
+        "confidence": _confidence(major.get("confidence")) or 0.0,
+        "evidence": {
+            "identity_proven": identity_proven,
+            "identity_mismatch": identity_mismatch,
+            "study_scope": (
+                "MISMATCHED_STUDY"
+                if identity_mismatch
+                else "LAST_COMPLETED_STUDY"
+                if last_completed_only
+                else "CURRENT_STUDY"
+            ),
+            "symbol": study_symbol,
+            "timeframe": study_timeframe,
+            "current_symbol": current_symbol,
+            "current_timeframe": current_timeframe,
+            "closed_candle_key": _safe_identifier(
+                market_study.get("closed_candle_key"), ""
+            ),
+            "major_trend_side": major_side,
+            "inner_trend_side": inner_side,
+            "regression_side": regression_side,
+            "behavior_state": behavior_state,
+            "behavior_side": behavior_side,
+            "behavior_candle_count": behavior_candles,
+            "behavior_duration_seconds": behavior_duration,
+            "history_observation_count": len(history),
+            "history_dominant_side": history_dominant_side,
+            "history_major_counts": history_major_counts,
+            "history_regression_counts": history_regression_counts,
+            "pair_dna_observation_count": _integer(pair_dna.get("observation_count")),
+        },
+        "updated_at": updated_at,
+    }
+
+    model_result = _mapping(payload.get("model_council_result"))
+    model_council = _first_mapping(
+        payload,
+        ("model_council_result", "model_council"),
+        ("model_council_study_packet", "model_council"),
+        ("study_packet", "model_council"),
+    )
+    book_strategy = _first_mapping(
+        payload,
+        ("model_council_result", "book_strategy"),
+        ("model_council_result", "model_council", "book_strategy"),
+        ("model_council_study_packet", "book_strategy"),
+        ("study_packet", "book_strategy"),
+        ("book_strategy",),
+    )
+    dual_thesis = _first_mapping(
+        payload,
+        ("model_council_result", "book_strategy", "dual_thesis_report_v3"),
+        ("model_council_result", "dual_thesis_report_v3"),
+        ("model_council_result", "model_council", "dual_thesis_report_v3"),
+        ("model_council_study_packet", "dual_thesis_report_v3"),
+        ("study_packet", "dual_thesis_report_v3"),
+    )
+    countertrend_promotion = _countertrend_sniper_promotion_source(payload)
+    countertrend_side = (
+        _side(countertrend_promotion.get("side"))
+        if _explicit_bool(countertrend_promotion.get("active")) is True
+        else "NEUTRAL"
+    )
+    command_side = _side(command.get("selected_side"))
+    dual_side = _side(
+        dual_thesis.get("selected_authority_side"),
+        dual_thesis.get("playbook_ai_selected_side"),
+    )
+    council_side = _side(
+        book_strategy.get("final_side"),
+        book_strategy.get("candidate_side"),
+        book_strategy.get("side"),
+        model_council.get("final_side"),
+        model_council.get("side"),
+        model_result.get("final_side"),
+        model_result.get("side"),
+    )
+    selected_side = _side(command_side, countertrend_side, dual_side, council_side)
+    direction_source = (
+        "DECISION_COMMAND_CENTER"
+        if command_side in _DIRECTIONAL_SIDES
+        else "COUNTERTREND_SNIPER"
+        if countertrend_side in _DIRECTIONAL_SIDES
+        else "DUAL_THESIS"
+        if dual_side in _DIRECTIONAL_SIDES
+        else "MODEL_COUNCIL"
+        if council_side in _DIRECTIONAL_SIDES
+        else "CLOSED_CANDLE_REGRESSION"
+        if regression_side in _DIRECTIONAL_SIDES
+        else "NONE"
+    )
+    studied_side = (
+        selected_side
+        if selected_side in _DIRECTIONAL_SIDES
+        else regression_side
+    )
+    sides = _mapping(command.get("sides"))
+    countertrend_ensemble = _mapping(countertrend_promotion.get("ensemble_basis"))
+    council_scores = _mapping(model_result.get("council_scores"))
+    selected_score = _confidence(
+        _mapping(sides.get(selected_side)).get("score"),
+        command.get(f"{selected_side.lower()}_score") if selected_side in _DIRECTIONAL_SIDES else None,
+        countertrend_ensemble.get("council_side_score"),
+        _mapping(dual_thesis.get(selected_side.lower())).get("score"),
+        council_scores.get(f"{selected_side.lower()}_score"),
+        council_scores.get(selected_side),
+        directional.get("confidence"),
+    ) or 0.0
+    countertrend = bool(
+        studied_side in _DIRECTIONAL_SIDES
+        and major_side in _DIRECTIONAL_SIDES
+        and studied_side != major_side
+    )
+    timing_effect = _path_clock_timing_effect_v3(
+        path_clock_liquidity,
+        current_symbol=current_symbol,
+        current_timeframe=current_timeframe,
+        study_closed_candle_key=_safe_identifier(
+            market_study.get("closed_candle_key"), ""
+        ),
+        studied_side=studied_side,
+        freshness_state=freshness_state,
+        now_epoch=now_epoch,
+    )
+    if identity_mismatch:
+        directional_state = "MISMATCHED_EVIDENCE"
+    elif freshness_state == "STALE":
+        directional_state = "STALE"
+    elif studied_side not in _DIRECTIONAL_SIDES:
+        directional_state = "NO_DIRECTION"
+    elif identity_proven and freshness_state == "FRESH":
+        directional_state = "CURRENT"
+    else:
+        directional_state = "FORMING"
+
+    if identity_mismatch:
+        directional_headline = (
+            f"Last directional study belongs to {study_symbol} {study_timeframe}"
+        )
+    elif selected_side in _DIRECTIONAL_SIDES and regression_side in _DIRECTIONAL_SIDES:
+        if selected_side == regression_side:
+            directional_headline = (
+                f"{selected_side} was studied and remains the current regression read"
+            )
+        else:
+            directional_headline = (
+                f"{selected_side} was studied; current regression now reads {regression_side}"
+            )
+    elif selected_side in _DIRECTIONAL_SIDES:
+        directional_headline = (
+            f"{selected_side} is the ensemble study; regression is still forming"
+        )
+    elif regression_side in _DIRECTIONAL_SIDES:
+        directional_headline = f"Current regression is studying {regression_side}"
+    else:
+        directional_headline = "No directional study is ready"
+    if (
+        not identity_mismatch
+        and freshness_state != "FRESH"
+        and studied_side in _DIRECTIONAL_SIDES
+    ):
+        directional_headline = f"Last completed read: {directional_headline}"
+
+    study_sentences: list[str] = []
+    if identity_mismatch:
+        study_sentences.append(
+            f"The last directional evidence was produced for {study_symbol} "
+            f"{study_timeframe}, not the current {current_symbol} {current_timeframe}."
+        )
+    elif selected_side in _DIRECTIONAL_SIDES:
+        study_sentences.append(f"The ensemble was studying {selected_side}.")
+    else:
+        study_sentences.append("The ensemble has not selected a directional side.")
+    if not identity_mismatch and regression_side in _DIRECTIONAL_SIDES:
+        qualifier = "last completed" if freshness_state != "FRESH" else "current"
+        study_sentences.append(
+            f"The {qualifier} closed-candle regression reads {regression_side}."
+        )
+    else:
+        study_sentences.append("The closed-candle regression has no directional read yet.")
+    if identity_mismatch:
+        study_sentences.append(
+            "A new completed study must bind to the current pair and timeframe "
+            "before a direction can be called current."
+        )
+    elif countertrend:
+        study_sentences.append(
+            f"This is a countertrend {studied_side} study inside a {major_side} major trend."
+        )
+    elif studied_side in _DIRECTIONAL_SIDES and major_side in _DIRECTIONAL_SIDES:
+        study_sentences.append(
+            f"The studied direction agrees with the {major_side} major trend."
+        )
+    if timing_effect.get("mature") is True and (
+        timing_effect.get("timing_supports_entry") is True
+        or timing_effect.get("timing_veto") is True
+    ):
+        timing_duration = _integer(timing_effect.get("contract_duration_seconds"))
+        timing_minutes = max(
+            15,
+            int(math.ceil(timing_duration / 60.0)) if timing_duration > 0 else 15,
+        )
+        if timing_effect.get("timing_supports_entry") is True:
+            study_sentences.append(
+                f"Mature timing history supports studying this {studied_side} over a "
+                f"{timing_minutes}-minute window; anything under 15 minutes is excluded."
+            )
+        else:
+            study_sentences.append(
+                f"Mature timing history says delay this {studied_side}; anything under "
+                "15 minutes is excluded."
+            )
+    directional_answer: dict[str, object] = {
+        "question": "Which direction was studied, and what is being studied now?",
+        "headline": directional_headline,
+        "answer": " ".join(study_sentences),
+        "state": directional_state,
+        "side": studied_side,
+        "confidence": selected_score,
+        "evidence": {
+            "ensemble_studied_side": selected_side,
+            "direction_source": direction_source,
+            "countertrend_classification": _safe_public_text(
+                countertrend_promotion.get("classification"), "UNAVAILABLE", limit=40
+            ).upper(),
+            "current_regression_side": regression_side,
+            "current_move_side": _side(current_move.get("direction")),
+            "current_pressure_side": _side(
+                pressure_event.get("direction"), regression_pressure.get("side")
+            ),
+            "major_trend_side": major_side,
+            "inner_trend_side": inner_side,
+            "countertrend": countertrend,
+            "study_status": _safe_public_text(
+                market_study.get("status"), "UNAVAILABLE", limit=40
+            ).upper(),
+            "study_freshness": freshness_state,
+            "closed_candle_key": _safe_identifier(
+                market_study.get("closed_candle_key"), ""
+            ),
+            "path_clock_liquidity_v3": timing_effect,
+        },
+        "updated_at": updated_at,
+    }
+
+    opportunity = _first_mapping(
+        command,
+        ("execution_opportunity_window_v3",),
+        ("opportunity",),
+    ) or _first_mapping(
+        payload,
+        ("execution_opportunity_window_v3",),
+        ("model_council_result", "execution_opportunity_window_v3"),
+        ("model_council_result", "model_council", "execution_opportunity_window_v3"),
+        ("model_council_study_packet", "execution_opportunity_window_v3"),
+        ("study_packet", "execution_opportunity_window_v3"),
+    )
+    opportunity_state = _text(
+        opportunity.get("state") or opportunity.get("status"), "UNAVAILABLE"
+    ).upper()
+    opportunity_expiry = _epoch(
+        opportunity.get("valid_until_epoch_sec"),
+        opportunity.get("valid_until_epoch"),
+        opportunity.get("expires_at"),
+    )
+    promotion = _first_mapping(
+        payload,
+        ("promotion_trace",),
+        ("model_council_study_packet", "promotion_trace"),
+        ("study_packet", "promotion_trace"),
+        ("model_council_result", "promotion_trace"),
+        ("model_council_result", "model_council", "promotion_trace"),
+    )
+    missed = _mapping(promotion.get("missed_opportunity")) or _mapping(
+        payload.get("missed_opportunity")
+    )
+    blocker_text = " ".join(
+        _text(value, "", limit=160).upper()
+        for value in (
+            command.get("blocker"),
+            command.get("next_required"),
+            promotion.get("true_blocker"),
+            promotion.get("denied_at"),
+            book_strategy.get("maturity_state"),
+            book_strategy.get("denied_at"),
+            book_strategy.get("true_blocker"),
+            countertrend_promotion.get("classification"),
+            countertrend_promotion.get("book_strategy_state"),
+        )
+        if value not in (None, "")
+    )
+    missed_tokens = (
+        "EXPIRED",
+        "MISSED",
+        "TOO_LATE",
+        "LATE_ENTRY",
+        "LATE_CHASE",
+        "OVEREXTENDED",
+        "DO_NOT_CHASE",
+        "MOVED_WITHOUT_ENTRY",
+    )
+    explicit_missed = bool(
+        opportunity_state in {"EXPIRED", "MISSED", "TOO_LATE"}
+        or (
+            studied_side in _DIRECTIONAL_SIDES
+            and opportunity_state in {"ACTIVE", "AUTHORIZED_NOW", "OPEN", "READY"}
+            and opportunity_expiry is not None
+            and opportunity_expiry <= now_epoch
+        )
+        # The council's ``missed_opportunity`` probe is a diagnostic candidate
+        # whose future move may still be unconfirmed.  It must not become a
+        # definitive human-facing MISSED claim without an explicit outcome.
+        or (
+            _side(missed.get("side")) in _DIRECTIONAL_SIDES
+            and (
+                _explicit_bool(missed.get("future_move_confirmed")) is True
+                or _text(
+                    missed.get("classification")
+                    or missed.get("state")
+                    or missed.get("status"),
+                    "",
+                ).upper()
+                in {"MISSED", "CONFIRMED_MISSED", "MISSED_OPPORTUNITY"}
+            )
+        )
+        or _text(countertrend_promotion.get("classification"), "").upper()
+        == "MISSED_DO_NOT_CHASE"
+        or any(token in blocker_text for token in missed_tokens)
+    )
+    opposite_live_side = any(
+        _side(event.get("direction")) in _DIRECTIONAL_SIDES
+        and _side(event.get("direction")) != studied_side
+        and _text(event.get("state"), "UNKNOWN").upper() in {"ACTIVE", "UNKNOWN"}
+        for event in (current_move, pressure_event)
+    ) if studied_side in _DIRECTIONAL_SIDES else False
+    _countertrend_valid, countertrend_validation_state = (
+        _countertrend_bypass_validation_v3(
+            payload,
+            command,
+            selected_side=studied_side,
+            now_epoch=now_epoch,
+        )
+    )
+    no_current_entry_study = bool(
+        studied_side not in _DIRECTIONAL_SIDES
+        and not market_study
+        and not countertrend_promotion
+        and _explicit_bool(command.get("execution_packet_present")) is not True
+        and updated_at is None
+    )
+
+    permission_allowed = permission.get("allowed") is True
+    permission_side = _side(permission.get("side"))
+    permission_action = _text(permission.get("action"), "WAIT", limit=32).upper()
+    entry_permission_authorized = bool(
+        permission_allowed
+        and permission_side in _DIRECTIONAL_SIDES
+        and permission_action in {permission_side, f"{permission_side}_NOW"}
+    )
+    timing_supports_entry = timing_effect.get("timing_supports_entry") is True
+    timing_veto = timing_effect.get("timing_veto") is True
+    enter_now = bool(entry_permission_authorized and not timing_veto)
+    if enter_now:
+        timing_state = "ENTER_NOW"
+    elif identity_mismatch or countertrend_validation_state == "INVALIDATED":
+        timing_state = "INVALIDATED"
+    elif timing_veto:
+        timing_state = "TIMING_DELAY"
+    elif no_current_entry_study:
+        timing_state = "FORMING"
+    elif (
+        countertrend_validation_state == "STALE"
+        and freshness_state in {"STALE", "WAITING", "UNKNOWN"}
+    ):
+        timing_state = "STALE"
+    elif explicit_missed:
+        timing_state = "MISSED"
+    elif countertrend_validation_state == "STALE":
+        timing_state = "STALE"
+    elif opposite_live_side:
+        timing_state = "CONFLICT"
+    elif freshness_state in {"STALE", "WAITING", "UNKNOWN"}:
+        timing_state = "STALE"
+    else:
+        timing_state = "FORMING"
+
+    side_label = studied_side if studied_side in _DIRECTIONAL_SIDES else "trade"
+    next_trigger = "A new current-frame directional study must publish."
+    if timing_state == "ENTER_NOW":
+        action = f"{studied_side}_NOW"
+        entry_headline = f"YES — enter {studied_side} now"
+        entry_answer = (
+            f"Yes. A verified {studied_side} entry window is open on the current frame."
+        )
+        reason = _safe_public_text(
+            permission.get("message"),
+            "Every current execution check is aligned.",
+            limit=240,
+        )
+        next_trigger = (
+            "Act only inside this verified window and stop if the current live truth changes."
+        )
+    elif timing_state == "TIMING_DELAY":
+        action = "DO_NOT_ENTER"
+        entry_headline = f"NOT YET — timing says delay the {side_label}"
+        entry_answer = (
+            f"Do not enter {side_label} now. {_safe_public_text(timing_effect.get('reason'), '', limit=320)}"
+        ).strip()
+        reason = _safe_public_text(
+            timing_effect.get("reason"),
+            "Historical path, clock, and liquidity evidence says delay this entry.",
+            limit=320,
+        )
+        next_trigger = (
+            "Wait for a fresh matching timing read with at least 15 minutes of room; "
+            "timing evidence can only delay permission, never create it."
+        )
+    elif timing_state == "MISSED":
+        action = "DO_NOT_ENTER"
+        entry_headline = f"NO — the {side_label} opportunity was missed"
+        entry_answer = (
+            f"No. The studied {side_label} move progressed beyond its verified entry "
+            "window; chasing it now is not authorized."
+        )
+        reason = (
+            "The opportunity expired or was explicitly classified as missed before a "
+            "current executable entry remained available."
+        )
+        next_trigger = (
+            f"A newly detected {side_label} setup must open its own fresh entry window."
+        )
+    elif timing_state == "INVALIDATED":
+        action = "DO_NOT_ENTER"
+        entry_headline = "NO — this entry belongs to different live evidence"
+        entry_answer = (
+            "No. The entry study or its validated execution lineage does not match "
+            "the pair, timeframe, frame, capture, or opportunity currently on screen."
+        )
+        reason = (
+            "The prior entry evidence was invalidated instead of being carried across "
+            "a market or frame change."
+        )
+        next_trigger = (
+            "A new current-frame setup must publish for this exact pair and timeframe."
+        )
+    elif timing_state == "CONFLICT":
+        action = "DO_NOT_ENTER"
+        entry_headline = f"NO — live movement conflicts with {side_label}"
+        entry_answer = (
+            f"No. {side_label} is still the studied direction, but the current live "
+            "movement evidence does not agree with it."
+        )
+        reason = "Current movement or active pressure points opposite the studied direction."
+        next_trigger = (
+            f"Current movement and pressure must both confirm {side_label} inside a fresh window."
+        )
+    elif timing_state == "STALE":
+        action = "DO_NOT_ENTER"
+        entry_headline = "NO — the entry evidence is stale"
+        entry_answer = (
+            f"No. The last {side_label} study remains useful history, but it is not a "
+            "current entry instruction."
+        )
+        reason = "The latest entry evidence is not fresh enough to support a trade now."
+        next_trigger = "A new completed candle must publish a fresh directional and entry read."
+    else:
+        action = "DO_NOT_ENTER"
+        if no_current_entry_study:
+            entry_headline = "NOT YET — no current entry study"
+            entry_answer = (
+                "Not yet. No identity-proven completed study has selected a "
+                "directional trade on the current chart."
+            )
+            reason = "There is no current directional study to authorize or reject."
+            next_trigger = (
+                "The tracker must publish one identity-proven completed-candle "
+                "directional study."
+            )
+        else:
+            entry_headline = f"NOT YET — {side_label} entry is forming"
+            entry_answer = (
+                f"Not yet. {side_label} is being studied, but the system has not published "
+                "a complete current entry permission."
+                if studied_side in _DIRECTIONAL_SIDES
+                else "Not yet. No directional trade has reached entry readiness."
+            )
+            reason = _safe_public_text(
+                permission.get("message"),
+                "The entry checks are still forming.",
+                limit=240,
+            )
+            if reason.lower().startswith("wait. "):
+                reason = reason[6:]
+            elif reason.lower().startswith("wait for "):
+                reason = f"Still requires {reason[9:]}"
+        if not no_current_entry_study:
+            if permission.get("window_open") is True:
+                next_trigger = (
+                    f"Current-frame execution permission must publish while the {side_label} "
+                    "window remains open."
+                )
+            elif studied_side in _DIRECTIONAL_SIDES:
+                next_trigger = (
+                    f"A fresh {side_label} opportunity window must open with matching "
+                    "live movement."
+                )
+            else:
+                next_trigger = (
+                    "One directional ensemble study must become selected and executable."
+                )
+
+    entry_answer_contract: dict[str, object] = {
+        "question": "What is the best decision to do right now?",
+        "headline": entry_headline,
+        "answer": entry_answer,
+        "state": timing_state,
+        "side": studied_side,
+        "confidence": selected_score,
+        "evidence": {
+            "directional_study_present": studied_side in _DIRECTIONAL_SIDES,
+            "direction_source": direction_source,
+            "countertrend_classification": _safe_public_text(
+                countertrend_promotion.get("classification"), "UNAVAILABLE", limit=40
+            ).upper(),
+            "countertrend_validation_state": countertrend_validation_state,
+            "permission_allowed": permission_allowed,
+            "permission_side": permission_side,
+            "entry_permission_authorized": entry_permission_authorized,
+            "timing_supports_entry": timing_supports_entry,
+            "timing_veto": timing_veto,
+            "path_clock_liquidity_v3": timing_effect,
+            "freshness": freshness_state,
+            "opportunity_state": opportunity_state,
+            "opportunity_expires_at": opportunity_expiry,
+            "window_open": permission.get("window_open") is True,
+            "current_move_side": _side(current_move.get("direction")),
+            "current_move_state": _safe_public_text(
+                current_move.get("state"), "UNKNOWN", limit=24
+            ).upper(),
+            "pressure_side": _side(pressure_event.get("direction")),
+            "pressure_state": _safe_public_text(
+                pressure_event.get("state"), "UNKNOWN", limit=24
+            ).upper(),
+        },
+        "updated_at": updated_at,
+        "enter_now": enter_now,
+        "action": action,
+        "reason": reason,
+        "next_trigger": next_trigger,
+        "timing_state": timing_state,
+        "permission_allowed": permission_allowed,
+        "entry_permission_authorized": entry_permission_authorized,
+        "timing_supports_entry": timing_supports_entry,
+        "timing_veto": timing_veto,
+    }
+    return {
+        "schema_version": "PG_THREE_QUESTION_OPERATOR_BRIEF_V3",
+        "market_origin_history": history_answer,
+        "studied_direction_current": directional_answer,
+        "entry_now": entry_answer_contract,
+    }
+
+
 def retracement_pair_contract_v3(value: object) -> dict[str, object]:
     """Bound the Pair DNA aggregate without persistence or dedupe metadata."""
 
@@ -2825,6 +4366,10 @@ def _market_study_contract(value: object) -> dict[str, object]:
     regime_partition = _mapping(source.get("regime_partition"))
     cross_pair = _mapping(source.get("cross_pair_association"))
     claim_proofs = _mapping(source.get("claim_proofs"))
+    path_clock_liquidity = path_clock_liquidity_contract_v3(
+        source.get("path_clock_liquidity_v3")
+        or source.get("path_clock_liquidity")
+    )
     matches: list[dict[str, object]] = []
     for row in _rows(similarity.get("matches"))[:5]:
         outcome = _mapping(row.get("outcome"))
@@ -3114,6 +4659,8 @@ def _market_study_contract(value: object) -> dict[str, object]:
     }
     if retracement_study:
         result["retracement_study"] = retracement_study
+    if path_clock_liquidity:
+        result["path_clock_liquidity_v3"] = path_clock_liquidity
 
     motif_levels: list[dict[str, object]] = []
     for level in _rows(motif_lattice.get("levels"))[:4]:
@@ -3546,6 +5093,790 @@ def _market_study_contract(value: object) -> dict[str, object]:
     return result
 
 
+def _cpu_stream_source(
+    source: Mapping[str, object],
+    tracking_summary: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return the first declared CPU stream health payload.
+
+    Raw tracker sessions currently publish the health block at the session root,
+    while compact/live adapters can nest it under tracking.  This lookup is
+    intentionally narrow so unrelated runtime diagnostics never cross into the
+    operator workspace.
+    """
+
+    containers = (
+        source,
+        _mapping(source.get("tracking")),
+        tracking_summary,
+        _mapping(source.get("session")),
+    )
+    for container in containers:
+        stream = _mapping(container.get("cpu_stream_v3"))
+        if stream:
+            return stream
+    return {}
+
+
+def _bounded_stream_count(*values: object) -> int:
+    return min(_CPU_STREAM_COUNTER_LIMIT, _integer(*values))
+
+
+def _cpu_stream_freshness_budget_sec(
+    stream: Mapping[str, Any],
+    temporal: Mapping[str, Any],
+    *,
+    acquisition_fps: float | None,
+) -> float:
+    """Return a bounded freshness window matched to the observed CPU cadence.
+
+    The stream captures a native broker window on CPU and can legitimately run
+    below its target rate while a frame capture or closed-candle study is in
+    flight.  A fixed five-second timeout therefore produced false STALE reads on
+    otherwise advancing streams.  This budget follows the slower of the recent
+    and aggregate observed periods, while the hard ceiling still makes a stopped
+    observer fail closed.  It affects forming-chart observation only and cannot
+    refresh completed-candle evidence or entry permission.
+    """
+
+    candidate_budgets = [_CPU_STREAM_FRESHNESS_MIN_BUDGET_SEC]
+
+    target_fps = _number(stream.get("target_fps"))
+    if target_fps is not None and target_fps > 0.0:
+        candidate_budgets.append(
+            _CPU_STREAM_TARGET_PERIOD_MULTIPLIER / min(240.0, target_fps)
+        )
+
+    if acquisition_fps is not None and acquisition_fps > 0.0:
+        candidate_budgets.append(
+            _CPU_STREAM_OBSERVED_PERIOD_MULTIPLIER
+            / min(240.0, acquisition_fps)
+        )
+
+    frame_delta_sec = _number(temporal.get("frame_delta_sec"))
+    if frame_delta_sec is not None and frame_delta_sec > 0.0:
+        candidate_budgets.append(
+            _CPU_STREAM_OBSERVED_PERIOD_MULTIPLIER
+            * min(_CPU_STREAM_FRESHNESS_MAX_BUDGET_SEC, frame_delta_sec)
+        )
+
+    return round(
+        min(
+            _CPU_STREAM_FRESHNESS_MAX_BUDGET_SEC,
+            max(candidate_budgets),
+        ),
+        3,
+    )
+
+
+def _cpu_stream_contract(
+    source: Mapping[str, object],
+    tracking_summary: Mapping[str, Any],
+    *,
+    now_epoch: float | None = None,
+) -> dict[str, object]:
+    """Project bounded stream health and an observation-only intrabar read.
+
+    Pixel motion is useful for saying whether the displayed chart is moving,
+    resting, or changing materially.  It is deliberately never converted into
+    BUY/SELL truth: only a completed-candle study can supply direction or entry
+    permission.
+    """
+
+    stream = _cpu_stream_source(source, tracking_summary)
+    observer = _mapping(stream.get("observer"))
+    observer_counters = _mapping(observer.get("counters"))
+    lineage = _mapping(stream.get("last_keyframe_lineage"))
+    last_decision = _mapping(observer.get("last_decision"))
+    temporal = _mapping(last_decision.get("temporal_evidence"))
+    motion = _mapping(temporal.get("motion"))
+    rest = _mapping(temporal.get("rest"))
+    wick_motion = _mapping(temporal.get("wick_motion"))
+    change = _mapping(temporal.get("change"))
+
+    enabled_flag = _explicit_bool(stream.get("enabled"))
+    if enabled_flag is None:
+        enabled_flag = _explicit_bool(stream.get("requested"))
+    enabled = enabled_flag is True
+
+    raw_state = _text(stream.get("state") or stream.get("status"), "", limit=48)
+    normalized_state = _CPU_STREAM_STATE_ALIASES.get(
+        raw_state.upper().replace("-", "_").replace(" ", "_"),
+        "UNKNOWN" if stream else "UNAVAILABLE",
+    )
+    if stream and not enabled:
+        normalized_state = "DISABLED"
+
+    acquisition_fps = None
+    for fps_value in (
+        stream.get("acquisition_fps"),
+        stream.get("actual_fps"),
+        observer.get("acquisition_fps"),
+        observer.get("observed_fps"),
+    ):
+        acquisition_fps = _number(fps_value)
+        if acquisition_fps is not None:
+            break
+    if acquisition_fps is not None:
+        acquisition_fps = round(max(0.0, min(240.0, acquisition_fps)), 3)
+
+    freshness_budget_sec = _cpu_stream_freshness_budget_sec(
+        stream,
+        temporal,
+        acquisition_fps=acquisition_fps,
+    )
+    available_flag = _explicit_bool(stream.get("available"))
+    stream_available = available_flag is not False
+
+    current_epoch = float(now_epoch if now_epoch is not None else time.time())
+    heartbeat_epoch = _epoch(
+        stream.get("status_updated_epoch"),
+        stream.get("updated_epoch"),
+        stream.get("updated_at"),
+    )
+    last_frame_epoch = _epoch(
+        stream.get("last_frame_epoch"),
+        stream.get("last_capture_epoch"),
+        observer.get("last_captured_epoch"),
+    )
+    heartbeat_age = (
+        round(max(0.0, current_epoch - heartbeat_epoch), 3)
+        if heartbeat_epoch is not None
+        else None
+    )
+    frame_age = (
+        round(max(0.0, current_epoch - last_frame_epoch), 3)
+        if last_frame_epoch is not None
+        else None
+    )
+    stream_fresh = bool(
+        enabled
+        and stream_available
+        and normalized_state == "RUNNING"
+        and heartbeat_age is not None
+        and frame_age is not None
+        and -1.0 <= current_epoch - cast(float, heartbeat_epoch)
+        <= freshness_budget_sec
+        and -1.0 <= current_epoch - cast(float, last_frame_epoch)
+        <= freshness_budget_sec
+    )
+
+    raw_activity = _text(
+        temporal.get("state") or motion.get("state") or observer.get("state"),
+        "",
+        limit=32,
+    ).upper().replace("-", "_").replace(" ", "_")
+    activity_aliases = {
+        "MATERIAL_CHANGE": "MATERIAL_CHANGE",
+        "MOTION": "MOVING",
+        "MOVING": "MOVING",
+        "REST": "RESTING",
+        "RESTING": "RESTING",
+        "DUPLICATE": "UNCHANGED",
+        "UNCHANGED": "UNCHANGED",
+        "KEYFRAME": "STARTING",
+        "IDLE": "STARTING",
+    }
+    if not stream or not enabled:
+        activity_state = "UNAVAILABLE"
+    elif not stream_fresh:
+        activity_state = "STARTING" if last_frame_epoch is None else "STALE"
+    else:
+        activity_state = activity_aliases.get(raw_activity, "OBSERVING")
+
+    motion_score_value = _number(motion.get("motion_score"))
+    motion_score = (
+        round(max(0.0, min(1.0, motion_score_value)), 6)
+        if motion_score_value is not None
+        else None
+    )
+    acceleration_value = _number(motion.get("motion_acceleration"))
+    motion_acceleration = (
+        round(max(-1.0, min(1.0, acceleration_value)), 6)
+        if acceleration_value is not None
+        else None
+    )
+    changed_ratio_value = _number(change.get("changed_pixel_ratio"))
+    changed_pixel_ratio = (
+        round(max(0.0, min(1.0, changed_ratio_value)), 6)
+        if changed_ratio_value is not None
+        else None
+    )
+    wick_pressure = _text(
+        wick_motion.get("dominant_extreme"), "NONE", limit=24
+    ).upper()
+    if wick_pressure not in {"UPPER", "LOWER", "BALANCED", "NONE"}:
+        wick_pressure = "NONE"
+    activity_summary = {
+        "MATERIAL_CHANGE": "Live stream sees a material change on the chart.",
+        "MOVING": "Live stream sees the chart moving now.",
+        "RESTING": "Live stream sees the chart resting now.",
+        "UNCHANGED": "Live stream sees no material visual change right now.",
+        "STARTING": "Live stream is establishing a current visual baseline.",
+        "STALE": "The last stream frame is too old to describe the chart now.",
+        "UNAVAILABLE": "No current CPU stream observation is available.",
+        "OBSERVING": "Live stream is observing the current chart.",
+    }[activity_state]
+    market_read = {
+        "schema_version": _CPU_STREAM_MARKET_READ_SCHEMA_VERSION,
+        "state": activity_state,
+        "summary": activity_summary,
+        "fresh": stream_fresh,
+        "observed_at": last_frame_epoch,
+        "heartbeat_at": heartbeat_epoch,
+        "frame_age_seconds": frame_age,
+        "heartbeat_age_seconds": heartbeat_age,
+        "freshness_budget_seconds": freshness_budget_sec,
+        "frame_seq": _bounded_stream_count(
+            temporal.get("frame_seq"), last_decision.get("frame_seq"), observer.get("frame_seq")
+        ),
+        "stream_generation": _bounded_stream_count(
+            temporal.get("stream_generation"),
+            last_decision.get("stream_generation"),
+            observer.get("stream_generation"),
+            lineage.get("stream_generation"),
+        ),
+        "motion_score": motion_score,
+        "motion_acceleration": motion_acceleration,
+        "changed_pixel_ratio": changed_pixel_ratio,
+        "rest_active": _explicit_bool(rest.get("active")) is True,
+        "rest_duration_seconds": round(
+            max(0.0, _number(rest.get("duration_sec")) or 0.0), 3
+        ),
+        "wick_pressure": wick_pressure,
+        "direction": "NEUTRAL",
+        "direction_basis": "COMPLETED_CANDLE_REQUIRED",
+        "direction_available": False,
+        "forming_candle": True,
+        "closed_candle": False,
+        "can_grant_entry_permission": False,
+        "study_only": True,
+        "execution_authority": False,
+        "broker_click_authority": False,
+    }
+
+    last_reason = _safe_public_text(
+        stream.get("last_reason")
+        or lineage.get("accepted_reason")
+        or stream.get("last_error"),
+        "",
+        limit=160,
+    )
+
+    return {
+        "enabled": enabled,
+        "state": normalized_state,
+        "acquisition_fps": acquisition_fps,
+        "observed_frames": _bounded_stream_count(stream.get("observed_frames")),
+        "accepted_keyframes": _bounded_stream_count(
+            stream.get("accepted_keyframes"), stream.get("accepted_events")
+        ),
+        "dropped_frames": _bounded_stream_count(
+            stream.get("dropped_frames"), stream.get("dropped_keyframes")
+        ),
+        "duplicate_frames": _bounded_stream_count(
+            stream.get("duplicate_frames"),
+            observer.get("duplicate_frames"),
+            observer.get("duplicate_events"),
+            observer_counters.get("duplicate_frames"),
+        ),
+        "last_frame_epoch": last_frame_epoch,
+        "last_keyframe_epoch": _epoch(
+            stream.get("last_keyframe_epoch"), stream.get("last_event_epoch")
+        ),
+        "heartbeat_epoch": heartbeat_epoch,
+        "fresh": stream_fresh,
+        "last_reason": last_reason,
+        "stream_generation": _bounded_stream_count(
+            stream.get("stream_generation"), lineage.get("stream_generation")
+        ),
+        "market_read": market_read,
+    }
+
+
+def cpu_stream_tracking_contract_v3(
+    payload: Mapping[str, object],
+    *,
+    now_epoch: float | None = None,
+) -> dict[str, object]:
+    """Project the safe stream strip independently of the cached workspace."""
+
+    return _cpu_stream_contract(
+        payload,
+        _mapping(payload.get("tracking_summary")),
+        now_epoch=now_epoch,
+    )
+
+
+def _closed_candle_basis_v3(
+    contract: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, object]:
+    existing = _mapping(evidence.get("closed_candle_basis"))
+    if existing:
+        return {
+            "headline": _text(existing.get("headline"), "", limit=240),
+            "answer": _text(existing.get("answer"), "", limit=960),
+            "state": _text(existing.get("state"), "UNKNOWN", limit=40).upper(),
+            "updated_at": _epoch(existing.get("updated_at")),
+            "reason": _text(existing.get("reason"), "", limit=320),
+            "next_trigger": _text(existing.get("next_trigger"), "", limit=320),
+        }
+    return {
+        "headline": _text(contract.get("headline"), "", limit=240),
+        "answer": _text(contract.get("answer"), "", limit=960),
+        "state": _text(contract.get("state"), "UNKNOWN", limit=40).upper(),
+        "updated_at": _epoch(contract.get("updated_at")),
+        "reason": _text(contract.get("reason"), "", limit=320),
+        "next_trigger": _text(contract.get("next_trigger"), "", limit=320),
+    }
+
+
+def _stream_activity_label(state: str) -> str:
+    return {
+        "MATERIAL_CHANGE": "changing materially",
+        "MOVING": "moving",
+        "RESTING": "resting",
+        "UNCHANGED": "visually unchanged",
+        "STARTING": "establishing its baseline",
+        "OBSERVING": "being observed",
+    }.get(state, "not current")
+
+
+def _current_order_reference_area_label_v3(
+    value: object,
+    *,
+    side: str,
+) -> str:
+    """Return one bounded, side-matched public reference label when present."""
+
+    if side not in _DIRECTIONAL_SIDES:
+        return ""
+    candidates: list[tuple[int, str]] = []
+    for row in _rows(value):
+        if (
+            _text(row.get("layer"), "", limit=40).lower() != "order_positioning"
+            or _side(row.get("side")) != side
+            or _text(row.get("lifecycle"), "current", limit=24).lower()
+            != "current"
+        ):
+            continue
+        mode = _text(row.get("positioning_mode"), "", limit=24).upper()
+        if mode not in {"REFERENCE", "CURRENT"}:
+            continue
+        label = _safe_public_text(row.get("label"), "", limit=80)
+        if label:
+            candidates.append((0 if mode == "REFERENCE" else 1, label))
+    return min(candidates)[1] if candidates else ""
+
+
+def _streaming_three_question_synthesis_v3(
+    questions: Mapping[str, Any],
+    *,
+    permission: Mapping[str, Any],
+    stream: Mapping[str, Any],
+    order_reference_rows: object = (),
+) -> dict[str, object]:
+    """Refresh Q2/Q3 from one bounded stream heartbeat without minting authority."""
+
+    result = dict(questions)
+    market_read = dict(_mapping(stream.get("market_read")))
+    stream_fresh = market_read.get("fresh") is True
+    stream_state = _text(market_read.get("state"), "UNAVAILABLE", limit=32).upper()
+    stream_summary = _text(
+        market_read.get("summary"),
+        "No current stream observation is available.",
+        limit=240,
+    )
+    heartbeat_epoch = _epoch(
+        market_read.get("heartbeat_at"),
+        stream.get("heartbeat_epoch"),
+    )
+
+    studied = dict(_mapping(result.get("studied_direction_current")))
+    studied_evidence = dict(_mapping(studied.get("evidence")))
+    studied_basis = _closed_candle_basis_v3(studied, studied_evidence)
+    studied_evidence["closed_candle_basis"] = studied_basis
+    studied_evidence["streaming_market_read"] = market_read
+    studied_evidence["stream_read_fresh"] = stream_fresh
+    studied_evidence["stream_frame_seq"] = _bounded_stream_count(
+        market_read.get("frame_seq")
+    )
+    studied["evidence"] = studied_evidence
+    studied_side = _side(studied.get("side"))
+    if stream_fresh:
+        activity_label = _stream_activity_label(stream_state)
+        studied["headline"] = (
+            f"{studied_side} was studied; live stream is {activity_label}"
+            if studied_side in _DIRECTIONAL_SIDES
+            else f"No closed-candle direction yet; live stream is {activity_label}"
+        )
+        basis_answer = _text(studied_basis.get("answer"), "", limit=960)
+        studied["answer"] = " ".join(
+            part
+            for part in (
+                basis_answer,
+                stream_summary,
+                "This intrabar observation is current, but it does not replace completed-candle direction.",
+            )
+            if part
+        )
+        studied["updated_at"] = heartbeat_epoch
+        studied["live_state"] = "STREAMING"
+    else:
+        studied["live_state"] = stream_state
+    result["studied_direction_current"] = studied
+
+    entry = dict(_mapping(result.get("entry_now")))
+    entry_evidence = dict(_mapping(entry.get("evidence")))
+    entry_basis = _closed_candle_basis_v3(entry, entry_evidence)
+    entry_evidence["closed_candle_basis"] = entry_basis
+    entry_evidence["streaming_market_read"] = market_read
+    entry_evidence["stream_read_fresh"] = stream_fresh
+    entry_evidence["stream_frame_seq"] = _bounded_stream_count(
+        market_read.get("frame_seq")
+    )
+    entry["question"] = "What is the best decision to do right now?"
+
+    permission_allowed = permission.get("allowed") is True
+    permission_side = _side(permission.get("side"))
+    permission_action = _text(permission.get("action"), "WAIT", limit=32).upper()
+    entry_permission_authorized = bool(
+        permission_allowed
+        and permission_side in _DIRECTIONAL_SIDES
+        and permission_action in {f"{permission_side}_NOW", permission_side}
+    )
+    timing_supports_entry = bool(
+        entry.get("timing_supports_entry") is True
+        or entry_evidence.get("timing_supports_entry") is True
+    )
+    timing_effect = dict(
+        _mapping(entry_evidence.get("path_clock_liquidity_v3"))
+    )
+    timing_valid_until = _number(timing_effect.get("valid_until"))
+    timing_expired = bool(
+        timing_effect.get("maturity_claimed") is True
+        and timing_valid_until is not None
+        and heartbeat_epoch is not None
+        and timing_valid_until <= heartbeat_epoch
+    )
+    timing_veto = bool(
+        entry.get("timing_veto") is True
+        or entry_evidence.get("timing_veto") is True
+        or timing_expired
+    )
+    if timing_expired:
+        timing_supports_entry = False
+        timing_effect.update(
+            {
+                "fresh": False,
+                "state": "STALE",
+                "timing_supports_entry": False,
+                "timing_veto": True,
+                "reason": (
+                    "The mature timing read expired and must be replaced by a fresh "
+                    "matching completed-candle study."
+                ),
+            }
+        )
+        entry_evidence["path_clock_liquidity_v3"] = timing_effect
+    enter_now = bool(
+        entry_permission_authorized and not timing_veto
+    )
+    timing_state = _text(
+        entry.get("timing_state") or entry_basis.get("state"),
+        "FORMING",
+        limit=40,
+    ).upper()
+    if timing_veto and timing_state not in {"INVALIDATED", "MISSED", "CONFLICT"}:
+        timing_state = "TIMING_DELAY"
+    elif timing_state == "ENTER_NOW" and not enter_now:
+        timing_state = "FORMING" if stream_fresh else "STALE"
+    market_origin = _mapping(result.get("market_origin_history"))
+    market_origin_evidence = _mapping(market_origin.get("evidence"))
+    major_side = _side(
+        studied_evidence.get("major_trend_side"),
+        market_origin_evidence.get("major_trend_side"),
+        market_origin.get("side"),
+    )
+    prior_studied_side = _side(entry.get("side"), studied_side)
+    current_regression_side = _side(
+        studied_evidence.get("current_regression_side")
+    )
+    current_actionable_side = _side(current_regression_side, major_side)
+    current_regression_major_aligned = bool(
+        current_actionable_side in _DIRECTIONAL_SIDES
+        and (
+            current_regression_side not in _DIRECTIONAL_SIDES
+            or major_side not in _DIRECTIONAL_SIDES
+            or current_regression_side == major_side
+        )
+    )
+    prior_thesis_superseded = bool(
+        timing_state in {"MISSED", "STALE", "FORMING", "WAITING"}
+        and prior_studied_side in _DIRECTIONAL_SIDES
+        and current_actionable_side in _DIRECTIONAL_SIDES
+        and prior_studied_side != current_actionable_side
+        and current_regression_major_aligned
+    )
+    selected_side = (
+        current_actionable_side
+        if prior_thesis_superseded
+        else _side(prior_studied_side, current_actionable_side)
+    )
+    closed_move_side = _side(entry_evidence.get("current_move_side"))
+    order_reference_label = _current_order_reference_area_label_v3(
+        order_reference_rows,
+        side=selected_side,
+    )
+    order_reference_guidance = (
+        f" Use the current {order_reference_label} as the reference area; "
+        "the stream alone does not prove price is inside it."
+        if order_reference_label
+        else ""
+    )
+    study_transition_guidance = (
+        f"The prior {prior_studied_side} thesis remains history; the current "
+        f"closed-candle study now tracks {selected_side}."
+        if prior_thesis_superseded
+        else ""
+    )
+
+    if enter_now:
+        best_action = f"ENTER_{permission_side}"
+        decision_state = "ENTER_NOW"
+        entry["headline"] = f"ENTER {permission_side} NOW — verified window open"
+        entry["answer"] = _text(
+            entry_basis.get("answer"),
+            f"Enter {permission_side} only inside the current verified window.",
+            limit=960,
+        )
+        entry["reason"] = _safe_public_text(
+            permission.get("message"),
+            "Closed-candle permission and the current opportunity window are aligned.",
+            limit=320,
+        )
+        entry["next_trigger"] = _safe_public_text(
+            permission.get("next_condition"),
+            "Stop if the verified window closes or the closed-candle truth changes.",
+            limit=320,
+        )
+    elif timing_state == "TIMING_DELAY":
+        best_action = "DELAY_FOR_TIMING"
+        decision_state = "TIMING_DELAY"
+        timing_reason = _safe_public_text(
+            timing_effect.get("reason") or entry.get("reason"),
+            "Historical path, clock, and liquidity evidence says delay this entry.",
+            limit=320,
+        )
+        entry["headline"] = (
+            f"NOT YET — timing says delay the {selected_side}"
+            if selected_side in _DIRECTIONAL_SIDES
+            else "NOT YET — timing says delay this trade"
+        )
+        entry["answer"] = " ".join(
+            part
+            for part in (
+                timing_reason,
+                stream_summary if stream_fresh else "",
+                "At least 15 minutes of room is required, and timing cannot create entry permission.",
+            )
+            if part
+        )
+        entry["reason"] = timing_reason
+        entry["next_trigger"] = (
+            "Wait for a fresh matching timing read with at least 15 minutes of room and "
+            "an independently verified entry window."
+        )
+    elif timing_state == "MISSED":
+        best_action = (
+            f"WAIT_FOR_FRESH_{selected_side}_PULLBACK"
+            if selected_side in _DIRECTIONAL_SIDES
+            else "STAND_ASIDE"
+        )
+        decision_state = timing_state
+        if stream_fresh:
+            entry["headline"] = (
+                f"WAIT FOR A FRESH {selected_side} PULLBACK — the prior "
+                f"{prior_studied_side} opportunity was missed"
+                if selected_side in _DIRECTIONAL_SIDES
+                else "STAND ASIDE — the prior opportunity was missed"
+            )
+            entry["answer"] = " ".join(
+                part
+                for part in (
+                    stream_summary,
+                    _text(entry_basis.get("answer"), "Do not enter this trade.", limit=960),
+                    study_transition_guidance,
+                    order_reference_guidance.strip(),
+                )
+                if part
+            )
+        if selected_side in _DIRECTIONAL_SIDES:
+            entry["next_trigger"] = (
+                f"Wait for a fresh {selected_side} pullback to publish its own verified "
+                "closed-candle entry window."
+            )
+    elif timing_state in {"INVALIDATED", "CONFLICT"}:
+        best_action = "STAND_ASIDE"
+        decision_state = timing_state
+        if stream_fresh:
+            entry["headline"] = {
+                "INVALIDATED": "STAND ASIDE — the prior evidence was invalidated",
+                "CONFLICT": "STAND ASIDE — live and studied evidence conflict",
+            }[timing_state]
+            entry["answer"] = " ".join(
+                part
+                for part in (
+                    stream_summary,
+                    _text(entry_basis.get("answer"), "Do not enter this trade.", limit=960),
+                )
+                if part
+            )
+    elif stream_fresh and stream_state in {"MATERIAL_CHANGE", "MOVING"}:
+        if selected_side in _DIRECTIONAL_SIDES:
+            aligned_continuation = closed_move_side == selected_side
+            best_action = (
+                f"TRACK_{selected_side}_CONTINUATION"
+                if aligned_continuation
+                else f"TRACK_{selected_side}"
+            )
+            entry["headline"] = (
+                f"TRACK {selected_side} CONTINUATION — live chart is "
+                f"{_stream_activity_label(stream_state)}"
+                if aligned_continuation
+                else f"TRACK {selected_side} — live chart is "
+                f"{_stream_activity_label(stream_state)}"
+            )
+            entry["answer"] = (
+                f"Track the existing {selected_side} thesis. {stream_summary} "
+                f"{study_transition_guidance} "
+                "The stream read is intrabar observation only; closed-candle entry permission "
+                "is not open, so do not enter yet."
+            )
+        else:
+            best_action = "OBSERVE_MOVE"
+            entry["headline"] = "OBSERVE — the live chart is moving"
+            entry["answer"] = (
+                f"{stream_summary} No completed-candle direction currently has entry "
+                "permission, so observe the move without entering."
+            )
+        decision_state = "TRACKING"
+    elif stream_fresh and stream_state == "RESTING":
+        if selected_side in _DIRECTIONAL_SIDES:
+            retrace_name = "PULLBACK" if selected_side == "BUY" else "RALLY"
+            best_action = f"WATCH_{selected_side}_{retrace_name}"
+            decision_state = "WATCHING_RETRACE"
+            entry["headline"] = (
+                f"WATCH {selected_side} {retrace_name} — the live chart is resting"
+            )
+            entry["answer"] = (
+                f"The completed-candle {selected_side} thesis remains the directional "
+                f"context. {stream_summary} {study_transition_guidance}"
+                f"{order_reference_guidance} Do not enter until "
+                "a fresh closed-candle permission window verifies the continuation."
+            )
+        else:
+            best_action = "STAND_ASIDE"
+            decision_state = "RESTING"
+            entry["headline"] = "STAND ASIDE — the live chart is resting"
+            entry["answer"] = (
+                f"{stream_summary} Keep the completed-candle study as context, but do not "
+                "enter without a newly verified permission window."
+            )
+    elif stream_fresh and stream_state == "UNCHANGED":
+        # Byte-identical pixels can be a quiet visible surface or a stale
+        # Chromium off-screen cache. They are capture-health evidence, never
+        # enough evidence to classify the market itself as resting.
+        decision_state = "OBSERVING_CAPTURE"
+        if selected_side in _DIRECTIONAL_SIDES:
+            best_action = f"TRACK_{selected_side}"
+            entry["headline"] = (
+                f"WATCH {selected_side} — live pixels are unchanged"
+            )
+            entry["answer"] = (
+                f"The completed-candle {selected_side} thesis remains context. "
+                f"{stream_summary} Unchanged pixels do not prove a market rest. "
+                f"{study_transition_guidance}{order_reference_guidance} Wait for a fresh "
+                "capture and a verified closed-candle permission window before entering."
+            )
+        else:
+            best_action = "OBSERVE_CAPTURE"
+            entry["headline"] = "OBSERVE — live pixels are unchanged"
+            entry["answer"] = (
+                f"{stream_summary} Unchanged pixels alone do not prove that the market "
+                "is resting. Wait for a fresh capture and completed-candle evidence; "
+                "there is no verified entry permission now."
+            )
+    elif stream_fresh:
+        best_action = "OBSERVE"
+        decision_state = "OBSERVING"
+        entry["headline"] = "OBSERVE — the stream is building the current read"
+        entry["answer"] = (
+            f"{stream_summary} Do not enter until completed-candle permission is current."
+        )
+    else:
+        best_action = "STAND_ASIDE" if timing_state in {"STALE", "WAITING"} else "OBSERVE"
+        decision_state = timing_state
+
+    entry["enter_now"] = enter_now
+    entry["action"] = f"{permission_side}_NOW" if enter_now else "DO_NOT_ENTER"
+    entry["decision"] = best_action
+    entry["decision_state"] = decision_state
+    entry["timing_state"] = "ENTER_NOW" if enter_now else timing_state
+    entry["state"] = entry["timing_state"]
+    entry["side"] = permission_side if enter_now else selected_side
+    if stream_fresh and heartbeat_epoch is not None:
+        entry["updated_at"] = heartbeat_epoch
+    entry["permission_allowed"] = permission_allowed
+    entry["entry_permission_authorized"] = entry_permission_authorized
+    entry["timing_supports_entry"] = timing_supports_entry
+    entry["timing_veto"] = timing_veto
+    entry_evidence["permission_allowed"] = permission_allowed
+    entry_evidence["best_action"] = best_action
+    entry_evidence["entry_permission_authorized"] = entry_permission_authorized
+    entry_evidence["timing_supports_entry"] = timing_supports_entry
+    entry_evidence["timing_veto"] = timing_veto
+    entry_evidence["prior_studied_side"] = prior_studied_side
+    entry_evidence["current_regression_side"] = current_regression_side
+    entry_evidence["current_actionable_study_side"] = selected_side
+    entry_evidence["prior_thesis_superseded"] = prior_thesis_superseded
+    entry_evidence["execution_authority"] = False
+    entry_evidence["broker_click_authority"] = False
+    entry["evidence"] = entry_evidence
+    result["entry_now"] = entry
+    return result
+
+
+def refresh_operator_streaming_read_v3(
+    workspace: Mapping[str, object],
+    runtime_payload: Mapping[str, object],
+    *,
+    now_epoch: float | None = None,
+) -> dict[str, object]:
+    """Attach the latest bounded stream heartbeat to a cached operator workspace."""
+
+    current_epoch = float(now_epoch if now_epoch is not None else time.time())
+    result = dict(workspace)
+    tracking = dict(_mapping(result.get("tracking")))
+    stream = cpu_stream_tracking_contract_v3(
+        runtime_payload,
+        now_epoch=current_epoch,
+    )
+    tracking["stream"] = stream
+    heartbeat_epoch = _epoch(stream.get("heartbeat_epoch"))
+    if stream.get("fresh") is True and heartbeat_epoch is not None:
+        tracking["updated_at"] = heartbeat_epoch
+    result["tracking"] = tracking
+    result["three_questions"] = _streaming_three_question_synthesis_v3(
+        _mapping(result.get("three_questions")),
+        permission=_mapping(result.get("permission")),
+        stream=stream,
+        order_reference_rows=result.get("overlays"),
+    )
+    return result
+
+
 def build_operator_workspace_v1(
     payload: Mapping[str, object],
     *,
@@ -3604,11 +5935,36 @@ def build_operator_workspace_v1(
         pressure_event,
         now_epoch=current_epoch,
     )
-    history = _history_contract(source)
     tracking_summary = _mapping(source.get("tracking_summary"))
+    stream = _cpu_stream_contract(
+        source,
+        tracking_summary,
+        now_epoch=current_epoch,
+    )
     market_study_v3 = _market_study_contract(
         tracking_summary.get("market_study_v3")
         or _mapping(source.get("latest_signal")).get("market_study_v3")
+    )
+    market = {
+        "symbol": _safe_public_text(
+            tracking_summary.get("detected_market")
+            or _mapping(source.get("latest_signal")).get("symbol")
+            or _mapping(source.get("latest_signal")).get("pair")
+            or source.get("market")
+            or market_study_v3.get("symbol")
+        ),
+        "timeframe": _safe_public_text(
+            tracking_summary.get("detected_timeframe")
+            or _mapping(source.get("latest_signal")).get("timeframe")
+            or market_study_v3.get("timeframe"),
+            "Unknown",
+            limit=32,
+        ),
+    }
+    history = _history_contract(
+        source,
+        current_symbol=str(market["symbol"]),
+        current_timeframe=str(market["timeframe"]),
     )
     tracking_flag = _explicit_bool(source.get("tracking_enabled"))
     if tracking_flag is True:
@@ -3630,20 +5986,18 @@ def build_operator_workspace_v1(
         _integer(display_frame),
         _integer(source.get("capture_count")),
     )
-    market = {
-        "symbol": _safe_public_text(
-            tracking_summary.get("detected_market")
-            or _mapping(source.get("latest_signal")).get("symbol")
-            or _mapping(source.get("latest_signal")).get("pair")
-            or source.get("market")
-        ),
-        "timeframe": _safe_public_text(
-            tracking_summary.get("detected_timeframe")
-            or _mapping(source.get("latest_signal")).get("timeframe"),
-            "Unknown",
-            limit=32,
-        ),
-    }
+    three_questions = _three_question_brief_v3(
+        source,
+        command=command,
+        market=market,
+        market_study=market_study_v3,
+        history=history,
+        freshness=freshness,
+        current_move=current_move,
+        pressure_event=pressure_event,
+        permission=permission,
+        now_epoch=current_epoch,
+    )
     observed_at = current_move.get("observed_at") or pressure_event.get("observed_at") or _epoch(
         tracking_summary.get("last_capture_epoch"), source.get("last_capture_epoch")
     )
@@ -3675,12 +6029,14 @@ def build_operator_workspace_v1(
         "session_id": session_id,
         "revision": revision,
         "market": market,
+        "three_questions": three_questions,
         "tracking": {
             "active": tracking_flag is True,
             "state": tracking_state,
             "updated_at": observed_at,
             "history_count": len(history),
             "market_study_v3": market_study_v3,
+            "stream": stream,
         },
         "freshness": freshness,
         "current_move": current_move,
@@ -3700,6 +6056,11 @@ def build_operator_workspace_v1(
         "overlays": overlays,
         "history": history,
     }
+    result = refresh_operator_streaming_read_v3(
+        result,
+        source,
+        now_epoch=current_epoch,
+    )
     assert tuple(result) == _TOP_LEVEL_KEYS
     return result
 
@@ -3707,4 +6068,7 @@ def build_operator_workspace_v1(
 __all__ = [
     "OPERATOR_WORKSPACE_SCHEMA_VERSION",
     "build_operator_workspace_v1",
+    "cpu_stream_tracking_contract_v3",
+    "path_clock_liquidity_contract_v3",
+    "refresh_operator_streaming_read_v3",
 ]

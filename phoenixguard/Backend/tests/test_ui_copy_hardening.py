@@ -99,37 +99,48 @@ def test_tracker_pressure_uses_server_authoritative_temporal_event() -> None:
     assert "function rawLivePressureRead" not in dashboard
     assert "pressure_event" in dashboard
     assert 'pressureState === "ended"' in dashboard
-    assert "directionalSide(pressure.direction || pressure.side)" in dashboard
+    assert "studyDirection(pressure.direction || pressure.side)" in dashboard
+    assert "function liveFormingRead(payload)" in dashboard
+    assert "Live forming evidence remains provisional until candle close." in dashboard
     assert "Regression study · candle by candle" in dashboard
     assert "History never grants entry permission." in dashboard
 
 
-def test_tracker_dashboard_separates_current_outlook_and_entry_permission() -> None:
+def test_tracker_dashboard_uses_three_questions_and_separate_entry_permission() -> None:
     dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
         encoding="utf-8"
     )
 
     assert 'id="current-move-title"' in dashboard
-    assert 'id="forecast-title"' in dashboard
     assert 'id="permission-title"' in dashboard
-    assert "This is a forecast, not entry permission." in dashboard
+    assert 'aria-label="The three live trading questions"' in dashboard
+    assert 'id="market-origin-question">Where is the market from, and how did history behave?' in dashboard
+    assert 'id="direction-study-question">Which direction was studied, and what is being studied now?' in dashboard
+    assert 'id="entry-now-question">What is the best decision to do right now?' in dashboard
+    assert "function threeQuestionAnswers(payload, study, permission)" in dashboard
+    assert "safeObject(safeObject(payload).three_questions)" in dashboard
     assert 'function entryWindowLabel(permission)' in dashboard
     assert 'function entryLocationGuidance(permission, action)' in dashboard
     assert '"Buy low · entry open"' in dashboard
     assert '"Sell high · entry open"' in dashboard
     assert '"Setup window · verifying"' in dashboard
-    assert "current-frame permission is refreshing" in dashboard
+    assert "The model has not confirmed a current entry." in dashboard
     assert "lower price inside the verified demand or retest area" in dashboard
     assert "higher price inside the verified supply or retest area" in dashboard
-    assert "The setup closes early if live truth changes." in dashboard
+    assert "scheduleEntryExpiry(permission, freshness, action);" in dashboard
+    assert "The verified entry window has expired." in dashboard
     assert "contract.valid_for_seconds" in dashboard
     assert "/v1/mobile/operator/state/v1/" in dashboard
     assert "function highFrequencyForecast" not in dashboard
     assert "function derivedHighFrequencyForecast" not in dashboard
-    assert 'aria-label="Major trend, inner trend, and regression study"' in dashboard
-    assert "Trend and regression describe the chart. Entry permission remains separate." in dashboard
+    assert "<summary>Technical contracts and evidence</summary>" in dashboard
+    assert "<span>Major and inner trend</span>" in dashboard
+    assert "No current chart-verified order area is drawable yet; entry permission remains separate." in dashboard
     assert 'data-overlay-family="lstm"' not in dashboard
     assert 'data-overlay-family="scene_forecaster"' not in dashboard
+    assert 'id="forecast-title"' not in dashboard
+    assert "This is a forecast, not entry permission." not in dashboard
+    assert "episodeOutlookOverlays" not in dashboard
     assert "/v1/mobile/live/state/v3/" not in dashboard
 
 
@@ -139,14 +150,17 @@ def test_tracker_dashboard_uses_sanitized_operator_overlays() -> None:
     )
 
     assert 'const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";' in dashboard
-    assert "const operatorOverlays = episodeOutlookOverlays(operatorState);" in dashboard
+    assert "const operatorOverlays = safeList(committedOperatorState.overlays)" in dashboard
+    assert ".filter(function (overlay) { return !overlayIsDiagnostic(overlay); });" in dashboard
     assert "state.overlays = operatorOverlays;" in dashboard
     assert "function lifecycleIsVisible(overlay)" in dashboard
     assert "function overlayMatchesSurface(overlay)" in dashboard
     assert "function overlayFamily(overlay)" in dashboard
-    assert '["movement", "structure", "zones", "plan", "outlook", "history"]' in dashboard
+    assert '["movement", "structure", "zones", "plan", "history"]' in dashboard
+    assert '["movement", "structure", "zones", "plan", "outlook", "history"]' not in dashboard
     assert 'safeText(overlay.coordinate_space, "chart")' in dashboard
     assert "function renderOverlays()" in dashboard
+    assert "episodeOutlookOverlays" not in dashboard
     assert "backendOverlayObjects" not in dashboard
     assert "runtime_telemetry" not in dashboard
     assert "broker_controls" not in dashboard

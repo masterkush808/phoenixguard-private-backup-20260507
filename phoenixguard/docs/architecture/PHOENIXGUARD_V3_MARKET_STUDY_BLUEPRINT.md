@@ -1,11 +1,12 @@
 # PhoenixGuard V3 Market Study Blueprint
 
 - Status: implemented V3 architecture and operating contract
-- Updated: 2026-07-25
+- Updated: 2026-07-29
 - Scope: continuous candle intelligence, exact candle memory, behavioral regression, Pair DNA,
   hierarchical motifs, historical time-to-event evidence, exact normalized paths, adaptive feature
   governance, concept drift, non-causal cross-pair association, proof certificates, object
-  relationships, retracement confluence, historical similarity, and operator presentation
+  relationships, retracement confluence, historical similarity, joint path-clock-liquidity timing,
+  and operator presentation
 - Version boundary: **V3 only. This is not a V4 proposal.**
 
 This document is the canonical implementation blueprint for PhoenixGuard's continuous
@@ -1195,7 +1196,234 @@ pair/timeframe scope, latency, abstention behavior, calibration, and exact evalu
 promoted only when it improves out-of-sample decision support without weakening closed-candle
 temporal integrity, explainability, runtime bounds, or the independent execution gate.
 
-## 17. Definition of done for this V3 lane
+## 17. Joint Path-Clock Liquidity Field V3
+
+### 17.1 Timing question and admission boundary
+
+Directional correctness is not enough for a fixed-duration OTC contract. The timing lane must study
+the joint event:
+
+```text
+the selected stop remains unbroken
+AND the studied directional move reaches its target
+AND that event occurs inside the declared contract clock
+```
+
+`PG_PATH_CLOCK_LIQUIDITY_V3` therefore conditions historical evidence on three simultaneous axes:
+
+1. **Path**: signed displacement, high excursion, low excursion, MAE, and MFE in median-range
+   units fixed at the anchor.
+2. **Clock**: elapsed seconds and remaining seconds under one explicit fixed-duration contract.
+3. **Liquidity state**: a bounded five-axis vector containing wick entropy, repeated-area touches,
+   late-sweep motif distance, body/wick asymmetry, and object co-presence density.
+
+The canonical duration policy is `PG_TIMING_DURATION_POLICY_V3`:
+
+- a new timing anchor is admitted only when the declared duration is at least 900 seconds;
+- the bounded maximum is 7,200 seconds;
+- 899.999 seconds remains excluded and exactly 900 seconds is eligible;
+- an already admitted anchor continues to be observed when its remaining clock falls below 900
+  seconds, because the final-clock sweep is material evidence;
+- a new entry is not eligible from a late anchor with less than 900 seconds remaining;
+- a move that reaches its target before 900 elapsed seconds is retained in the audit trail but is
+  excluded from eligible timing, calibration, and promotion statistics;
+- direction evidence from a shorter horizon may still describe the chart, but it is never timing
+  authority for a sub-15-minute trade.
+
+### 17.2 Closed-candle anchor and trajectory schema
+
+Every anchor identity binds all of the following fields:
+
+```text
+schema + feature version
+pair + timeframe
+coordinate space + order domain
+stable anchor close key + monotonic close order
+anchor close timestamp + source cadence
+studied direction + explicit contract duration
+anchor-known median-range scale + liquidity vector
+```
+
+Every later observation is uniquely identified by `(anchor_id, observation_order)`. An identical
+retry is an idempotent no-op; a conflicting payload under the same identity fails closed. One
+trajectory contains only observed closed-candle timestamps. A 30-second grid is permitted only when
+the source cadence or an exact sub-candle source proves those timestamps. PhoenixGuard never
+interpolates M5 OHLC into invented 30-second timing evidence.
+
+The close clock is a separate proof from candle identity. `source_bar_id` may prove which bar was
+observed while `closed_candle_epoch`, or a source open time plus the proven timeframe, proves when it
+closed. Both are retained even when they appear on the same source row. A generic frame capture time,
+publish time, frame number, X position, or initial screenshot baseline is never relabeled as a candle
+close.
+
+For screenshot-only streaming, V3 can create `PG_PROVEN_CLOSED_CANDLE_TIME_V3` only after the
+resolver proves exactly one forming-to-closed transition and two capture observations bracket exactly
+one timeframe boundary. The certificate binds pair, timeframe, stable close key, monotonic close
+sequence, exact bound row, source cadence, boundary epoch, observation latency, transition count,
+and proof source. Multi-candle reacquisition, an unbracketed boundary, a clock gap, conflicting source
+times, or a pair/timeframe change yields no certificate. The bounded event-time ledger is persisted
+with the closed-candle identity state and reattaches time only to the exact stable bindings reobserved
+on the current geometry axis.
+
+The normalized point contract is:
+
+```text
+elapsed_seconds
+path_mru
+high_mru
+low_mru
+```
+
+where `MRU` means median-range unit frozen from information available at the anchor. The completed
+trajectory records stop-before-target order, target time, MAE, MFE, final directional displacement,
+path efficiency, and clock-conditioned adverse/favorable excursions. When OHLC cannot prove the
+intrabar order of a stop and target touched within one candle, the result is
+`UNKNOWN_FAIL_CLOSED`; it is never guessed from candle color.
+
+### 17.3 Causal maturation and discontinuities
+
+An anchor matures only when an observed closed candle proves elapsed time equal to its declared
+duration. The side store censors, instead of completing, an anchor when any of these occur:
+
+- pair or timeframe changes;
+- coordinate space or order domain changes;
+- stable close order is non-monotonic or has an unproved gap;
+- the exact expiry boundary was skipped;
+- the anchor-known scale is missing or invalid;
+- bounded anchor or trajectory capacity is reached.
+
+Forming-candle wick/body measurements may appear in transient watch telemetry, but they never enter
+the durable field, Pair DNA, replay score, calibration, or permission. Restart restoration fully
+revalidates every identity, point, bound, digest, and safety flag before the field can be queried.
+
+### 17.4 Historical field and query contract
+
+For a live closed-candle state, the engine finds bounded same-pair neighbors compatible with the
+direction, duration, liquidity vector, coordinate space, order domain, and causal cutoff. For each
+declared stop/target scenario it publishes a compact estimate containing:
+
+- support count and effective neighbor distance;
+- stop-before-target survival probability;
+- probability that the worst historical pullback still lay ahead at this clock position;
+- target-arrival and adverse-excursion distributions;
+- eligible and excluded-early outcome counts;
+- explicit remaining clock and new-entry eligibility;
+- an abstention status when support or continuity is insufficient.
+
+Clock-field rows are keyed by both the declared contract duration and the aligned elapsed/remaining
+clock. Two trajectories at the same elapsed second but with different expiry clocks are never merged
+into one timing population. The published probability that the worst drawdown still lies ahead counts
+only histories whose global maximum adverse excursion occurs after the aligned current point; any
+later adverse movement is not sufficient by itself.
+
+The wording “worst pullback” is used in the operator view. It describes the adverse excursion of
+the studied price path, not account drawdown and not a guaranteed future sweep.
+
+### 17.5 Freeze, replay, calibration, and promotion
+
+Every proven close freezes its field state before later candles are read. The freeze binds the exact
+historical-library revision and digest used for that estimate, so adding later trajectories cannot
+rewrite an earlier claim. Replays then score four independent axes:
+
+| Axis | Required measurement |
+| --- | --- |
+| Direction | Did the final realized path agree with the frozen studied direction? |
+| Timing | Did the move occur inside the frozen survival window? |
+| Sweep survival | Did each declared stop remain alive until the move occurred? |
+| Calibration | Did predicted survival frequencies match realized frequencies? |
+
+A candidate timing policy is promoted only after the minimum replay support is present and it
+improves all four axes against the registered baseline. One strong direction score cannot hide poor
+timing, worse sweep survival, or miscalibration. Promotion is versioned, reversible, bounded, and
+pair/timeframe scoped. Until the gate passes, the field remains useful historical study but cannot
+support or veto an otherwise valid entry, except for the hard duration contract itself.
+
+Every exact completed horizon enters the replay cohort, including paths that never reached the frozen
+target and paths that finished flat. A no-target horizon is right-censored at its exact expiry with
+`observed_move_occurred=false`; it is a timing miss, every target-before-stop outcome is false, and its
+survival probability contributes a negative calibration observation. It cannot disappear from support
+or count as a success. Candidate and baseline scores must prove the same ordered closed-candle cohort,
+and each sweep outcome binds the same stop distance and move size on both sides. A cohort mismatch or
+scenario mismatch fails promotion rather than allowing stop widening to masquerade as model
+improvement.
+
+### 17.6 Persistence and Pair DNA boundary
+
+Raw normalized paths and frozen replay states live in a dedicated atomic side store under
+`path_clock_liquidity_v3`. They are never embedded into the shared Pair DNA JSON. Default bounds are:
+
+| Resource | Default hard bound |
+| --- | ---: |
+| Historical trajectories | 256 |
+| Normalized points per trajectory | 241 |
+| Frozen closed-candle states | 512 |
+| Nearest neighbors per query | 64 |
+| Active pending anchors | bounded by the side-store contract |
+| Contract horizon | 900-7,200 seconds |
+
+Pair DNA receives only a compact partition summary: counts, duration distribution, direction
+distribution, calibration support, last update identity, and a digest. Side-store writes are locked,
+validated, size-bounded, written to a same-directory temporary file, flushed, `fsync`ed, and
+atomically replaced. A corrupted or oversized snapshot is rejected rather than partially loaded.
+
+### 17.7 Public timing and the independent permission contract
+
+The public allowlist exposes only the current bounded timing read: lineage, side, duration,
+remaining clock, support, calibrated probabilities, promotion status, and safety flags. Raw paths,
+neighbors, liquidity vectors, detector state, geometry, hashes, and persistence internals are
+private.
+
+JPCLF is an asymmetric gate:
+
+| Existing entry permission | Mature JPCLF timing | Q3 result |
+| --- | --- | --- |
+| Closed | Eligible now | Timing may be ready, but permission remains closed. |
+| Open | Wait-until state | Do not enter yet; show the earliest eligible clock. |
+| Open | Sweep-risk or worst-pullback-ahead veto | Stand aside; name the timing risk. |
+| Open | Eligible now | Existing entry may remain open, subject to every other V3 gate. |
+| Either | Missing, immature, stale, or mismatched | Ignore JPCLF; retain the pre-existing permission result. |
+
+The public contract keeps four separate booleans:
+
+```text
+permission_allowed
+timing_supports_entry
+timing_veto
+entry_permission_authorized
+```
+
+`timing_supports_entry` can never turn a false `permission_allowed` into authorization. Timing can
+delay or veto; it cannot create a BUY or SELL. Q1 remains the history answer. Q2 keeps direction
+authoritative and may append one plain timing sentence only after the field is mature. Q3 remains
+the single best action now. The streaming refresh applies the same gate, so a heartbeat cannot
+erase a timing veto or revive stale timing from another pair, frame, or close.
+
+### 17.8 Failure modes and test matrix
+
+| Failure or test | Required outcome |
+| --- | --- |
+| 899-second candidate | Excluded before ranking, support, confidence, or persistence |
+| Exact 900-second candidate | Eligible for a new anchor |
+| Admitted anchor reaches 120 seconds remaining | Observation continues; new-entry eligibility is false |
+| Same anchor/observation replayed | Exact duplicate is a no-op; conflicting duplicate fails |
+| Source bar id plus source timestamp | Preserve and validate both independent proofs |
+| Initial screenshot baseline | No candle-close timestamp is invented |
+| One resolver close bracketed across one timeframe boundary | Emit one key/sequence/row-bound close-time certificate |
+| Capture/publish time without a close transition | Never becomes candle time |
+| Locked Chromium surface remains byte-identical beyond the bounded threshold | Treat it as capture-health evidence, not market rest; rate-limit an identity-verified visible recovery with no clicks or keys, and admit one recovery keyframe only after the observer proves non-duplicate pixels |
+| Multi-candle reacquisition or missed boundary | Censor; do not backfill or interpolate timestamps |
+| Greatest timestamp belongs to an unbound row | Reject it; current event is selected by proof key and sequence |
+| Forming candle changes | No durable field, replay, or Pair DNA mutation |
+| Pair/timeframe/domain/coordinate change | Pending anchors are censored and old timing is removed from public state |
+| Process restart | Digest-validated field and pending anchors restore exactly once |
+| Target and stop touched in one unsequenced candle | Intrabar order is unknown and fails closed |
+| Public projection | No raw trajectory, neighbor vector, geometry, or private digest leaks |
+| Timing says enter but permission is closed | Q3 stays closed |
+| Permission is open but mature timing vetoes | Q3 becomes do-not-enter without mutating permission truth |
+| Stream heartbeat | The same timing gate is reapplied with current lineage and freshness |
+| Capacity reached | Old bounded evidence is evicted/censored according to policy; memory cannot grow |
+
+## 18. Definition of done for this V3 lane
 
 The V3 market-study lane is complete only when all of these statements are true at the same time:
 
@@ -1205,6 +1433,9 @@ The V3 market-study lane is complete only when all of these statements are true 
 - screenshot positional IDs remain display-only; resolver identity persists only through the
   bounded current-frame `stable_visible_candle_bindings` contract under
   `PG_CLOSED_CANDLE_IDENTITY_STATE_V3`, a stable event key, and monotonic event sequence;
+- a byte-identical off-screen browser cache cannot masquerade as a quiet market or advance JPCLF;
+  the explicitly locked chart uses bounded, identity-verified visible recovery and no input
+  synthesis;
 - the operator can see major trend, inner trend, current swing/rest behavior, and the one studied
   directional read;
 - Pair DNA counts only new monotonic candles and proven completed-segment boundaries inside one

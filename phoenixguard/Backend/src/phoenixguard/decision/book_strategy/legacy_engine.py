@@ -4,6 +4,10 @@ from math import isfinite
 from typing import Any, Literal, Mapping, Sequence, cast
 
 from phoenixguard.decision.astar_decision_state_v3 import build_candidate_decision_ledger_v3
+from phoenixguard.decision.countertrend_sniper_v3 import (
+    COUNTERTREND_SNIPER_PRELIMINARY_PHASE,
+    COUNTERTREND_SNIPER_SCHEMA_VERSION,
+)
 
 
 BOOK_STRATEGY_SCHEMA_VERSION = "PG_BOOK_STRATEGY_MASTER_V3"
@@ -2421,6 +2425,9 @@ def evaluate_book_strategy_master_v3(
     visible_candle_count = _int(candle_movement_context.get("visible_candle_count"), 0)
     estimated_candles_to_force = _int(opposing_force_room_context.get("estimated_candles_to_force"), 0)
     professional_thesis_resolution = _mapping(snapshot.get("professional_thesis_resolution_v3"))
+    countertrend_sniper_promotion = _mapping(
+        snapshot.get("countertrend_sniper_promotion_v3")
+    )
     professional_thesis_state = _upper(professional_thesis_resolution.get("thesis_state"))
     professional_authority_side = _side(professional_thesis_resolution.get("authority_side"))
     professional_opposing_force_reaction = bool(
@@ -2458,6 +2465,22 @@ def evaluate_book_strategy_master_v3(
     )
     opposing_force_rejection_confirmed = _bool(
         professional_thesis_resolution.get("opposing_force_rejection_confirmed")
+    )
+    countertrend_sniper_promotion_ready = bool(
+        countertrend_sniper_promotion.get("schema_version")
+        == COUNTERTREND_SNIPER_SCHEMA_VERSION
+        and countertrend_sniper_promotion.get("phase")
+        == COUNTERTREND_SNIPER_PRELIMINARY_PHASE
+        and countertrend_sniper_promotion.get("preliminary_non_authoritative")
+        is True
+        and countertrend_sniper_promotion.get("authoritative") is False
+        and countertrend_sniper_promotion.get("active") is True
+        and countertrend_sniper_promotion.get("promotion_ready") is True
+        and _side(countertrend_sniper_promotion.get("side")) == side
+        and _mapping(countertrend_sniper_promotion.get("gates")).get(
+            "closed_candle_rejection"
+        )
+        is True
     )
     opposing_force_ok_overridden_by_professional_reaction = False
     if (professional_opposing_force_reaction or professional_bias_resumption_reaction) and not opposing_force_ok:
@@ -2637,7 +2660,8 @@ def evaluate_book_strategy_master_v3(
     counter_reaction_rejection_confirmed = bool(
         side in {"BUY", "SELL"}
         and (
-            role_flip_confirmed
+            countertrend_sniper_promotion_ready
+            or role_flip_confirmed
             or structure_shift_confirmed
             or (break_of_structure_confirmed and retest_confirmed)
             or (liquidity_sweep_detected and (retest_confirmed or measured_reaction_accepted))
@@ -3176,6 +3200,8 @@ def evaluate_book_strategy_master_v3(
         "professional_thesis_state": professional_thesis_state,
         "professional_counter_leg": professional_counter_leg,
         "professional_opposing_force_reaction": professional_opposing_force_reaction,
+        "countertrend_sniper_promotion_ready": countertrend_sniper_promotion_ready,
+        "countertrend_sniper_promotion_v3": countertrend_sniper_promotion,
         "professional_bias_resumption_reaction": professional_bias_resumption_reaction,
         "professional_current_pressure_continuation": professional_current_pressure_continuation,
         "current_pressure_continuation_ready": current_pressure_continuation_ready,

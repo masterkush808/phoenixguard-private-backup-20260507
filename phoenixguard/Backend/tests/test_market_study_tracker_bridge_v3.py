@@ -6,7 +6,10 @@ from typing import Any
 from phoenixguard.decision.scene_forecast_contributor_v3 import (
     resolve_closed_candle_identity_v3,
 )
-from phoenixguard.mobile_api.window_tracker import PhoenixGuardWindowTrackingAdapter
+from phoenixguard.mobile_api.window_tracker import (
+    PhoenixGuardWindowTrackingAdapter,
+    _advance_closed_candle_time_attestations_v3,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _tracker_window(closed_count: int) -> list[dict[str, Any]]:
@@ -51,6 +54,7 @@ def _study(
     scene: dict[str, Any],
     *,
     smart_money_context: dict[str, Any] | None = None,
+    contract_duration_seconds: int | None = None,
 ) -> dict[str, Any]:
     return adapter._build_market_study_v3(  # pyright: ignore[reportPrivateUsage]
         candles=candles,
@@ -74,8 +78,35 @@ def _study(
         structure_boxes=[],
         historical_structure=[],
         support_resistance_zones=[],
+        contract_duration_seconds=contract_duration_seconds,
         smart_money_context=smart_money_context,
     )
+
+
+def _timed_resolution(
+    candles: list[dict[str, Any]],
+    *,
+    capture_epoch: float,
+    previous_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolution = resolve_closed_candle_identity_v3(
+        candles,
+        pair="CAD/JPY OTC",
+        timeframe="M5",
+        previous_state=previous_state,
+    )
+    state = _advance_closed_candle_time_attestations_v3(
+        candles=candles,
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        capture_epoch=capture_epoch,
+        previous_identity_state=previous_state,
+        identity_resolution=resolution,
+        identity_state=resolution["state"],
+        market_identity_confirmed=True,
+        timeframe_identity_confirmed=True,
+    )
+    return {**resolution, "state": state}
 
 
 def _source_price_window(closed_count: int) -> list[dict[str, Any]]:
@@ -399,3 +430,222 @@ def test_caller_stability_flags_cannot_promote_a_positional_object(
     assert order_block["identity_scope"] == "OBSERVATION_ONLY"
     assert order_block["identity_stable"] is False
     assert graph["retracement_study"]["status"] == "NO_COMPARABLE_OBJECTS"
+
+
+def test_initial_screenshot_without_source_time_remains_jpclf_censored(
+    tmp_path: Path,
+) -> None:
+    boundary_epoch = 1_800_000_000.0
+    rows = _tracker_window(8)
+    resolution = _timed_resolution(
+        rows,
+        capture_epoch=boundary_epoch - 1.0,
+    )
+
+    assert resolution["state"]["closed_candle_time_attestations_v3"] == []
+    result = _study(
+        PhoenixGuardWindowTrackingAdapter(
+            market_study_root=tmp_path / "initial-screenshot-censored"
+        ),
+        rows,
+        _scene(resolution),
+        contract_duration_seconds=900,
+    )
+
+    assert result["candle_intelligence"]["latest"].get("timestamp") is None
+    assert result["path_clock_liquidity_v3"]["status"] == (
+        "CENSORED_INVALID_TIMING_EVIDENCE"
+    )
+
+
+def test_exact_source_close_or_open_time_immediately_builds_jpclf(
+    tmp_path: Path,
+) -> None:
+    close_epoch = 1_800_000_000.0
+    source_cases = (
+        ("closed_candle_epoch", close_epoch, "SOURCE_CLOSE_TIME"),
+        ("bar_open_time", close_epoch - 300.0, "SOURCE_OPEN_PLUS_TIMEFRAME"),
+    )
+    for case_index, (field_name, field_value, expected_source) in enumerate(
+        source_cases
+    ):
+        rows = _tracker_window(8)
+        rows[-2][field_name] = field_value
+        resolution = _timed_resolution(
+            rows,
+            capture_epoch=close_epoch + 2.0,
+        )
+        proofs = resolution["state"]["closed_candle_time_attestations_v3"]
+
+        assert len(proofs) == 1
+        assert proofs[0]["schema_version"] == "PG_PROVEN_CLOSED_CANDLE_TIME_V3"
+        assert proofs[0]["timestamp_semantic"] == "BAR_CLOSE"
+        assert proofs[0]["timestamp_source"] == expected_source
+        assert proofs[0]["close_epoch_seconds"] == close_epoch
+        assert proofs[0]["bound_row_index"] == len(rows) - 2
+        assert proofs[0]["transition_count"] == 0
+
+        result = _study(
+            PhoenixGuardWindowTrackingAdapter(
+                market_study_root=tmp_path / f"exact-source-{case_index}"
+            ),
+            rows,
+            _scene(resolution),
+            contract_duration_seconds=900,
+        )
+        timing = result["path_clock_liquidity_v3"]
+        assert result["candle_intelligence"]["latest"]["timestamp"] == close_epoch
+        assert timing["status"] == "BUILDING_HISTORY"
+        assert timing["active_anchor_count"] == 1
+        time_proof = timing["latest_field_state"]["closed_candle_time_proof"]
+        assert time_proof["bound_row_index"] == 0
+        assert time_proof["timestamp_source"] == (
+            expected_source
+        )
+
+
+def test_one_step_straddled_rollovers_attest_and_restamp_stable_history(
+    tmp_path: Path,
+) -> None:
+    boundary_epoch = 1_800_000_000.0
+    initial_rows = _tracker_window(8)
+    initial = _timed_resolution(
+        initial_rows,
+        capture_epoch=boundary_epoch - 1.0,
+    )
+
+    rollover_rows = _tracker_window(9)
+    rollover = _timed_resolution(
+        rollover_rows,
+        capture_epoch=boundary_epoch + 2.0,
+        previous_state=initial["state"],
+    )
+    first_proof = rollover["state"]["closed_candle_time_attestations_v3"][-1]
+    assert rollover["transition_observed"] is True
+    assert rollover["closed_candle_sequence"] == initial["closed_candle_sequence"] + 1
+    assert first_proof["timestamp_source"] == "RESOLVER_BOUND_BOUNDARY_GRID"
+    assert first_proof["close_epoch_seconds"] == boundary_epoch
+    assert first_proof["observation_latency_seconds"] == 2.0
+    assert first_proof["contiguous_from_previous"] is True
+    assert first_proof["transition_count"] == 1
+
+    adapter = PhoenixGuardWindowTrackingAdapter(
+        market_study_root=tmp_path / "straddled-rollover"
+    )
+    first = _study(
+        adapter,
+        rollover_rows,
+        _scene(rollover),
+        contract_duration_seconds=900,
+    )
+    assert first["path_clock_liquidity_v3"]["status"] == "BUILDING_HISTORY"
+    assert first["path_clock_liquidity_v3"]["active_anchor_count"] == 1
+
+    next_rows = _tracker_window(10)
+    next_rollover = _timed_resolution(
+        next_rows,
+        capture_epoch=boundary_epoch + 302.0,
+        previous_state=rollover["state"],
+    )
+    second = _study(
+        adapter,
+        next_rows,
+        _scene(next_rollover),
+        contract_duration_seconds=900,
+    )
+    timing = second["path_clock_liquidity_v3"]
+    proof_epochs = [
+        proof["close_epoch_seconds"]
+        for proof in next_rollover["state"][
+            "closed_candle_time_attestations_v3"
+        ]
+    ]
+
+    assert proof_epochs == [boundary_epoch, boundary_epoch + 300.0]
+    assert timing["status"] == "BUILDING_HISTORY"
+    assert timing["active_anchor_count"] == 2
+    assert timing["latest_field_state"]["closed_candle_time_proof"][
+        "bound_row_index"
+    ] == 1
+    assert timing["censorship_audit"]["censored_anchor_count"] == 0
+    assert timing["censorship_audit"]["discontinuity_count"] == 0
+
+
+def test_screenshot_rollover_rejects_no_straddle_gap_and_multiple_boundaries() -> None:
+    boundary_epoch = 1_800_000_000.0
+
+    same_interval_initial = _timed_resolution(
+        _tracker_window(8),
+        capture_epoch=boundary_epoch + 10.0,
+    )
+    no_straddle = _timed_resolution(
+        _tracker_window(9),
+        capture_epoch=boundary_epoch + 20.0,
+        previous_state=same_interval_initial["state"],
+    )
+    assert no_straddle["transition_observed"] is True
+    assert no_straddle["state"]["closed_candle_time_attestations_v3"] == []
+
+    gap_initial = _timed_resolution(
+        _tracker_window(8),
+        capture_epoch=boundary_epoch - 1.0,
+    )
+    gap = _timed_resolution(
+        _tracker_window(10),
+        capture_epoch=boundary_epoch + 2.0,
+        previous_state=gap_initial["state"],
+    )
+    assert gap["transition_observed"] is True
+    assert gap["transition_count"] == 2
+    assert gap["state"]["closed_candle_time_attestations_v3"] == []
+
+    old_initial = _timed_resolution(
+        _tracker_window(8),
+        capture_epoch=boundary_epoch - 601.0,
+    )
+    multi_boundary = _timed_resolution(
+        _tracker_window(9),
+        capture_epoch=boundary_epoch + 2.0,
+        previous_state=old_initial["state"],
+    )
+    assert multi_boundary["transition_count"] == 1
+    assert multi_boundary["state"]["closed_candle_time_attestations_v3"] == []
+
+
+def test_caller_timestamp_aliases_are_stripped_without_an_attestation(
+    tmp_path: Path,
+) -> None:
+    rows = _tracker_window(8)
+    clean_resolution = resolve_closed_candle_identity_v3(
+        rows,
+        pair="CAD/JPY OTC",
+        timeframe="M5",
+    )
+    spoofed_rows = [dict(row) for row in rows]
+    spoofed_rows[-2].update(
+        {
+            "timestamp": 1_800_000_000,
+            "time": 1_800_000_000,
+            "bar_open_time": 1_799_999_700,
+            "open_time": 1_799_999_700,
+            "open_timestamp": 1_799_999_700,
+            "candle_open_epoch": 1_799_999_700,
+            "closed_candle_epoch": 1_800_000_000,
+            "close_time": 1_800_000_000,
+            "resolver_bound_row_index": len(rows) - 2,
+            "timestamp_proof_source": "CALLER_SPOOF",
+        }
+    )
+    result = _study(
+        PhoenixGuardWindowTrackingAdapter(
+            market_study_root=tmp_path / "caller-time-spoof"
+        ),
+        spoofed_rows,
+        _scene(clean_resolution),
+        contract_duration_seconds=900,
+    )
+
+    assert result["candle_intelligence"]["latest"].get("timestamp") is None
+    assert result["path_clock_liquidity_v3"]["status"] == (
+        "CENSORED_INVALID_TIMING_EVIDENCE"
+    )

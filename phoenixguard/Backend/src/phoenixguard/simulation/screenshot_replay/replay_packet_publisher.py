@@ -147,7 +147,7 @@ class ReplayPacketPublisher:
                 "execution_mature": executable and not bad_now,
                 "timing": {
                     "state": "READY" if executable and not bad_now else "WAIT",
-                    "expiry_seconds": int(metadata.get("expiry_seconds", 300)),
+                    "expiry_seconds": int(metadata.get("expiry_seconds", 900)),
                 },
                 "market_context": {
                     "dominant_side": dominant_side,

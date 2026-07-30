@@ -31,7 +31,7 @@ from reportlab.platypus.tableofcontents import TableOfContents
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "docs" / "architecture" / "PHOENIXGUARD_V3_MARKET_STUDY_BLUEPRINT.md"
-OUTPUT = ROOT / "reports" / "PhoenixGuard_V3_Deep_Market_Study_Blueprint_2026-07-24.pdf"
+OUTPUT = ROOT / "reports" / "PhoenixGuard_V3_Deep_Market_Study_Blueprint_2026-07-29.pdf"
 
 NAVY = colors.HexColor("#10233F")
 BLUE = colors.HexColor("#1E5AA8")
@@ -568,7 +568,7 @@ def _cover() -> list[object]:
         [
             [Paragraph("VERSION", STYLES["small"]), _paragraph("V3 only - no V4", "body")],
             [Paragraph("STATUS", STYLES["small"]), _paragraph("Implemented architecture and operating contract", "body")],
-            [Paragraph("UPDATED", STYLES["small"]), _paragraph(date(2026, 7, 24).isoformat(), "body")],
+            [Paragraph("UPDATED", STYLES["small"]), _paragraph(date(2026, 7, 29).isoformat(), "body")],
             [Paragraph("SOURCE", STYLES["small"]), _paragraph(str(SOURCE.relative_to(ROOT)), "body")],
         ],
         colWidths=[2.2 * cm, 14.9 * cm],

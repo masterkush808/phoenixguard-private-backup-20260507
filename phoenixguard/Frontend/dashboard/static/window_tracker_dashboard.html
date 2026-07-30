@@ -295,21 +295,36 @@
     }
 
     .decision-shell {
-      display: grid;
-      grid-template-columns: minmax(240px, 0.58fr) minmax(0, 1.72fr);
-      gap: clamp(22px, 3.5vw, 58px);
-      align-items: stretch;
-      padding: clamp(20px, 3vw, 38px) 0 clamp(22px, 3vw, 42px);
+      padding: clamp(18px, 2.4vw, 32px) 0 clamp(22px, 3vw, 40px);
       border-bottom: 1px solid var(--line);
       animation: enter-up 420ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
     }
 
-    .decision-primary {
+    .decision-brief-head {
       display: flex;
-      min-width: 0;
-      flex-direction: column;
+      align-items: flex-end;
       justify-content: space-between;
-      gap: 18px;
+      gap: 28px;
+      margin-bottom: clamp(16px, 2vw, 24px);
+    }
+
+    .decision-brief-title h2 {
+      margin: 5px 0 0;
+      color: var(--gold-pale);
+      font-family: var(--font-display);
+      font-size: clamp(22px, 2.35vw, 34px);
+      font-stretch: condensed;
+      font-weight: 760;
+      letter-spacing: -0.035em;
+      line-height: 1.05;
+    }
+
+    .decision-brief-title p {
+      max-width: 64ch;
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
     }
 
     .decision-context {
@@ -326,6 +341,45 @@
       font-weight: 660;
     }
 
+    .stream-observation {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--quiet);
+      font-family: var(--font-mono);
+      white-space: nowrap;
+      transition: color 180ms ease;
+    }
+
+    .stream-observation-dot {
+      width: 5px;
+      height: 5px;
+      flex: 0 0 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .stream-observation[data-state="running"] {
+      color: var(--up);
+    }
+
+    .stream-observation[data-state="running"] .stream-observation-dot,
+    .stream-observation[data-state="starting"] .stream-observation-dot {
+      animation: status-pulse 2.4s ease-in-out infinite;
+    }
+
+    .stream-observation[data-state="starting"] {
+      color: var(--warn);
+    }
+
+    .stream-observation[data-state="degraded"] {
+      color: var(--gold);
+    }
+
+    .stream-observation[data-state="offline"] {
+      color: var(--down);
+    }
+
     .decision-kicker,
     .section-kicker,
     .story-label,
@@ -339,19 +393,134 @@
       text-transform: uppercase;
     }
 
+    .decision-questions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(270px, 0.9fr);
+      margin: 0;
+      padding: 0;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line-strong);
+      list-style: none;
+    }
+
+    .decision-question {
+      position: relative;
+      min-width: 0;
+      padding: clamp(18px, 2.2vw, 30px);
+      padding-left: clamp(44px, 4vw, 70px);
+      animation: answer-reveal 420ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+    }
+
+    .decision-question:nth-child(2) {
+      animation-delay: 60ms;
+    }
+
+    .decision-question:nth-child(3) {
+      animation-delay: 120ms;
+    }
+
+    .decision-question + .decision-question {
+      border-left: 1px solid var(--line);
+    }
+
+    .decision-question[data-question="entry"] {
+      background: linear-gradient(145deg, rgba(242, 200, 102, 0.08), rgba(242, 200, 102, 0.018));
+    }
+
+    .decision-shell[data-tone="buy"] .decision-question[data-question="entry"] {
+      background: linear-gradient(145deg, rgba(126, 216, 173, 0.13), rgba(126, 216, 173, 0.025));
+    }
+
+    .decision-shell[data-tone="sell"] .decision-question[data-question="entry"] {
+      background: linear-gradient(145deg, rgba(255, 157, 147, 0.13), rgba(255, 157, 147, 0.025));
+    }
+
+    .question-number {
+      position: absolute;
+      top: clamp(20px, 2.2vw, 31px);
+      left: clamp(14px, 1.5vw, 24px);
+      color: rgba(242, 200, 102, 0.62);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 780;
+      letter-spacing: 0.06em;
+    }
+
+    .decision-question h3 {
+      min-height: 2.8em;
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: clamp(12px, 1vw, 14px);
+      font-weight: 560;
+      line-height: 1.4;
+    }
+
+    .answer-headline {
+      display: block;
+      margin-top: 17px;
+      color: var(--ink);
+      font-family: var(--font-display);
+      font-size: clamp(22px, 2vw, 31px);
+      font-stretch: condensed;
+      font-weight: 770;
+      letter-spacing: -0.035em;
+      line-height: 1.06;
+    }
+
+    .answer-copy {
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .answer-context {
+      margin: 14px 0 0;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .answer-context span {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--quiet);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .answer-context strong {
+      color: var(--ink);
+      font-weight: 650;
+    }
+
+    .answer-confidence {
+      display: block;
+      min-height: 16px;
+      margin-top: 8px;
+      color: #c9b982;
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+
     .decision-action-row {
       display: flex;
       flex-wrap: wrap;
       align-items: baseline;
       gap: 12px;
-      margin-top: 5px;
+      margin-top: 17px;
     }
 
     .decision-action-row h2 {
       margin: 0;
       color: var(--ink);
       font-family: var(--font-display);
-      font-size: clamp(30px, 3.4vw, 48px);
+      font-size: clamp(34px, 3.2vw, 48px);
       font-stretch: condensed;
       font-weight: 800;
       letter-spacing: -0.055em;
@@ -384,7 +553,7 @@
 
     .decision-instruction {
       margin: 12px 0 0;
-      max-width: 46ch;
+      max-width: 42ch;
       color: var(--ink);
       font-size: clamp(14px, 1.25vw, 17px);
       line-height: 1.45;
@@ -399,6 +568,7 @@
     }
 
     .decision-next {
+      margin-top: 14px;
       padding-top: 14px;
       border-top: 1px solid var(--line);
     }
@@ -412,76 +582,11 @@
       line-height: 1.5;
     }
 
-    .decision-story {
-      display: flex;
-      min-width: 0;
-      flex-direction: column;
-      justify-content: center;
-    }
-
-    .story-heading {
-      display: flex;
-      align-items: end;
-      justify-content: space-between;
-      gap: 18px;
-      margin-bottom: 16px;
-    }
-
-    .story-heading h3 {
-      margin: 4px 0 0;
-      font-family: var(--font-display);
-      font-size: clamp(20px, 2.1vw, 30px);
-      font-stretch: condensed;
-      letter-spacing: -0.025em;
-      color: var(--gold-pale);
-    }
-
-    .story-heading p {
-      max-width: 42ch;
-      margin: 0;
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1.5;
-      text-align: right;
-    }
-
-    .story-steps {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      border-top: 1px solid var(--line);
-      border-bottom: 1px solid var(--line);
-    }
-
-    .story-step {
-      min-width: 0;
-      padding: 17px clamp(12px, 2vw, 24px) 18px 0;
-    }
-
-    .story-step + .story-step {
-      padding-left: clamp(12px, 2vw, 24px);
-      border-left: 1px solid var(--line);
-    }
-
-    .story-step strong {
-      display: block;
-      margin-top: 7px;
-      color: var(--ink);
-      font-size: 13px;
-      font-weight: 670;
-    }
-
-    .story-step p {
-      margin: 7px 0 0;
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1.55;
-    }
-
     .pressure-event {
       display: flex;
       align-items: flex-start;
       gap: 8px;
-      margin: 13px 0 0;
+      margin: 12px 0 0;
       color: var(--muted);
       font-size: 11px;
       line-height: 1.5;
@@ -506,7 +611,7 @@
     }
 
     .evidence-details {
-      margin-top: 13px;
+      margin-top: 14px;
     }
 
     .evidence-details summary {
@@ -518,7 +623,7 @@
 
     .evidence-list {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
       margin-top: 12px;
     }
@@ -561,6 +666,17 @@
       background: transparent;
       cursor: pointer;
       font-size: 11px;
+    }
+
+    @keyframes answer-reveal {
+      from {
+        opacity: 0;
+        transform: translateY(7px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
 
     .vision-workspace {
@@ -1854,9 +1970,24 @@
     }
 
     @media (max-width: 980px) {
-      .decision-shell {
-        grid-template-columns: 1fr;
-        gap: 28px;
+      .decision-brief-head {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .decision-questions {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .decision-question[data-question="entry"] {
+        grid-column: 1 / -1;
+        border-top: 1px solid var(--line);
+        border-left: 0;
+      }
+
+      .decision-question h3 {
+        min-height: auto;
       }
 
       .advanced-view .workspace-grid {
@@ -1944,34 +2075,112 @@
       }
 
       .decision-shell {
-        padding-top: 17px;
+        padding-top: 8px;
+      }
+
+      .decision-brief-head {
+        gap: 4px;
+        margin-bottom: 8px;
+      }
+
+      .decision-brief-title p {
+        display: none;
+      }
+
+      .decision-context {
+        gap: 4px;
+        font-size: 9px;
       }
 
       .decision-action-row h2 {
-        font-size: clamp(42px, 16vw, 64px);
+        font-size: clamp(28px, 10vw, 38px);
       }
 
-      .story-heading {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-
-      .story-heading p {
-        text-align: left;
-      }
-
-      .story-steps {
+      .decision-questions {
         grid-template-columns: 1fr;
       }
 
-      .story-step {
-        padding: 14px 0;
+      .decision-question {
+        padding: 10px 10px 11px 38px;
       }
 
-      .story-step + .story-step {
-        padding-left: 0;
+      .decision-question + .decision-question,
+      .decision-question[data-question="entry"] {
+        grid-column: auto;
         border-top: 1px solid var(--line);
         border-left: 0;
+      }
+
+      .question-number {
+        top: 12px;
+        left: 11px;
+      }
+
+      .decision-question h3 {
+        margin-top: 2px;
+        font-size: 10px;
+        line-height: 1.25;
+      }
+
+      .answer-headline {
+        margin-top: 6px;
+        font-size: 18px;
+      }
+
+      .answer-copy {
+        margin-top: 4px;
+        font-size: 10px;
+        line-height: 1.35;
+      }
+
+      .decision-question[data-question="history"] .answer-context,
+      #market-origin-confidence,
+      #direction-study-confidence {
+        display: none;
+      }
+
+      .decision-question[data-question="history"] .answer-copy,
+      .decision-question[data-question="study"] .answer-copy {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+
+      .decision-action-row {
+        gap: 7px;
+        margin-top: 6px;
+      }
+
+      .decision-confidence {
+        font-size: 9px;
+      }
+
+      .decision-instruction {
+        margin-top: 6px;
+        font-size: 12px;
+        line-height: 1.3;
+      }
+
+      .decision-reason {
+        display: -webkit-box;
+        margin-top: 4px;
+        overflow: hidden;
+        font-size: 10px;
+        line-height: 1.3;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+
+      .decision-next {
+        margin-top: 6px;
+        padding-top: 6px;
+      }
+
+      .decision-next strong {
+        margin-top: 3px;
+        font-size: 10px;
+        line-height: 1.3;
       }
 
       .evidence-list {
@@ -2131,76 +2340,90 @@
   </header>
 
   <main class="app-main" id="main-content">
-    <section class="decision-shell" id="beginner-decision-shell" data-tone="hold" aria-labelledby="beginner-decision-title">
-      <div class="decision-primary">
-        <div>
-          <div class="decision-context">
-            <strong id="beginner-read-status">Checking the live chart</strong>
-            <span aria-hidden="true">·</span>
-            <span id="beginner-market-context">Market not connected</span>
-          </div>
-          <div class="decision-action-block">
-            <span class="decision-kicker">Entry permission</span>
-            <div class="decision-action-row">
-              <h2 id="beginner-decision-title" aria-live="polite">CLOSED</h2>
-              <span class="decision-confidence" id="beginner-confidence">Building evidence</span>
-            </div>
-            <p class="decision-instruction" id="beginner-instruction">No trade entry is open.</p>
-            <p class="decision-reason" id="beginner-reason">Entry remains separate from the chart study.</p>
-          </div>
+    <section class="decision-shell" id="beginner-decision-shell" data-tone="hold" aria-labelledby="beginner-story-title">
+      <header class="decision-brief-head">
+        <div class="decision-brief-title">
+          <span class="decision-kicker">Live trading brief</span>
+          <h2 id="beginner-story-title">Three answers. One decision.</h2>
+          <p id="beginner-story-summary">The model explains the market, the active study, and the trade decision in that order.</p>
         </div>
-        <div class="decision-next">
-          <span class="decision-kicker">Permission changes when</span>
-          <strong id="beginner-next-condition">A current chart explicitly returns BUY NOW or SELL NOW.</strong>
+        <div class="decision-context">
+          <strong id="beginner-read-status">Checking the live chart</strong>
+          <span aria-hidden="true">·</span>
+          <span id="beginner-market-context">Market not connected</span>
+          <span aria-hidden="true">·</span>
+          <span class="stream-observation" id="stream-observation" data-state="unknown" role="status" aria-live="polite">
+            <i class="stream-observation-dot" aria-hidden="true"></i>
+            <span id="stream-observation-label">Observation health unavailable</span>
+          </span>
         </div>
-      </div>
+      </header>
 
-      <div class="decision-story">
-        <div class="story-heading">
-          <div>
-            <span class="decision-kicker">Market story</span>
-            <h3 id="beginner-story-title">Reading the larger and inner trend</h3>
-          </div>
-          <p id="beginner-story-summary">Trend and regression describe the chart. Entry permission remains separate.</p>
-        </div>
-        <div class="story-steps" aria-label="Major trend, inner trend, and regression study">
-          <div class="story-step">
-            <span class="story-label" id="story-step-one-label">Major trend</span>
-            <strong id="current-move-title">Reading larger structure</strong>
-            <p id="beginner-now-read">The broader chart direction is being studied.</p>
-          </div>
-          <div class="story-step">
-            <span class="story-label" id="story-step-two-label">Inner trend</span>
-            <strong id="inner-trend-title">Reading local movement</strong>
-            <p id="beginner-next-read">The move inside the larger trend is being classified.</p>
-          </div>
-          <div class="story-step">
-            <span class="story-label" id="story-step-three-label">Regression study</span>
+      <ol class="decision-questions" aria-label="The three live trading questions">
+        <li class="decision-question" data-question="history" id="question-market-history">
+          <span class="question-number" aria-hidden="true">01</span>
+          <span class="story-label" id="story-step-one-label">Question 1</span>
+          <h3 id="market-origin-question">Where is the market from, and how did history behave?</h3>
+          <strong class="answer-headline" id="current-move-title" aria-live="polite">Reading market origin</strong>
+          <p class="answer-copy" id="beginner-now-read">The larger move and its historical behavior are being studied.</p>
+          <p class="answer-context">
+            <span>Historical behavior</span>
             <strong id="permission-title">Building history</strong>
-            <p id="beginner-entry-read">Recorded movement, rests, and continuations will form the history read.</p>
+          </p>
+          <p class="answer-copy" id="beginner-entry-read">Completed movement, rests, and continuations will form this read.</p>
+          <span class="answer-confidence" id="market-origin-confidence"></span>
+        </li>
+
+        <li class="decision-question" data-question="study" id="question-direction-study">
+          <span class="question-number" aria-hidden="true">02</span>
+          <span class="story-label" id="story-step-two-label">Question 2</span>
+          <h3 id="direction-study-question">Which direction was studied, and what is being studied now?</h3>
+          <strong class="answer-headline" id="inner-trend-title" aria-live="polite">Reading the active study</strong>
+          <p class="answer-copy" id="beginner-next-read">The earlier direction and current directional study are being compared.</p>
+          <span class="answer-confidence" id="direction-study-confidence"></span>
+        </li>
+
+        <li class="decision-question" data-question="entry" id="question-entry-now">
+          <span class="question-number" aria-hidden="true">03</span>
+          <span class="story-label" id="story-step-three-label">Question 3</span>
+          <h3 id="entry-now-question">What is the best decision to do right now?</h3>
+          <div class="decision-action-row">
+            <h2 id="beginner-decision-title" aria-live="assertive">NO — NOT YET</h2>
+            <span class="decision-confidence" id="beginner-confidence">Building evidence</span>
+          </div>
+          <p class="decision-instruction" id="beginner-instruction">Do not enter until the model confirms a side.</p>
+          <p class="decision-reason" id="beginner-reason">The entry decision is still being built.</p>
+          <div class="decision-next">
+            <span class="decision-kicker">What changes the answer</span>
+            <strong id="beginner-next-condition">A current chart must explicitly confirm BUY NOW or SELL NOW.</strong>
+          </div>
+        </li>
+      </ol>
+
+      <details class="evidence-details">
+        <summary>Technical contracts and evidence</summary>
+        <div class="evidence-list">
+          <div class="evidence-item">
+            <span>Major and inner trend</span>
+            <strong id="beginner-evidence-story">Reading market structure</strong>
+          </div>
+          <div class="evidence-item">
+            <span>Regression</span>
+            <strong id="beginner-evidence-timing">Building history</strong>
+          </div>
+          <div class="evidence-item">
+            <span>Entry contract</span>
+            <strong id="beginner-evidence-safety">Unavailable while checking</strong>
+          </div>
+          <div class="evidence-item">
+            <span>Continuous observation stream</span>
+            <strong id="stream-observation-detail">Stream health unavailable</strong>
           </div>
         </div>
         <p class="pressure-event" id="pressure-event" data-state="none">No current pressure event has been confirmed.</p>
-        <details class="evidence-details">
-          <summary>See study evidence</summary>
-          <div class="evidence-list">
-            <div class="evidence-item">
-              <span>Structure</span>
-              <strong id="beginner-evidence-story">Reading major and inner trend</strong>
-            </div>
-            <div class="evidence-item">
-              <span>Regression</span>
-              <strong id="beginner-evidence-timing">Building history</strong>
-            </div>
-            <div class="evidence-item">
-              <span>Entry permission</span>
-              <strong id="beginner-evidence-safety">Closed while checking</strong>
-            </div>
-          </div>
-          <p class="retracement-evidence" id="retracement-evidence" aria-live="polite">Retracement evidence: awaiting completed graph and Pair DNA history for the 70.5% OTE reference and the 71.8% experimental, nonstandard level. Observation only; never entry permission.</p>
-          <button class="decision-advanced-link" id="beginner-open-advanced" type="button">Explore the visual evidence</button>
-        </details>
-      </div>
+        <p class="retracement-evidence" id="retracement-evidence" aria-live="polite">Retracement evidence: awaiting completed graph and Pair DNA history for the 70.5% OTE reference and the 71.8% experimental, nonstandard level. Observation only; never entry permission.</p>
+        <button class="decision-advanced-link" id="beginner-open-advanced" type="button">Explore the visual evidence</button>
+      </details>
     </section>
 
     <section class="vision-workspace" aria-labelledby="workspace-title">
@@ -2266,6 +2489,7 @@
               <button class="layer-filter" type="button" data-overlay-family="targets" aria-pressed="true">Targets <span class="layer-count" data-layer-count="targets">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="invalidation" aria-pressed="true">Risk limits <span class="layer-count" data-layer-count="invalidation">0</span></button>
               <div class="order-area-kind-controls" aria-label="Individual order-area overlays">
+                <button class="layer-filter" type="button" data-overlay-kind-control="precision_entry" data-available="false" aria-pressed="false" disabled>Model entry areas <span class="layer-count" data-order-kind-count="precision_entry">—</span></button>
                 <button class="layer-filter" type="button" data-overlay-kind-control="lower_price_buy_area" data-available="false" aria-pressed="false" disabled>Buy lower · limit <span class="layer-count" data-order-kind-count="lower_price_buy_area">0</span></button>
                 <button class="layer-filter" type="button" data-overlay-kind-control="higher_price_sell_area" data-available="false" aria-pressed="false" disabled>Sell higher · limit <span class="layer-count" data-order-kind-count="higher_price_sell_area">0</span></button>
                 <button class="layer-filter" type="button" data-overlay-kind-control="upside_break_area" data-available="false" aria-pressed="false" disabled>Buy above · stop <span class="layer-count" data-order-kind-count="upside_break_area">0</span></button>
@@ -2419,9 +2643,9 @@
 
     const SESSION_ID = __SESSION_ID_JSON__;
     const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";
-    // Explicit actions and visibility refreshes stay immediate. This is only
-    // the low-frequency HTTP fallback used while the dashboard is left open.
-    const POLL_INTERVAL_MS = 30000;
+    // SSE is primary. This bounded visible fallback keeps the operator brief
+    // responsive if an intermediary delays or drops stream data events.
+    const POLL_INTERVAL_MS = 2000;
     // Preserve a useful but bounded automatic closed-candle study history.
     const SESSION_HISTORY_ROW_LIMIT = 256;
     const OVERLAY_LAYERS_STORAGE_KEY = "phoenixguard.overlay.layers.v1";
@@ -2530,6 +2754,9 @@
       beginnerDecisionShell: byId("beginner-decision-shell"),
       beginnerReadStatus: byId("beginner-read-status"),
       beginnerMarketContext: byId("beginner-market-context"),
+      streamObservation: byId("stream-observation"),
+      streamObservationLabel: byId("stream-observation-label"),
+      streamObservationDetail: byId("stream-observation-detail"),
       beginnerDecisionTitle: byId("beginner-decision-title"),
       beginnerConfidence: byId("beginner-confidence"),
       beginnerInstruction: byId("beginner-instruction"),
@@ -2540,6 +2767,14 @@
       storyStepOneLabel: byId("story-step-one-label"),
       storyStepTwoLabel: byId("story-step-two-label"),
       storyStepThreeLabel: byId("story-step-three-label"),
+      marketOriginQuestion: byId("market-origin-question"),
+      directionStudyQuestion: byId("direction-study-question"),
+      entryNowQuestion: byId("entry-now-question"),
+      questionMarketHistory: byId("question-market-history"),
+      questionDirectionStudy: byId("question-direction-study"),
+      questionEntryNow: byId("question-entry-now"),
+      marketOriginConfidence: byId("market-origin-confidence"),
+      directionStudyConfidence: byId("direction-study-confidence"),
       currentMoveTitle: byId("current-move-title"),
       innerTrendTitle: byId("inner-trend-title"),
       permissionTitle: byId("permission-title"),
@@ -2691,6 +2926,7 @@
       labelMode: readStoredValue("phoenixguard.labels", "on"),
       overlayOpacity: Number(readStoredValue("phoenixguard.overlay.opacity", "88")) || 88,
       payload: null,
+      visualPayload: null,
       overlays: [],
       selectedOverlayId: "",
       lastRevision: -1,
@@ -2698,8 +2934,13 @@
       acceptedView: "",
       requestSequence: 0,
       pollTimer: 0,
+      entryExpiryTimer: 0,
       eventSource: null,
       streamConnected: false,
+      liveSession: null,
+      sessionSnapshotRequest: null,
+      lastSessionSnapshotEpoch: 0,
+      completedStudyHistory: [],
       streamRefreshQueued: false,
       streamRefreshTimer: 0,
       busy: false,
@@ -2832,7 +3073,10 @@
 
     function setText(element, value, fallback) {
       if (element) {
-        element.textContent = safeText(value, fallback);
+        const nextText = safeText(value, fallback);
+        if (element.textContent !== nextText) {
+          element.textContent = nextText;
+        }
       }
     }
 
@@ -2856,11 +3100,11 @@
     }
 
     function formatTime(epoch) {
-      const number = Number(epoch || 0);
+      const number = eventEpochSeconds(epoch);
       if (!Number.isFinite(number) || number <= 0) {
         return "Time unavailable";
       }
-      const milliseconds = number > 100000000000 ? number : number * 1000;
+      const milliseconds = number * 1000;
       try {
         return new Intl.DateTimeFormat(undefined, {
           hour: "2-digit",
@@ -2872,12 +3116,26 @@
       }
     }
 
+    function eventEpochSeconds(value) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric > 100000000000 ? numeric / 1000 : numeric;
+      }
+      if (typeof value === "string" && value.trim()) {
+        const parsed = Date.parse(value);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          return parsed / 1000;
+        }
+      }
+      return 0;
+    }
+
     function formatAge(epoch) {
-      const number = Number(epoch || 0);
+      const number = eventEpochSeconds(epoch);
       if (!Number.isFinite(number) || number <= 0) {
         return "";
       }
-      const seconds = Math.max(0, Date.now() / 1000 - (number > 100000000000 ? number / 1000 : number));
+      const seconds = Math.max(0, Date.now() / 1000 - number);
       if (seconds < 5) {
         return "updated now";
       }
@@ -2979,6 +3237,10 @@
         + "/events";
     }
 
+    function sessionSnapshotUrl() {
+      return "/v1/mobile/window-tracker/sessions/" + encodeURIComponent(SESSION_ID);
+    }
+
     async function requestJson(url) {
       const response = await fetch(url, {
         cache: "no-store",
@@ -3069,6 +3331,12 @@
         } else {
           setConnectionState("offline", "Connection lost");
           updateVisualStatus("chart", "offline", "Broker frame retained · Connection lost");
+          invalidateLiveEntryDecision(
+            "The live connection was lost, so the previous entry answer is no longer current.",
+            "NO — CONNECTION LOST",
+            "Reconnect and wait for a new current-frame entry answer.",
+            "offline",
+          );
         }
       } finally {
         if (sequence === state.requestSequence) {
@@ -3108,6 +3376,82 @@
       }
     }
 
+    function applySessionStreamSnapshot(rawPayload) {
+      const snapshot = safeObject(rawPayload);
+      if (!Object.keys(snapshot).length) {
+        return;
+      }
+      state.liveSession = Object.assign({}, safeObject(state.liveSession), snapshot);
+      rememberCompletedStudyHistory(state.liveSession);
+      if (state.payload) {
+        // Stream observations can advance while the next broker bitmap is
+        // decoding. Update live/forming copy now, while entry authority and
+        // overlay geometry remain tied to the committed operator bundle.
+        renderTrackingStatus(state.payload);
+        renderDecision(state.payload);
+        renderHistory(state.payload);
+      }
+    }
+
+    function applySessionStreamEvent(event) {
+      const body = safeText(event && event.data, "");
+      if (!body) {
+        return;
+      }
+      try {
+        applySessionStreamSnapshot(JSON.parse(body));
+      } catch (_error) {
+      }
+    }
+
+    function refreshSessionSnapshot(options) {
+      const config = options || {};
+      const nowEpoch = Date.now() / 1000;
+      if (
+        config.force !== true
+        && state.lastSessionSnapshotEpoch > 0
+        && nowEpoch - state.lastSessionSnapshotEpoch < 2
+      ) {
+        return Promise.resolve();
+      }
+      if (state.sessionSnapshotRequest) {
+        return state.sessionSnapshotRequest;
+      }
+      const request = fetch(sessionSnapshotUrl(), {
+        cache: "no-store",
+        headers: {"Accept": "application/json"},
+      }).then(function (response) {
+        if (!response.ok) {
+          return null;
+        }
+        return response.json();
+      }).then(function (snapshot) {
+        const session = safeObject(snapshot);
+        const sessionId = safeText(session.session_id, "");
+        if (!Object.keys(session).length || (sessionId && sessionId !== SESSION_ID)) {
+          return;
+        }
+        state.lastSessionSnapshotEpoch = Date.now() / 1000;
+        applySessionStreamSnapshot(session);
+      }).catch(function () {
+        // The event stream and atomic operator endpoint remain available. A
+        // failed supplemental snapshot must never blank a committed surface.
+      }).finally(function () {
+        if (state.sessionSnapshotRequest === request) {
+          state.sessionSnapshotRequest = null;
+        }
+      });
+      state.sessionSnapshotRequest = request;
+      return request;
+    }
+
+    async function refreshPublicState(options) {
+      await Promise.all([
+        refreshOperatorState(options),
+        refreshSessionSnapshot(options),
+      ]);
+    }
+
     function connectSessionStream() {
       if (typeof window.EventSource !== "function") {
         return;
@@ -3123,28 +3467,34 @@
       source.onopen = function () {
         if (state.eventSource === source) {
           state.streamConnected = true;
+          // Some proxies flush heartbeat comments before the first data event.
+          // Seed the forming read from the matching public session endpoint so
+          // an open connection can never look like a frozen empty stream.
+          refreshSessionSnapshot();
         }
       };
       source.onerror = function () {
         if (state.eventSource === source) {
-          // EventSource reconnects itself. The 30-second HTTP timer remains
+          // EventSource reconnects itself. The 2-second HTTP fallback remains
           // active, so a stream interruption can never freeze the dashboard.
           state.streamConnected = false;
         }
       };
-      source.addEventListener("SESSION_UPDATE", function () {
+      source.addEventListener("SESSION_UPDATE", function (event) {
         if (state.eventSource !== source) {
           return;
         }
         state.streamConnected = true;
+        applySessionStreamEvent(event);
         scheduleStreamRefresh(40);
       });
       ["TRACKING_UPDATE", "MARKET_STUDY_UPDATE"].forEach(function (eventName) {
-        source.addEventListener(eventName, function () {
+        source.addEventListener(eventName, function (event) {
           if (state.eventSource !== source) {
             return;
           }
           state.streamConnected = true;
+          applySessionStreamEvent(event);
           scheduleStreamRefresh(40);
         });
       });
@@ -3160,22 +3510,112 @@
         window.clearTimeout(state.pollTimer);
       }
       state.pollTimer = window.setTimeout(async function () {
+        // The atomic operator adapter is compact and authoritative. Do not
+        // download the much larger raw session snapshot every two seconds;
+        // that supplemental read is reserved for startup/reconnect/manual use.
         await refreshOperatorState();
         scheduleRefresh(document.hidden ? POLL_INTERVAL_MS * 4 : POLL_INTERVAL_MS);
       }, Math.max(500, Number(delay) || POLL_INTERVAL_MS));
     }
 
     function renderUnavailableState(error) {
+      if (state.entryExpiryTimer) {
+        window.clearTimeout(state.entryExpiryTimer);
+        state.entryExpiryTimer = 0;
+      }
       const message = safeText(error && error.message, "Live analysis is temporarily unavailable.");
       setConnectionState("offline", "Offline");
       els.beginnerDecisionShell.dataset.tone = "blocked";
+      els.questionMarketHistory.dataset.state = "offline";
+      els.questionDirectionStudy.dataset.state = "offline";
+      els.questionEntryNow.dataset.state = "offline";
       setText(els.beginnerReadStatus, "No current observation");
-      setText(els.beginnerDecisionTitle, "CLOSED");
-      setText(els.beginnerInstruction, "Entry permission is unavailable.");
+      setText(els.beginnerStorySummary, "The three answers require one current, verified chart observation.");
+      setText(els.currentMoveTitle, "Market origin unavailable");
+      setText(els.beginnerNowRead, "Reconnect the broker chart to read where the market came from.");
+      setText(els.permissionTitle, "History unavailable");
+      setText(els.beginnerEntryRead, "No completed study can be attached to an offline chart.");
+      setText(els.marketOriginConfidence, "");
+      setText(els.innerTrendTitle, "No active directional study");
+      setText(els.beginnerNextRead, "The model needs a current chart before it can compare the earlier and active direction.");
+      setText(els.directionStudyConfidence, "");
+      setText(els.beginnerDecisionTitle, "NO — OFFLINE");
+      setText(els.beginnerConfidence, "No current model answer");
+      setText(els.beginnerInstruction, "Do not enter while the live chart is unavailable.");
       setText(els.beginnerReason, message);
       setText(els.beginnerNextCondition, "Reconnect the chart and wait for a new current observation.");
       setText(els.retracementEvidence, "Retracement evidence: unavailable while the live workspace is offline. Observation only; never entry permission.");
+      renderStreamObservation({tracking: {stream: {enabled: false, state: "OFFLINE"}}});
       updateVisualStatus("chart", "offline", "Broker view unavailable");
+    }
+
+    function invalidateLiveEntryDecision(reason, headline, nextCondition, stateLabel) {
+      if (state.entryExpiryTimer) {
+        window.clearTimeout(state.entryExpiryTimer);
+        state.entryExpiryTimer = 0;
+      }
+      els.beginnerDecisionShell.dataset.tone = "blocked";
+      els.questionMarketHistory.dataset.state = "last-completed";
+      els.questionDirectionStudy.dataset.state = "stale";
+      els.questionEntryNow.dataset.state = safeText(stateLabel, "closed").toLowerCase();
+      setText(els.beginnerReadStatus, "No current entry answer");
+      setText(
+        els.beginnerStorySummary,
+        "The market and study answers remain visible as history; entry permission is closed.",
+      );
+      setText(els.beginnerDecisionTitle, safeText(headline, "NO — ENTRY CLOSED"));
+      setText(els.beginnerConfidence, "No current entry permission");
+      setText(els.beginnerInstruction, "Do not enter from the previous answer.");
+      setText(els.beginnerReason, safeText(reason, "The previous entry answer is no longer current."));
+      setText(
+        els.beginnerNextCondition,
+        safeText(nextCondition, "Wait for a new current-frame BUY NOW or SELL NOW answer."),
+      );
+      setText(els.beginnerEvidenceSafety, "Entry closed · current permission unavailable");
+    }
+
+    function scheduleEntryExpiry(permission, freshness, action) {
+      if (state.entryExpiryTimer) {
+        window.clearTimeout(state.entryExpiryTimer);
+        state.entryExpiryTimer = 0;
+      }
+      if (normalizeAction(action) === "WAIT") {
+        return;
+      }
+      const permissionExpiresAt = Number(safeObject(permission).expires_at || 0);
+      const freshnessExpiresAt = Number(safeObject(freshness).valid_until || 0);
+      const deadlines = [permissionExpiresAt, freshnessExpiresAt].filter(function (value) {
+        return Number.isFinite(value) && value > 0;
+      });
+      const expiresAt = deadlines.length ? Math.min(...deadlines) : 0;
+      if (expiresAt <= 0) {
+        invalidateLiveEntryDecision(
+          "The entry answer did not include a verifiable expiry.",
+          "NO — ENTRY CLOSED",
+          "Wait for a new entry answer with a current verified window.",
+          "closed",
+        );
+        return;
+      }
+      const remainingMs = Math.floor((expiresAt - Date.now() / 1000) * 1000);
+      if (remainingMs <= 0) {
+        invalidateLiveEntryDecision(
+          "The verified entry window has expired.",
+          "NO — WINDOW EXPIRED",
+          "Wait for a newly detected setup with its own verified window.",
+          "expired",
+        );
+        return;
+      }
+      state.entryExpiryTimer = window.setTimeout(function () {
+        state.entryExpiryTimer = 0;
+        invalidateLiveEntryDecision(
+          "The verified entry window has expired.",
+          "NO — WINDOW EXPIRED",
+          "Wait for a newly detected setup with its own verified window.",
+          "expired",
+        );
+      }, remainingMs);
     }
 
     function studyDirection(value) {
@@ -3306,19 +3746,24 @@
         + ". Observation only; never entry permission.";
     }
 
+    function marketStudyContract(payload) {
+      const source = safeObject(payload);
+      const tracking = safeObject(source.tracking || source.tracking_summary);
+      const latestSignal = safeObject(source.latest_signal);
+      return safeObject(
+        tracking.market_study_v3
+          || source.market_study_v3
+          || latestSignal.market_study_v3
+          || source.regression_study
+          || source.market_study
+          || source.behavioral_study
+          || source.study,
+      );
+    }
+
     function marketRegressionStudy(payload) {
       const operatorState = safeObject(payload);
-      const tracking = safeObject(operatorState.tracking);
-      const latestSignal = safeObject(operatorState.latest_signal);
-      const explicitStudy = safeObject(
-        tracking.market_study_v3
-          || operatorState.market_study_v3
-          || safeObject(latestSignal).market_study_v3
-          || operatorState.regression_study
-          || operatorState.market_study
-          || operatorState.behavioral_study
-          || operatorState.study,
-      );
+      const explicitStudy = marketStudyContract(operatorState);
       const regressionContract = safeObject(explicitStudy.regression);
       const behaviorContract = safeObject(explicitStudy.behavior);
       const similarityContract = safeObject(explicitStudy.historical_similarity);
@@ -3481,18 +3926,263 @@
       };
     }
 
+    function questionContract(payload, key, aliases) {
+      const questions = safeObject(safeObject(payload).three_questions);
+      const candidate = firstStudyValue([
+        questions[key],
+        ...safeList(aliases).map(function (alias) {
+          return questions[alias];
+        }),
+      ]);
+      return safeObject(candidate);
+    }
+
+    function questionField(contract, keys, fallback) {
+      const row = safeObject(contract);
+      for (const key of safeList(keys)) {
+        const value = row[key];
+        if (typeof value === "string" || typeof value === "number") {
+          const text = safeText(value, "");
+          if (text) {
+            return text;
+          }
+        }
+      }
+      return safeText(fallback, "");
+    }
+
+    function questionEvidence(contract, fallback) {
+      const evidence = safeObject(contract).evidence;
+      if (Array.isArray(evidence)) {
+        const lines = evidence.map(function (item) {
+          const row = safeObject(item);
+          return questionField(row, ["summary", "answer", "reason", "label", "value"], item);
+        }).filter(Boolean);
+        return lines.length ? lines.join(" · ") : safeText(fallback, "");
+      }
+      if (evidence && typeof evidence === "object") {
+        return questionField(evidence, ["summary", "answer", "reason", "label", "value"], fallback);
+      }
+      return safeText(evidence, fallback);
+    }
+
+    function questionConfidence(value) {
+      if (value === undefined || value === null || value === "") {
+        return "";
+      }
+      if (typeof value === "string" && !Number.isFinite(Number(value))) {
+        const text = safeText(value, "");
+        return /^0(?:\.0+)?%?(?:\s.*)?$/i.test(text) ? "" : text;
+      }
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        return "";
+      }
+      const percentage = numeric <= 1 ? numeric * 100 : numeric;
+      return Math.round(clamp(percentage, 0, 100)) + "% model confidence";
+    }
+
+    function directionNoun(side) {
+      const normalized = directionalSide(side);
+      return normalized === "BUY" ? "BUY" : normalized === "SELL" ? "SELL" : "NEUTRAL";
+    }
+
+    function marketOriginHeadline(side) {
+      const normalized = directionalSide(side);
+      if (normalized === "BUY") {
+        return "From an upward market";
+      }
+      if (normalized === "SELL") {
+        return "From a downward market";
+      }
+      return "From a mixed market";
+    }
+
+    function threeQuestionAnswers(payload, study, permission) {
+      const operatorState = safeObject(payload);
+      const permissionContract = safeObject(permission);
+      const freshnessContract = safeObject(operatorState.freshness);
+      const pressure = safeObject(operatorState.pressure_event);
+      const originContract = questionContract(operatorState, "market_origin_history", ["question_1", "q1"]);
+      const studyContract = questionContract(operatorState, "studied_direction_current", ["question_2", "q2"]);
+      const entryContract = questionContract(operatorState, "entry_now", ["question_3", "q3"]);
+      const studyEvidence = safeObject(studyContract.evidence);
+      const liveRead = liveFormingRead(operatorState);
+      const priorSide = studyDirection(pressure) !== "HOLD"
+        ? studyDirection(pressure)
+        : directionalSide(study.regression.side);
+      const studiedSide = studyDirection(
+        studyEvidence.ensemble_studied_side || studyContract.side || priorSide,
+      );
+      const completedSide = studyDirection(
+        studyEvidence.current_regression_side
+          || studyEvidence.last_completed_side
+          || study.regression.side,
+      );
+      const currentSide = directionalSide(study.inner.side);
+      const originFallback = [study.major.summary, study.regression.summary].filter(Boolean).join(" ");
+      const studyFallback = "Earlier evidence studied " + directionNoun(priorSide)
+        + ". " + study.inner.summary;
+      const completedStudyAnswer = questionField(studyContract, ["answer"], studyFallback);
+      const liveStudyEvidence = [
+        questionEvidence(studyContract, study.inner.summary),
+        liveRead.available ? "Live forming evidence remains provisional until candle close." : "",
+      ].filter(Boolean).join(" · ");
+
+      const rawContractAction = safeText(entryContract.action, "");
+      const contractAction = normalizeAction(rawContractAction);
+      const permissionAction = normalizeAction(permissionContract.action);
+      const permissionSide = studyDirection(permissionContract.side);
+      const actionSide = permissionAction === "BUY NOW"
+        ? "BUY"
+        : permissionAction === "SELL NOW"
+          ? "SELL"
+          : "HOLD";
+      const contractSide = studyDirection(entryContract.side);
+      const hasEntryContract = Object.keys(entryContract).length > 0;
+      const permissionExpiresAt = Number(permissionContract.expires_at || 0);
+      const freshnessExpiresAt = Number(freshnessContract.valid_until || 0);
+      const nowEpoch = Date.now() / 1000;
+      const permissionIsCurrent = Number.isFinite(permissionExpiresAt)
+        && permissionExpiresAt > nowEpoch;
+      const freshnessIsCurrent = normalizeFreshness(freshnessContract.state || freshnessContract.status) === "live"
+        && Number.isFinite(freshnessExpiresAt)
+        && freshnessExpiresAt > nowEpoch;
+      const contractAgrees = !hasEntryContract || (
+        entryContract.enter_now === true
+        && contractAction === permissionAction
+        && contractSide === actionSide
+      );
+      const permissionAllowsEntry = permissionContract.allowed === true
+        && permissionAction !== "WAIT"
+        && permissionSide === actionSide
+        && permissionIsCurrent;
+      const entryAction = permissionAllowsEntry
+        && freshnessIsCurrent
+        && contractAgrees
+        ? permissionAction
+        : "WAIT";
+      const enterNow = entryAction !== "WAIT";
+      const entryClosedByDeadline = permissionContract.allowed === true
+        && permissionAction !== "WAIT"
+        && (!permissionIsCurrent || !freshnessIsCurrent);
+      const entryState = safeText(entryContract.timing_state || entryContract.state, "").toUpperCase();
+      const contractHeadline = safeText(entryContract.headline, "").toUpperCase();
+      const contractClaimsEntry = entryContract.enter_now === true
+        || contractAction !== "WAIT"
+        || ["ENTER", "ENTER_NOW", "AUTHORIZED_NOW"].includes(entryState)
+        || /^(YES\b|ENTER\b|BUY NOW\b|SELL NOW\b)/.test(contractHeadline);
+      const contractAnswerTrusted = enterNow || !contractClaimsEntry;
+      const fallbackEntryHeadline = enterNow
+        ? "YES — " + entryAction
+        : entryClosedByDeadline
+          ? "NO — WINDOW EXPIRED"
+        : "NO — NOT YET";
+      const closedReason = entryClosedByDeadline
+        ? "The verified entry window or its live observation has expired."
+        : contractClaimsEntry
+          ? "The entry brief did not match current verified permission."
+          : "";
+      const closedNextTrigger = entryClosedByDeadline
+        ? "Wait for a newly detected setup with its own verified window."
+        : "Wait for one atomic, current entry answer.";
+      const permissionMessage = safeText(
+        permissionContract.message
+          || permissionContract.instruction
+          || permissionContract.reason
+          || permissionContract.summary,
+        enterNow ? "The model has confirmed a current entry." : "The model has not confirmed a current entry.",
+      );
+      const entryGuidance = entryLocationGuidance(permissionContract, entryAction);
+      const entryConfidence = (contractAnswerTrusted ? questionConfidence(entryContract.confidence).replace("% model confidence", "% ensemble study score") : "")
+        || (contractAnswerTrusted ? questionField(entryContract, ["timing_state", "state"], "") : "")
+        || (entryAction === "WAIT" ? "No entry confirmation" : entryWindowLabel(permissionContract) || "Current entry confirmed");
+
+      return {
+        origin: {
+          question: questionField(
+            originContract,
+            ["question"],
+            "Where is the market from, and how did history behave?",
+          ),
+          headline: questionField(originContract, ["headline"], marketOriginHeadline(study.major.side)),
+          answer: questionField(originContract, ["answer"], originFallback),
+          evidence: questionEvidence(originContract, study.regression.summary),
+          confidence: questionConfidence(originContract.confidence),
+          state: questionField(originContract, ["state"], directionNoun(study.major.side)),
+        },
+        studied: {
+          question: questionField(
+            studyContract,
+            ["question"],
+            "Which direction was studied, and what is being studied now?",
+          ),
+          headline: directionNoun(studiedSide) + " studied · completed "
+            + directionNoun(completedSide) + " · forming " + liveRead.label,
+          answer: "Last completed candle: " + completedStudyAnswer
+            + " Live forming stream: " + liveRead.summary,
+          evidence: liveStudyEvidence,
+          confidence: questionConfidence(studyContract.confidence)
+            || (liveRead.available ? "Forming read · not closed" : "Confidence unavailable"),
+          state: liveRead.available ? "FORMING" : questionField(studyContract, ["state"], directionNoun(currentSide)),
+        },
+        entry: {
+          question: "What is the best decision to do right now?",
+          headline: enterNow
+            ? fallbackEntryHeadline
+            : contractAnswerTrusted
+            ? questionField(entryContract, ["headline"], fallbackEntryHeadline)
+            : fallbackEntryHeadline,
+          answer: contractAnswerTrusted
+            ? questionField(
+                entryContract,
+                ["answer"],
+                enterNow ? entryGuidance || permissionMessage : "Do not enter this trade yet.",
+              )
+            : "Do not enter this trade; the entry brief conflicts with current permission.",
+          reason: entryClosedByDeadline
+            ? closedReason
+            : contractAnswerTrusted
+            ? questionField(entryContract, ["reason"], permissionMessage)
+            : closedReason,
+          nextTrigger: entryClosedByDeadline
+            ? closedNextTrigger
+            : contractAnswerTrusted
+            ? questionField(
+                entryContract,
+                ["next_trigger"],
+                permissionContract.next_condition || "Wait for a current BUY NOW or SELL NOW confirmation.",
+              )
+            : closedNextTrigger,
+          evidence: entryClosedByDeadline
+            ? "Entry closed because the verified window is no longer current."
+            : contractAnswerTrusted
+            ? questionEvidence(entryContract, permissionMessage)
+            : "Entry closed because the brief did not match current verified permission.",
+          confidence: entryConfidence,
+          state: contractAnswerTrusted
+            ? questionField(
+                entryContract,
+                ["state", "timing_state"],
+                enterNow ? "ENTER" : entryClosedByDeadline ? "EXPIRED" : "WAIT",
+              )
+            : "CONFLICT",
+          action: entryAction,
+          enterNow: enterNow,
+        },
+      };
+    }
+
     function renderDecision(payload) {
       const market = safeObject(payload.market);
       const freshness = safeObject(payload.freshness);
-      const currentMove = safeObject(payload.current_move);
       const permission = safeObject(payload.permission);
       const pressure = safeObject(payload.pressure_event);
       const study = marketRegressionStudy(payload);
-      const action = normalizeAction(permission.action);
+      const answers = threeQuestionAnswers(payload, study, permission);
+      const action = answers.entry.action;
       const setupWindowOpen = permission.window_open === true || action !== "WAIT";
       const setupWindowVerifying = action === "WAIT" && setupWindowOpen;
-      const windowLabel = entryWindowLabel(permission);
-      const entryGuidance = entryLocationGuidance(permission, action);
       const freshState = normalizeFreshness(freshness.state || freshness.status);
       const freshnessLabel = safeText(
         freshness.label,
@@ -3515,57 +4205,36 @@
           : action === "SELL NOW"
             ? "Sell high · entry open"
             : "Entry closed";
-      const permissionMessage = safeText(
-        permission.message || permission.instruction || permission.reason || permission.summary,
-        action === "WAIT" ? "No verified entry window is open." : "A verified entry window is open.",
-      );
-
-      setText(els.storyStepOneLabel, "Major trend");
-      setText(els.storyStepTwoLabel, "Inner trend");
-      setText(els.storyStepThreeLabel, "Regression study");
+      setText(els.storyStepOneLabel, "Question 1");
+      setText(els.storyStepTwoLabel, "Question 2");
+      setText(els.storyStepThreeLabel, "Question 3");
+      setText(els.marketOriginQuestion, answers.origin.question);
+      setText(els.directionStudyQuestion, answers.studied.question);
+      setText(els.entryNowQuestion, answers.entry.question);
       els.beginnerDecisionShell.dataset.tone = actionTone;
+      els.questionMarketHistory.dataset.state = safeText(answers.origin.state, "unknown").toLowerCase();
+      els.questionDirectionStudy.dataset.state = safeText(answers.studied.state, "unknown").toLowerCase();
+      els.questionEntryNow.dataset.state = safeText(answers.entry.state, action === "WAIT" ? "wait" : "enter").toLowerCase();
       setText(els.beginnerReadStatus, freshnessLabel);
       setText(els.beginnerMarketContext, marketLabel);
-      setText(els.beginnerDecisionTitle, action === "WAIT" ? "CLOSED" : action);
-      setText(
-        els.beginnerConfidence,
-        setupWindowVerifying
-          ? "Permission refreshing"
-          : action === "WAIT"
-            ? "No entry permission"
-            : windowLabel || "Current window verified",
-      );
-      setText(
-        els.beginnerInstruction,
-        action === "WAIT" ? "No trade entry is open." : entryGuidance,
-        permissionMessage,
-      );
-      setText(
-        els.beginnerReason,
-        permissionMessage,
-        "Entry permission stays separate from the chart study.",
-      );
-      setText(
-        els.beginnerNextCondition,
-        setupWindowVerifying
-          ? "Wait for current-frame permission to finish refreshing."
-          : permission.next_condition,
-        action === "WAIT"
-          ? "A current chart must explicitly return BUY NOW or SELL NOW."
-          : "Use the verified price area and stop if live truth changes.",
-      );
-
-      setText(els.currentMoveTitle, study.major.title);
-      setText(els.beginnerNowRead, study.major.summary);
-      setText(els.innerTrendTitle, study.inner.title);
-      setText(els.beginnerNextRead, study.inner.summary);
+      setText(els.currentMoveTitle, answers.origin.headline);
+      setText(els.beginnerNowRead, answers.origin.answer);
       setText(els.permissionTitle, study.regression.title);
-      setText(els.beginnerEntryRead, study.regression.summary);
-      setText(els.beginnerStoryTitle, study.major.title + " · " + study.inner.title);
+      setText(els.beginnerEntryRead, answers.origin.evidence);
+      setText(els.marketOriginConfidence, answers.origin.confidence);
+      setText(els.innerTrendTitle, answers.studied.headline);
+      setText(els.beginnerNextRead, answers.studied.answer);
+      setText(els.directionStudyConfidence, answers.studied.confidence);
+      setText(els.beginnerDecisionTitle, answers.entry.headline);
+      setText(els.beginnerConfidence, answers.entry.confidence);
+      setText(els.beginnerInstruction, answers.entry.answer);
+      setText(els.beginnerReason, answers.entry.reason);
+      setText(els.beginnerNextCondition, answers.entry.nextTrigger);
+      setText(els.beginnerStoryTitle, "Three answers. One decision.");
       setText(
         els.beginnerStorySummary,
-        "The inner sequence is " + study.phase + ". Entry permission remains "
-          + (action === "WAIT" ? "closed" : "separately verified") + ".",
+        "All three answers use the same " + freshnessLabel.toLowerCase()
+          + " for " + marketLabel + ".",
       );
 
       const pressureState = safeText(pressure.state, "NONE").toLowerCase();
@@ -3580,13 +4249,15 @@
       }
       els.pressureEvent.dataset.state = ["active", "ended", "stale"].includes(pressureState) ? pressureState : "none";
       setText(els.pressureEvent, pressureCopy);
-      setText(els.beginnerEvidenceStory, "Major " + study.major.title.toLowerCase() + " · Inner " + study.inner.title.toLowerCase());
-      setText(els.beginnerEvidenceTiming, study.regression.title);
+      setText(els.beginnerEvidenceStory, answers.origin.evidence || "Major " + study.major.title.toLowerCase() + " · Inner " + study.inner.title.toLowerCase());
+      setText(els.beginnerEvidenceTiming, answers.studied.evidence || study.regression.title);
       setText(els.retracementEvidence, study.retracementEvidence);
       setText(
         els.beginnerEvidenceSafety,
-        entryPermissionTitle + " · " + freshnessLabel + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
+        entryPermissionTitle + " · " + answers.entry.evidence + " · " + freshnessLabel
+          + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
       );
+      scheduleEntryExpiry(permission, freshness, action);
     }
 
     function updateVisualStatus(source, freshness, label) {
@@ -3597,20 +4268,213 @@
       setText(els.visualEvidenceLabel, label);
     }
 
+    function streamContract(payload) {
+      const operatorStream = safeObject(safeObject(safeObject(payload).tracking).stream);
+      if (Object.keys(operatorStream).length) {
+        // This public adapter strips intrabar direction and entry authority.
+        // Never let lower-level pixel telemetry overrule its market_read.
+        return operatorStream;
+      }
+      const liveSession = safeObject(state.liveSession);
+      const cpu = safeObject(liveSession.cpu_stream_v3);
+      if (!Object.keys(cpu).length) {
+        return {};
+      }
+      const observer = safeObject(cpu.observer);
+      const counters = safeObject(observer.counters);
+      const lastDecision = safeObject(observer.last_decision);
+      const temporal = safeObject(lastDecision.temporal_evidence);
+      const lastObservation = safeObject(cpu.last_observation_lineage);
+      const lastKeyframe = safeObject(cpu.last_keyframe_lineage);
+      const rawFormingState = temporal.state
+        || observer.state
+        || safeObject(lastObservation.temporal_evidence).state
+        || "OBSERVING";
+      const rawObservedAt = cpu.last_capture_epoch
+        || observer.last_captured_epoch
+        || lastObservation.captured_epoch;
+      return {
+        enabled: cpu.enabled !== false && cpu.requested !== false,
+        state: cpu.status || observer.status || "UNAVAILABLE",
+        acquisition_fps: cpu.acquisition_fps ?? cpu.actual_fps,
+        observed_frames: cpu.observed_frames ?? counters.frames_observed,
+        accepted_keyframes: cpu.accepted_events ?? counters.keyframes_selected,
+        dropped_frames: cpu.dropped_keyframes ?? counters.latest_frame_wins_drops,
+        duplicate_frames: counters.duplicate_frames,
+        last_frame_epoch: rawObservedAt,
+        last_keyframe_epoch: cpu.last_event_epoch || observer.last_keyframe_epoch || lastKeyframe.captured_epoch,
+        last_reason: lastObservation.accepted_reason || lastKeyframe.accepted_reason || safeObject(lastKeyframe.temporal_evidence).selection_reason,
+        stream_generation: observer.stream_generation,
+        market_read: {
+          state: rawFormingState,
+          summary: "Live pixels are observing forming-candle activity.",
+          fresh: eventEpochSeconds(rawObservedAt) > 0,
+          observed_at: rawObservedAt,
+          direction: "NEUTRAL",
+          direction_available: false,
+          forming_candle: true,
+          closed_candle: false,
+          can_grant_entry_permission: false,
+        },
+        source: "session_stream",
+      };
+    }
+
+    function liveFormingRead(payload) {
+      const stream = streamContract(payload);
+      const marketRead = safeObject(stream.market_read);
+      const hasMarketRead = Object.keys(marketRead).length > 0;
+      const streamState = normalizeStreamState(stream.state, stream.enabled === true);
+      const formingToken = safeText(marketRead.state || stream.last_reason, "OBSERVING")
+        .toUpperCase()
+        .replace(/[ -]+/g, "_");
+      const observedAt = eventEpochSeconds(marketRead.observed_at || stream.last_frame_epoch);
+      const available = ["running", "starting", "degraded"].includes(streamState)
+        && observedAt > 0
+        && (!hasMarketRead || marketRead.fresh === true);
+      const publicActivitySummary = safeText(marketRead.summary, "");
+      let label = "being observed";
+      let summary = publicActivitySummary
+        || "The live forming candle is being observed.";
+      if (/DUPLICATE|UNCHANGED|HEARTBEAT/.test(formingToken)) {
+        label = "unchanged";
+        summary = publicActivitySummary
+          || "The live forming candle has no new material pixel change.";
+      } else if (/REST|PAUSE|RANGE|COMPRESSION/.test(formingToken)) {
+        label = "resting";
+        summary = publicActivitySummary
+          || "The live forming candle is resting or compressing.";
+      } else if (/MOTION|MOVING|MOVE|MATERIAL|CHANGE/.test(formingToken)) {
+        label = "moving";
+        summary = publicActivitySummary
+          || "The live forming candle is moving now.";
+      }
+      if (available) {
+        summary += " This is forming-candle activity only; direction waits for a completed candle.";
+      }
+      return {
+        available: available,
+        label: available ? label : "stream unavailable",
+        summary: available
+          ? summary
+          : "No live forming-candle read is available; the last completed candle remains the newest confirmed study.",
+        side: "HOLD",
+        observedAt: observedAt,
+      };
+    }
+
+    function formatStreamCount(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0) {
+        return "—";
+      }
+      try {
+        return new Intl.NumberFormat().format(Math.floor(number));
+      } catch (_error) {
+        return String(Math.floor(number));
+      }
+    }
+
+    function normalizeStreamState(value, enabled) {
+      const token = safeText(value, "UNAVAILABLE").toUpperCase().replace(/[ -]+/g, "_");
+      if (["RUNNING", "ACTIVE", "LIVE", "STREAMING"].includes(token)) {
+        return enabled ? "running" : "disabled";
+      }
+      if (["STARTING", "CONNECTING", "WARMING", "WAITING"].includes(token)) {
+        return enabled ? "starting" : "disabled";
+      }
+      if (["DEGRADED", "DELAYED", "FALLBACK_SNAPSHOT", "SNAPSHOT_FALLBACK", "DEGRADED_SNAPSHOT_FALLBACK"].includes(token)) {
+        return enabled ? "degraded" : "disabled";
+      }
+      if (token === "PAUSED") {
+        return "paused";
+      }
+      if (["DISABLED", "STOPPED", "IDLE", "INACTIVE"].includes(token)) {
+        return token === "DISABLED" ? "disabled" : "stopped";
+      }
+      if (["OFFLINE", "ERROR", "FAILED"].includes(token)) {
+        return "offline";
+      }
+      return "unknown";
+    }
+
+    function renderStreamObservation(payload) {
+      const stream = streamContract(payload);
+      const enabled = stream.enabled === true;
+      const streamState = normalizeStreamState(stream.state, enabled);
+      const labels = {
+        running: "Continuous observation · live",
+        starting: "Continuous observation · starting",
+        degraded: "Continuous observation · limited",
+        paused: "Continuous observation · paused",
+        disabled: "Continuous observation · disabled",
+        stopped: "Continuous observation · stopped",
+        offline: "Continuous observation · offline",
+        unknown: "Observation health unavailable",
+      };
+      els.streamObservation.dataset.state = streamState;
+      setText(els.streamObservationLabel, labels[streamState]);
+
+      const detail = [titleCase(safeText(stream.state, "UNAVAILABLE"))];
+      const fps = Number(stream.acquisition_fps);
+      if (stream.acquisition_fps !== null && stream.acquisition_fps !== undefined && Number.isFinite(fps)) {
+        detail.push((fps >= 10 ? fps.toFixed(1) : fps.toFixed(2)) + " FPS acquisition");
+      }
+      if (Object.prototype.hasOwnProperty.call(stream, "observed_frames")) {
+        detail.push(formatStreamCount(stream.observed_frames) + " frames observed");
+      }
+      if (Object.prototype.hasOwnProperty.call(stream, "accepted_keyframes")) {
+        detail.push(formatStreamCount(stream.accepted_keyframes) + " keyframes accepted");
+      }
+      if (Object.prototype.hasOwnProperty.call(stream, "dropped_frames")) {
+        detail.push(formatStreamCount(stream.dropped_frames) + " dropped");
+      }
+      if (Object.prototype.hasOwnProperty.call(stream, "duplicate_frames")) {
+        detail.push(formatStreamCount(stream.duplicate_frames) + " duplicates");
+      }
+      const generation = Number(stream.stream_generation);
+      if (Number.isFinite(generation) && generation > 0) {
+        detail.push("generation " + Math.floor(generation));
+      }
+      const lastFrameEpoch = Number(stream.last_frame_epoch);
+      if (Number.isFinite(lastFrameEpoch) && lastFrameEpoch > 0) {
+        detail.push("last frame " + (formatAge(lastFrameEpoch) || formatTime(lastFrameEpoch)));
+      }
+      const lastKeyframeEpoch = Number(stream.last_keyframe_epoch);
+      if (Number.isFinite(lastKeyframeEpoch) && lastKeyframeEpoch > 0) {
+        detail.push("last keyframe " + (formatAge(lastKeyframeEpoch) || formatTime(lastKeyframeEpoch)));
+      }
+      const lastReason = safeText(stream.last_reason, "");
+      if (lastReason) {
+        detail.push(lastReason);
+      }
+      setText(els.streamObservationDetail, detail.join(" · "));
+    }
+
     function renderTrackingStatus(payload) {
       const tracking = safeObject(payload.tracking);
       const freshness = safeObject(payload.freshness);
       const normalized = normalizeFreshness(freshness.state || freshness.status);
       const trackingState = safeText(tracking.state || tracking.status, "WAITING").toLowerCase();
       const active = tracking.active !== false && trackingState !== "paused";
-      const label = !active ? "Paused" : normalized === "live" ? "Live" : normalized === "updating" ? "Updating" : normalized === "stale" ? "Entry checks expired" : "Offline";
-      setConnectionState(active ? normalized : "updating", label);
+      const liveRead = liveFormingRead(payload);
+      const label = !active
+        ? "Paused"
+        : liveRead.available
+          ? normalized === "live" ? "Live" : "Live stream"
+          : normalized === "live" ? "Live" : normalized === "updating" ? "Updating" : normalized === "stale" ? "Entry checks expired" : "Offline";
+      setConnectionState(active ? (liveRead.available ? "live" : normalized) : "updating", label);
       const observed = Number(freshness.observed_at || payload.observed_at || 0);
       setText(
         els.surfaceMeta,
-        [safeText(freshness.label, titleCase(freshness.state || freshness.status)), formatAge(observed)].filter(Boolean).join(" · "),
+        [
+          liveRead.available ? "Forming candle " + liveRead.label : "",
+          liveRead.observedAt ? formatAge(liveRead.observedAt) : "",
+          "Last completed study " + (formatAge(observed) || "time unavailable"),
+        ].filter(Boolean).join(" · "),
         "Waiting for a current observation"
       );
+      renderStreamObservation(payload);
     }
 
     function currentSurface(payload) {
@@ -3691,6 +4555,9 @@
       state.selectedOverlayId = "";
       state.focusedOverlayId = "";
       state.overlays = [];
+      state.visualPayload = null;
+      state.liveSession = null;
+      state.completedStudyHistory = [];
       state.lastVisualBundleKey = "";
       state.projectedGeometryCache.clear();
       state.controlGeometryCache.clear();
@@ -3702,6 +4569,22 @@
       state.detachedOverlayNodes.clear();
       closeOverlayInspector();
       syncOverlayButtons([], {loading: true});
+    }
+
+    function commitLiveOperatorCopy(payload) {
+      // The three operator answers and the CPU-stream strip are useful before
+      // a comparatively large broker bitmap has finished transferring and
+      // decoding. Commit that non-visual truth immediately, while leaving
+      // state.overlays and the displayed image on their last atomic frame.
+      // Entry geometry is still committed only by commitOperatorState after
+      // the matching bitmap loads, so this cannot mix frames or authorize a
+      // trade from forming pixels.
+      const operatorState = safeObject(payload);
+      state.payload = operatorState;
+      rememberCompletedStudyHistory(operatorState);
+      renderTrackingStatus(operatorState);
+      renderDecision(operatorState);
+      renderHistory(operatorState);
     }
 
     function loadSurface(payload, options) {
@@ -3757,6 +4640,7 @@
         // The old image and its overlays remain the committed visual truth
         // until the new bitmap decodes. Keep its controls atomic as well;
         // pending-frame rows cannot disable buttons for boxes still on screen.
+        commitLiveOperatorCopy(payload);
         syncOverlayButtons(state.overlays, {loading: true});
         return;
       }
@@ -3780,6 +4664,7 @@
       if (focused && focused.dataset.overlayId) {
         state.focusedOverlayId = focused.dataset.overlayId;
       }
+      commitLiveOperatorCopy(payload);
       state.pendingPayload = payload;
       state.pendingImageUrl = primaryUrl;
       state.pendingImageFallbackUrl = fallbackUrl;
@@ -4111,12 +4996,11 @@
       return counts;
     }
 
-    function overlayIsRenderableForControl(overlay) {
+    function overlayIsAvailableForControl(overlay) {
       if (
         !overlay
         || overlayIsDiagnostic(overlay)
         || !lifecycleIsVisible(overlay)
-        || !quickViewShowsOverlay(overlay)
         || !overlayMatchesSurface(overlay)
         || !state.naturalWidth
         || !state.naturalHeight
@@ -4125,6 +5009,10 @@
       }
       const geometry = projectedOverlayGeometryForControl(overlay);
       return Boolean(geometry.bounds || geometry.points.length >= 2);
+    }
+
+    function overlayIsRenderableForControl(overlay) {
+      return overlayIsAvailableForControl(overlay) && quickViewShowsOverlay(overlay);
     }
 
     function orderPositioningMode(overlay) {
@@ -4210,7 +5098,7 @@
       const orderAreaModeCounts = new Map();
       safeList(overlays || state.overlays).forEach(function (overlay) {
         const kind = overlayKind(overlay);
-        if (!kind || !overlayIsRenderableForControl(overlay)) {
+        if (!kind || !overlayIsAvailableForControl(overlay)) {
           return;
         }
         const current = kinds.get(kind) || {
@@ -4238,10 +5126,12 @@
       document.querySelectorAll("[data-overlay-kind-control]").forEach(function (button) {
         const kind = safeText(button.dataset.overlayKindControl, "").toLowerCase();
         const meta = kinds.get(kind);
-        const count = meta ? Number(meta.familyCounts.get("order_positioning") || 0) : 0;
+        const count = meta ? Number(meta.count || 0) : 0;
         const available = count > 0;
         const enabled = available
-          && state.activeFamilies.has("order_positioning")
+          && Array.from(meta.families).some(function (family) {
+            return state.activeFamilies.has(family);
+          })
           && !state.disabledKinds.has(kind);
         orderAreaCount += count;
         button.disabled = !available;
@@ -4331,7 +5221,7 @@
       applyStudyBackedCounts(counts, state.payload || state.pendingPayload, overlayPool);
       counts.order_positioning = overlayPool.filter(function (overlay) {
         return overlayFamily(overlay) === "order_positioning"
-          && overlayIsRenderableForControl(overlay);
+          && overlayIsAvailableForControl(overlay);
       }).length;
       document.querySelectorAll("[data-overlay-family]").forEach(function (button) {
         const family = button.dataset.overlayFamily;
@@ -4423,7 +5313,10 @@
         return;
       }
       const matches = state.overlays.filter(function (overlay) {
-        return overlayKind(overlay) === token && overlayIsRenderableForControl(overlay);
+        // A fixed control must be able to turn its own family on. Restricting
+        // this lookup to the current quick-view preset made a correctly
+        // counted precision-entry area inert whenever `triggers` was off.
+        return overlayKind(overlay) === token && overlayIsAvailableForControl(overlay);
       });
       if (!matches.length) {
         return;
@@ -4521,7 +5414,7 @@
     }
 
     function surfaceProjectionIdentity(payload) {
-      const operatorState = safeObject(payload || state.payload);
+      const operatorState = safeObject(payload || state.visualPayload || state.payload);
       const surface = safeObject(operatorState.surface);
       const viewport = state.surfaceViewport;
       return JSON.stringify({
@@ -4559,7 +5452,7 @@
       return JSON.stringify({
         semanticRevision: safeText(
           overlay.overlay_semantic_revision
-            || safeObject(state.payload).overlay_semantic_revision,
+            || safeObject(state.visualPayload || state.payload).overlay_semantic_revision,
           "",
         ),
         geometryRevision: safeText(overlay.overlay_geometry_revision, ""),
@@ -4618,7 +5511,8 @@
       if (space !== state.imageSpace && !hasForwardProjection && !hasReverseProjection) {
         return false;
       }
-      const surfaceFrame = safeText(safeObject(state.payload && state.payload.surface).frame_id, "");
+      const visualPayload = safeObject(state.visualPayload || state.payload);
+      const surfaceFrame = safeText(safeObject(visualPayload.surface).frame_id, "");
       const overlayFrame = safeText(overlay.frame_id, "");
       return Boolean(surfaceFrame && overlayFrame && surfaceFrame === overlayFrame);
     }
@@ -4980,7 +5874,9 @@
     }
 
     function overlayRenderSignature(overlay, role) {
-      const liveRevision = overlayIsLiveEdge(overlay) ? revisionValue(safeObject(state.payload)) : "";
+      const liveRevision = overlayIsLiveEdge(overlay)
+        ? revisionValue(safeObject(state.visualPayload || state.payload))
+        : "";
       return JSON.stringify({
         role: role,
         projection: surfaceProjectionIdentity(),
@@ -5440,6 +6336,70 @@
       });
     }
 
+    function completedCandleHistoryRows(payload) {
+      const source = safeObject(payload);
+      const study = marketStudyContract(source);
+      const closedCandleKey = safeText(study.closed_candle_key, "");
+      if (!closedCandleKey) {
+        return [];
+      }
+      const regression = safeObject(study.regression);
+      const candleIntelligence = safeObject(study.candle_intelligence);
+      const latestCandle = safeObject(candleIntelligence.latest);
+      if (latestCandle.closed === false) {
+        return [];
+      }
+      const behavior = safeObject(study.behavior);
+      const directionalRead = safeObject(study.directional_read);
+      const market = safeObject(source.market);
+      const symbol = safeText(study.symbol || market.symbol || market.market, "Unknown market");
+      const timeframe = safeText(study.timeframe || market.timeframe, "Unknown timeframe");
+      const candleType = titleCase(latestCandle.type || latestCandle.personality || "completed candle");
+      const relationship = titleCase(latestCandle.relation_to_previous || latestCandle.relationship || "");
+      const story = safeText(behavior.market_story, "");
+      const summary = [
+        story,
+        "Latest closed candle: " + candleType + (relationship ? " · " + relationship : "") + ".",
+      ].filter(Boolean).join(" ");
+      return [{
+        id: "closed-study-" + symbol + "-" + timeframe + "-" + closedCandleKey,
+        closed_candle_key: closedCandleKey,
+        closed_candle_sequence: Number(study.closed_candle_sequence || latestCandle.closed_candle_sequence || 0),
+        observed_at: eventEpochSeconds(study.observed_at || source.last_capture_epoch || source.updated_at),
+        direction: latestCandle.direction || directionalRead.side,
+        state: "completed",
+        summary: summary,
+        major_trend: regression.major_trend,
+        inner_trend: regression.inner_trend,
+        regression_direction: directionalRead,
+        behavior: behavior,
+        market_study_v3: study,
+      }];
+    }
+
+    function rememberCompletedStudyHistory(payload) {
+      const rows = completedCandleHistoryRows(payload);
+      if (!rows.length) {
+        return;
+      }
+      const byKey = new Map(state.completedStudyHistory.map(function (row) {
+        return [safeText(row.closed_candle_key || row.id, ""), row];
+      }));
+      rows.forEach(function (row) {
+        byKey.set(safeText(row.closed_candle_key || row.id, ""), row);
+      });
+      state.completedStudyHistory = Array.from(byKey.values())
+        .sort(function (left, right) {
+          const leftSequence = Number(left.closed_candle_sequence || 0);
+          const rightSequence = Number(right.closed_candle_sequence || 0);
+          if (leftSequence > 0 && rightSequence > 0 && leftSequence !== rightSequence) {
+            return leftSequence - rightSequence;
+          }
+          return eventEpochSeconds(left.observed_at) - eventEpochSeconds(right.observed_at);
+        })
+        .slice(-SESSION_HISTORY_ROW_LIMIT);
+    }
+
     function normalizeHistoryBehavior(value) {
       const token = safeText(value, "").toUpperCase().replace(/[_-]+/g, " ");
       if (/SAVED|ARCHIVE/.test(token)) {
@@ -5474,7 +6434,9 @@
       );
       return {
         id: safeText(row.event_id || row.id, "history-" + index + "-" + safeText(row.observed_at || row.timestamp, index)),
-        observed_at: Number(row.observed_at || row.timestamp || row.created_at_epoch || 0),
+        observed_at: eventEpochSeconds(row.observed_at || row.timestamp || row.created_at_epoch),
+        closedKey: safeText(row.closed_candle_key, ""),
+        closedSequence: Number(row.closed_candle_sequence || safeObject(row.sequence_position).ordinal || 0),
         side: studyDirection(row.actual_side || row.actual || row.side || row.direction || row.action),
         majorSide: studyDirection(rowRegression.major_trend || row.major_trend || row.major_trend_context || safeObject(row.trends).major),
         innerSide: studyDirection(rowRegression.inner_trend || row.inner_trend || row.local_trend || safeObject(row.trends).inner),
@@ -5549,13 +6511,19 @@
       const serverRows = safeList(payload.history).length
         ? safeList(payload.history)
         : safeList(payload.session_history);
-      const items = decorateHistoryItems(serverRows.map(normalizeHistoryItem));
+      const sourceRows = state.completedStudyHistory.concat(serverRows);
+      const items = decorateHistoryItems(sourceRows.map(normalizeHistoryItem));
       const byIdentity = new Map();
       items.forEach(function (item) {
-        byIdentity.set(item.id, item);
+        byIdentity.set(item.closedKey || item.id, item);
       });
       return Array.from(byIdentity.values())
-        .sort(function (a, b) { return Number(a.observed_at || 0) - Number(b.observed_at || 0); })
+        .sort(function (a, b) {
+          if (a.closedSequence > 0 && b.closedSequence > 0 && a.closedSequence !== b.closedSequence) {
+            return a.closedSequence - b.closedSequence;
+          }
+          return Number(a.observed_at || 0) - Number(b.observed_at || 0);
+        })
         .slice(-SESSION_HISTORY_ROW_LIMIT);
     }
 
@@ -5612,7 +6580,9 @@
         button.__historyItem = item;
         button.setAttribute("aria-current", latest ? "true" : "false");
         const time = button.querySelector(".history-time");
-        time.textContent = formatTime(item.observed_at);
+        time.textContent = item.observed_at > 0
+          ? formatTime(item.observed_at)
+          : item.closedSequence > 0 ? "Closed #" + item.closedSequence : "Completed candle";
         const majorTrend = button.querySelector(".history-major-trend");
         majorTrend.textContent = "Major · " + (item.majorSide === "BUY" ? "uptrend" : item.majorSide === "SELL" ? "downtrend" : "mixed / range");
         const innerTrend = button.querySelector(".history-inner-trend");
@@ -5696,16 +6666,14 @@
         state.historyItemNodes.clear();
       }
       state.historySemanticIdentity = historySemanticIdentity;
-      state.payload = committedOperatorState;
+      state.visualPayload = committedOperatorState;
       state.overlays = operatorOverlays;
       syncOverlayButtons();
       if (visualBundleChanged) {
         state.lastVisualBundleKey = nextVisualBundleKey;
         pruneOverlayCaches();
       }
-      renderTrackingStatus(committedOperatorState);
-      renderDecision(committedOperatorState);
-      renderHistory(committedOperatorState);
+      commitLiveOperatorCopy(committedOperatorState);
       if (visualBundleChanged) {
         renderOverlays();
       }
@@ -5803,7 +6771,7 @@
       setZoomMode("manual", current + 0.15);
     });
     els.refreshView.addEventListener("click", function () {
-      refreshOperatorState({force: true});
+      refreshPublicState({force: true});
     });
     els.surfaceImage.addEventListener("load", onSurfaceImageReady);
     els.surfaceImage.addEventListener("error", onSurfaceImageError);
@@ -5874,7 +6842,7 @@
     });
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) {
-        refreshOperatorState({force: true});
+        refreshPublicState({force: true});
       }
     });
     window.addEventListener("resize", function () {
@@ -5893,7 +6861,7 @@
     els.overlayOpacity.value = String(state.overlayOpacity);
     document.documentElement.style.setProperty("--overlay-opacity", String(state.overlayOpacity / 100));
     setOverlayView(state.overlayView, {fetch: false, persist: false});
-    refreshOperatorState({force: true});
+    refreshPublicState({force: true});
     connectSessionStream();
     scheduleRefresh(POLL_INTERVAL_MS);
   </script>

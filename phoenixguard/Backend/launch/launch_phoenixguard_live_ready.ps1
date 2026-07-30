@@ -45,6 +45,18 @@ Set-PhoenixGuardDefaultProcessEnvironment -Name 'NUMEXPR_NUM_THREADS' -Value '2'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'TOKENIZERS_PARALLELISM' -Value 'false'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CHRONOS_CPU_THREADS' -Value '2'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_BACKGROUND_WARMUP_ON_LAUNCH' -Value '1'
+# Continuous observation is intentionally CPU-small on the supported local
+# profile. The V3 study lane is only awakened for material keyframes or its
+# bounded watchdog heartbeat.
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_ENABLED' -Value '1'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_FPS' -Value '0.25'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC' -Value '15.0'
+$normalizedBrokerQuery = $BrokerWindowQuery.Trim().ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_MT4_BRIDGE_ENABLED)) {
+    $pocketOptionOnly = $normalizedBrokerQuery.Contains('pocket option') -or $normalizedBrokerQuery.Contains('innovative trading platform')
+    $env:PHOENIXGUARD_MT4_BRIDGE_ENABLED = if ($pocketOptionOnly) { '0' } else { '1' }
+}
+$launchMt4Bridge = $env:PHOENIXGUARD_MT4_BRIDGE_ENABLED.Trim().ToLowerInvariant() -notin @('0', 'false', 'off', 'no')
 
 # The canonical launcher is FINAL_LIVE. Choose the live Python profile before
 # resolving the interpreter, while still respecting an explicit caller profile
@@ -112,6 +124,139 @@ function Test-PhoenixGuardOwnedCommandLine {
         }
     }
     return $false
+}
+
+function Test-LocalTcpPortOpen {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Port
+    )
+
+    try {
+        $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+        return [bool](@($listeners | Where-Object { [int]$_.Port -eq $Port }).Count -gt 0)
+    } catch {
+        throw "Local TCP listener inspection failed; refusing destructive preflight cleanup."
+    }
+}
+
+function Get-ValidatedPhoenixGuardRuntimeLock {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LockPath,
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSessionId,
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedApiPort
+    )
+
+    if (-not (Test-Path -LiteralPath $LockPath -PathType Leaf)) {
+        throw "Runtime lock is missing; refusing unattributed process cleanup."
+    }
+    $lock = $null
+    for ($attempt = 0; $attempt -lt 5 -and $null -eq $lock; $attempt += 1) {
+        try {
+            $lock = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            if ($attempt -lt 4) {
+                Start-Sleep -Milliseconds 50
+            }
+        }
+    }
+    if ($null -eq $lock) {
+        throw "Runtime lock is unreadable; refusing unattributed process cleanup."
+    }
+
+    $expectedRoot = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\')
+    $expectedLockPath = [System.IO.Path]::GetFullPath($LockPath)
+    $lockRoot = [System.IO.Path]::GetFullPath([string]$lock.repo_root).TrimEnd('\')
+    $lockPathValue = [System.IO.Path]::GetFullPath([string]$lock.lock_path)
+    $ownerToken = [string]$lock.owner_token
+    $expectedOwnerId = if ($ownerToken.Length -ge 10) {
+        "phoenixguard-$ExpectedSessionId-$($ownerToken.Substring(0, 10))"
+    } else {
+        ''
+    }
+    $runtimeDataDir = [System.IO.Path]::GetFullPath([string]$lock.data_dir)
+    $expectedRuntimePrefix = [System.IO.Path]::GetFullPath(
+        (Join-Path -Path $expectedRoot -ChildPath 'runtime\live')
+    ).TrimEnd('\') + '\'
+
+    $isValid = (
+        ([string]$lock.schema_version -ceq 'PG_RUNTIME_SINGLETON_GUARD_V3') -and
+        $lockRoot.Equals($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $lockPathValue.Equals($expectedLockPath, [System.StringComparison]::OrdinalIgnoreCase) -and
+        ([string]$lock.session_id -ceq $ExpectedSessionId) -and
+        ([int]$lock.api_port -eq $ExpectedApiPort) -and
+        ([string]$lock.base_url -ceq "http://127.0.0.1:$ExpectedApiPort") -and
+        ($ownerToken -cmatch '^[0-9a-f]{32}$') -and
+        ([string]$lock.state_version_owner -ceq $ownerToken) -and
+        ([string]$lock.runtime_owner_id -ceq $expectedOwnerId) -and
+        $runtimeDataDir.StartsWith($expectedRuntimePrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    )
+    if (-not $isValid) {
+        throw "Runtime lock ownership contract failed validation; refusing process cleanup."
+    }
+
+    $heartbeatEpochMs = [int64]$lock.heartbeat_epoch_ms
+    $nowEpochMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $heartbeatAgeMs = $nowEpochMs - $heartbeatEpochMs
+    if ($heartbeatEpochMs -le 0 -or $heartbeatAgeMs -lt -30000 -or $heartbeatAgeMs -gt 120000) {
+        throw "Runtime lock heartbeat is not fresh; refusing PID cleanup because PID reuse cannot be excluded."
+    }
+
+    $ownedPids = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($key in @('launcher_pid', 'tracker_pid', 'api_pid', 'shooter_pid')) {
+        $candidate = [int]$lock.$key
+        if ($candidate -gt 0) {
+            [void]$ownedPids.Add($candidate)
+        }
+    }
+    if ($ownedPids.Count -eq 0) {
+        throw "Runtime lock contains no owned process identifiers."
+    }
+
+    $pidEpochContracts = @(
+        [pscustomobject]@{ PidKey = 'tracker_pid'; EpochKey = 'created_epoch_ms' },
+        [pscustomobject]@{ PidKey = 'api_pid'; EpochKey = 'api_registered_epoch_ms' }
+    )
+    $verifiedCorePidCount = 0
+    foreach ($contract in $pidEpochContracts) {
+        $candidatePid = [int]$lock.($contract.PidKey)
+        if ($candidatePid -le 0) {
+            continue
+        }
+        $candidateProcess = Get-Process -Id $candidatePid -ErrorAction SilentlyContinue
+        if ($null -eq $candidateProcess) {
+            continue
+        }
+        $registeredEpochMs = [int64]$lock.($contract.EpochKey)
+        if ($registeredEpochMs -le 0) {
+            $registeredEpochMs = [int64]$lock.created_epoch_ms
+        }
+        try {
+            $processStartEpochMs = [DateTimeOffset]::new(
+                $candidateProcess.StartTime.ToUniversalTime()
+            ).ToUnixTimeMilliseconds()
+        } catch {
+            throw "Owned PID start time could not be verified; refusing cleanup because PID reuse cannot be excluded."
+        }
+        if ([Math]::Abs([double]($processStartEpochMs - $registeredEpochMs)) -gt 120000.0) {
+            throw "Owned PID start time does not match its runtime-lock registration; refusing cleanup."
+        }
+        $verifiedCorePidCount += 1
+    }
+    if ($verifiedCorePidCount -eq 0) {
+        throw "No live core PID matched the active runtime lock; refusing process cleanup."
+    }
+    return [pscustomobject]@{
+        BaseUrl = [string]$lock.base_url
+        SessionId = [string]$lock.session_id
+        Pids = @($ownedPids)
+        HeartbeatAgeMs = [int64]$heartbeatAgeMs
+    }
 }
 
 function Get-LiveReadinessSnapshot {
@@ -291,13 +436,13 @@ $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = '1'
 $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_DASHBOARD_ROUTE = 'live'
-$env:PHOENIXGUARD_EXECUTION_COOLDOWN_SEC = '600'
+$env:PHOENIXGUARD_EXECUTION_COOLDOWN_SEC = '900'
 $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = '0'
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = '1'
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = '300'
 $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = '960'
 # A display-only heartbeat advances the visible frame without a matching model
-# result.  Keep the operator surface on the last atomic chart + forecast bundle;
+# result.  Keep the operator surface on the last atomic chart + study bundle;
 # the full capture worker publishes the next bundle when inference completes.
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '0'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = '15.0'
@@ -383,6 +528,40 @@ if ($processRowsAvailable) {
         [void]$targetProcessIds.Add([int]$_.ProcessId)
     }
 }
+$lockFallbackStopped = 0
+if (-not $processRowsAvailable) {
+    $runtimeLockPath = Join-Path -Path $runtimeDir -ChildPath 'phoenixguard_stack.lock.json'
+    $validatedRuntimeLock = $null
+    if (Test-LocalTcpPortOpen -Port 8793) {
+        $validatedRuntimeLock = Get-ValidatedPhoenixGuardRuntimeLock `
+            -LockPath $runtimeLockPath `
+            -RepositoryRoot $ProjectRoot `
+            -ExpectedSessionId $SessionId `
+            -ExpectedApiPort 8793
+    } elseif (Test-Path -LiteralPath $runtimeLockPath -PathType Leaf) {
+        try {
+            $validatedRuntimeLock = Get-ValidatedPhoenixGuardRuntimeLock `
+                -LockPath $runtimeLockPath `
+                -RepositoryRoot $ProjectRoot `
+                -ExpectedSessionId $SessionId `
+                -ExpectedApiPort 8793
+        } catch {
+            Write-Warning "Stale or invalid closed-port runtime lock will not be used as PID authority."
+        }
+    }
+    Write-Warning "Using repository-scoped psutil cleanup because process command-line inspection is unavailable."
+    & $pythonPath `
+        '.\Developer\developer_tools\phoenixguard_kill_switch.py' `
+        --kill-only `
+        --session-id $SessionId `
+        --base-url 'http://127.0.0.1:8793' `
+        --ports '8793,8767,8787,18180,18181,3210,3310,7861'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Repository-scoped PhoenixGuard cleanup failed; runtime deletion is blocked."
+    }
+    $lockFallbackStopped = 1
+    Start-Sleep -Seconds 3
+}
 try {
     foreach ($cleanupPort in @(8793, 18181, 18180, 8787, 3210, 3310)) {
         Get-NetTCPConnection -LocalPort $cleanupPort -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
@@ -420,7 +599,14 @@ foreach ($processId in $targetProcessIds) {
 if ($targetProcessIds.Count -gt 0) {
     Start-Sleep -Seconds 2
 }
-Write-Host "  stopped_processes=$($targetProcessIds.Count)"
+$portCloseDeadline = (Get-Date).AddSeconds(12)
+while ((Get-Date) -lt $portCloseDeadline -and (Test-LocalTcpPortOpen -Port 8793)) {
+    Start-Sleep -Milliseconds 250
+}
+if (Test-LocalTcpPortOpen -Port 8793) {
+    throw "Port 8793 is still owned after scoped PhoenixGuard cleanup; refusing runtime deletion and relaunch."
+}
+Write-Host "  stopped_processes=$($targetProcessIds.Count) lock_fallback_roots=$lockFallbackStopped"
 
 Write-Host ""
 Write-Host "Preflight: configured PhoenixGuard live Python environment"
@@ -481,7 +667,7 @@ Write-Host ""
 Write-Host "Preflight: shooter broker-window and calibration checks retired"
 
 Write-Host ""
-Write-Host "Launching single FINAL_LIVE tracker, Model Council, package reporter, and bridge stack..."
+Write-Host "Launching single FINAL_LIVE tracker, Model Council, package reporter, and broker-relevant bridge stack..."
 $childLaunchProfile = if ($DisableShooter) { 'TRACKER_PLUS_COUNCIL' } else { 'FULL' }
 $launchArgs = @{
     ApiHost = '127.0.0.1'
@@ -547,7 +733,8 @@ $topologyArgs = @(
 )
 if ($DisableShooter) {
     $topologyArgs += '--allow-missing-shooter'
-} else {
+}
+if ($launchMt4Bridge) {
     $topologyArgs += '--require-bridge'
 }
 & $pythonPath @topologyArgs
@@ -581,6 +768,8 @@ $summaryPayload = [ordered]@{
     shooter_mode = if ($DisableShooter) { 'DISABLED' } else { 'PACKAGE_REPORTER' }
     shooter_execution_path = 'retired_reporter_only'
     shooter_poll_sec = $ShooterPollSec
+    mt4_bridge_enabled = [bool]$launchMt4Bridge
+    cpu_stream_fps = $env:PHOENIXGUARD_CPU_STREAM_FPS
     live_execution_enabled = $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED
     display_native_capture_fallback_enabled = $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK
     disk_growth_guard_enabled = $env:PHOENIXGUARD_DISK_GUARD_ENABLED

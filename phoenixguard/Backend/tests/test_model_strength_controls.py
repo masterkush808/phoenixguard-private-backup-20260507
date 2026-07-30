@@ -39,7 +39,7 @@ def test_model_strength_settings_to_execution_controls_clamps_and_maps() -> None
     assert ai_strengths["scenario_engine"] == 2.0
     assert lane_thresholds["SNIPER_ZONE_ENTRY"] == 0.58
     assert lane_thresholds["FAILED_RETEST_ENTRY"] == 0.0
-    assert controls["high_frequency_expiry_seconds"] == 180.0
+    assert controls["high_frequency_expiry_seconds"] == 900.0
     assert controls["adaptive_timer_enabled"] is False
     assert controls["min_dominance_margin"] == 0.24
     assert controls["packet_valid_for_seconds"] == 75.0
@@ -82,8 +82,8 @@ def test_window_tracker_persists_model_strength_controls(tmp_path: Path) -> None
         assert controls["execution_lane_thresholds"]["SNIPER_ZONE_ENTRY"] == 0.58
         assert controls["model_strength_profile"]["execution_threshold"] == 0.63
         assert controls["high_frequency_timeframe"] == "M1"
-        assert controls["high_frequency_expiry_seconds"] == 180
-        assert controls["high_frequency_horizon_candles"] == 4
+        assert controls["high_frequency_expiry_seconds"] == 900
+        assert controls["high_frequency_horizon_candles"] == 15
         assert controls["allow_live_momentum_entries"] is False
         assert controls["min_live_momentum_score"] == 0.66
         assert controls["min_dominance_margin"] == 0.22

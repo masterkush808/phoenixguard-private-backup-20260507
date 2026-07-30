@@ -199,7 +199,7 @@ def build_execution_command(
         "risk_controls": {
             "user_controlled_risk": True,
             "broker_password_required": False,
-            "max_duration_seconds": int(internal_packet.get("expiry_seconds") or 60),
+            "max_duration_seconds": int(internal_packet.get("expiry_seconds") or 900),
         },
     }
     command["command_hash"] = command_hash(command)

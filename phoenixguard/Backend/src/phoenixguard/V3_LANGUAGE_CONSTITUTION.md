@@ -122,10 +122,18 @@ The quality classification of the entry now: `PERFECT_ENTRY`, `GOOD_ENTRY`,
 The path-aware timing object. Execution is allowed only when its mode allows entering now
 and the selected expiry is present.
 
+`path_clock_liquidity`
+
+The closed-candle causal Joint Path-Clock Liquidity Field study. It conditions historical
+stop survival on normalized path progress, remaining fixed-duration clock, and bounded liquidity
+state. A mature read may delay or veto an otherwise permitted entry; it can never create side,
+permission, or broker-click authority.
+
 `expiry_seconds`
 
 Duration in seconds for the broker time setting. It must match
-`time_sequence.target_seconds`.
+`time_sequence.target_seconds`. PhoenixGuard V3 rejects every positive fixed duration below
+900 seconds; the bounded JPCLF study horizon ends at 7,200 seconds.
 
 `time_sequence`
 
@@ -170,3 +178,9 @@ The current reporting phase of the local shooter process, such as `WAITING` or
 13. Floating Window compact mode must not display raw `n/a` debug fields.
 14. Runtime trace must show tracker, council, study, execution, shooter package reporter,
     floating state, health, and cache together.
+15. A new path-clock timing anchor or executable fixed-duration packet must declare at least
+    900 seconds; evidence below that boundary is excluded from support and calibration.
+16. An admitted path-clock anchor continues through its final 899 seconds for sweep study, but
+    that late state cannot authorize a new entry.
+17. `timing_supports_entry` never changes false permission to true. `timing_veto` may only reduce
+    an already existing permission after exact current-frame lineage validation.

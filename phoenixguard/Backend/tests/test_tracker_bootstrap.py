@@ -31,11 +31,11 @@ def test_build_locked_tracker_controls_uses_safe_tracking_defaults() -> None:
     assert "execution_profile" not in controls
     assert "auto_memory_projection" not in controls
     assert "require_memory_projection" not in controls
-    assert controls["high_frequency_expiry_seconds"] == 600
+    assert controls["high_frequency_expiry_seconds"] == 900
     assert controls["scenario_generation_enabled"] is False
     assert controls["max_executions_per_window"] == 1
     assert controls["execution_window_sec"] == 600.0
-    assert controls["cooldown_sec"] == 600.0
+    assert controls["cooldown_sec"] == 900.0
 
 
 def test_tracker_focus_is_locked_from_manual_focus_region() -> None:
@@ -147,6 +147,76 @@ def test_tracker_session_runtime_state_allows_first_capture_warming() -> None:
 
     assert state["status"] == "WARMING"
     assert state["stale"] is False
+
+
+def test_launcher_does_not_restart_quiet_snapshot_lane_when_cpu_stream_is_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
+
+    assert tracker_launcher._session_needs_worker_restart(
+        {
+            "tracking_enabled": True,
+            "status": "running",
+            "last_capture_epoch": 100.0,
+            "cpu_stream_v3": {
+                "enabled": True,
+                "available": True,
+                "status": "active",
+                "status_updated_epoch": 999.5,
+                "last_capture_epoch": 999.5,
+                "pending_keyframe": False,
+                "in_flight_keyframe": False,
+            },
+        },
+        15.0,
+    ) is False
+
+
+def test_launcher_restarts_when_cpu_stream_heartbeat_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
+
+    assert tracker_launcher._session_needs_worker_restart(
+        {
+            "tracking_enabled": True,
+            "status": "running",
+            "last_capture_epoch": 100.0,
+            "cpu_stream_v3": {
+                "enabled": True,
+                "available": True,
+                "status": "active",
+                "status_updated_epoch": 950.0,
+                "last_capture_epoch": 950.0,
+            },
+        },
+        15.0,
+    ) is True
+
+
+def test_launcher_restarts_stuck_stream_keyframe_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
+
+    assert tracker_launcher._session_needs_worker_restart(
+        {
+            "tracking_enabled": True,
+            "status": "running",
+            "last_capture_epoch": 100.0,
+            "cpu_stream_v3": {
+                "enabled": True,
+                "available": True,
+                "status": "active",
+                "status_updated_epoch": 999.5,
+                "last_capture_epoch": 999.5,
+                "last_event_epoch": 900.0,
+                "pending_keyframe": True,
+            },
+        },
+        15.0,
+    ) is True
 
 
 def test_tracker_status_file_write_success(tmp_path: Path) -> None:

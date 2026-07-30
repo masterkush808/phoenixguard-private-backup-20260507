@@ -5,6 +5,10 @@ from enum import Enum
 import time
 from typing import Any, Mapping, Sequence, cast
 
+from phoenixguard.core.timing_policy_v3 import (
+    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+)
+
 
 LANGUAGE_CONSTITUTION_VERSION = "PG_V3_LANGUAGE_CONSTITUTION_2026_05_25"
 EXECUTION_PACKET_SCHEMA_VERSION = "PG_EXECUTION_PACKET_V3"
@@ -412,6 +416,15 @@ def validate_execution_packet_language(packet: Mapping[str, Any] | None, *, now_
     expiry_seconds = _float(execution.get("expiry_seconds"), 0.0)
     if expiry_seconds <= 0.0:
         add("MISSING_EXPIRY_SECONDS", "execution.expiry_seconds", "Executable packet requires positive expiry_seconds.")
+    elif expiry_seconds < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS:
+        add(
+            "EXPIRY_BELOW_MINIMUM_STUDIED_DURATION",
+            "execution.expiry_seconds",
+            (
+                "Executable V3 OTC packets require at least 900 seconds. "
+                "Moves under 15 minutes are excluded from timing consideration."
+            ),
+        )
     time_sequence = _mapping(execution.get("time_sequence"))
     target_seconds = _float(time_sequence.get("target_seconds"), 0.0)
     target_text = _text(time_sequence.get("target_text"))

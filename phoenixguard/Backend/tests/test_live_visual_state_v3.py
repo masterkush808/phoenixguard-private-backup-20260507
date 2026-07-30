@@ -14,7 +14,7 @@ from phoenixguard.mobile_api.live_state_v3 import (
     _overlay_from_active_object,  # pyright: ignore[reportPrivateUsage]
     _overlay_semantic_geometry_key,  # pyright: ignore[reportPrivateUsage]
     _rescale_registry_overlay_to_current_chart,  # pyright: ignore[reportPrivateUsage]
-    _two_candle_and_lstm_payloads,  # pyright: ignore[reportPrivateUsage]
+    _strip_private_shadow_forecast_fields,  # pyright: ignore[reportPrivateUsage]
     compact_session_payload,
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
@@ -226,7 +226,7 @@ def test_overlay_identity_binding_rejects_stale_explicit_true_identity(
     assert [row["overlay_id"] for row in rejected] == ["current-demand"]
 
 
-def test_public_forecast_reader_prefers_current_identity_pending_tombstone() -> None:
+def test_public_state_removes_retired_forecasts_even_during_identity_transition() -> None:
     pending: dict[str, Any] = {
         "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
         "provider_status": "MARKET_IDENTITY_PENDING",
@@ -256,17 +256,11 @@ def test_public_forecast_reader_prefers_current_identity_pending_tombstone() -> 
         "forecast_scenarios": [{"role": role} for role in ("base", "bull", "bear")],
     }
 
-    _two_candle, selected = _two_candle_and_lstm_payloads(
+    public = _strip_private_shadow_forecast_fields(
         {
             "display_frame_id": 941,
-            "model_vote_frame_id": 941,
             "latest_signal": {
-                "market": "",
-                "focus_timeframe": "M1",
                 "market_selector_rebind_required": True,
-                "market_selector_studying_new_pair": True,
-                "market_identity_confirmed": False,
-                "timeframe_identity_confirmed": True,
                 "scene_forecast_contribution": pending,
             },
             "model_council_study_packet": {
@@ -275,10 +269,10 @@ def test_public_forecast_reader_prefers_current_identity_pending_tombstone() -> 
         }
     )
 
-    assert selected["provider_status"] == "MARKET_IDENTITY_PENDING"
-    assert selected["_source_frame_id"] == 941
-    assert selected.get("line_points", []) == []
-    assert selected.get("forecast_candles", []) == []
+    assert public["display_frame_id"] == 941
+    assert public["latest_signal"]["market_selector_rebind_required"] is True
+    assert "scene_forecast_contribution" not in public["latest_signal"]
+    assert "scene_forecast_contribution" not in public["model_council_study_packet"]
 
 
 def testcompact_session_payload_preserves_v3_authoritypackets_and_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -583,10 +577,9 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
     assert state["model_council"]["side"] == "BUY"
     assert state["signal_thesis_v3"]["active"] is True
     assert state["live_visual_state"]["signal_thesis_v3"]["side"] == "BUY"
-    assert state["live_visual_state"]["two_candle_study"]["display_as"] == "TEXT_AND_BANDS_ONLY"
-    assert state["live_visual_state"]["two_candle_study"]["do_not_render_synthetic_candles"] is True
-    assert state["live_visual_state"]["lstm_contribution"]["blocker"] is False
-    assert state["live_visual_state"]["prediction_overlay"]["enabled"] is False
+    assert "two_candle_study" not in state["live_visual_state"]
+    assert "lstm_contribution" not in state["live_visual_state"]
+    assert "prediction_overlay" not in state["live_visual_state"]
     assert state["live_visual_state"]["visual_plane"]["auto_zoom_enabled"] is False
     assert state["live_visual_state"]["overlay_layout"]["schema_version"] == "PG_OVERLAY_LAYOUT_V3"
     assert state["model_council"]["next_required"] == "full sequence context required"

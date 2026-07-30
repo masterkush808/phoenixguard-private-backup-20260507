@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Mapping, Sequence, cast
 
 
 SIGNAL_THESIS_SCHEMA_VERSION = "PG_SIGNAL_THESIS_V3"
 _ACTIVE_STATES = {"TRACKING", "ALLOW_PULLBACK", "PROTECT_WIN"}
-_TERMINAL_STATES = {"INVALIDATED", "TARGET_REACHED", "PAIR_SWITCH_RESET", "NO_ACTIVE_THESIS"}
+_TERMINAL_STATES = {
+    "EXPIRED",
+    "INVALIDATED",
+    "TARGET_REACHED",
+    "PAIR_SWITCH_RESET",
+    "NO_ACTIVE_THESIS",
+}
+_STUDY_THESIS_TTL_CANDLES = 2.0
+_STUDY_THESIS_MIN_TTL_SEC = 30.0
+_STUDY_THESIS_MAX_TTL_SEC = 21_600.0
 _PROFESSIONAL_COUNTER_THESIS_STATES = {
     "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
     "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
@@ -125,6 +135,78 @@ def _first_rows(*values: Any) -> list[dict[str, Any]]:
         if rows:
             return rows
     return []
+
+
+def _timeframe_seconds(value: Any) -> float:
+    text = str(value or "").strip().upper().replace(" ", "")
+    match = re.search(r"(\d+(?:\.\d+)?)([SMHDW])", text)
+    if not match:
+        return 300.0
+    amount = max(1.0, _float(match.group(1), 1.0))
+    multiplier = {
+        "S": 1.0,
+        "M": 60.0,
+        "H": 3600.0,
+        "D": 86_400.0,
+        "W": 604_800.0,
+    }.get(match.group(2), 300.0)
+    return amount * multiplier
+
+
+def _study_thesis_ttl_sec(timeframe: Any) -> float:
+    return max(
+        _STUDY_THESIS_MIN_TTL_SEC,
+        min(
+            _STUDY_THESIS_MAX_TTL_SEC,
+            _timeframe_seconds(timeframe) * _STUDY_THESIS_TTL_CANDLES,
+        ),
+    )
+
+
+def _positive_epoch(*values: Any) -> float:
+    for value in values:
+        parsed = _float(value, 0.0)
+        if 0.0 < parsed < 10_000_000_000.0:
+            return parsed
+    return 0.0
+
+
+def _trade_execution_confirmation(
+    snapshot: Mapping[str, Any],
+    result: Mapping[str, Any],
+    execution_packet: Mapping[str, Any],
+) -> tuple[bool, float]:
+    """Return only explicit broker/trade confirmation, never model permission."""
+
+    broker_state = _mapping(
+        snapshot.get("broker_execution_state")
+        or snapshot.get("execution_state")
+    )
+    active_trade = _first_mapping(
+        snapshot.get("active_trade"),
+        broker_state.get("active_trade"),
+        result.get("active_trade"),
+        execution_packet.get("active_trade"),
+    )
+    verification_rows = (
+        _mapping(snapshot.get("trade_verification")),
+        _mapping(broker_state.get("trade_verification")),
+        _mapping(_mapping(broker_state.get("last_result")).get("trade_verification")),
+        _mapping(result.get("trade_verification")),
+        _mapping(execution_packet.get("trade_verification")),
+        _mapping(_mapping(active_trade.get("click_result")).get("trade_verification")),
+    )
+    confirmation_status = str(active_trade.get("confirmation_status") or "").strip().upper()
+    confirmed = bool(
+        confirmation_status in {"CONFIRMED", "BROKER_CONFIRMED", "ACCEPTED"}
+        or any(row.get("confirmed") is True for row in verification_rows)
+    )
+    valid_until = _positive_epoch(
+        active_trade.get("expires_epoch"),
+        active_trade.get("valid_until_epoch_sec"),
+        active_trade.get("valid_until_epoch"),
+    )
+    return confirmed, valid_until
 
 
 def _bbox(value: Any) -> list[float]:
@@ -343,6 +425,28 @@ def _candidate_from_payloads(
         signal.get("execution_timing"),
         tracking.get("execution_timing"),
     )
+    opportunity = _first_mapping(
+        result.get("execution_opportunity_window_v3"),
+        execution_packet.get("execution_opportunity_window_v3"),
+        study_packet.get("execution_opportunity_window_v3"),
+        snapshot.get("execution_opportunity_window_v3"),
+    )
+    execution_confirmed, trade_valid_until_epoch = _trade_execution_confirmation(
+        snapshot,
+        result,
+        execution_packet,
+    )
+    source_valid_until_epoch = _positive_epoch(
+        execution_packet.get("valid_until_epoch_sec"),
+        execution_packet.get("valid_until_epoch"),
+        study_packet.get("valid_until_epoch_sec"),
+        study_packet.get("valid_until_epoch"),
+        opportunity.get("valid_until_epoch_sec"),
+        opportunity.get("valid_until_epoch"),
+        result.get("valid_until_epoch_sec"),
+        result.get("valid_until_epoch"),
+        snapshot.get("decision_valid_until_epoch"),
+    )
     side = _side(
         execution.get("side")
         or council.get("final_side")
@@ -446,6 +550,9 @@ def _candidate_from_payloads(
         "book_failed_continuation_reversal": bool(book_evidence.get("failed_continuation_reversal")),
         "entry_now_allowed": bool(timing.get("entry_now_allowed") or timing.get("entry_allowed")),
         "execution_enabled": bool(execution.get("enabled") or execution_packet),
+        "execution_confirmed": execution_confirmed,
+        "trade_valid_until_epoch": trade_valid_until_epoch,
+        "source_valid_until_epoch": source_valid_until_epoch,
     }
 
 
@@ -533,6 +640,21 @@ def _new_thesis(
     )
     created_frame = _int(candidate.get("frame_id"), 0)
     status = "TRACKING"
+    execution_confirmed = bool(candidate.get("execution_confirmed"))
+    fallback_valid_until = float(now_epoch) + _study_thesis_ttl_sec(
+        candidate.get("timeframe")
+    )
+    source_valid_until = _float(candidate.get("source_valid_until_epoch"), 0.0)
+    trade_valid_until = _float(candidate.get("trade_valid_until_epoch"), 0.0)
+    valid_until_epoch = (
+        trade_valid_until
+        if execution_confirmed and trade_valid_until > float(now_epoch)
+        else source_valid_until
+        if not execution_confirmed and source_valid_until > float(now_epoch)
+        else 0.0
+        if execution_confirmed
+        else fallback_valid_until
+    )
     return {
         "schema_version": SIGNAL_THESIS_SCHEMA_VERSION,
         "active": True,
@@ -554,6 +676,9 @@ def _new_thesis(
         "selected_lane": str(candidate.get("lane") or ""),
         "created_epoch": float(now_epoch),
         "updated_epoch": float(now_epoch),
+        "valid_until_epoch": round(float(valid_until_epoch), 3),
+        "execution_confirmed": execution_confirmed,
+        "authority_scope": "CONFIRMED_TRADE" if execution_confirmed else "STUDY_ONLY",
         "age_sec": 0.0,
         "entry_frame_id": created_frame,
         "last_frame_id": created_frame,
@@ -577,7 +702,11 @@ def _new_thesis(
         "countertrend_attempt_blocked": False,
         "blocked_countertrend_side": _opposite(side),
         "countertrend_policy": "BLOCK_OPPOSITE_EXECUTION_UNTIL_INVALIDATION",
-        "release_condition": "pair switch, target completion, or invalidation/reversal confirmation",
+        "release_condition": (
+            "trade expiry, pair switch, target completion, or invalidation/reversal confirmation"
+            if execution_confirmed
+            else "study-window expiry, pair switch, target completion, or invalidation/reversal confirmation"
+        ),
         "plain_language": (
             f"Tracking the active {side} idea from frame {created_frame}. "
             f"The opposite {_opposite(side)} side is blocked until invalidation is confirmed."
@@ -628,6 +757,62 @@ def _update_active_thesis(
 ) -> dict[str, Any]:
     side = _side(previous.get("side"))
     current_side = _side(candidate.get("side"))
+    execution_confirmed = bool(previous.get("execution_confirmed"))
+    created_epoch = _float(previous.get("created_epoch"), now_epoch)
+    valid_until_epoch = _float(previous.get("valid_until_epoch"), 0.0)
+    if valid_until_epoch <= 0.0 and not execution_confirmed:
+        valid_until_epoch = created_epoch + _study_thesis_ttl_sec(
+            previous.get("timeframe") or candidate.get("timeframe")
+        )
+    if valid_until_epoch > 0.0 and float(now_epoch) >= valid_until_epoch:
+        reason = (
+            "The confirmed trade reached its declared expiry."
+            if execution_confirmed
+            else "The unexecuted study thesis exceeded its bounded opportunity window."
+        )
+        expired = dict(previous)
+        expired.update(
+            {
+                "schema_version": SIGNAL_THESIS_SCHEMA_VERSION,
+                "active": False,
+                "status": "EXPIRED",
+                "room_state": "EXPIRED",
+                "effective_side": "HOLD",
+                "raw_read_side": current_side,
+                "current_signal_side": current_side,
+                "updated_epoch": float(now_epoch),
+                "valid_until_epoch": round(float(valid_until_epoch), 3),
+                "age_sec": round(max(0.0, float(now_epoch) - created_epoch), 3),
+                "countertrend_blocked": False,
+                "countertrend_attempt_blocked": False,
+                "blocked_countertrend_side": "HOLD",
+                "countertrend_policy": "WAIT_FOR_NEW_THESIS",
+                "release_condition": "A fresh current-chart thesis must earn its own opportunity window.",
+                "plain_language": reason,
+                "source_module": "signal_thesis_tracker",
+            }
+        )
+        expired["history"] = _append_event(
+            previous,
+            {
+                "event": "THESIS_EXPIRED",
+                "epoch": float(now_epoch),
+                "frame_id": _int(candidate.get("frame_id"), _int(previous.get("last_frame_id"), 0)),
+                "side": side,
+                "raw_read_side": current_side,
+                "reason": reason,
+            },
+        )
+        if _start_allowed(candidate):
+            expired["replaced_by"] = _new_thesis(
+                snapshot=snapshot,
+                result=result,
+                study_packet=study_packet,
+                execution_packet=execution_packet,
+                candidate=candidate,
+                now_epoch=now_epoch,
+            )
+        return expired
     current_y, current_source = _latest_price_y(snapshot)
     height = max(1.0, _float(previous.get("chart_height_proxy"), _chart_height(snapshot)))
     entry_y = _float(previous.get("entry_price_proxy"), float("nan"))

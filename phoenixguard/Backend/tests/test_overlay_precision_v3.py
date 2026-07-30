@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from PIL import Image
+import pytest
 
 from phoenixguard.mobile_api.live_state_v3 import build_live_state_v3
 from phoenixguard.tracking.market_object_tracker_v3 import build_v3_overlays_from_session
@@ -38,6 +39,15 @@ def _session(tmp_path: Path) -> dict[str, Any]:
         },
         "manual_focus_region": {"enabled": True, "normalized_bbox": [0.02, 0.06, 0.76, 0.94]},
         "tracking_summary": {
+            "detected_market": "EUR/USD OTC",
+            "detected_timeframe": "M5",
+            "market_confidence": 0.93,
+            "timeframe_confidence": 0.91,
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_eurusdotc",
+            "market_selector_rebind_required": False,
+            "market_selector_studying_new_pair": False,
             "focus_region": {"pixel_bbox": [39, 62, 1473, 976]},
             "chart_region": {"pixel_bbox": [0, 67, 1434, 914], "width": 1434, "height": 847},
             "display_region": {"pixel_bbox": [0, 67, 1434, 914], "width": 1434, "height": 847},
@@ -66,7 +76,20 @@ def _session(tmp_path: Path) -> dict[str, Any]:
                 ],
             },
         },
-        "latest_signal": {"action": "SELL", "confidence": 0.9, "effective_confidence": 0.9},
+        "latest_signal": {
+            "action": "SELL",
+            "confidence": 0.9,
+            "effective_confidence": 0.9,
+            "market": "EUR/USD OTC",
+            "focus_timeframe": "M5",
+            "market_confidence": 0.93,
+            "timeframe_confidence": 0.91,
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_visual_fingerprint": "selector_v2_eurusdotc",
+            "market_selector_rebind_required": False,
+            "market_selector_studying_new_pair": False,
+        },
     }
 
 
@@ -440,6 +463,7 @@ def test_candles_mode_renders_every_visible_candle_box(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.skip(reason="retired public forecast modes are no longer renderable")
 def test_two_candle_and_lstm_modes_render_anchored_study_overlays(tmp_path: Path) -> None:
     session = _session(tmp_path)
     candles = _install_visible_candles(session, count=8)
@@ -539,6 +563,7 @@ def test_study_overlays_reject_wrong_frame_and_expired_packets(tmp_path: Path) -
     )
 
 
+@pytest.mark.skip(reason="retired public forecast overlays are no longer renderable")
 def test_waiting_frame_renders_last_aligned_forecast_as_stale_diagnostic(tmp_path: Path) -> None:
     session = _session(tmp_path)
     _install_visible_candles(session, count=8)
@@ -657,6 +682,7 @@ def test_waiting_frame_never_projects_forecast_snapshot_onto_new_frame(tmp_path:
     assert not any(row.get("type") == "LSTM_STUDY" for row in state["overlay_objects"])
 
 
+@pytest.mark.skip(reason="retired public forecast overlays are no longer renderable")
 def test_current_root_study_packet_emits_truthful_neutral_studies_and_lstm_path(tmp_path: Path) -> None:
     session = _session(tmp_path)
     _install_visible_candles(session, count=8)
@@ -719,6 +745,7 @@ def test_current_root_study_packet_emits_truthful_neutral_studies_and_lstm_path(
     assert len(cast(list[dict[str, Any]], composite.get("forecast_candles"))) == 12
 
 
+@pytest.mark.skip(reason="retired public LSTM mode is no longer renderable")
 def test_lstm_mode_renders_learned_candle_event_progression_path(tmp_path: Path) -> None:
     session = _session(tmp_path)
     candles = _install_visible_candles(session, count=8)
@@ -768,6 +795,7 @@ def test_lstm_mode_renders_learned_candle_event_progression_path(tmp_path: Path)
     assert "NO EDGE" in str(composite.get("reason"))
 
 
+@pytest.mark.skip(reason="retired public LSTM mode is no longer renderable")
 def test_lstm_multimodal_scenarios_share_causal_geometry_and_select_primary(
     tmp_path: Path,
 ) -> None:
@@ -882,6 +910,7 @@ def test_lstm_multimodal_scenarios_share_causal_geometry_and_select_primary(
     ]
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_low_quality_direct_lstm_path_remains_visible_as_neutral_diagnostic(
     tmp_path: Path,
     monkeypatch: Any,
@@ -937,6 +966,7 @@ def test_low_quality_direct_lstm_path_remains_visible_as_neutral_diagnostic(
     assert "LOW CONFIDENCE" in str(composite["reason"])
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_lstm_overlay_keeps_path_movement_separate_from_candle_body(
     tmp_path: Path,
 ) -> None:
@@ -1013,6 +1043,7 @@ def test_lstm_overlay_keeps_path_movement_separate_from_candle_body(
     assert [row["direction_conflict"] for row in events] == [True, *[False] * 11]
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_current_direct_lstm_path_outranks_legacy_study_packet_copy(
     tmp_path: Path,
 ) -> None:
@@ -1080,6 +1111,7 @@ def test_current_direct_lstm_path_outranks_legacy_study_packet_copy(
     assert len(cast(list[dict[str, Any]], composites[0]["forecast_candles"])) == 12
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_direct_lstm_path_uses_causal_feature_anchor_when_compact_candles_are_absent(
     tmp_path: Path,
 ) -> None:
@@ -1124,6 +1156,7 @@ def test_direct_lstm_path_uses_causal_feature_anchor_when_compact_candles_are_ab
     assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_direct_lstm_path_snaps_to_matching_latest_candle_close(
     tmp_path: Path,
 ) -> None:
@@ -1180,6 +1213,7 @@ def test_direct_lstm_path_snaps_to_matching_latest_candle_close(
     assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_direct_lstm_path_does_not_snap_to_adjacent_tracker_candle(
     tmp_path: Path,
 ) -> None:
@@ -1241,6 +1275,7 @@ def test_direct_lstm_path_does_not_snap_to_adjacent_tracker_candle(
     assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_boxes(
     tmp_path: Path,
 ) -> None:
@@ -1293,6 +1328,7 @@ def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_box
     assert len(cast(list[dict[str, Any]], rows[0].get("forecast_candles"))) == 12
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_lstm_path_cannot_authorize_when_production_gate_is_false(
     tmp_path: Path,
 ) -> None:
@@ -1337,6 +1373,7 @@ def test_lstm_path_cannot_authorize_when_production_gate_is_false(
     assert not str(row["role"]).endswith("_authorized")
 
 
+@pytest.mark.skip(reason="retired public LSTM path is no longer renderable")
 def test_lstm_path_never_inherits_authority_from_conflicting_top_level_metadata(
     tmp_path: Path,
 ) -> None:

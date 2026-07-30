@@ -266,7 +266,7 @@ $ShooterCooldownSec = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_COOL
 $ShooterEnabled = (ConvertTo-BoolFlag -Value (Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_ENABLED' -DefaultValue '1') -DefaultValue $true) -and -not $NoShooter
 $StartupTestTradeEnabled = ConvertTo-BoolFlag -Value (Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_ENABLED' -DefaultValue '0') -DefaultValue $false
 $StartupTestTradeSide = (Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_SIDE' -DefaultValue 'AUTO').Trim().ToUpperInvariant()
-$StartupTestTradeExpirySec = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_EXPIRY_SEC' -DefaultValue '180')
+$StartupTestTradeExpirySec = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_EXPIRY_SEC' -DefaultValue '900')
 $StartupTestTradeReadyTimeoutSec = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_READY_TIMEOUT_SEC' -DefaultValue '120')
 $StartupTestTradeMaxSignalAgeSec = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_MAX_SIGNAL_AGE_SEC' -DefaultValue ([string]$ShooterMaxSignalAge))
 $StartupTestTradeMinRepeatSec = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_STARTUP_TEST_TRADE_MIN_REPEAT_SEC' -DefaultValue '3600')
@@ -747,7 +747,7 @@ function Invoke-StartupTestTrade {
 
     $side = Resolve-StartupTestTradeSide -SessionPayload $snapshot
     $body = @{
-        expiry_seconds = [Math]::Max(1, $StartupTestTradeExpirySec)
+        expiry_seconds = [Math]::Max(900, $StartupTestTradeExpirySec)
         force = $true
     }
     if ($side -in @('BUY', 'SELL')) {

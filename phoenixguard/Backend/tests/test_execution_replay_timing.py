@@ -17,9 +17,9 @@ def _profiles() -> dict[str, TimingProfile]:
         symbol="EURUSD",
         timeframe="M1",
         setup_type="continuation",
-        historical_durations_seconds=[90, 120, 150, 180],
-        safe_expiry_range_seconds=(120, 300),
-        best_historical_expiry_seconds=180,
+        historical_durations_seconds=[900, 1200, 1500, 1800],
+        safe_expiry_range_seconds=(900, 3000),
+        best_historical_expiry_seconds=1800,
         late_entry_threshold_seconds=210,
         fakeout_window_seconds=(0, 45),
         reversal_window_seconds=(45, 105),
@@ -29,9 +29,9 @@ def _profiles() -> dict[str, TimingProfile]:
         symbol="GBPUSD",
         timeframe="M1",
         setup_type="reversal",
-        historical_durations_seconds=[120, 150, 180, 210],
-        safe_expiry_range_seconds=(180, 420),
-        best_historical_expiry_seconds=300,
+        historical_durations_seconds=[1200, 1500, 1800, 2100],
+        safe_expiry_range_seconds=(1200, 4200),
+        best_historical_expiry_seconds=3000,
         late_entry_threshold_seconds=260,
         fakeout_window_seconds=(0, 60),
         reversal_window_seconds=(90, 260),
@@ -41,11 +41,11 @@ def _profiles() -> dict[str, TimingProfile]:
         symbol="USDJPY",
         timeframe="M1",
         setup_type="fakeout",
-        average_setup_duration_seconds=90,
-        median_setup_duration_seconds=75,
-        min_safe_expiry_seconds=60,
-        max_safe_expiry_seconds=180,
-        best_historical_expiry_seconds=90,
+        average_setup_duration_seconds=1500,
+        median_setup_duration_seconds=1200,
+        min_safe_expiry_seconds=900,
+        max_safe_expiry_seconds=1800,
+        best_historical_expiry_seconds=1200,
         late_entry_threshold_seconds=120,
         fakeout_window=TimingWindow(0, 90),
         reversal_window=TimingWindow(60, 150),
@@ -57,11 +57,11 @@ def _profiles() -> dict[str, TimingProfile]:
 def test_pair_specific_profile_has_expected_duration_intelligence() -> None:
     profile = _profiles()[profile_key("EURUSD", "M1", "continuation")]
 
-    assert profile.average_setup_duration_seconds == 135
-    assert profile.median_setup_duration_seconds == 135
-    assert profile.min_safe_expiry_seconds == 120
-    assert profile.max_safe_expiry_seconds == 300
-    assert profile.best_historical_expiry_seconds == 180
+    assert profile.average_setup_duration_seconds == 1350
+    assert profile.median_setup_duration_seconds == 1350
+    assert profile.min_safe_expiry_seconds == 900
+    assert profile.max_safe_expiry_seconds == 3000
+    assert profile.best_historical_expiry_seconds == 1800
     assert profile.late_entry_threshold_seconds == 210
     assert profile.continuation_window == TimingWindow(60, 210)
 
@@ -75,7 +75,7 @@ def test_replay_accepts_known_winning_buy_continuation() -> None:
             "setup_type": "continuation",
             "execution_action": "BUY",
             "entry_age_seconds": 120,
-            "expiry_seconds": 180,
+            "expiry_seconds": 1800,
             "outcome": "win",
         },
         _profiles(),
@@ -83,7 +83,7 @@ def test_replay_accepts_known_winning_buy_continuation() -> None:
 
     assert result.accepted is True
     assert result.reason_codes == ()
-    assert result.recommended_expiry_seconds == 180
+    assert result.recommended_expiry_seconds == 1800
 
 
 def test_replay_rejects_losing_late_buy() -> None:
@@ -95,7 +95,7 @@ def test_replay_rejects_losing_late_buy() -> None:
             "setup_type": "continuation",
             "execution_action": "BUY",
             "entry_age_seconds": 240,
-            "expiry_seconds": 180,
+            "expiry_seconds": 1800,
             "outcome": "loss",
         },
         _profiles(),
@@ -115,7 +115,7 @@ def test_replay_accepts_winning_sell_reversal() -> None:
             "setup_type": "reversal",
             "execution_action": "SELL",
             "entry_age_seconds": 150,
-            "expiry_seconds": 300,
+            "expiry_seconds": 3000,
             "support_proximity": 0.20,
             "outcome": "win",
         },
@@ -124,7 +124,7 @@ def test_replay_accepts_winning_sell_reversal() -> None:
 
     assert result.accepted is True
     assert result.reason_codes == ()
-    assert result.recommended_expiry_seconds == 300
+    assert result.recommended_expiry_seconds == 3000
 
 
 def test_replay_rejects_losing_sell_into_support() -> None:
@@ -136,7 +136,7 @@ def test_replay_rejects_losing_sell_into_support() -> None:
             "setup_type": "reversal",
             "execution_action": "SELL",
             "entry_age_seconds": 150,
-            "expiry_seconds": 300,
+            "expiry_seconds": 3000,
             "support_proximity": 0.92,
             "outcome": "loss",
         },
@@ -157,7 +157,7 @@ def test_replay_rejects_fakeout_window() -> None:
             "setup_type": "fakeout",
             "execution_action": "BUY",
             "entry_age_seconds": 45,
-            "expiry_seconds": 90,
+            "expiry_seconds": 1200,
             "fakeout_probability": 0.82,
         },
         _profiles(),
@@ -177,7 +177,7 @@ def test_replay_rejects_reversal_that_needs_wait() -> None:
             "setup_type": "reversal",
             "execution_action": "SELL",
             "entry_age_seconds": 60,
-            "expiry_seconds": 300,
+            "expiry_seconds": 3000,
         },
         _profiles(),
     )
@@ -195,7 +195,7 @@ def test_replay_rejects_continuation_expiry_too_early() -> None:
             "setup_type": "continuation",
             "execution_action": "BUY",
             "entry_age_seconds": 120,
-            "expiry_seconds": 60,
+            "expiry_seconds": 899,
         },
         _profiles(),
     )
@@ -213,7 +213,7 @@ def test_replay_rejects_continuation_expiry_too_late() -> None:
             "setup_type": "continuation",
             "execution_action": "BUY",
             "entry_age_seconds": 120,
-            "expiry_seconds": 420,
+            "expiry_seconds": 3600,
         },
         _profiles(),
     )
@@ -232,7 +232,7 @@ def test_replay_batch_evaluation_stays_pure() -> None:
                 "setup_type": "continuation",
                 "execution_action": "BUY",
                 "entry_age_seconds": 120,
-                "expiry_seconds": 180,
+                "expiry_seconds": 1800,
             },
             {
                 "signal_id": "reversal-too-early",
@@ -241,7 +241,7 @@ def test_replay_batch_evaluation_stays_pure() -> None:
                 "setup_type": "reversal",
                 "execution_action": "SELL",
                 "entry_age_seconds": 60,
-                "expiry_seconds": 300,
+                "expiry_seconds": 3000,
             },
         ],
         _profiles(),

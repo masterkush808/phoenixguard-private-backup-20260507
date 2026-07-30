@@ -10,6 +10,9 @@ from fastapi.testclient import TestClient
 import pytest
 
 import phoenixguard.mobile_api.app as mobile_app
+from phoenixguard.decision.countertrend_sniper_v3 import (
+    build_countertrend_sniper_lineage_v3,
+)
 from phoenixguard.execution.packet_v3 import build_execution_packet_v3
 from phoenixguard.mobile_api.app import create_app
 from phoenixguard.runtime.cache_v3 import (
@@ -653,7 +656,7 @@ def test_direct_window_tracker_stream_uses_compact_signature_gate(
         encoding="utf-8",
     )
     probe = cast(
-        Callable[..., tuple[str, tuple[str, int, int] | None, dict[str, object] | None]],
+        Callable[..., tuple[str, object | None, dict[str, object] | None]],
         getattr(mobile_app, "_direct_window_tracker_stream_snapshot"),
     )
 
@@ -697,6 +700,346 @@ def test_direct_window_tracker_stream_uses_compact_signature_gate(
     assert changed_signature != signature
     assert changed_payload is not None
     assert changed_payload["capture_count"] == 2
+
+    cpu_stream_path = session_dir / "cpu_stream_v3.json"
+    cpu_stream_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                "session_id": "pocket-live-8788",
+                "status": "active",
+                "status_updated_epoch": 101.0,
+                "observed_frames": 41,
+                "last_capture_epoch": 100.9,
+                "observer": {
+                    "cpu_only": True,
+                    "stream_id": "pgcpu-pocket-live-8788-safe",
+                    "frame_seq": 41,
+                    "stream_generation": 3,
+                    "last_decision": {
+                        "temporal_evidence": {
+                            "frame_seq": 41,
+                            "state": "motion",
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_read_text = Path.read_text
+    direct_reads: list[str] = []
+
+    def counted_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path in {session_path, compact_path, cpu_stream_path}:
+            direct_reads.append(path.name)
+        return original_read_text(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    state, cpu_signature, cpu_payload = probe("pocket-live-8788", changed_signature)
+
+    assert state == "updated"
+    assert cpu_signature != changed_signature
+    assert cpu_payload is not None
+    assert set(cpu_payload) == {"session_id", "cpu_stream_v3"}
+    assert cast(dict[str, object], cpu_payload["cpu_stream_v3"])["observed_frames"] == 41
+    assert direct_reads == ["cpu_stream_v3.json"]
+
+    fingerprint = cast(
+        Callable[[Mapping[str, object]], str],
+        getattr(mobile_app, "_window_tracker_stream_fingerprint_v3"),
+    )
+    first_cpu_fingerprint = fingerprint(cpu_payload)
+    direct_reads.clear()
+    cpu_stream_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                "session_id": "pocket-live-8788",
+                "status": "active",
+                "status_updated_epoch": 101.2,
+                "observed_frames": 420,
+                "last_capture_epoch": 101.1,
+                "observer": {
+                    "frame_seq": 420,
+                    "stream_generation": 3,
+                    "last_decision": {
+                        "temporal_evidence": {
+                            "frame_seq": 420,
+                            "state": "rest",
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state, next_cpu_signature, next_cpu_payload = probe(
+        "pocket-live-8788",
+        cpu_signature,
+    )
+
+    assert state == "updated"
+    assert next_cpu_signature != cpu_signature
+    assert next_cpu_payload is not None
+    assert direct_reads == ["cpu_stream_v3.json"]
+    assert fingerprint(next_cpu_payload) != first_cpu_fingerprint
+
+
+def test_cpu_stream_fingerprint_isolates_heartbeat_and_frame_sequence() -> None:
+    fingerprint = cast(
+        Callable[[Mapping[str, object]], str],
+        getattr(mobile_app, "_window_tracker_stream_fingerprint_v3"),
+    )
+
+    def payload(
+        *,
+        heartbeat: float,
+        frame_seq: int,
+        debug: object = None,
+    ) -> dict[str, object]:
+        return {
+            "session_id": "pocket-live-8788",
+            "cpu_stream_v3": {
+                "status": "active",
+                "status_updated_epoch": heartbeat,
+                "observed_frames": 41,
+                "observer": {
+                    "frame_seq": frame_seq,
+                    "stream_generation": 3,
+                    "last_decision": {
+                        "temporal_evidence": {
+                            "frame_seq": frame_seq,
+                            "state": "motion",
+                        }
+                    },
+                    "unrelated_debug": debug,
+                },
+            },
+        }
+
+    baseline = payload(heartbeat=101.0, frame_seq=41)
+
+    assert fingerprint(payload(heartbeat=101.2, frame_seq=41)) != fingerprint(baseline)
+    assert fingerprint(payload(heartbeat=101.0, frame_seq=42)) != fingerprint(baseline)
+    assert fingerprint(payload(heartbeat=101.0, frame_seq=41, debug="ignored")) == fingerprint(
+        baseline
+    )
+
+
+def test_session_stream_emits_cpu_only_updates_for_heartbeat_and_frame_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    session_dir = (
+        data_dir
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / "pocket-live-8788"
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "capture_count": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+    compact_path = session_dir / "compact_live_state.json"
+    compact_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "capture_count": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cpu_stream_path = session_dir / "cpu_stream_v3.json"
+
+    def write_cpu_stream(*, heartbeat: float, frame_seq: int) -> None:
+        cpu_stream_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                    "session_id": "pocket-live-8788",
+                    "status": "active",
+                    "status_updated_epoch": heartbeat,
+                    "observed_frames": frame_seq,
+                    "observer": {
+                        "frame_seq": frame_seq,
+                        "stream_generation": 2,
+                        "last_frame_hash": "private-frame-hash",
+                        "last_decision": {
+                            "temporal_evidence": {
+                                "frame_seq": frame_seq,
+                                "state": "motion",
+                                "direction": "BUY",
+                            }
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_cpu_stream(heartbeat=101.0, frame_seq=41)
+    app = create_app()
+
+    class CapturedStreamingResponse:
+        def __init__(self, content: object, **_kwargs: object) -> None:
+            self.content = content
+
+    monkeypatch.setattr(mobile_app, "StreamingResponse", CapturedStreamingResponse)
+    monkeypatch.setattr(mobile_app.time, "sleep", lambda _seconds: None)
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", "")
+        == "/v1/mobile/window-tracker/sessions/{session_id}/events"
+    )
+    endpoint = cast(Callable[[str], object], getattr(route, "endpoint"))
+    response = endpoint("pocket-live-8788")
+    events = cast(Any, getattr(response, "content"))
+
+    def event_payload(event: str) -> dict[str, object]:
+        assert event.startswith("event: SESSION_UPDATE\n")
+        body = event.split("data: ", 1)[1].split("\n\n", 1)[0]
+        parsed = json.loads(body)
+        assert isinstance(parsed, dict)
+        return cast(dict[str, object], parsed)
+
+    initial = event_payload(next(events))
+    assert initial["capture_count"] == 7
+
+    write_cpu_stream(heartbeat=1001.0, frame_seq=41)
+    heartbeat_update = event_payload(next(events))
+    assert set(heartbeat_update) == {"session_id", "cpu_stream_v3"}
+    heartbeat_cpu = cast(dict[str, object], heartbeat_update["cpu_stream_v3"])
+    assert heartbeat_cpu["status_updated_epoch"] == 1001
+    assert heartbeat_cpu["observed_frames"] == 41
+
+    write_cpu_stream(heartbeat=1001.0, frame_seq=420)
+    frame_update = event_payload(next(events))
+    assert set(frame_update) == {"session_id", "cpu_stream_v3"}
+    frame_cpu = cast(dict[str, object], frame_update["cpu_stream_v3"])
+    assert frame_cpu["observed_frames"] == 420
+    assert cast(dict[str, object], frame_cpu["observer"])["frame_seq"] == 420
+    serialized = json.dumps([initial, heartbeat_update, frame_update])
+    assert "private-frame-hash" not in serialized
+    assert '"direction": "BUY"' not in serialized
+
+
+def test_public_cpu_stream_projection_strips_identity_geometry_hashes_and_direction() -> None:
+    sanitize = cast(
+        Callable[[Mapping[str, object]], dict[str, object]],
+        getattr(mobile_app, "_sanitize_public_tracker_session"),
+    )
+    public = sanitize(
+        {
+            "session_id": "pocket-live-8788",
+            "cpu_stream_v3": {
+                "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                "session_id": "pocket-live-8788",
+                "status": "active",
+                "status_updated_epoch": 101.0,
+                "observed_frames": 41,
+                "private_frame_path": r"C:\secret\frame.png",
+                "observer": {
+                    "cpu_only": True,
+                    "stream_id": "pgcpu-pocket-live-8788-safe",
+                    "frame_seq": 41,
+                    "stream_generation": 3,
+                    "last_frame_hash": "private-frame-hash",
+                    "identity": {
+                        "window_title": "private broker title",
+                        "process_id": 1234,
+                    },
+                    "geometry": {"bbox": [0, 0, 1920, 1080]},
+                    "rings": {
+                        "full_frames": {"size": 2, "capacity": 2, "dropped": 7},
+                        "downsamples": {"size": 12, "capacity": 48, "dropped": 3},
+                    },
+                    "memory": {
+                        "current_estimated_pixel_bytes": 1024,
+                        "configured_upper_bound_pixel_bytes": 4096,
+                    },
+                    "counters": {
+                        "frames_observed": 41,
+                        "full_frame_ring_drops": 7,
+                        "downsample_ring_drops": 3,
+                    },
+                    "last_decision": {
+                        "input_frame_hash": "private-input-hash",
+                        "temporal_evidence": {
+                            "frame_seq": 41,
+                            "state": "motion",
+                            "direction": "BUY",
+                        },
+                    },
+                },
+                "last_keyframe_lineage": {
+                    "schema_version": "PG_CPU_STREAM_KEYFRAME_LINEAGE_V3",
+                    "stream_id": "pgcpu-pocket-live-8788-safe",
+                    "stream_generation": 3,
+                    "frame_seq": 40,
+                    "input_frame_hash": "private-keyframe-hash",
+                    "captured_epoch": 100.9,
+                    "broker_click_authority": True,
+                },
+            },
+        }
+    )
+
+    cpu = cast(dict[str, object], public["cpu_stream_v3"])
+    observer = cast(dict[str, object], cpu["observer"])
+    temporal = cast(
+        dict[str, object],
+        cast(dict[str, object], observer["last_decision"])["temporal_evidence"],
+    )
+    serialized = json.dumps(public)
+
+    assert temporal["state"] == "motion"
+    assert temporal["direction"] == "NEUTRAL"
+    assert temporal["direction_available"] is False
+    assert temporal["can_grant_entry_permission"] is False
+    assert cpu["execution_authority"] is False
+    assert cpu["broker_click_authority"] is False
+    assert observer["cpu_only"] is True
+    assert observer["stream_id"] == "pgcpu-pocket-live-8788-safe"
+    assert observer["rings"] == {
+        "full_frames": {"size": 2, "capacity": 2, "dropped": 7},
+        "downsamples": {"size": 12, "capacity": 48, "dropped": 3},
+    }
+    assert observer["memory"] == {
+        "current_estimated_pixel_bytes": 1024,
+        "configured_upper_bound_pixel_bytes": 4096,
+    }
+    assert cast(dict[str, object], observer["counters"])["full_frame_ring_drops"] == 7
+    lineage = cast(dict[str, object], cpu["last_keyframe_lineage"])
+    assert lineage["stream_id"] == "pgcpu-pocket-live-8788-safe"
+    assert lineage["stream_generation"] == 3
+    assert lineage["frame_seq"] == 40
+    assert lineage["broker_click_authority"] is False
+    for private_token in (
+        "private-frame-hash",
+        "private-input-hash",
+        "private-keyframe-hash",
+        "private broker title",
+        "process_id",
+        "geometry",
+        r"C:\\secret",
+        '"direction": "BUY"',
+    ):
+        assert private_token not in serialized
 
 
 def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> None:
@@ -1144,7 +1487,11 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     assert "artifact_selection" not in serialized
     assert "private_model_feature" not in serialized
     live_visual = cast(Mapping[str, Any], payload["live_visual_state"])
-    public_lstm = cast(Mapping[str, Any], live_visual["lstm_contribution"])
+    # Forward-model telemetry remains available to the private council, but it
+    # is intentionally absent from the public chart contract.  The operator UI
+    # explains the three current trading questions instead of publishing a
+    # forecast lane or a misleading neutralized model artifact.
+    assert "lstm_contribution" not in live_visual
     public_boundary = cast(
         Callable[[Mapping[str, object]], dict[str, object]],
         getattr(mobile_app, "_strip_private_projection_snapshots"),
@@ -1160,7 +1507,6 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     )
     assert "artifact_path" not in json.dumps(projected_alias)
     assert "private_model_feature" not in json.dumps(projected_alias)
-    assert public_lstm["trade_authorization_status"] == "NO_EDGE"
 
     compact_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
 
@@ -1348,10 +1694,12 @@ def test_compact_live_state_projects_study_only_decision_command_center(
         "lineage_rejected",
         "anchor_reused",
         "out_of_order_ignored",
+        "opportunity_id",
     }
     assert command["execution_opportunity_window_v3"]["state"] == "OPEN"
     assert command["execution_opportunity_window_v3"]["side"] == "SELL"
     assert command["execution_opportunity_window_v3"]["integrity_valid"] is True
+    assert command["execution_opportunity_window_v3"]["opportunity_id"] == "must-not-leak"
     assert "execution_authorized" not in command["execution_opportunity_window_v3"]
     assert "entry_permission_v3" not in command["execution_opportunity_window_v3"]
     assert "by_side" not in command["horizon"]
@@ -1397,6 +1745,113 @@ def test_compact_live_state_projects_study_only_decision_command_center(
     )
     assert arbitration_fallback["selected_side"] == "SELL"
     assert result_fallback["selected_side"] == "BUY"
+
+
+def test_decision_command_projects_only_current_validated_countertrend_lineage() -> None:
+    now_epoch = time.time()
+    packet = _fresh_endpoint_execution_packet(
+        packet_id="pgpkt-current-countertrend",
+        frame_id=41,
+        capture_count=41,
+        side="SELL",
+    )
+    packet.update(
+        {
+            "trigger_closed_candle_key": "closed-candle-41",
+            "trigger_frame_id": 41,
+            "execution_opportunity_window_v3": {
+                "state": "OPEN",
+                "side": "SELL",
+                "opportunity_id": "pgepisode-current-countertrend",
+                "opportunity_key": "pgopp-current-countertrend",
+                "opened_frame_id": 41,
+                "valid_until_epoch": now_epoch + 60.0,
+                "valid_until_epoch_sec": now_epoch + 60.0,
+                "integrity_valid": True,
+                "lineage_rejected": False,
+            },
+        }
+    )
+    lineage = build_countertrend_sniper_lineage_v3(packet)
+    promotion = {
+        "schema_version": "PG_COUNTERTREND_SNIPER_PROMOTION_V3",
+        "phase": "VALIDATED",
+        "active": True,
+        "classification": "ENTER_NOW",
+        "side": "SELL",
+        "against_global_side": "BUY",
+        "validated_entry_mode": "COUNTERTREND_SNIPER",
+        "entry_permission_authorized": True,
+        "movement_confirmation_bypass_allowed": True,
+        "execution_packet_present": True,
+        "broker_click_authority": False,
+        "lineage": lineage,
+    }
+    payload: dict[str, object] = {
+        "session_id": "pocket-live-8788",
+        "display_frame_id": 41,
+        "chart_frame_id": 41,
+        "model_vote_frame_id": 41,
+        "frame_index": 41,
+        "capture_count": 41,
+        "state_version": 141,
+        "input_frame_hash": "frame-41",
+        "instrument_identity_hash": lineage["instrument_identity_hash"],
+        "tracking_summary": {
+            "detected_market": "EUR/GBP OTC",
+            "detected_timeframe": "M5",
+            "display_frame_id": 41,
+            "capture_count": 41,
+        },
+        "model_council_packet": packet,
+        "execution_packet_present": True,
+        "model_council_result": {
+            "final_side": "SELL",
+            "countertrend_sniper_promotion_v3": promotion,
+        },
+    }
+    build_summary = cast(
+        Callable[..., dict[str, object]],
+        getattr(mobile_app, "_decision_command_center_summary_v3"),
+    )
+
+    command = build_summary(payload, now_epoch=now_epoch)
+
+    assert command["execution_packet_present"] is True
+    assert command["execution_packet_id"] == packet["packet_id"]
+    assert command["execution_lineage"] == lineage
+    assert command["countertrend_sniper_promotion_v3"] == {
+        "schema_version": "PG_COUNTERTREND_SNIPER_PROMOTION_V3",
+        "phase": "VALIDATED",
+        "active": True,
+        "classification": "ENTER_NOW",
+        "side": "SELL",
+        "against_global_side": "BUY",
+        "validated_entry_mode": "COUNTERTREND_SNIPER",
+        "entry_permission_authorized": True,
+        "movement_confirmation_bypass_allowed": True,
+        "execution_packet_present": True,
+        "movement_confirmation_substitute": "CLOSED_CANDLE_OPPOSING_FORCE_REJECTION",
+        "broker_click_authority": False,
+        "lineage": lineage,
+    }
+    assert "execution" not in command
+    assert command["contains_execution_authority"] is False
+
+    mismatched_payload = dict(payload)
+    mismatched_payload["tracking_summary"] = {
+        "detected_market": "AUD/JPY",
+        "detected_timeframe": "M15",
+        "display_frame_id": 41,
+        "capture_count": 41,
+    }
+
+    mismatched = build_summary(mismatched_payload, now_epoch=now_epoch)
+
+    assert mismatched["execution_packet_present"] is False
+    assert mismatched["execution_packet_id"] == ""
+    assert mismatched["execution_lineage"] == {}
+    assert mismatched["countertrend_sniper_promotion_v3"] == {}
 
 
 def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(

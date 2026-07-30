@@ -3460,7 +3460,7 @@ def _build_share_super_power_counterfactual_html(result: Mapping[str, Any] | Non
   eta_candles = cast(dict[str, Any], timing_signal.get("eta_candles", {}))
   eta_mid = float(np.clip(eta_candles.get("mid", timing_signal.get("projected_candle_count", 0.0)), 0.0, 24.0))
   timeframe_minutes = float(np.clip(timing_signal.get("timeframe_minutes", 5.0) or 5.0, 1.0, 240.0))
-  expiry_minutes = float(np.clip(timing_signal.get("expiry_minutes", 60.0) or 60.0, timeframe_minutes, 240.0))
+  expiry_minutes = float(np.clip(timing_signal.get("expiry_minutes", 60.0) or 60.0, max(timeframe_minutes, 15.0), 240.0))
   buffer_minutes = float(np.clip(timing_signal.get("entry_buffer_minutes", 8.0) or 8.0, 0.0, expiry_minutes))
   safe_window_minutes = max(expiry_minutes - buffer_minutes, timeframe_minutes)
   safe_window_candles = safe_window_minutes / max(timeframe_minutes, 1.0)

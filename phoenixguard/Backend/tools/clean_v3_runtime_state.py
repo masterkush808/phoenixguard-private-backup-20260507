@@ -33,7 +33,6 @@ DISPOSABLE_ROOT_PATHS = {
     "cleanup_reports",
     "debug.log",
     "logs",
-    "reports",
 }
 DISPOSABLE_FILE_PATHS = {
     "Backend/scripts_runtime/replay_trace.log",

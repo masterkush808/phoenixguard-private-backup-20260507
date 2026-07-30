@@ -4391,7 +4391,7 @@ def _build_timing_signal_profile(
 ) -> dict[str, Any]:
     timeframe_value = str(chart_state.get("timeframe", os.getenv("PHOENIXGUARD_SIGNAL_TIMEFRAME", "M5"))).upper()
     tf_minutes = _timeframe_to_minutes(timeframe_value, 5.0)
-    expiry_minutes = float(np.clip(float(os.getenv("PHOENIXGUARD_BINARY_EXPIRY_MIN", "60") or 60.0), 5.0, 240.0))
+    expiry_minutes = float(np.clip(float(os.getenv("PHOENIXGUARD_BINARY_EXPIRY_MIN", "60") or 60.0), 15.0, 240.0))
     buffer_minutes = float(np.clip(float(os.getenv("PHOENIXGUARD_ENTRY_BUFFER_MIN", "8") or 8.0), 1.0, 40.0))
 
     continue_prob = float(np.clip(transition_probabilities.get("continue", 0.25), 0.0, 1.0))

@@ -32,6 +32,8 @@ test-results/
 
 # Runtime/capture/debug output
 .codex_runtime/
+/.runtime/
+/runtime_launcher_io/
 .codex_logs/
 /runtime/
 .backups/

@@ -1069,7 +1069,7 @@ class BusinessStore:
             "symbol": "EURUSD",
             "timeframe": "M1",
             "confidence": 0.78,
-            "expiry_seconds": 60,
+            "expiry_seconds": 900,
             "valid_until_epoch": now + 8.0,
         }
 

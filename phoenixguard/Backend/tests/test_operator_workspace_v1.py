@@ -16,6 +16,8 @@ from phoenixguard.mobile_api.live_state_v3 import build_live_state_v3
 from phoenixguard.mobile_api.operator_workspace_v1 import (
     OPERATOR_WORKSPACE_SCHEMA_VERSION,
     build_operator_workspace_v1,
+    cpu_stream_tracking_contract_v3,
+    refresh_operator_streaming_read_v3,
 )
 
 
@@ -24,6 +26,7 @@ TOP_LEVEL_KEYS = {
     "session_id",
     "revision",
     "market",
+    "three_questions",
     "tracking",
     "freshness",
     "current_move",
@@ -43,11 +46,30 @@ class _MarketView(TypedDict):
     timeframe: str
 
 
+class _StreamView(TypedDict):
+    enabled: bool
+    state: str
+    acquisition_fps: float | None
+    observed_frames: int
+    accepted_keyframes: int
+    dropped_frames: int
+    duplicate_frames: int
+    last_frame_epoch: float | None
+    last_keyframe_epoch: float | None
+    heartbeat_epoch: float | None
+    fresh: bool
+    last_reason: str
+    stream_generation: int
+    market_read: dict[str, object]
+
+
 class _TrackingView(TypedDict):
     active: bool
     state: str
     updated_at: float | None
     history_count: int
+    market_study_v3: dict[str, object]
+    stream: _StreamView
 
 
 class _FreshnessView(TypedDict):
@@ -146,11 +168,44 @@ class _HistoryView(TypedDict):
     id: NotRequired[str]
 
 
+class _QuestionAnswerView(TypedDict):
+    question: str
+    headline: str
+    answer: str
+    state: str
+    side: str
+    confidence: float
+    evidence: dict[str, object]
+    updated_at: float | None
+
+
+class _EntryQuestionAnswerView(_QuestionAnswerView):
+    enter_now: bool
+    action: str
+    reason: str
+    next_trigger: str
+    timing_state: str
+    decision: str
+    decision_state: str
+    permission_allowed: bool
+    entry_permission_authorized: bool
+    timing_supports_entry: bool
+    timing_veto: bool
+
+
+class _ThreeQuestionView(TypedDict):
+    schema_version: str
+    market_origin_history: _QuestionAnswerView
+    studied_direction_current: _QuestionAnswerView
+    entry_now: _EntryQuestionAnswerView
+
+
 class _OperatorWorkspaceView(TypedDict):
     schema_version: str
     session_id: str
     revision: int
     market: _MarketView
+    three_questions: _ThreeQuestionView
     tracking: _TrackingView
     freshness: _FreshnessView
     current_move: _MovementView
@@ -184,6 +239,9 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
         "session_id": "desk-live-1",
         "state_version": 14,
         "display_frame_id": 14,
+        "capture_count": 14,
+        "input_frame_hash": "frame-eurusd-m5-14",
+        "instrument_identity_hash": "pginst-eurusd-m5",
         "tracking_enabled": True,
         "tracking_summary": {
             "detected_market": "EUR/USD",
@@ -220,6 +278,269 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
             },
         },
     }
+
+
+def _cpu_stream_runtime_payload(
+    *,
+    now: float,
+    frame_seq: int,
+    state: str,
+) -> dict[str, object]:
+    return {
+        "session_id": "desk-live-1",
+        "cpu_stream_v3": {
+            "requested": True,
+            "enabled": True,
+            "available": True,
+            "status": "active",
+            "actual_fps": 2.0,
+            "observed_frames": frame_seq,
+            "last_capture_epoch": now - 0.1,
+            "status_updated_epoch": now - 0.05,
+            "broker_click_authority": True,
+            "private_frame_path": r"C:\secret\frame.png",
+            "observer": {
+                "frame_seq": frame_seq,
+                "stream_generation": 2,
+                "last_captured_epoch": now - 0.1,
+                "last_frame_hash": "private-frame-hash",
+                "last_decision": {
+                    "frame_seq": frame_seq,
+                    "stream_generation": 2,
+                    "input_frame_hash": "private-frame-hash",
+                    "temporal_evidence": {
+                        "frame_seq": frame_seq,
+                        "stream_generation": 2,
+                        "state": state,
+                        "direction": "BUY",
+                        "motion": {
+                            "state": state,
+                            "motion_score": 0.24 if state == "motion" else 0.01,
+                            "motion_acceleration": 0.03,
+                        },
+                        "change": {"changed_pixel_ratio": 0.16},
+                        "rest": {
+                            "active": state in {"rest", "duplicate"},
+                            "duration_sec": 2.5,
+                        },
+                        "wick_motion": {"dominant_extreme": "LOWER"},
+                    },
+                },
+            },
+        },
+    }
+
+
+def _countertrend_study_payload(*, now: float = 100.0) -> dict[str, object]:
+    payload = _fresh_payload(side="SELL", now=now)
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    study: dict[str, object] = {
+        "schema_version": "PG_MARKET_STUDY_V3",
+        "status": "STUDIED",
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "closed_candle_key": "3d40b65dac4324cb7bb8e288",
+        "closed_candle_sequence": 88,
+        "regression": {
+            "major_trend": {
+                "side": "BUY",
+                "confidence": 0.86,
+                "window_candles": 34,
+            },
+            "inner_trend": {
+                "side": "SELL",
+                "confidence": 0.78,
+                "window_candles": 9,
+            },
+            "current_pressure": {"side": "SELL", "confidence": 0.81},
+        },
+        "behavior": {
+            "current_state": {
+                "state": "SWING",
+                "direction": "SELL",
+                "candle_count": 3,
+                "duration_seconds": 900,
+            }
+        },
+        "directional_read": {
+            "side": "SELL",
+            "confidence": 0.82,
+            "status": "SUPPORTED",
+        },
+        "pair_dna": {"observation_count": 419},
+    }
+    tracking["market_study_v3"] = study
+    payload["recent_studies"] = [
+        {
+            "observed_at": now - 301,
+            "frame_id": 12,
+            "market_study_v3": {
+                **study,
+                "closed_candle_key": "4f50c76ebd5435dc8cc9f399",
+                "closed_candle_sequence": 86,
+                "directional_read": {
+                    "side": "BUY",
+                    "confidence": 0.72,
+                    "status": "SUPPORTED",
+                },
+            },
+        },
+        {
+            "observed_at": now - 1,
+            "frame_id": 14,
+            "market_study_v3": study,
+        },
+    ]
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["sides"] = {
+        "BUY": {"score": 0.46, "selected": False},
+        "SELL": {"score": 0.84, "selected": True},
+    }
+    command["buy_score"] = 0.46
+    command["sell_score"] = 0.84
+    return payload
+
+
+def _attach_mature_path_clock_timing(
+    payload: dict[str, object],
+    *,
+    supports_entry: bool,
+    timing_veto: bool,
+    contract_duration_seconds: int = 1_800,
+    remaining_seconds: int = 1_800,
+    closed_candle_key: str = "3d40b65dac4324cb7bb8e288",
+    valid_until: float | None = None,
+) -> None:
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    study = _mutable_mapping(tracking["market_study_v3"])
+    timing_read: dict[str, object] = {
+        "status": "TIMING_SUPPORT",
+        "side": "SELL",
+        "eligible": True,
+        "contract_admitted": True,
+        "new_entry_eligible": remaining_seconds >= 900,
+        "contract_duration_seconds": contract_duration_seconds,
+        "elapsed_seconds": contract_duration_seconds - remaining_seconds,
+        "remaining_seconds": remaining_seconds,
+        "support_count": 48,
+        "minimum_support": 32,
+        "survival_probability": 0.74,
+        "probability_worst_drawdown_still_ahead": 0.31,
+        "timing_supports_entry": supports_entry,
+        "timing_veto": timing_veto,
+        "neighbor_evidence": [{"trajectory_id": "private-neighbour"}],
+    }
+    if valid_until is not None:
+        timing_read["valid_until"] = valid_until
+    study["path_clock_liquidity_v3"] = {
+        "schema_version": "PG_PATH_CLOCK_LIQUIDITY_FIELD_V3",
+        "status": "STUDIED",
+        "reason": "The four-axis replay gate passed.",
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "closed_candle_key": closed_candle_key,
+        "closed_candle_sequence": 88,
+        "minimum_eligible_duration_seconds": 900,
+        "maximum_studied_duration_seconds": 7_200,
+        "timing_read": timing_read,
+        "promotion_gate": {
+            "status": "PROMOTION_ELIGIBLE",
+            "passed": True,
+            "all_axes_improved": True,
+            "minimum_replays": 32,
+            "support": {"baseline": 48, "candidate": 48, "passed": True},
+            "axes": {"private": "must-not-cross"},
+        },
+        "replay_score": {
+            "audited_replay_count": 52,
+            "eligible_replay_count": 48,
+            "excluded_early_move_count": 4,
+            "metrics": {
+                "directional_accuracy": 0.73,
+                "timing_accuracy": 0.69,
+                "sweep_survival_rate": 0.71,
+                "calibration_score": 0.81,
+            },
+        },
+        "trajectories": [{"trajectory_id": "private-trajectory"}],
+        "freezes": [{"closed_candle_key": "private-freeze"}],
+        "liquidity_state": {"wick_entropy": 0.42},
+    }
+
+
+def _set_current_regression_side(
+    payload: dict[str, object],
+    *,
+    side: str,
+) -> None:
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    market_study = _mutable_mapping(tracking["market_study_v3"])
+    directional_read = _mutable_mapping(market_study["directional_read"])
+    directional_read["side"] = side
+
+
+def _countertrend_execution_lineage(*, now: float = 100.0) -> dict[str, object]:
+    return {
+        "packet_id": "pgpkt-countertrend-eurusd-m5-14",
+        "opportunity_id": "pgepisode-countertrend-eurusd-m5-14",
+        "session_id": "desk-live-1",
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "frame_id": 14,
+        "capture_count": 14,
+        "state_version": 14,
+        "input_frame_hash": "frame-eurusd-m5-14",
+        "instrument_identity_hash": "pginst-eurusd-m5",
+        "trigger_closed_candle_key": "3d40b65dac4324cb7bb8e288",
+        "opportunity_key": "pgopp-countertrend-eurusd-m5",
+        "trigger_frame_id": 14,
+        "valid_until_epoch": now + 20.0,
+        "integrity_valid": True,
+        "lineage_rejected": False,
+    }
+
+
+def _countertrend_enter_now_promotion(*, now: float = 100.0) -> dict[str, object]:
+    return {
+        "schema_version": "PG_COUNTERTREND_SNIPER_PROMOTION_V3",
+        "phase": "VALIDATED",
+        "active": True,
+        "classification": "ENTER_NOW",
+        "side": "SELL",
+        "against_global_side": "BUY",
+        "entry_permission_authorized": True,
+        "movement_confirmation_bypass_allowed": True,
+        "execution_packet_present": True,
+        "validated_entry_mode": "COUNTERTREND_SNIPER",
+        "broker_click_authority": False,
+        "lineage": _countertrend_execution_lineage(now=now),
+        "ensemble_basis": {"council_side_score": 0.89},
+    }
+
+
+def _bind_countertrend_command(
+    payload: dict[str, object],
+    promotion: Mapping[str, object],
+) -> None:
+    command = _mutable_mapping(payload["decision_command_center"])
+    lineage = _mutable_mapping(promotion["lineage"])
+    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
+    opportunity.update(
+        {
+            "opportunity_id": lineage["opportunity_id"],
+            "opportunity_key": lineage["opportunity_key"],
+            "trigger_frame_id": lineage["trigger_frame_id"],
+        }
+    )
+    command["execution_packet_id"] = lineage["packet_id"]
+    command["execution_lineage"] = dict(lineage)
+    command["countertrend_sniper_promotion_v3"] = dict(promotion)
 
 
 def _positioning_anchor_rows(
@@ -499,7 +820,6 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
         "packet_id",
         "source_agent",
         "source_path",
-        "reason",
         "coordinate_mode",
     }
     assert _all_keys(workspace).isdisjoint(forbidden_keys)
@@ -507,6 +827,1167 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
     assert r"C:\\secret" not in serialized
     assert "exec-secret" not in serialized
     assert "private-agent" not in serialized
+
+
+def test_operator_workspace_sanitizes_cpu_stream_health_without_authority() -> None:
+    payload = _fresh_payload()
+    payload["cpu_stream_v3"] = {
+        "enabled": "yes",
+        "state": "streaming",
+        "acquisition_fps": 31.98765,
+        "observed_frames": 123,
+        "accepted_keyframes": 44,
+        "dropped_frames": -5,
+        "duplicate_frames": "7",
+        "last_frame_epoch": 99.75,
+        "last_keyframe_epoch": 99.5,
+        "status_updated_epoch": 99.9,
+        "last_reason": "  Pixel change\naccepted  ",
+        "stream_generation": 9,
+        "observer": {
+            "frame_seq": 123,
+            "last_captured_epoch": 99.75,
+            "last_decision": {
+                "frame_seq": 123,
+                "stream_generation": 9,
+                "temporal_evidence": {
+                    "frame_seq": 123,
+                    "stream_generation": 9,
+                    "state": "motion",
+                    "motion": {
+                        "state": "motion",
+                        "motion_score": 0.21,
+                        "motion_acceleration": 0.04,
+                    },
+                    "change": {"changed_pixel_ratio": 0.18},
+                    "rest": {"active": False, "duration_sec": 0.0},
+                    "wick_motion": {"dominant_extreme": "UPPER"},
+                },
+            },
+        },
+        "execution_authority": True,
+        "broker_click_authority": True,
+        "private_capture_policy": "FULL_MODEL_ALWAYS",
+    }
+
+    stream = _build_workspace(payload, now_epoch=100.0)["tracking"]["stream"]
+
+    assert cpu_stream_tracking_contract_v3(payload, now_epoch=100.0) == stream
+    assert set(stream) == {
+        "enabled",
+        "state",
+        "acquisition_fps",
+        "observed_frames",
+        "accepted_keyframes",
+        "dropped_frames",
+        "duplicate_frames",
+        "last_frame_epoch",
+        "last_keyframe_epoch",
+        "heartbeat_epoch",
+        "fresh",
+        "last_reason",
+        "stream_generation",
+        "market_read",
+    }
+    assert stream["enabled"] is True
+    assert stream["state"] == "RUNNING"
+    assert stream["acquisition_fps"] == 31.988
+    assert stream["observed_frames"] == 123
+    assert stream["accepted_keyframes"] == 44
+    assert stream["dropped_frames"] == 0
+    assert stream["duplicate_frames"] == 7
+    assert stream["last_frame_epoch"] == 99.75
+    assert stream["last_keyframe_epoch"] == 99.5
+    assert stream["heartbeat_epoch"] == 99.9
+    assert stream["fresh"] is True
+    assert stream["last_reason"] == "Pixel change accepted"
+    assert stream["stream_generation"] == 9
+    market_read = cast(dict[str, object], stream["market_read"])
+    assert market_read["state"] == "MOVING"
+    assert market_read["fresh"] is True
+    assert market_read["freshness_budget_seconds"] == 8.0
+    assert market_read["frame_seq"] == 123
+    assert market_read["direction"] == "NEUTRAL"
+    assert market_read["direction_available"] is False
+    assert market_read["forming_candle"] is True
+    assert market_read["closed_candle"] is False
+    assert market_read["can_grant_entry_permission"] is False
+    assert market_read["execution_authority"] is False
+    assert market_read["broker_click_authority"] is False
+    serialized = json.dumps(stream)
+    assert '"broker_click_authority": true' not in serialized
+    assert '"execution_authority": true' not in serialized
+    assert "FULL_MODEL_ALWAYS" not in serialized
+
+
+def test_slow_advancing_cpu_stream_uses_bounded_adaptive_freshness() -> None:
+    payload = _cpu_stream_runtime_payload(now=100.0, frame_seq=124, state="motion")
+    stream = cast(dict[str, object], payload["cpu_stream_v3"])
+    stream["target_fps"] = 0.5
+    stream["actual_fps"] = 0.07
+    stream["last_capture_epoch"] = 76.0
+    stream["status_updated_epoch"] = 80.0
+    observer = cast(dict[str, object], stream["observer"])
+    observer["last_captured_epoch"] = 76.0
+    last_decision = cast(dict[str, object], observer["last_decision"])
+    temporal = cast(dict[str, object], last_decision["temporal_evidence"])
+    temporal["frame_delta_sec"] = 3.5
+
+    public_stream = cpu_stream_tracking_contract_v3(payload, now_epoch=100.0)
+    market_read = cast(dict[str, object], public_stream["market_read"])
+
+    assert public_stream["fresh"] is True
+    assert market_read["fresh"] is True
+    assert market_read["state"] == "MOVING"
+    assert market_read["frame_age_seconds"] == 24.0
+    assert market_read["heartbeat_age_seconds"] == 20.0
+    assert market_read["freshness_budget_seconds"] == 42.857
+    assert market_read["can_grant_entry_permission"] is False
+
+
+def test_cpu_stream_becomes_stale_beyond_adaptive_freshness_ceiling() -> None:
+    payload = _cpu_stream_runtime_payload(now=100.0, frame_seq=125, state="motion")
+    stream = cast(dict[str, object], payload["cpu_stream_v3"])
+    stream["target_fps"] = 0.5
+    stream["actual_fps"] = 0.01
+    stream["last_capture_epoch"] = 54.0
+    stream["status_updated_epoch"] = 54.0
+
+    public_stream = cpu_stream_tracking_contract_v3(payload, now_epoch=100.0)
+    market_read = cast(dict[str, object], public_stream["market_read"])
+
+    assert public_stream["fresh"] is False
+    assert market_read["fresh"] is False
+    assert market_read["state"] == "STALE"
+    assert market_read["freshness_budget_seconds"] == 45.0
+
+
+def test_unavailable_cpu_stream_is_stale_even_with_current_timestamps() -> None:
+    payload = _cpu_stream_runtime_payload(now=100.0, frame_seq=126, state="motion")
+    stream = cast(dict[str, object], payload["cpu_stream_v3"])
+    stream["available"] = False
+
+    public_stream = cpu_stream_tracking_contract_v3(payload, now_epoch=100.0)
+    market_read = cast(dict[str, object], public_stream["market_read"])
+
+    assert public_stream["state"] == "RUNNING"
+    assert public_stream["fresh"] is False
+    assert market_read["state"] == "STALE"
+    assert market_read["fresh"] is False
+
+
+def test_normal_cpu_stream_keeps_short_freshness_budget() -> None:
+    payload = _cpu_stream_runtime_payload(now=100.0, frame_seq=127, state="rest")
+
+    public_stream = cpu_stream_tracking_contract_v3(payload, now_epoch=100.0)
+    market_read = cast(dict[str, object], public_stream["market_read"])
+
+    assert public_stream["fresh"] is True
+    assert market_read["state"] == "RESTING"
+    assert market_read["freshness_budget_seconds"] == 8.0
+
+
+def test_operator_workspace_adapts_nested_runtime_stream_health_aliases() -> None:
+    payload = _fresh_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking["cpu_stream_v3"] = {
+        "requested": True,
+        "status": "degraded_snapshot_fallback",
+        "actual_fps": 7.25,
+        "observed_frames": 87,
+        "accepted_events": 12,
+        "dropped_keyframes": 3,
+        "last_capture_epoch": 98.75,
+        "last_event_epoch": 98.25,
+        "last_error": r"C:\secret\stream.log",
+        "observer": {
+            "counters": {"duplicate_frames": 19},
+            "internal_threshold": 0.17,
+        },
+        "last_keyframe_lineage": {
+            "stream_generation": 4,
+            "input_frame_hash": "private-hash",
+        },
+    }
+
+    stream = _build_workspace(payload, now_epoch=100.0)["tracking"]["stream"]
+
+    assert stream["enabled"] is True
+    assert stream["state"] == "DEGRADED"
+    assert stream["acquisition_fps"] == 7.25
+    assert stream["accepted_keyframes"] == 12
+    assert stream["dropped_frames"] == 3
+    assert stream["duplicate_frames"] == 19
+    assert stream["last_frame_epoch"] == 98.75
+    assert stream["last_keyframe_epoch"] == 98.25
+    assert stream["last_reason"] == ""
+    assert stream["stream_generation"] == 4
+    serialized = json.dumps(stream)
+    assert "private-hash" not in serialized
+    assert r"C:\\secret" not in serialized
+
+
+def test_fresh_stream_heartbeat_updates_current_read_and_best_action_without_permission() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    payload.update(_cpu_stream_runtime_payload(now=100.0, frame_seq=41, state="motion"))
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    questions = workspace["three_questions"]
+    studied = questions["studied_direction_current"]
+    decision = questions["entry_now"]
+
+    assert studied["side"] == "SELL"
+    assert studied["updated_at"] == 99.95
+    assert "live stream is moving" in studied["headline"]
+    assert "intrabar observation" in studied["answer"]
+    studied_read = cast(
+        dict[str, object],
+        cast(dict[str, object], studied["evidence"])["streaming_market_read"],
+    )
+    assert studied_read["state"] == "MOVING"
+    assert studied_read["direction"] == "NEUTRAL"
+    assert studied_read["direction_available"] is False
+
+    assert decision["question"] == "What is the best decision to do right now?"
+    assert decision["decision"] == "TRACK_SELL_CONTINUATION"
+    assert decision["decision_state"] == "TRACKING"
+    assert decision["action"] == "DO_NOT_ENTER"
+    assert decision["enter_now"] is False
+    assert decision["updated_at"] == 99.95
+    decision_evidence = cast(dict[str, object], decision["evidence"])
+    assert decision_evidence["entry_permission_authorized"] is False
+    assert decision_evidence["execution_authority"] is False
+    assert decision_evidence["broker_click_authority"] is False
+    serialized = json.dumps(workspace)
+    assert "private-frame-hash" not in serialized
+    assert r"C:\\secret" not in serialized
+    assert '"direction": "BUY"' not in json.dumps(workspace["tracking"]["stream"])
+
+
+def test_resting_stream_watches_directional_retrace_and_names_current_reference() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    base = _build_workspace(payload, now_epoch=100.0)
+    public_workspace = cast(dict[str, object], base)
+    public_workspace["overlays"] = [
+        *base["overlays"],
+        {
+            "layer": "order_positioning",
+            "side": "SELL",
+            "label": "Higher price sell area",
+            "lifecycle": "current",
+            "positioning_mode": "REFERENCE",
+        },
+    ]
+
+    refreshed = refresh_operator_streaming_read_v3(
+        public_workspace,
+        _cpu_stream_runtime_payload(now=100.0, frame_seq=42, state="rest"),
+        now_epoch=100.0,
+    )
+    entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+
+    assert entry["decision"] == "WATCH_SELL_RALLY"
+    assert entry["decision_state"] == "WATCHING_RETRACE"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["enter_now"] is False
+    assert "Higher price sell area" in str(entry["answer"])
+    evidence = cast(dict[str, object], entry["evidence"])
+    assert evidence["execution_authority"] is False
+    assert evidence["broker_click_authority"] is False
+
+
+def test_duplicate_stream_pixels_are_not_reported_as_market_rest() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    base = _build_workspace(payload, now_epoch=100.0)
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        _cpu_stream_runtime_payload(now=100.0, frame_seq=43, state="duplicate"),
+        now_epoch=100.0,
+    )
+    entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+
+    assert entry["decision"] == "TRACK_SELL"
+    assert entry["decision_state"] == "OBSERVING_CAPTURE"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["enter_now"] is False
+    assert "pixels are unchanged" in str(entry["headline"])
+    assert "do not prove a market rest" in str(entry["answer"])
+
+
+def test_missed_stream_decision_waits_for_fresh_directional_pullback() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
+    opportunity["state"] = "EXPIRED"
+    opportunity["valid_until_epoch"] = 99.0
+    payload.update(_cpu_stream_runtime_payload(now=100.0, frame_seq=43, state="motion"))
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"]["entry_now"]
+
+    assert entry["decision"] == "WAIT_FOR_FRESH_SELL_PULLBACK"
+    assert entry["decision_state"] == "MISSED"
+    assert entry["timing_state"] == "MISSED"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["enter_now"] is False
+    assert "WAIT FOR A FRESH SELL PULLBACK" in entry["headline"]
+    assert "fresh SELL pullback" in entry["next_trigger"]
+
+
+def test_missed_prior_thesis_yields_to_aligned_current_regression_and_major() -> None:
+    payload = _countertrend_study_payload()
+    _set_current_regression_side(payload, side="BUY")
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
+    opportunity["state"] = "EXPIRED"
+    opportunity["valid_until_epoch"] = 99.0
+    payload.update(_cpu_stream_runtime_payload(now=100.0, frame_seq=44, state="motion"))
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    studied = workspace["three_questions"]["studied_direction_current"]
+    entry = workspace["three_questions"]["entry_now"]
+
+    assert studied["side"] == "SELL"
+    assert studied["evidence"]["ensemble_studied_side"] == "SELL"
+    assert studied["evidence"]["current_regression_side"] == "BUY"
+    assert studied["evidence"]["major_trend_side"] == "BUY"
+    assert entry["decision"] == "WAIT_FOR_FRESH_BUY_PULLBACK"
+    assert entry["side"] == "BUY"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["evidence"]["prior_studied_side"] == "SELL"
+    assert entry["evidence"]["current_actionable_study_side"] == "BUY"
+    assert entry["evidence"]["prior_thesis_superseded"] is True
+    assert "prior SELL" in entry["headline"]
+    assert "current closed-candle study now tracks BUY" in entry["answer"]
+
+
+def test_resting_stream_watches_current_buy_after_prior_sell_expires() -> None:
+    payload = _countertrend_study_payload()
+    _set_current_regression_side(payload, side="BUY")
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    payload.update(_cpu_stream_runtime_payload(now=100.0, frame_seq=45, state="rest"))
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"]["entry_now"]
+
+    assert entry["timing_state"] == "FORMING"
+    assert entry["decision"] == "WATCH_BUY_PULLBACK"
+    assert entry["decision_state"] == "WATCHING_RETRACE"
+    assert entry["side"] == "BUY"
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert "prior SELL thesis remains history" in entry["answer"]
+    assert "current closed-candle study now tracks BUY" in entry["answer"]
+
+
+def test_stream_refresh_updates_cached_questions_without_rebuilding_closed_candle_study() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    base = _build_workspace(payload, now_epoch=100.0)
+    original_study_key = base["tracking"]["market_study_v3"]["closed_candle_key"]
+
+    moving = refresh_operator_streaming_read_v3(
+        base,
+        _cpu_stream_runtime_payload(now=101.0, frame_seq=51, state="motion"),
+        now_epoch=101.0,
+    )
+    resting = refresh_operator_streaming_read_v3(
+        moving,
+        _cpu_stream_runtime_payload(now=102.0, frame_seq=52, state="rest"),
+        now_epoch=102.0,
+    )
+
+    assert moving["revision"] == resting["revision"] == base["revision"]
+    assert moving["tracking"]["stream"]["market_read"]["state"] == "MOVING"
+    assert resting["tracking"]["stream"]["market_read"]["state"] == "RESTING"
+    assert (
+        moving["three_questions"]["entry_now"]["decision"]
+        == "TRACK_SELL_CONTINUATION"
+    )
+    assert resting["three_questions"]["entry_now"]["decision"] == "WATCH_SELL_RALLY"
+    assert resting["three_questions"]["entry_now"]["action"] == "DO_NOT_ENTER"
+    assert resting["tracking"]["market_study_v3"]["closed_candle_key"] == original_study_key
+
+
+def test_expired_cached_enter_now_is_cleared_by_public_stream_synthesis() -> None:
+    base = _build_workspace(_fresh_payload(side="BUY"), now_epoch=100.0)
+    assert base["three_questions"]["entry_now"]["enter_now"] is True
+    expired = dict(base)
+    expired["permission"] = {
+        **cast(dict[str, object], base["permission"]),
+        "allowed": False,
+        "action": "WAIT",
+        "side": "NEUTRAL",
+        "window_open": False,
+    }
+
+    refreshed = refresh_operator_streaming_read_v3(
+        expired,
+        _cpu_stream_runtime_payload(now=101.0, frame_seq=61, state="motion"),
+        now_epoch=101.0,
+    )
+    decision = refreshed["three_questions"]["entry_now"]
+
+    assert decision["enter_now"] is False
+    assert decision["action"] == "DO_NOT_ENTER"
+    assert decision["timing_state"] != "ENTER_NOW"
+    assert decision["state"] != "ENTER_NOW"
+    assert decision["decision"] == "TRACK_BUY_CONTINUATION"
+    assert refreshed["permission"]["allowed"] is False
+
+
+def test_three_questions_explain_countertrend_sell_without_turning_study_into_permission() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+
+    brief = _build_workspace(payload, now_epoch=100.0)["three_questions"]
+
+    assert brief["schema_version"] == "PG_THREE_QUESTION_OPERATOR_BRIEF_V3"
+    history = brief["market_origin_history"]
+    assert history["state"] == "CURRENT"
+    assert history["side"] == "BUY"
+    assert "upward major structure" in history["answer"]
+    assert history["evidence"]["behavior_state"] == "SWING"
+    assert history["evidence"]["history_observation_count"] == 2
+
+    study = brief["studied_direction_current"]
+    assert study["state"] == "CURRENT"
+    assert study["side"] == "SELL"
+    assert study["confidence"] == 0.84
+    assert study["evidence"]["ensemble_studied_side"] == "SELL"
+    assert study["evidence"]["current_regression_side"] == "SELL"
+    assert study["evidence"]["countertrend"] is True
+    assert "countertrend SELL study inside a BUY major trend" in study["answer"]
+
+    entry = brief["entry_now"]
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["timing_state"] == "FORMING"
+    assert entry["state"] == "FORMING"
+    assert entry["side"] == "SELL"
+    assert entry["headline"] == "NOT YET — SELL entry is forming"
+    assert not entry["reason"].lower().startswith("wait")
+
+
+def test_three_questions_do_not_call_missing_entry_evidence_stale_history() -> None:
+    workspace = _build_workspace(
+        {
+            "session_id": "desk-live-1",
+            "tracking_enabled": False,
+            "tracking_summary": {},
+            "decision_command_center": {},
+        },
+        now_epoch=100.0,
+    )
+
+    entry = workspace["three_questions"]["entry_now"]
+
+    assert entry["timing_state"] == "FORMING"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["headline"] == "NOT YET — no current entry study"
+    assert "No identity-proven completed study" in entry["answer"]
+    assert "last trade study" not in entry["answer"].lower()
+
+
+def test_three_questions_publish_enter_now_only_from_existing_permission_contract() -> None:
+    payload = _countertrend_study_payload()
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    entry = workspace["three_questions"]["entry_now"]
+
+    assert workspace["permission"]["allowed"] is True
+    assert entry["enter_now"] is True
+    assert entry["action"] == "SELL_NOW"
+    assert entry["timing_state"] == "ENTER_NOW"
+    assert entry["side"] == "SELL"
+    assert entry["evidence"]["permission_allowed"] is True
+
+
+def test_mature_path_clock_timing_supports_but_never_grants_entry_permission() -> None:
+    payload = _countertrend_study_payload()
+    _attach_mature_path_clock_timing(
+        payload,
+        supports_entry=True,
+        timing_veto=False,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    studied = workspace["three_questions"]["studied_direction_current"]
+    entry = workspace["three_questions"]["entry_now"]
+    public_study = workspace["tracking"]["market_study_v3"]
+
+    assert "Mature timing history supports studying this SELL" in studied["answer"]
+    assert "anything under 15 minutes is excluded" in studied["answer"]
+    assert workspace["permission"]["allowed"] is True
+    assert entry["permission_allowed"] is True
+    assert entry["entry_permission_authorized"] is True
+    assert entry["timing_supports_entry"] is True
+    assert entry["timing_veto"] is False
+    assert entry["enter_now"] is True
+    serialized = json.dumps(public_study)
+    assert "private-trajectory" not in serialized
+    assert "private-neighbour" not in serialized
+    assert "private-freeze" not in serialized
+    assert "wick_entropy" not in serialized
+
+    no_permission_payload = _countertrend_study_payload()
+    no_permission_command = _mutable_mapping(
+        no_permission_payload["decision_command_center"]
+    )
+    no_permission_command["execution_packet_present"] = False
+    _attach_mature_path_clock_timing(
+        no_permission_payload,
+        supports_entry=True,
+        timing_veto=False,
+    )
+    no_permission = _build_workspace(
+        no_permission_payload,
+        now_epoch=100.0,
+    )["three_questions"]["entry_now"]
+    assert no_permission["entry_permission_authorized"] is False
+    assert no_permission["timing_supports_entry"] is True
+    assert no_permission["enter_now"] is False
+    assert no_permission["action"] == "DO_NOT_ENTER"
+
+
+def test_mature_path_clock_veto_delays_permission_and_survives_stream_refresh() -> None:
+    payload = _countertrend_study_payload()
+    _attach_mature_path_clock_timing(
+        payload,
+        supports_entry=False,
+        timing_veto=True,
+    )
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    entry = workspace["three_questions"]["entry_now"]
+
+    assert workspace["permission"]["allowed"] is True
+    assert entry["permission_allowed"] is True
+    assert entry["entry_permission_authorized"] is True
+    assert entry["timing_supports_entry"] is False
+    assert entry["timing_veto"] is True
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["decision"] == "DELAY_FOR_TIMING"
+    assert entry["timing_state"] == "TIMING_DELAY"
+
+    refreshed = refresh_operator_streaming_read_v3(
+        workspace,
+        _cpu_stream_runtime_payload(now=101.0, frame_seq=71, state="motion"),
+        now_epoch=101.0,
+    )
+    refreshed_entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    assert refreshed_entry["entry_permission_authorized"] is True
+    assert refreshed_entry["timing_veto"] is True
+    assert refreshed_entry["enter_now"] is False
+    assert refreshed_entry["decision"] == "DELAY_FOR_TIMING"
+    assert "At least 15 minutes" in str(refreshed_entry["answer"])
+
+
+def test_stream_refresh_expires_mature_path_clock_support_fail_closed() -> None:
+    payload = _countertrend_study_payload()
+    _attach_mature_path_clock_timing(
+        payload,
+        supports_entry=True,
+        timing_veto=False,
+        valid_until=100.5,
+    )
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    assert workspace["three_questions"]["entry_now"]["enter_now"] is True
+
+    refreshed = refresh_operator_streaming_read_v3(
+        workspace,
+        _cpu_stream_runtime_payload(now=101.0, frame_seq=72, state="motion"),
+        now_epoch=101.0,
+    )
+    entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    timing = cast(
+        dict[str, object],
+        cast(dict[str, object], entry["evidence"])["path_clock_liquidity_v3"],
+    )
+
+    assert entry["entry_permission_authorized"] is True
+    assert entry["timing_supports_entry"] is False
+    assert entry["timing_veto"] is True
+    assert entry["enter_now"] is False
+    assert entry["decision"] == "DELAY_FOR_TIMING"
+    assert timing["state"] == "STALE"
+
+
+@pytest.mark.parametrize(
+    ("contract_duration_seconds", "remaining_seconds", "closed_candle_key", "expected_state"),
+    [
+        (899, 899, "3d40b65dac4324cb7bb8e288", "UNDER_15_MINUTES"),
+        (1_800, 1_800, "wrong-closed-candle", "INVALID_LINEAGE"),
+    ],
+)
+def test_path_clock_timing_fails_closed_for_under_15_minutes_or_wrong_lineage(
+    contract_duration_seconds: int,
+    remaining_seconds: int,
+    closed_candle_key: str,
+    expected_state: str,
+) -> None:
+    payload = _countertrend_study_payload()
+    _attach_mature_path_clock_timing(
+        payload,
+        supports_entry=True,
+        timing_veto=False,
+        contract_duration_seconds=contract_duration_seconds,
+        remaining_seconds=remaining_seconds,
+        closed_candle_key=closed_candle_key,
+    )
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+    timing = cast(
+        dict[str, object],
+        cast(dict[str, object], entry["evidence"])["path_clock_liquidity_v3"],
+    )
+
+    assert entry["entry_permission_authorized"] is True
+    assert entry["timing_veto"] is True
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert timing["state"] == expected_state
+
+
+def test_unproven_exact_candle_time_keeps_eligible_duration_separate() -> None:
+    payload = _countertrend_study_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    study = _mutable_mapping(tracking["market_study_v3"])
+    study["path_clock_liquidity_v3"] = {
+        "schema_version": "PG_PATH_CLOCK_LIQUIDITY_PUBLIC_STUDY_V3",
+        "status": "CENSORED_INVALID_TIMING_EVIDENCE",
+        "reason": "Exact contiguous timing evidence was not proven.",
+        "duration_policy": {
+            "minimum_eligible_duration_seconds": 900,
+            "maximum_studied_duration_seconds": 7_200,
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+            "status": "ELIGIBLE",
+        },
+        "timing_read": {
+            "status": "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE",
+            "state": "INELIGIBLE",
+            "contract_duration_seconds": 3_000,
+            "remaining_seconds": 3_000,
+            "new_entry_eligible": False,
+            "timing_supports_entry": False,
+            "timing_veto": False,
+        },
+        "promotion_gate": {
+            "status": "INSUFFICIENT_REPLAY_CALIBRATION",
+            "passed": False,
+            "all_axes_improved": False,
+        },
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+    }
+
+    bounded_once = mobile_app._bounded_operator_projection_context(payload)  # pyright: ignore[reportPrivateUsage]
+    bounded_twice = mobile_app._bounded_operator_projection_context(bounded_once)  # pyright: ignore[reportPrivateUsage]
+    projected_tracking = _mutable_mapping(bounded_twice["tracking_summary"])
+    projected_study = _mutable_mapping(projected_tracking["market_study_v3"])
+    projected_timing = _mutable_mapping(
+        projected_study["path_clock_liquidity_v3"]
+    )
+    assert projected_timing["duration_policy_status"] == "ELIGIBLE"
+    assert projected_timing["duration_policy_eligible"] is True
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+    timing = cast(
+        dict[str, object],
+        cast(dict[str, object], entry["evidence"])["path_clock_liquidity_v3"],
+    )
+
+    assert timing["minimum_duration_seconds"] == 900
+    assert timing["contract_duration_seconds"] == 3_000
+    assert timing["duration_policy_valid"] is True
+    assert timing["remaining_window_eligible"] is True
+    assert timing["timing_evidence_proven"] is False
+    assert timing["state"] == "TIMING_EVIDENCE_UNAVAILABLE"
+    assert timing["source_status"] == "CENSORED_INVALID_TIMING_EVIDENCE"
+    assert timing["source_timing_status"] == (
+        "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE"
+    )
+    assert timing["timing_veto"] is True
+    assert entry["entry_permission_authorized"] is True
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["timing_state"] == "TIMING_DELAY"
+    assert entry["decision"] == "DELAY_FOR_TIMING"
+    assert "will not invent a survival probability" in str(entry["reason"])
+
+
+def test_unaligned_duration_is_not_mislabeled_as_under_15_minutes() -> None:
+    payload = _countertrend_study_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    study = _mutable_mapping(tracking["market_study_v3"])
+    study["path_clock_liquidity_v3"] = {
+        "schema_version": "PG_PATH_CLOCK_LIQUIDITY_PUBLIC_STUDY_V3",
+        "status": "PENDING",
+        "reason": "The duration has no exact closed-candle endpoint.",
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "closed_candle_key": "3d40b65dac4324cb7bb8e288",
+        "duration_policy": {
+            "minimum_eligible_duration_seconds": 900,
+            "maximum_studied_duration_seconds": 7_200,
+            "requested_duration_seconds": 1_000,
+            "new_entry_eligible": False,
+            "status": "NOT_ALIGNED_TO_CLOSED_CANDLE_GRID",
+        },
+        "timing_read": {
+            "status": "PENDING",
+            "state": "INELIGIBLE",
+            "side": "SELL",
+            "eligible": False,
+            "contract_admitted": False,
+            "contract_duration_seconds": 1_000,
+            "remaining_seconds": 1_000,
+            "new_entry_eligible": False,
+            "timing_supports_entry": False,
+            "timing_veto": False,
+        },
+        "promotion_gate": {
+            "status": "INSUFFICIENT_REPLAY_CALIBRATION",
+            "passed": False,
+            "all_axes_improved": False,
+        },
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+    }
+
+    bounded_once = mobile_app._bounded_operator_projection_context(payload)  # pyright: ignore[reportPrivateUsage]
+    bounded_twice = mobile_app._bounded_operator_projection_context(bounded_once)  # pyright: ignore[reportPrivateUsage]
+    entry = _build_workspace(bounded_twice, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+    timing = _mutable_mapping(
+        _mutable_mapping(entry["evidence"])["path_clock_liquidity_v3"]
+    )
+
+    assert timing["contract_duration_seconds"] == 1_000
+    assert timing["duration_policy_valid"] is True
+    assert timing["remaining_window_eligible"] is True
+    assert timing["timing_evidence_proven"] is False
+    assert timing["state"] == "TIMING_EVIDENCE_UNAVAILABLE"
+    assert timing["timing_veto"] is True
+    assert entry["enter_now"] is False
+    assert entry["decision"] == "DELAY_FOR_TIMING"
+
+
+def test_bounded_projection_keeps_only_public_path_clock_summary() -> None:
+    payload = _countertrend_study_payload()
+    _attach_mature_path_clock_timing(
+        payload,
+        supports_entry=True,
+        timing_veto=False,
+    )
+
+    bounded = mobile_app._bounded_operator_projection_context(payload)  # pyright: ignore[reportPrivateUsage]
+    tracking = cast(dict[str, object], bounded["tracking_summary"])
+    study = cast(dict[str, object], tracking["market_study_v3"])
+    timing = cast(dict[str, object], study["path_clock_liquidity_v3"])
+
+    assert timing["minimum_eligible_duration_seconds"] == 900
+    assert timing["execution_authority"] is False
+    assert timing["can_grant_entry_permission"] is False
+    assert cast(dict[str, object], timing["timing_read"])[
+        "contract_duration_seconds"
+    ] == 1_800
+    serialized = json.dumps(bounded)
+    assert "private-trajectory" not in serialized
+    assert "private-neighbour" not in serialized
+    assert "private-freeze" not in serialized
+    assert "wick_entropy" not in serialized
+
+
+def test_countertrend_sniper_can_enter_sell_while_current_leg_remains_buy() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+        "confidence": 0.83,
+    }
+    command["pressure_event"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+        "confidence": 0.80,
+    }
+    promotion = _countertrend_enter_now_promotion()
+    _bind_countertrend_command(payload, promotion)
+    payload["model_council_result"] = {
+        "book_strategy": {
+            "countertrend_sniper_promotion_v3": promotion
+        }
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    permission = workspace["permission"]
+    entry = workspace["three_questions"]["entry_now"]
+
+    assert workspace["current_move"]["direction"] == "BUY"
+    assert permission["allowed"] is True
+    assert permission["action"] == "SELL_NOW"
+    assert "countertrend sniper sell entry window" in permission["message"]
+    assert entry["enter_now"] is True
+    assert entry["action"] == "SELL_NOW"
+    assert entry["timing_state"] == "ENTER_NOW"
+    assert entry["side"] == "SELL"
+    assert entry["evidence"]["countertrend_classification"] == "ENTER_NOW"
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("schema_version", "UNKNOWN"),
+        ("classification", "FORMING"),
+        ("entry_permission_authorized", False),
+        ("movement_confirmation_bypass_allowed", False),
+        ("execution_packet_present", False),
+        ("validated_entry_mode", "NONE"),
+        ("active", False),
+        ("side", "BUY"),
+    ],
+)
+def test_countertrend_sniper_bypass_fails_closed_when_any_proof_is_missing(
+    field: str,
+    unsafe_value: object,
+) -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+    }
+    command["pressure_event"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+    }
+    promotion = _countertrend_enter_now_promotion()
+    promotion[field] = unsafe_value
+    _bind_countertrend_command(payload, promotion)
+    payload["model_council_result"] = {
+        "book_strategy": {"countertrend_sniper_promotion_v3": promotion}
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["permission"]["allowed"] is False
+    assert workspace["permission"]["action"] == "WAIT"
+    assert workspace["three_questions"]["entry_now"]["enter_now"] is False
+    assert workspace["three_questions"]["entry_now"]["action"] == "DO_NOT_ENTER"
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("packet_id", "pgpkt-other"),
+        ("opportunity_id", "pgepisode-other"),
+        ("opportunity_key", "pgopp-other"),
+        ("session_id", "other-session"),
+        ("symbol", "AUD/JPY"),
+        ("timeframe", "M15"),
+        ("frame_id", 13),
+        ("capture_count", 13),
+        ("state_version", 13),
+        ("input_frame_hash", "other-frame"),
+        ("instrument_identity_hash", "pginst-other"),
+        ("trigger_closed_candle_key", "other-candle"),
+        ("trigger_frame_id", 13),
+        ("integrity_valid", False),
+        ("lineage_rejected", True),
+    ],
+)
+def test_countertrend_sniper_promotion_lineage_mismatch_matrix_fails_closed(
+    field: str,
+    unsafe_value: object,
+) -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+    }
+    command["pressure_event"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+    }
+    promotion = _countertrend_enter_now_promotion()
+    _bind_countertrend_command(payload, promotion)
+    projected = _mutable_mapping(command["countertrend_sniper_promotion_v3"])
+    projected_lineage = _mutable_mapping(projected["lineage"])
+    projected_lineage[field] = unsafe_value
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["permission"]["allowed"] is False
+    assert workspace["three_questions"]["entry_now"]["timing_state"] == "INVALIDATED"
+
+
+def test_old_eurusd_m5_study_and_promotion_cannot_cross_into_audjpy_m15() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+    }
+    promotion = _countertrend_enter_now_promotion()
+    _bind_countertrend_command(payload, promotion)
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking["detected_market"] = "AUD/JPY"
+    tracking["detected_timeframe"] = "M15"
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["market"] == {"symbol": "AUD/JPY", "timeframe": "M15"}
+    history = workspace["three_questions"]["market_origin_history"]
+    assert history["state"] == "MISMATCHED_EVIDENCE"
+    assert history["evidence"]["identity_proven"] is False
+    assert history["evidence"]["identity_mismatch"] is True
+    assert history["evidence"]["history_observation_count"] == 0
+    assert workspace["three_questions"]["studied_direction_current"]["state"] == "MISMATCHED_EVIDENCE"
+    assert workspace["permission"]["allowed"] is False
+    assert workspace["three_questions"]["entry_now"]["timing_state"] == "INVALIDATED"
+
+
+def test_countertrend_sniper_stale_frame_lineage_is_invalidated() -> None:
+    payload = _countertrend_study_payload()
+    promotion = _countertrend_enter_now_promotion()
+    _bind_countertrend_command(payload, promotion)
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 100.0,
+        "frame_id": 15,
+    }
+    payload.update(
+        {
+            "display_frame_id": 15,
+            "capture_count": 15,
+            "state_version": 15,
+            "input_frame_hash": "frame-eurusd-m5-15",
+        }
+    )
+
+    workspace = _build_workspace(payload, now_epoch=101.0)
+
+    assert workspace["permission"]["allowed"] is False
+    assert workspace["three_questions"]["entry_now"]["timing_state"] == "INVALIDATED"
+
+
+def test_countertrend_sniper_expired_lineage_is_stale_not_enter_now() -> None:
+    payload = _countertrend_study_payload()
+    promotion = _countertrend_enter_now_promotion()
+    _bind_countertrend_command(payload, promotion)
+    command = _mutable_mapping(payload["decision_command_center"])
+    command_lineage = _mutable_mapping(command["execution_lineage"])
+    projected = _mutable_mapping(command["countertrend_sniper_promotion_v3"])
+    projected_lineage = _mutable_mapping(projected["lineage"])
+    command_lineage["valid_until_epoch"] = 99.0
+    projected_lineage["valid_until_epoch"] = 99.0
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["permission"]["allowed"] is False
+    assert workspace["three_questions"]["entry_now"]["timing_state"] == "STALE"
+
+
+def test_three_questions_call_an_expired_studied_move_missed_instead_of_wait() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
+    opportunity["state"] = "EXPIRED"
+    opportunity["valid_until_epoch"] = 99.0
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["timing_state"] == "MISSED"
+    assert entry["headline"] == "NO — the SELL opportunity was missed"
+    assert "chasing it now is not authorized" in entry["answer"]
+    assert "fresh SELL pullback" in entry["next_trigger"]
+
+
+def test_three_questions_do_not_claim_diagnostic_probe_was_definitively_missed() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    payload["promotion_trace"] = {
+        "missed_opportunity": {
+            "side": "SELL",
+            "setup": "SNIPER_ZONE_ENTRY",
+            "future_move_confirmed": None,
+        }
+    }
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["timing_state"] == "FORMING"
+    assert "missed" not in entry["headline"].lower()
+
+
+def test_three_questions_classify_late_chase_trap_as_missed() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    command["blocker"] = "LATE_CHASE_TRAP"
+    opportunity = _mutable_mapping(command["execution_opportunity_window_v3"])
+    opportunity["state"] = "CLOSED"
+    opportunity["valid_until_epoch"] = 140.0
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+
+    assert entry["timing_state"] == "MISSED"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert "missed" in entry["headline"].lower()
+    assert "chasing" in entry["answer"].lower()
+
+
+def test_three_questions_recover_countertrend_study_without_command_center() -> None:
+    payload = _countertrend_study_payload()
+    payload.pop("decision_command_center")
+    payload["model_council_result"] = {
+        "final_side": "HOLD",
+        "book_strategy": {
+            "dual_thesis_report_v3": {
+                "selected_authority_side": "SELL",
+            },
+            "countertrend_sniper_promotion_v3": {
+                "schema_version": "PG_COUNTERTREND_SNIPER_PROMOTION_V3",
+                "active": True,
+                "classification": "MISSED_DO_NOT_CHASE",
+                "side": "SELL",
+                "against_global_side": "BUY",
+                "ensemble_basis": {"council_side_score": 0.88},
+                "entry_permission_authorized": False,
+                "execution_packet_present": False,
+            },
+        },
+    }
+
+    brief = _build_workspace(payload, now_epoch=100.0)["three_questions"]
+    study = brief["studied_direction_current"]
+    entry = brief["entry_now"]
+
+    assert study["side"] == "SELL"
+    assert study["confidence"] == 0.88
+    assert study["evidence"]["direction_source"] == "COUNTERTREND_SNIPER"
+    assert study["evidence"]["countertrend_classification"] == "MISSED_DO_NOT_CHASE"
+    assert "ensemble was studying SELL" in study["answer"]
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["timing_state"] == "MISSED"
+    assert entry["side"] == "SELL"
+
+
+def test_three_questions_distinguish_live_conflict_from_a_forming_entry() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["current_movement"] = {
+        "side": "BUY",
+        "state": "ACTIVE",
+        "observed_at": 99.0,
+        "frame_id": 14,
+        "confidence": 0.79,
+    }
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+
+    assert entry["timing_state"] == "CONFLICT"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["side"] == "SELL"
+    assert entry["evidence"]["current_move_side"] == "BUY"
+
+
+def test_three_questions_keep_last_completed_study_when_entry_read_is_stale() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["valid_until_epoch"] = 99.0
+    command["fresh"] = False
+    command["freshness_status"] = "STALE"
+
+    brief = _build_workspace(payload, now_epoch=100.0)["three_questions"]
+
+    history = brief["market_origin_history"]
+    assert history["state"] == "LAST_COMPLETED"
+    assert history["side"] == "BUY"
+    assert history["headline"].startswith("Last completed study:")
+    assert history["evidence"]["identity_proven"] is True
+    assert history["evidence"]["symbol"] == "EUR/USD"
+    assert history["evidence"]["timeframe"] == "M5"
+
+    study = brief["studied_direction_current"]
+    assert study["state"] == "STALE"
+    assert study["side"] == "SELL"
+    assert study["headline"].startswith("Last completed read:")
+    assert "last completed closed-candle regression reads SELL" in study["answer"]
+
+    entry = brief["entry_now"]
+    assert entry["timing_state"] == "STALE"
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["side"] == "SELL"
 
 
 def test_idle_workspace_does_not_publish_retired_order_area_previews(
@@ -802,7 +2283,6 @@ def test_idle_blocked_candidate_publishes_observational_order_references(
         "SELL_LIMIT",
         "BUY_STOP",
         "SELL_STOP",
-        "execution_authority",
         "observational_only",
         "source_reference_id",
         "location_role",
@@ -813,6 +2293,7 @@ def test_idle_blocked_candidate_publishes_observational_order_references(
         "PRIVATE_EXECUTION_BLOCKER",
     ):
         assert private_token not in serialized
+    assert '"execution_authority": true' not in serialized
     assert "Original plan boundary" not in serialized
 
 
@@ -1160,6 +2641,27 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
     )
 
     class _NoFullReadTracker:
+        def cpu_stream_health_v3(
+            self,
+            requested_session_id: str,
+            persisted: Mapping[str, object],
+        ) -> dict[str, object]:
+            assert requested_session_id == session_id
+            assert persisted["session_id"] == session_id
+            return {
+                "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                "requested": True,
+                "enabled": True,
+                "available": True,
+                "status": "degraded_snapshot_fallback",
+                "actual_fps": 0.0,
+                "observed_frames": 0,
+                "accepted_events": 0,
+                "last_error": "Waiting for the exact broker window.",
+                "keyframe_slot_capacity": 1,
+                "broker_click_authority": False,
+            }
+
         def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
             raise AssertionError(f"full session snapshot read: {requested_session_id}")
 
@@ -1304,6 +2806,23 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
     assert health_response.status_code == 200
     assert session_response.status_code == 200
     assert full_session_reads == []
+    initial_stream = operator_response.json()["tracking"]["stream"]
+    assert initial_stream["enabled"] is True
+    assert initial_stream["state"] == "DEGRADED"
+    assert initial_stream["acquisition_fps"] == 0.0
+    assert initial_stream["observed_frames"] == 0
+    assert initial_stream["accepted_keyframes"] == 0
+    assert initial_stream["dropped_frames"] == 0
+    assert initial_stream["duplicate_frames"] == 0
+    assert initial_stream["last_frame_epoch"] is None
+    assert initial_stream["last_keyframe_epoch"] is None
+    assert initial_stream["heartbeat_epoch"] is None
+    assert initial_stream["fresh"] is False
+    assert initial_stream["last_reason"] == "Waiting for the exact broker window."
+    assert initial_stream["stream_generation"] == 0
+    assert initial_stream["market_read"]["state"] == "STARTING"
+    assert initial_stream["market_read"]["execution_authority"] is False
+    assert same_frame_response.json()["tracking"]["stream"]["state"] == "DEGRADED"
     assert operator_response.json()["surface"]["frame_id"] == frame_id
     assert same_frame_response.json()["revision"] == operator_response.json()["revision"]
     assert compact_churn_response.json()["revision"] == operator_response.json()["revision"]
@@ -2710,6 +4229,8 @@ def test_history_retains_continuous_chronological_regression_studies() -> None:
         for index in range(40)
     ]
     tracking_summary = _mutable_mapping(payload["tracking_summary"])
+    tracking_summary["detected_market"] = "CAD/JPY OTC"
+    tracking_summary["detected_timeframe"] = "M5"
     tracking_summary["market_study_v3"] = payload["recent_studies"][-1][
         "market_study_v3"
     ]
@@ -2959,7 +4480,7 @@ def test_operator_route_returns_only_the_current_public_projection(
     assert workspace["overlays"] == []
     assert workspace["permission"]["allowed"] is False
     assert _all_keys(workspace).isdisjoint(
-        {"provider_status", "frame_timing_trace_v3", "source_path", "reason"}
+        {"provider_status", "frame_timing_trace_v3", "source_path"}
     )
 
     for retired_view in ("forecast", "lstm", "two-candle", "scene-forecaster", "prediction"):

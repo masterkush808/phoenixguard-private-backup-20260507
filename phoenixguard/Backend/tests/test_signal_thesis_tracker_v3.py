@@ -327,3 +327,84 @@ def test_target_reached_is_terminal_and_releases_directional_authority() -> None
     assert completed["countertrend_policy"] == "WAIT_FOR_NEW_THESIS"
     assert thesis_blocks_countertrend(completed, {"side": "SELL"}) is False
     assert completed["history"][-1]["event"] == "THESIS_TARGET_REACHED"
+
+
+def test_unexecuted_study_thesis_expires_after_two_timeframe_candles() -> None:
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=_snapshot("SELL", y=110.0, frame_id=10),
+        model_council_result=_result("SELL"),
+        now_epoch=100.0,
+    )
+
+    assert thesis["execution_confirmed"] is False
+    assert thesis["authority_scope"] == "STUDY_ONLY"
+    assert thesis["valid_until_epoch"] == 700.0
+
+    expired = update_signal_thesis_v3(
+        thesis,
+        snapshot=_snapshot("BUY", y=108.0, frame_id=12),
+        model_council_result=_result("BUY", score=0.86),
+        now_epoch=701.0,
+    )
+
+    assert expired["active"] is False
+    assert expired["status"] == "EXPIRED"
+    assert expired["effective_side"] == "HOLD"
+    assert expired["countertrend_blocked"] is False
+    assert expired["blocked_countertrend_side"] == "HOLD"
+    assert expired["history"][-1]["event"] == "THESIS_EXPIRED"
+    assert expired["replaced_by"]["side"] == "BUY"
+    assert thesis_blocks_countertrend(expired, {"side": "BUY"}) is False
+
+
+def test_legacy_unexecuted_thesis_without_deadline_is_also_bounded() -> None:
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=_snapshot("SELL", y=110.0, frame_id=10),
+        model_council_result=_result("SELL"),
+        now_epoch=100.0,
+    )
+    thesis.pop("valid_until_epoch")
+    thesis.pop("execution_confirmed")
+
+    expired = update_signal_thesis_v3(
+        thesis,
+        snapshot=_snapshot("BUY", y=108.0, frame_id=12),
+        model_council_result=_result("BUY", score=0.86),
+        now_epoch=701.0,
+    )
+
+    assert expired["status"] == "EXPIRED"
+    assert expired["countertrend_blocked"] is False
+
+
+def test_explicitly_confirmed_trade_is_not_released_by_study_ttl() -> None:
+    snapshot = _snapshot("BUY", y=110.0, frame_id=10)
+    snapshot["broker_execution_state"] = {
+        "active_trade": {
+            "side": "BUY",
+            "confirmation_status": "confirmed",
+            "expires_epoch": 1200.0,
+        }
+    }
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=snapshot,
+        model_council_result=_result("BUY"),
+        now_epoch=100.0,
+    )
+
+    assert thesis["execution_confirmed"] is True
+    assert thesis["authority_scope"] == "CONFIRMED_TRADE"
+    assert thesis["valid_until_epoch"] == 1200.0
+
+    updated = update_signal_thesis_v3(
+        thesis,
+        snapshot=_snapshot("BUY", y=110.0, frame_id=11),
+        model_council_result=_result("BUY"),
+        now_epoch=800.0,
+    )
+
+    assert updated["active"] is True
+    assert updated["status"] != "EXPIRED"

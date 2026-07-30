@@ -12,6 +12,13 @@ from phoenixguard.decision.book_strategy_master_v3 import (
 )
 from phoenixguard.decision.astar_decision_state_v3 import build_candidate_decision_ledger_v3
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
+from phoenixguard.decision.countertrend_sniper_v3 import (
+    COUNTERTREND_SNIPER_PRELIMINARY_PHASE,
+    COUNTERTREND_SNIPER_VALIDATED_PHASE,
+    build_countertrend_sniper_lineage_v3,
+    classify_countertrend_sniper_promotion_v3,
+    instrument_identity_hash_v3,
+)
 from phoenixguard.decision.entry_window_policy_v3 import (
     entry_location_guidance_v3,
     resolve_entry_window_policy_v3,
@@ -2007,13 +2014,133 @@ def _current_candle_acceptance(snapshot: Mapping[str, Any], market: Mapping[str,
         0,
         _int(candle.get("seconds_remaining") or candle.get("remaining_seconds"), 0),
     )
+    closed_values = [
+        source[key]
+        for source in (candle, snapshot)
+        for key in (
+            "current_candle_closed",
+            "closed",
+            "is_closed",
+            "source_candle_closed",
+        )
+        if key in source
+    ]
+    current_candle_closed = bool(
+        closed_values
+        and all(isinstance(value, bool) for value in closed_values)
+        and all(value is closed_values[0] for value in closed_values)
+        and closed_values[0] is True
+    )
+    rejection_values = [
+        candle[key]
+        for key in (
+            "closed_rejection_confirmed",
+            "rejection_confirmed",
+            "opposing_force_rejection_confirmed",
+        )
+        if key in candle
+    ]
+    closed_rejection_confirmed = bool(
+        rejection_values
+        and all(isinstance(value, bool) for value in rejection_values)
+        and all(value is rejection_values[0] for value in rejection_values)
+        and rejection_values[0] is True
+    )
+    trigger_key_values = [
+        str(source[key]).strip()
+        for source in (candle, snapshot, tracking)
+        for key in (
+            "trigger_closed_candle_key",
+            "closed_candle_key",
+            "confirmation_closed_candle_key",
+        )
+        if key in source and str(source[key] or "").strip()
+    ]
+    trigger_keys = set(trigger_key_values)
+    outer_frame_id = _int(
+        snapshot.get("frame_id")
+        or snapshot.get("tracker_frame_id")
+        or snapshot.get("frame_index"),
+        0,
+    )
+    trigger_frame_values = [
+        source[key]
+        for source in (candle, snapshot, tracking)
+        for key in ("trigger_frame_id", "closed_candle_frame_id")
+        if key in source
+    ]
+    numeric_trigger_frames = {
+        int(value)
+        for value in trigger_frame_values
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value).is_integer()
+        and int(value) > 0
+    }
+    trigger_frame_id = (
+        next(iter(numeric_trigger_frames))
+        if trigger_frame_values
+        and len(numeric_trigger_frames) == 1
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and float(value).is_integer()
+            and int(value) > 0
+            for value in trigger_frame_values
+        )
+        else 0
+    )
+    if len(trigger_keys) == 1:
+        trigger_closed_candle_key = next(iter(trigger_keys))
+    elif trigger_keys:
+        trigger_closed_candle_key = ""
+    else:
+        trigger_closed_candle_key = ""
     return {
         "side": side if side in {"BUY", "SELL"} else "HOLD",
         "candle_phase": phase,
         "entry_allowed": entry_allowed,
+        "current_candle_closed": current_candle_closed,
         "too_late": too_late,
         "too_early": phase == "FORMING",
         "wick_reversal_risk": wick_risk,
+        "upper_shadow_range_ratio": round(
+            float(
+                _clip01(
+                    candle.get("upper_shadow_range_ratio")
+                    or candle.get("upper_wick_ratio")
+                    or candle.get("upper_wick_range_ratio"),
+                    0.0,
+                )
+            ),
+            4,
+        ),
+        "lower_shadow_range_ratio": round(
+            float(
+                _clip01(
+                    candle.get("lower_shadow_range_ratio")
+                    or candle.get("lower_wick_ratio")
+                    or candle.get("lower_wick_range_ratio"),
+                    0.0,
+                )
+            ),
+            4,
+        ),
+        "close_location_value": round(
+            float(
+                _clip01(
+                    candle.get("close_location_value")
+                    or candle.get("close_location")
+                    or candle.get("body_close_location"),
+                    0.5,
+                )
+            ),
+            4,
+        ),
+        "closed_rejection_confirmed": closed_rejection_confirmed,
+        "trigger_closed_candle_key": trigger_closed_candle_key,
+        "trigger_frame_id": trigger_frame_id,
+        "outer_frame_id": outer_frame_id,
         "close_progress": round(float(close_progress), 4),
         "seconds_elapsed": seconds_elapsed,
         "seconds_remaining": seconds_remaining,
@@ -5197,7 +5324,14 @@ def evaluate_model_council_v3(
     flip_flop_contained = bool(flip_flop and not flip_flop_release_allowed)
     stable = (not flip_flop_contained) and dominance_margin >= min_dominance_margin
     side_ok = candidate_side in {"BUY", "SELL"}
-    base_council_score = max(buy_score, sell_score) if side_ok else 0.0
+    selected_council_score = (
+        buy_score
+        if candidate_side == "BUY"
+        else sell_score
+        if candidate_side == "SELL"
+        else 0.0
+    )
+    base_council_score = selected_council_score
     raw_council_score = _clip01(base_council_score * ai_strength_multiplier)
     trap_penalty = -0.12 if trap_active else 0.0
     path_risk_adjustment = 0.03 if opposing_force_ok else -0.08
@@ -5321,7 +5455,7 @@ def evaluate_model_council_v3(
         trade_expiry_reference_seconds=preferred_expiry_seconds,
     )
     entry_window_seconds = entry_window_policy["duration_sec"]
-    movement_projection_horizon = _movement_projection_horizon(
+    movement_projection_horizon: dict[str, Any] = _movement_projection_horizon(
         candle_movement_context,
         candidate_side=candidate_side,
         preferred_seconds=preferred_expiry_seconds,
@@ -5798,6 +5932,71 @@ def evaluate_model_council_v3(
         final_execution_score = _clip01(raw_council_score + market_reality_adjustment)
         final_score_passed = final_execution_score >= lane_required_score
         stable = preliminary_stable
+        countertrend_sniper_promotion = classify_countertrend_sniper_promotion_v3(
+            phase=COUNTERTREND_SNIPER_PRELIMINARY_PHASE,
+            side=candidate_side,
+            global_side=_side(
+                professional_thesis_resolution.get("global_side")
+                or market_context.get("global_side")
+            ),
+            professional_thesis=professional_thesis_resolution,
+            current_candle=current_candle,
+            execution_lane=execution_lane,
+            timing_mode=timing_mode,
+            timing_has_explicit_expiry=timing_has_explicit_expiry,
+            entry_now_allowed=entry_now_allowed,
+            path_class=path_class,
+            opposing_force_ok=opposing_force_ok,
+            final_execution_score=final_execution_score,
+            lane_required_score=lane_required_score,
+            council_side_score=(buy_score if candidate_side == "BUY" else sell_score),
+            opposite_side_score=(sell_score if candidate_side == "BUY" else buy_score),
+            global_side_score=(
+                buy_score
+                if _side(
+                    professional_thesis_resolution.get("global_side")
+                    or market_context.get("global_side")
+                )
+                == "BUY"
+                else sell_score
+            ),
+            dominance_margin=dominance_margin,
+            model_role_outputs=model_role_outputs,
+            required_models_ready=bool(
+                health.get("all_required_models_awake") is True
+                and not runtime_blocked
+            ),
+            live_fresh=bool(
+                live_integrity.get("is_live") is True
+                and live_integrity.get("frame_advancing") is True
+                and live_integrity.get("capture_advancing") is True
+                and live_integrity.get("state_advancing") is True
+                and _upper(live_integrity.get("cache_status")) == "FRESH"
+                and not runtime_blocked
+            ),
+            identity_ok=bool(
+                has_explicit_instrument_lock
+                and study_identity_validation.ok
+                and packet_identity_validation.ok
+            ),
+            current_frame_ok=bool(
+                top_input_frame_hash
+                and not live_integrity_hash_mismatch
+                and _int(snapshot.get("frame_id") or snapshot.get("tracker_frame_id"), 0) > 0
+                and _int(snapshot.get("capture_count"), 0) > 0
+                and live_integrity.get("frame_advancing") is True
+                and live_integrity.get("capture_advancing") is True
+            ),
+            trap_active=trap_active,
+            history_exit_active=history_exit_active,
+            late_chase=late_chase,
+        )
+        professional_thesis_resolution["countertrend_sniper_promotion_ready"] = bool(
+            countertrend_sniper_promotion.get("promotion_ready")
+        )
+        professional_thesis_resolution["countertrend_sniper_classification"] = str(
+            countertrend_sniper_promotion.get("classification") or "FORMING"
+        )
         permission_hard_block = bool(permission_denied_effective and not permission_prepare_allowed)
         candidate_invalidated = _bool(
             snapshot.get("candidate_invalidated")
@@ -5841,6 +6040,8 @@ def evaluate_model_council_v3(
                 lstm_council_evidence,
             ),
             "candle_movement_context_v3": candle_movement_context,
+            "countertrend_sniper_promotion_v3": countertrend_sniper_promotion,
+            "professional_thesis_resolution_v3": professional_thesis_resolution,
             "lstm_council_evidence_v3": lstm_council_evidence,
         }
         book_strategy_market: dict[str, Any] = {**market, "candle_movement_context_v3": candle_movement_context}
@@ -6700,7 +6901,10 @@ def evaluate_model_council_v3(
             current_leg_payload = _mapping(candle_movement_context.get("current_leg"))
             current_leg_candle_count = _int(current_leg_payload.get("candle_count"), 0)
             expected_duration_sec = _int(professional_thesis_horizon.get("expected_duration_sec"), int(max(0, preferred_expiry_seconds)))
-            expected_move_time = {
+            thesis_horizon_basis: Any = professional_thesis_horizon.get("basis")
+            movement_projection_payload = _mapping(movement_projection_horizon)
+            movement_projection_basis: Any = movement_projection_payload.get("basis")
+            expected_move_time: dict[str, Any] = {
                 "expected_duration_sec": expected_duration_sec,
                 "expected_duration_text": _duration_text(expected_duration_sec),
                 "timeframe": str(candle_movement_context.get("timeframe") or "").upper(),
@@ -6710,19 +6914,23 @@ def evaluate_model_council_v3(
                 "projected_total_current_leg_candles": current_leg_candle_count + expected_move_candles,
                 "current_leg_side": current_leg_payload.get("side"),
                 "current_leg_stage": candle_movement_context.get("move_stage"),
-                "basis": str(professional_thesis_horizon.get("basis") or movement_projection_horizon.get("basis") or "preferred_expiry_seconds_to_timeframe_candles"),
+                "basis": str(
+                    thesis_horizon_basis
+                    or movement_projection_basis
+                    or "preferred_expiry_seconds_to_timeframe_candles"
+                ),
                 "entry_window": professional_entry_window,
                 "entry_window_policy_v3": dict(entry_window_policy),
                 "entry_location_guidance_v3": entry_location_guidance,
                 "thesis_horizon": professional_thesis_horizon,
                 "professional_trade_plan": professional_trade_plan,
-                "projection_horizon": movement_projection_horizon,
+                "projection_horizon": movement_projection_payload,
             }
             allowance_package["packet_id"] = base["packet_id"]
             allowance_package["expected_duration_sec"] = expected_duration_sec
             allowance_package["expected_duration_text"] = expected_move_time["expected_duration_text"]
             allowance_package["expected_candle_count"] = expected_move_candles
-            candle_movement_brief = {
+            candle_movement_brief: dict[str, Any] = {
                 "visible_candle_count": candle_movement_context.get("visible_candle_count"),
                 "tracked_candle_count": candle_movement_context.get("tracked_candle_count"),
                 "current_leg_candle_count": current_leg_candle_count,
@@ -6865,8 +7073,8 @@ def evaluate_model_council_v3(
                 "reversal_capture_mature": bool(execution_lane.get("reversal_capture_mature")),
                 "mature_directional_flow_ready": bool(execution_lane.get("mature_directional_flow_ready")),
                 "opportunity_capture_mode": bool(execution_lane.get("opportunity_capture_mode")),
-                "current_candle_acceptance": execution_lane.get("current_candle_acceptance", {}),
-                "wave_context": execution_lane.get("wave_context", {}),
+                "current_candle_acceptance": _mapping(execution_lane.get("current_candle_acceptance")),
+                "wave_context": _mapping(execution_lane.get("wave_context")),
                 "release_allowed": flip_flop_release_allowed,
                 "blocked_by": "NONE" if executable else blocked_by,
                 "true_blocker": "NONE" if executable else true_blocker,
@@ -7294,6 +7502,7 @@ def evaluate_model_council_v3(
             def _finalize_sequence_and_packets() -> dict[str, Any]:
                 nonlocal block_reason
                 nonlocal blocked_by
+                nonlocal countertrend_sniper_promotion
                 nonlocal executable
                 nonlocal final_state
                 nonlocal next_required
@@ -7580,6 +7789,16 @@ def evaluate_model_council_v3(
                     packet["professional_flip_flop_override"] = professional_flip_flop_override
                     packet["strategy_read"] = book_strategy.get("strategy_read")
                     packet["visual_integrity"] = opportunity_maturity.get("visual_integrity")
+                    packet["instrument_identity_hash"] = instrument_identity_hash_v3(
+                        instrument_context
+                    )
+                    packet["trigger_closed_candle_key"] = str(
+                        current_candle.get("trigger_closed_candle_key") or ""
+                    )
+                    packet["trigger_frame_id"] = _int(
+                        current_candle.get("trigger_frame_id"),
+                        0,
+                    )
                     validation = validate_execution_packet_v3(
                         packet,
                         now=current_now,
@@ -7879,6 +8098,139 @@ def evaluate_model_council_v3(
                     result["packet_result"] = "STUDY_PACKET_PUBLISHED"
                     result["execution_packet_present"] = False
                 current_execution_packet = _mapping(result.get("execution_packet") or result.get("model_council_packet"))
+                execution_packet_validated = bool(
+                    current_execution_packet
+                    and _mapping(result.get("packet_validation")).get("ok") is True
+                )
+                execution_lineage = build_countertrend_sniper_lineage_v3(
+                    current_execution_packet
+                )
+                expected_execution_lineage = {
+                    "packet_id": str(base.get("packet_id") or ""),
+                    "opportunity_id": str(
+                        execution_opportunity_window.get("opportunity_id") or ""
+                    ),
+                    "opportunity_key": str(
+                        execution_opportunity_window.get("opportunity_key") or ""
+                    ),
+                    "session_id": str(base.get("session_id") or ""),
+                    "symbol": str(base.get("symbol") or ""),
+                    "timeframe": str(base.get("timeframe") or "").upper(),
+                    "frame_id": _int(base.get("frame_id"), 0),
+                    "capture_count": _int(base.get("capture_count"), 0),
+                    "state_version": _int(base.get("state_version"), 0),
+                    "input_frame_hash": str(base.get("input_frame_hash") or ""),
+                    "instrument_identity_hash": instrument_identity_hash_v3(
+                        instrument_context
+                    ),
+                    "trigger_closed_candle_key": str(
+                        current_candle.get("trigger_closed_candle_key") or ""
+                    ),
+                    "trigger_frame_id": _int(base.get("frame_id"), 0),
+                    "valid_until_epoch": _float(
+                        execution_opportunity_window.get("valid_until_epoch")
+                        or execution_opportunity_window.get("valid_until_epoch_sec"),
+                        0.0,
+                    ),
+                    "integrity_valid": execution_opportunity_window.get(
+                        "integrity_valid"
+                    ),
+                    "lineage_rejected": execution_opportunity_window.get(
+                        "lineage_rejected"
+                    ),
+                }
+                final_countertrend_book_state = (
+                    opportunity_maturity_state
+                    if opportunity_maturity_state in {"LATE_CHASE", "MISSED", "INVALIDATED"}
+                    else book_strategy_state
+                )
+                countertrend_sniper_promotion = classify_countertrend_sniper_promotion_v3(
+                    phase=COUNTERTREND_SNIPER_VALIDATED_PHASE,
+                    side=candidate_side,
+                    global_side=_side(
+                        professional_thesis_resolution.get("global_side")
+                        or market_context.get("global_side")
+                    ),
+                    professional_thesis=professional_thesis_resolution,
+                    current_candle=current_candle,
+                    execution_lane=execution_lane,
+                    timing_mode=timing_mode,
+                    timing_has_explicit_expiry=timing_has_explicit_expiry,
+                    entry_now_allowed=entry_now_allowed,
+                    path_class=path_class,
+                    opposing_force_ok=opposing_force_ok,
+                    final_execution_score=final_execution_score,
+                    lane_required_score=lane_required_score,
+                    council_side_score=(buy_score if candidate_side == "BUY" else sell_score),
+                    opposite_side_score=(sell_score if candidate_side == "BUY" else buy_score),
+                    global_side_score=(
+                        buy_score
+                        if _side(
+                            professional_thesis_resolution.get("global_side")
+                            or market_context.get("global_side")
+                        )
+                        == "BUY"
+                        else sell_score
+                    ),
+                    dominance_margin=dominance_margin,
+                    model_role_outputs=model_role_outputs,
+                    required_models_ready=bool(
+                        health.get("all_required_models_awake") is True
+                        and not runtime_blocked
+                    ),
+                    live_fresh=bool(
+                        live_integrity.get("is_live") is True
+                        and live_integrity.get("frame_advancing") is True
+                        and live_integrity.get("capture_advancing") is True
+                        and live_integrity.get("state_advancing") is True
+                        and _upper(live_integrity.get("cache_status")) == "FRESH"
+                        and not runtime_blocked
+                    ),
+                    identity_ok=bool(
+                        has_explicit_instrument_lock
+                        and study_identity_validation.ok
+                        and packet_identity_validation.ok
+                    ),
+                    current_frame_ok=bool(
+                        top_input_frame_hash
+                        and not live_integrity_hash_mismatch
+                        and _int(snapshot.get("frame_id") or snapshot.get("tracker_frame_id"), 0) > 0
+                        and _int(snapshot.get("capture_count"), 0) > 0
+                        and live_integrity.get("frame_advancing") is True
+                        and live_integrity.get("capture_advancing") is True
+                    ),
+                    trap_active=trap_active,
+                    history_exit_active=history_exit_active,
+                    late_chase=late_chase,
+                    book_strategy_state=final_countertrend_book_state,
+                    execution_packet_present=True if current_execution_packet else False,
+                    execution_packet_validated=execution_packet_validated,
+                    execution_lineage=execution_lineage,
+                    expected_lineage=expected_execution_lineage,
+                )
+                professional_thesis_resolution["countertrend_sniper_promotion_ready"] = bool(
+                    countertrend_sniper_promotion.get("promotion_ready")
+                )
+                professional_thesis_resolution["countertrend_sniper_classification"] = str(
+                    countertrend_sniper_promotion.get("classification") or "FORMING"
+                )
+                for payload in (
+                    result,
+                    council,
+                    promotion_trace,
+                    allowance_package,
+                    study_packet,
+                    opportunity_maturity,
+                    book_strategy,
+                    professional_trade_plan,
+                    trade_candidate_queue,
+                ):
+                    payload["countertrend_sniper_promotion_v3"] = countertrend_sniper_promotion
+                if current_execution_packet:
+                    current_execution_packet["countertrend_sniper_promotion_v3"] = countertrend_sniper_promotion
+                    packet_allowance = _mapping(current_execution_packet.get("allowance_package"))
+                    packet_allowance["countertrend_sniper_promotion_v3"] = countertrend_sniper_promotion
+                    current_execution_packet["allowance_package"] = packet_allowance
                 entry_permission_v3 = build_entry_permission_v3(
                     dual_thesis_report,
                     execution_packet=current_execution_packet,
@@ -7907,6 +8259,131 @@ def evaluate_model_council_v3(
                         result["execution_packet"] = current_execution_packet
                     if isinstance(result.get("model_council_packet"), Mapping):
                         result["model_council_packet"] = current_execution_packet
+                    post_mutation_validation = validate_execution_packet_v3(
+                        current_execution_packet,
+                        expected_session_id=str(base.get("session_id") or ""),
+                        expected_symbol=str(base.get("symbol") or ""),
+                        expected_timeframe=str(base.get("timeframe") or ""),
+                        now=current_now,
+                        require_executable=True,
+                        require_broker_click_safe_identity=False,
+                    )
+                    result["post_mutation_packet_validation"] = (
+                        post_mutation_validation.as_dict()
+                    )
+                    result["packet_validation"] = post_mutation_validation.as_dict()
+                    if not post_mutation_validation.ok:
+                        post_validation_reason = (
+                            "POST_MUTATION_PACKET_REVALIDATION_FAILED:"
+                            f"{post_mutation_validation.first_reason}"
+                        )
+                        failed_promotion = dict(countertrend_sniper_promotion)
+                        failed_authorization_gates = {
+                            **_mapping(
+                                failed_promotion.get("authorization_gates")
+                            ),
+                            "execution_packet_validated": False,
+                            "execution_lineage_matches_outer_truth": False,
+                        }
+                        failed_promotion.update(
+                            {
+                                "authoritative": False,
+                                "classification": "INVALIDATED",
+                                "validated_entry_mode": "NONE",
+                                "entry_permission_authorized": False,
+                                "movement_confirmation_bypass_allowed": False,
+                                "movement_confirmation_substitute": "NONE",
+                                "same_side_movement_confirmation_required": True,
+                                "execution_packet_present": False,
+                                "execution_packet_validated": False,
+                                "execution_authority_source": "NONE",
+                                "broker_click_authority": False,
+                                "authorization_gates": failed_authorization_gates,
+                                "authorization_blocking_gates": [
+                                    name
+                                    for name, passed in failed_authorization_gates.items()
+                                    if passed is not True
+                                ],
+                                "next_required": (
+                                    "Current packet changed after validation; "
+                                    "wait for a fresh fully revalidated packet."
+                                ),
+                                "post_mutation_validation_failure": (
+                                    post_validation_reason
+                                ),
+                            }
+                        )
+                        countertrend_sniper_promotion = failed_promotion
+                        professional_thesis_resolution[
+                            "countertrend_sniper_classification"
+                        ] = "INVALIDATED"
+                        for payload in (
+                            result,
+                            council,
+                            promotion_trace,
+                            allowance_package,
+                            study_packet,
+                            opportunity_maturity,
+                            book_strategy,
+                            professional_trade_plan,
+                            trade_candidate_queue,
+                        ):
+                            payload["countertrend_sniper_promotion_v3"] = (
+                                failed_promotion
+                            )
+                        _mark_allowance_package_blocked(
+                            allowance_package,
+                            block_reason=post_validation_reason,
+                            next_required=(
+                                "publish a fresh packet that passes validation "
+                                "after every final mutation"
+                            ),
+                            release_state="WATCHING",
+                            final_state="BLOCKED_BY_RUNTIME",
+                            promotion_result="STUDY_PACKET_PUBLISHED",
+                        )
+                        entry_permission_v3 = build_entry_permission_v3(
+                            dual_thesis_report,
+                            execution_packet={},
+                            allowance_package=allowance_package,
+                        )
+                        dual_thesis_report["entry_permission_v3"] = (
+                            entry_permission_v3
+                        )
+                        for payload in (
+                            result,
+                            council,
+                            promotion_trace,
+                            allowance_package,
+                            study_packet,
+                        ):
+                            payload["entry_permission_v3"] = entry_permission_v3
+                            payload["dual_thesis_report_v3"] = dual_thesis_report
+                        result.pop("execution_packet", None)
+                        result.pop("model_council_packet", None)
+                        result.update(
+                            {
+                                "packet_type": "STUDY_PACKET",
+                                "packet_result": "STUDY_PACKET_PUBLISHED",
+                                "execution_packet_present": False,
+                                "block_reason": post_validation_reason,
+                                "execution": {
+                                    **_mapping(result.get("execution")),
+                                    "enabled": False,
+                                    "state": "BLOCKED_BY_RUNTIME",
+                                },
+                            }
+                        )
+                        study_packet.update(
+                            {
+                                "packet_result": "STUDY_PACKET_PUBLISHED",
+                                "true_blocker": post_validation_reason,
+                                "denied_at": post_validation_reason,
+                                "block_reason": post_validation_reason,
+                                "allowance_package": allowance_package,
+                            }
+                        )
+                        current_execution_packet = {}
                 result["study_packet"] = study_packet
                 result["model_council_study_packet"] = study_packet
                 return result

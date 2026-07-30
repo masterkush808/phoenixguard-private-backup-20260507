@@ -36,7 +36,11 @@ def build_adversarial_snapshot(name: str) -> dict[str, Any]:
         "buy_score": 0.78,
         "sell_score": 0.14,
         "context_confirmed": True,
-        "timing": {"state": "READY", "expiry_seconds": 300},
+        "timing": {
+            "state": "READY",
+            "expiry_seconds": 900,
+            "under_15_minutes_excluded": True,
+        },
         "market_context": {
             "dominant_side": "BUY",
             "global_side": "BUY",

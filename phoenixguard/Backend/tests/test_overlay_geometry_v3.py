@@ -592,7 +592,7 @@ def test_dashboard_exposes_semantic_layers_without_internal_observability() -> N
         / "window_tracker_dashboard.html"
     ).read_text(encoding="utf-8")
 
-    for layer_name in ("movement", "structure", "zones", "plan", "outlook", "history"):
+    for layer_name in ("movement", "structure", "zones", "plan", "history"):
         assert layer_name in dashboard_html
     for internal_surface in (
         "latency-pipeline",

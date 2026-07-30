@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import json
 import math
 from pathlib import Path
 from statistics import median
@@ -41,6 +42,11 @@ from phoenixguard.study.historical_similarity_v3 import (
     build_sequence_fingerprint_v3,
 )
 from phoenixguard.study.pair_dna_v3 import PairDNAStoreV3, PairDNAValidationError
+from phoenixguard.study.path_clock_liquidity_store_v3 import (
+    PathClockLiquiditySideStoreV3,
+    PathClockLiquidityStoreValidationError,
+    pending_path_clock_liquidity_v3,
+)
 from phoenixguard.study.object_relationship_graph_v3 import (
     build_object_relationship_graph_v3,
 )
@@ -78,6 +84,24 @@ _MAX_PENDING_CANDLES = 16
 _MAX_PENDING_OBJECTS = 16
 _MAX_CONTINUOUS_MOTIF_NODES_PER_LEVEL = 512
 _MAX_PUBLIC_RECENT_CANDLES = 32
+
+_CLOSED_CANDLE_TIME_PROOF_CACHE_FIELDS = (
+    "schema_version",
+    "symbol",
+    "timeframe",
+    "closed_candle_key",
+    "closed_candle_sequence",
+    "close_epoch_seconds",
+    "timestamp_semantic",
+    "timestamp_source",
+    "proof_source",
+    "bound_row_index",
+    "transition_count",
+    "source_cadence_seconds",
+    "observed_epoch_seconds",
+    "observation_latency_seconds",
+    "contiguous_from_previous",
+)
 _ONTOLOGY_STORE_SCHEMA_VERSION = "PG_PAIR_SCOPED_ADAPTIVE_ONTOLOGY_STORE_V3"
 _MAX_ONTOLOGY_PAIRS = 64
 _CONCEPT_DRIFT_FIXED_WINDOW = 24
@@ -222,6 +246,47 @@ def _timestamp_seconds(value: object) -> float | None:
     return parsed_datetime.astimezone(timezone.utc).timestamp()
 
 
+def _closed_candle_time_proof_cache_token(
+    value: Mapping[str, Any] | None,
+) -> str:
+    """Return a stable cache discriminator without validating or publishing proof.
+
+    The JPCLF side store remains the sole proof validator and sanitizer.  This
+    token only prevents an earlier fail-closed result for one candle key from
+    hiding later evidence, while preserving the existing same-event freeze for
+    every input other than the timing proof.
+    """
+
+    if value is None:
+        return "CLOSED_CANDLE_TIME_PROOF_ABSENT"
+    proof = dict(value)
+    normalized: dict[str, object] = {}
+    for field in _CLOSED_CANDLE_TIME_PROOF_CACHE_FIELDS:
+        item = proof.get(field)
+        if isinstance(item, float) and not math.isfinite(item):
+            normalized[field] = {
+                "invalid_non_finite_float": (
+                    "NAN" if math.isnan(item) else "POSITIVE_INFINITY" if item > 0 else "NEGATIVE_INFINITY"
+                )
+            }
+        elif item is None or isinstance(item, (bool, int, float, str)):
+            normalized[field] = item
+        else:
+            normalized[field] = {
+                "invalid_value_type": (
+                    f"{type(item).__module__}.{type(item).__qualname__}"
+                )
+            }
+    encoded = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"CLOSED_CANDLE_TIME_PROOF_SHA256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _price_history_row(
     row: Mapping[str, Any],
     *,
@@ -312,6 +377,155 @@ def _advanced_order_domain(candles: Sequence[Mapping[str, Any]]) -> str:
     ):
         return "TRACKER_EVENT_SEQUENCE_V3"
     return ""
+
+
+def _jpclf_liquidity_state(
+    candles: Sequence[Mapping[str, Any]],
+    object_relationship_graph: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the closed-candle-only liquidity vector used by JPCLF.
+
+    The vector intentionally uses dimensionless candle ratios and bounded graph
+    counts.  It therefore remains comparable when a locked chart is rendered
+    on a different pixel scale, while the side store separately proves path
+    geometry by re-observing each anchor on the current coordinate axis.
+    """
+
+    if not candles:
+        return {
+            "wick_entropy": 0.0,
+            "repeated_area_touches": 0,
+            "late_sweep_motif_distance": 1.0,
+            "wick_body_asymmetry": 0.0,
+            "object_copresence_density": 0.0,
+        }
+    latest = candles[-1]
+    ratios = _mapping(latest.get("ratios"))
+    body = _clip01(ratios.get("body_to_range"))
+    upper = _clip01(ratios.get("upper_wick_to_range"))
+    lower = _clip01(ratios.get("lower_wick_to_range"))
+    total = body + upper + lower
+    entropy = 0.0
+    if total > 1e-12:
+        for value in (body / total, upper / total, lower / total):
+            if value > 1e-12:
+                entropy -= value * math.log(value)
+        entropy /= math.log(3.0)
+
+    recent = list(candles[-8:])
+    sweep_count = 0
+    for candle in recent:
+        rejection = _mapping(_mapping(candle.get("interaction")).get("rejection"))
+        if (
+            rejection.get("upper_wick_swept_previous_high") is True
+            or rejection.get("lower_wick_swept_previous_low") is True
+        ):
+            sweep_count += 1
+    late_sweep_distance = 1.0 - (sweep_count / max(1, len(recent)))
+
+    relation_counts = _mapping(object_relationship_graph.get("relation_counts"))
+    repeated_touches = sum(
+        max(0, _integer(count))
+        for relation, count in relation_counts.items()
+        if "TOUCH" in str(relation).upper()
+        or "OVERLAP" in str(relation).upper()
+        or "RETEST" in str(relation).upper()
+    )
+    nodes = _rows(object_relationship_graph.get("nodes"))
+    edges = _rows(object_relationship_graph.get("edges"))
+    object_nodes = [
+        row
+        for row in nodes
+        if "OBJECT" in str(row.get("node_type") or "").upper()
+    ]
+    if not object_nodes:
+        # Some graph revisions publish object nodes without a node_type label.
+        object_nodes = [
+            row
+            for row in nodes
+            if row.get("object_type") not in (None, "")
+        ]
+    object_density = min(
+        1.0,
+        (len(object_nodes) / 32.0) + (min(128, len(edges)) / 256.0),
+    )
+    body_denominator = max(body, 1.0 / 64.0)
+    asymmetry = max(-64.0, min(64.0, (lower - upper) / body_denominator))
+    return {
+        "wick_entropy": round(_clip01(entropy), 8),
+        "repeated_area_touches": min(64, repeated_touches),
+        "late_sweep_motif_distance": round(max(0.0, late_sweep_distance), 8),
+        "wick_body_asymmetry": round(asymmetry, 8),
+        "object_copresence_density": round(object_density, 8),
+    }
+
+
+def _jpclf_resolver_bound_rows_v3(
+    candles: Sequence[Mapping[str, Any]],
+    closed_candle_time_proof: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], Mapping[str, Any] | None]:
+    """Select the proven JPCLF axis and verify its supplied proof index.
+
+    Candle intelligence may contain older screenshot rows that are useful to
+    the general study but lack lifelong resolver identity or exact time.  They
+    must not enter JPCLF.  The tracker expresses ``bound_row_index`` in this
+    exact ordered subset, so the service verifies key, sequence, and close time
+    at that index and then forwards the original proof unchanged.
+    """
+
+    trusted: list[dict[str, Any]] = []
+    for source in candles:
+        row = dict(source)
+        sequence = row.get("closed_candle_sequence")
+        if (
+            row.get("closed") is not True
+            or row.get("identity_stable") is not True
+            or row.get("identity_proof_source")
+            != "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+            or not str(row.get("stable_candle_identity") or "").startswith(
+                "EXPLICIT:"
+            )
+            or not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence < 0
+            or _timestamp_seconds(row.get("timestamp")) is None
+        ):
+            continue
+        trusted.append(row)
+
+    if closed_candle_time_proof is None:
+        return trusted, None
+
+    proof = closed_candle_time_proof
+    proof_key = str(proof.get("closed_candle_key") or "").strip()
+    proof_sequence = proof.get("closed_candle_sequence")
+    proof_resolver_index = proof.get("bound_row_index")
+    proof_close_seconds = _timestamp_seconds(proof.get("close_epoch_seconds"))
+    if (
+        not proof_key
+        or not isinstance(proof_sequence, int)
+        or isinstance(proof_sequence, bool)
+        or proof_sequence < 0
+        or not isinstance(proof_resolver_index, int)
+        or isinstance(proof_resolver_index, bool)
+        or proof_resolver_index < 0
+        or proof_close_seconds is None
+    ):
+        return [], proof
+
+    if proof_resolver_index >= len(trusted):
+        return [], proof
+    expected_identity = f"EXPLICIT:{proof_key}"
+    current = trusted[proof_resolver_index]
+    current_seconds = _timestamp_seconds(current.get("timestamp"))
+    if (
+        current.get("stable_candle_identity") != expected_identity
+        or current.get("closed_candle_sequence") != proof_sequence
+        or current_seconds is None
+        or abs(current_seconds - proof_close_seconds) > 1e-6
+    ):
+        return [], proof
+    return trusted, proof
 
 
 def _advanced_pending_contract(
@@ -2355,11 +2569,14 @@ class MarketStudyServiceV3:
         self.cross_pair = CrossPairStudyCoordinatorV3(
             self.root_dir / "cross_pair_coordinator_v3.json"
         )
+        self.path_clock_liquidity = PathClockLiquiditySideStoreV3(
+            self.root_dir / "path_clock_liquidity_v3"
+        )
         self._pending_path = self.root_dir / "pending_outcomes_v3.json"
         self._ontology_path = self.root_dir / "adaptive_feature_ontology_v3.json"
         self._lock = threading.RLock()
         self._pending: dict[tuple[str, str], dict[str, Any]] = {}
-        self._result_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._result_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
     @staticmethod
     def _pending_key(pair_key: tuple[str, str]) -> str:
@@ -2756,6 +2973,51 @@ class MarketStudyServiceV3:
             "coordinate_continuity": "CURRENT_FRAME_REOBSERVATION",
         }
 
+    def _path_clock_study(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        closed_candle_key: str,
+        closed_candle_sequence: object,
+        candles: Sequence[Mapping[str, Any]],
+        timeframe_seconds: int,
+        studied_direction: object,
+        contract_duration_seconds: object | None,
+        object_relationship_graph: Mapping[str, Any],
+        closed_candle_time_proof: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Advance the pair timing field without affecting trade permission."""
+
+        jpclf_candles, jpclf_time_proof = _jpclf_resolver_bound_rows_v3(
+            candles,
+            closed_candle_time_proof,
+        )
+        try:
+            return self.path_clock_liquidity.observe_closed_candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                closed_candle_key=closed_candle_key,
+                closed_candle_sequence=closed_candle_sequence,
+                closed_candle_time_proof=jpclf_time_proof,
+                candles=jpclf_candles,
+                source_cadence_seconds=timeframe_seconds,
+                studied_direction=studied_direction,
+                contract_duration_seconds=contract_duration_seconds,
+                liquidity_state=_jpclf_liquidity_state(
+                    jpclf_candles,
+                    object_relationship_graph,
+                ),
+            )
+        except PathClockLiquidityStoreValidationError as exc:
+            pending = pending_path_clock_liquidity_v3(
+                "JPCLF failed closed because exact contiguous timing evidence "
+                f"could not be proven: {exc}",
+                contract_duration_seconds=contract_duration_seconds,
+            )
+            pending["status"] = "CENSORED_INVALID_TIMING_EVIDENCE"
+            return pending
+
     def study(
         self,
         candles: Sequence[Mapping[str, Any]],
@@ -2768,6 +3030,8 @@ class MarketStudyServiceV3:
         regression: Mapping[str, Any] | None = None,
         objects: Sequence[Mapping[str, Any]] = (),
         observed_at: object = "",
+        contract_duration_seconds: object | None = None,
+        closed_candle_time_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         canonical_symbol = str(symbol or "").strip().upper()
         canonical_timeframe = str(timeframe or "").strip().upper()
@@ -2793,8 +3057,22 @@ class MarketStudyServiceV3:
                     reason="Pair, timeframe, and closed-candle identity are unproven.",
                 )
             )
+            path_clock_pending = pending_path_clock_liquidity_v3(
+                "Pair, timeframe, and closed-candle identity are unproven.",
+                contract_duration_seconds=contract_duration_seconds,
+            )
+            result["path_clock_liquidity_v3"] = path_clock_pending
+            result["path_clock_liquidity"] = deepcopy(path_clock_pending)
             return result
-        cache_key = (canonical_symbol, canonical_timeframe, close_key)
+        timing_proof_cache_token = _closed_candle_time_proof_cache_token(
+            closed_candle_time_proof
+        )
+        cache_key = (
+            canonical_symbol,
+            canonical_timeframe,
+            close_key,
+            timing_proof_cache_token,
+        )
         with self._lock:
             cached = self._result_cache.get(cache_key)
             if cached is not None:
@@ -2837,6 +3115,25 @@ class MarketStudyServiceV3:
                         ),
                     )
                 )
+                timeframe_seconds = max(
+                    1,
+                    int(_mapping(regression).get("timeframe_seconds", 300) or 300),
+                )
+                studied_rows = _rows(candle_study.get("candles"))
+                path_clock_pending = self._path_clock_study(
+                    symbol=canonical_symbol,
+                    timeframe=canonical_timeframe,
+                    closed_candle_key=close_key,
+                    closed_candle_sequence=closed_candle_sequence,
+                    candles=studied_rows,
+                    timeframe_seconds=timeframe_seconds,
+                    studied_direction="HOLD",
+                    contract_duration_seconds=contract_duration_seconds,
+                    closed_candle_time_proof=closed_candle_time_proof,
+                    object_relationship_graph={},
+                )
+                result["path_clock_liquidity_v3"] = path_clock_pending
+                result["path_clock_liquidity"] = deepcopy(path_clock_pending)
                 self._result_cache[cache_key] = result
                 return deepcopy(result)
 
@@ -3039,6 +3336,18 @@ class MarketStudyServiceV3:
                 compact_similarity,
                 latest_candle,
             )
+            path_clock_liquidity = self._path_clock_study(
+                symbol=canonical_symbol,
+                timeframe=canonical_timeframe,
+                closed_candle_key=close_key,
+                closed_candle_sequence=closed_candle_sequence,
+                candles=studied_candles,
+                timeframe_seconds=timeframe_seconds,
+                studied_direction=directional.get("side"),
+                contract_duration_seconds=contract_duration_seconds,
+                closed_candle_time_proof=closed_candle_time_proof,
+                object_relationship_graph=object_relationship_graph,
+            )
             material_studies = {
                 "regression": regression_row,
                 "candle_intelligence": _compact_candle_study(candle_study),
@@ -3081,6 +3390,8 @@ class MarketStudyServiceV3:
                     "historical_similarity": compact_similarity,
                     "outcome_maturation": maturation,
                     "directional_read": directional,
+                    "path_clock_liquidity_v3": path_clock_liquidity,
+                    "path_clock_liquidity": deepcopy(path_clock_liquidity),
                     **advanced_studies,
                     **research_studies,
                 }

@@ -120,11 +120,14 @@ def _str_value(value: object) -> str:
 
 
 def list_processes() -> list[ProcessRow]:
-    payload = _powershell_json(
-        "Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath | "
-        "ConvertTo-Json -Depth 5"
-    )
+    try:
+        payload = _powershell_json(
+            "Get-CimInstance Win32_Process | "
+            "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath | "
+            "ConvertTo-Json -Depth 5"
+        )
+    except RuntimeError:
+        return _list_processes_psutil()
     rows: list[ProcessRow] = []
     for item in _as_list(payload):
         if not isinstance(item, dict):
@@ -139,6 +142,40 @@ def list_processes() -> list[ProcessRow]:
                 executable_path=_str_value(data.get("ExecutablePath")),
             )
         )
+    return [row for row in rows if row.pid > 0]
+
+
+def _list_processes_psutil() -> list[ProcessRow]:
+    """Read process ownership without WMI when managed Windows blocks CIM."""
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - live profile owns this dependency.
+        raise RuntimeError("Process discovery failed: CIM denied and psutil unavailable") from exc
+
+    rows: list[ProcessRow] = []
+    for process in psutil.process_iter(["pid", "ppid", "name", "cmdline", "exe"]):
+        try:
+            info: dict[str, object] = process.info
+            raw_command_parts: object = info.get("cmdline")
+            command_parts = (
+                [str(part) for part in cast(list[object], raw_command_parts)]
+                if isinstance(raw_command_parts, list)
+                else []
+            )
+            rows.append(
+                ProcessRow(
+                    pid=_int_value(info.get("pid")),
+                    parent_pid=_int_value(info.get("ppid")),
+                    name=_str_value(info.get("name")),
+                    command_line=" ".join(command_parts),
+                    executable_path=_str_value(info.get("exe")),
+                )
+            )
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    if not rows:
+        raise RuntimeError("Process discovery failed: psutil returned no visible processes")
     return [row for row in rows if row.pid > 0]
 
 
@@ -183,11 +220,15 @@ def is_stack_process(row: ProcessRow, *, repo_root: Path, ancestor_pids: set[int
         return False
     if any(token in command for token in NON_STACK_COMMAND_TOKENS):
         return False
+    if row.pid in ancestor_pids:
+        return False
+    normalized_root = _norm(str(repo_root.resolve())).rstrip("\\")
+    executable = _norm(row.executable_path)
+    if normalized_root not in command and normalized_root not in executable:
+        return False
     token_match = any(token in command for token in KNOWN_STACK_TOKENS)
     if token_match:
         return True
-    if row.pid in ancestor_pids:
-        return False
     return False
 
 
@@ -232,7 +273,13 @@ def post_tracker_stop(base_url: str, session_id: str) -> None:
             print(f"tracker_stop={suffix}: unavailable")
 
 
-def kill_targets(targets: set[int], rows_by_pid: dict[int, ProcessRow], *, dry_run: bool) -> int:
+def kill_targets(
+    targets: set[int],
+    rows_by_pid: dict[int, ProcessRow],
+    *,
+    ports: Sequence[int],
+    dry_run: bool,
+) -> int:
     roots = root_target_pids(targets, rows_by_pid)
     if not roots:
         print("kill_switch: no PhoenixGuard stack processes found")
@@ -242,17 +289,76 @@ def kill_targets(targets: set[int], rows_by_pid: dict[int, ProcessRow], *, dry_r
         row = rows_by_pid.get(pid)
         label = f"{pid} {row.name if row else ''}".strip()
         print(f"kill_switch: {'would stop' if dry_run else 'stopping'} root {label}")
-        if dry_run:
-            continue
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], cwd=str(PROJECT_ROOT), check=False)
-        else:
+    if dry_run:
+        return len(targets)
+
+    if os.name == "nt":
+        # Managed Windows shells can deny taskkill /T even for same-user
+        # processes.  Stop only the already-attributed tree, leaves first, via
+        # psutil; taskkill remains a narrow fallback for any verified survivor.
+        try:
+            import psutil  # type: ignore[import-not-found]
+
+            def depth(pid: int) -> int:
+                result = 0
+                current = pid
+                visited: set[int] = set()
+                while current in rows_by_pid and current not in visited:
+                    visited.add(current)
+                    parent = rows_by_pid[current].parent_pid
+                    if parent not in targets:
+                        break
+                    result += 1
+                    current = parent
+                return result
+
+            processes: list[psutil.Process] = []
+            for pid in sorted(targets, key=lambda item: (-depth(item), item)):
+                try:
+                    process = psutil.Process(pid)
+                    process.terminate()
+                    processes.append(process)
+                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                    continue
+            _gone, alive = psutil.wait_procs(processes, timeout=2.0)
+            for process in alive:
+                try:
+                    process.kill()
+                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                    continue
+            if alive:
+                psutil.wait_procs(alive, timeout=2.0)
+        except ImportError:
+            pass
+
+        surviving_rows = list_processes()
+        surviving_roots = [
+            pid
+            for pid in roots
+            if any(row.pid == pid for row in surviving_rows)
+        ]
+        for pid in surviving_roots:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                cwd=str(PROJECT_ROOT),
+                check=False,
+            )
+    else:
+        for pid in roots:
             try:
                 os.kill(pid, 15)
             except OSError:
                 pass
-    if not dry_run:
-        time.sleep(3)
+
+    time.sleep(3)
+    remaining_rows = list_processes()
+    remaining_targets, _remaining_by_pid = collect_stack_pids(remaining_rows, ports)
+    if remaining_targets:
+        print(
+            "kill_switch: scoped cleanup incomplete; surviving repo-owned PIDs="
+            + ",".join(str(pid) for pid in sorted(remaining_targets))
+        )
+        return -1
     return len(targets)
 
 
@@ -381,7 +487,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         post_tracker_stop(args.base_url, args.session_id)
     rows = list_processes()
     targets, rows_by_pid = collect_stack_pids(rows, ports)
-    kill_targets(targets, rows_by_pid, dry_run=bool(args.dry_run))
+    stopped = kill_targets(targets, rows_by_pid, ports=ports, dry_run=bool(args.dry_run))
+    if stopped < 0:
+        return 3
     if args.kill_only:
         return 0
     if not args.skip_clean:

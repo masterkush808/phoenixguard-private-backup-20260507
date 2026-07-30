@@ -726,6 +726,115 @@ def test_source_identity_gap_cannot_masquerade_as_one_candle_horizon(
     assert unresolved["match_scores"]["source_one_step_horizon_proven"] is False
 
 
+def test_source_bar_id_and_market_time_remain_independent_proofs() -> None:
+    initial_rows = _coverage_candles(39)
+    initial_rows[-2].update(
+        {
+            "source_bar_id": "broker-bar-a",
+            "bar_open_time": 1_783_755_200,
+        }
+    )
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+    )
+    current_rows = _coverage_candles(39)
+    current_rows[-2].update(
+        {
+            "source_bar_id": "broker-bar-b",
+            "bar_open_time": 1_783_755_500,
+        }
+    )
+
+    advanced = resolve_closed_candle_identity_v3(
+        current_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    latest = advanced["state"]["latest_closed"]
+    assert latest["source_identity_field"] == "source_bar_id"
+    assert latest["source_identity_value"] == "broker-bar-b"
+    assert latest["source_time_field"] == "bar_open_time"
+    assert latest["source_time_semantics"] == "BAR_OPEN"
+    assert latest["source_time_seconds"] == 1_783_755_500
+    assert advanced["transition_observed"] is True
+    assert advanced["transition_reason"] == "SOURCE_BAR_ID_ADVANCED"
+    assert advanced["match_scores"]["source_time_step_count"] == 1
+
+
+def test_source_bar_id_cannot_hide_a_multi_interval_time_gap() -> None:
+    initial_rows = _coverage_candles(39)
+    initial_rows[-2].update(
+        {
+            "source_bar_id": "broker-bar-a",
+            "bar_open_time": 1_783_755_200,
+        }
+    )
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+    )
+    current_rows = _coverage_candles(39)
+    current_rows[-2].update(
+        {
+            "source_bar_id": "broker-bar-d",
+            "bar_open_time": 1_783_756_100,
+        }
+    )
+
+    unresolved = resolve_closed_candle_identity_v3(
+        current_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    assert unresolved["transition_observed"] is False
+    assert unresolved["transition_reason"] == "SOURCE_BAR_GAP_UNPROVEN"
+    assert unresolved["match_scores"]["source_time_step_count"] == 3
+    assert unresolved["closed_candle_key"] == initial["closed_candle_key"]
+
+
+def test_conflicting_source_times_fail_closed_even_with_a_new_bar_id() -> None:
+    initial_rows = _coverage_candles(39)
+    initial_rows[-2].update(
+        {
+            "source_bar_id": "broker-bar-a",
+            "bar_open_time": 1_783_755_200,
+            "open_time": 1_783_755_200,
+        }
+    )
+    initial = resolve_closed_candle_identity_v3(
+        initial_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+    )
+    current_rows = _coverage_candles(39)
+    current_rows[-2].update(
+        {
+            "source_bar_id": "broker-bar-b",
+            "bar_open_time": 1_783_755_500,
+            "open_time": 1_783_755_800,
+        }
+    )
+
+    unresolved = resolve_closed_candle_identity_v3(
+        current_rows,
+        pair="CHFJPY_OTC",
+        timeframe="M5",
+        previous_state=initial["state"],
+    )
+
+    assert unresolved["transition_observed"] is False
+    assert unresolved["transition_reason"] == "SOURCE_BAR_GAP_UNPROVEN"
+    assert unresolved["match_scores"]["source_time_step_count"] == 0
+    assert unresolved["match_scores"]["source_time_conflict_current"] is True
+
+
 def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() -> None:
     base = [
         0.52,

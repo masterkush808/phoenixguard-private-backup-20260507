@@ -140,11 +140,13 @@ def test_dashboard_removes_forecast_route_controls_and_uses_adaptive_fallback_po
     assert 'id="tracking-route-svg"' not in text
     assert 'id="tracking-path-a"' not in text
     assert 'id="tracking-path-b"' not in text
-    assert 'const POLL_INTERVAL_MS = 30000;' in text
+    assert 'const POLL_INTERVAL_MS = 2000;' in text
     assert 'ACTIVE_TRACKING_POLL_INTERVAL_MS' not in text
     assert 'scheduleRefresh(POLL_INTERVAL_MS);' in text
     assert 'document.hidden ? POLL_INTERVAL_MS * 4 : POLL_INTERVAL_MS' in text
-    assert 'const POLL_INTERVAL_MS = 3000;' not in text
+    assert 'const POLL_INTERVAL_MS = 30000;' not in text
+    assert "await refreshOperatorState();" in text
+    assert "download the much larger raw session snapshot every two seconds" in text
     assert 'new window.EventSource(sessionStreamUrl())' in text
     assert '+ "/events";' in text
     assert 'source.addEventListener("SESSION_UPDATE"' in text
@@ -153,24 +155,102 @@ def test_dashboard_removes_forecast_route_controls_and_uses_adaptive_fallback_po
     assert "closeSessionStream();" in text
 
 
-def test_dashboard_keeps_trend_regression_and_entry_permission_separate() -> None:
+def test_dashboard_commits_live_answers_before_the_broker_bitmap_finishes() -> None:
     text = _dashboard_text()
+
+    assert "function commitLiveOperatorCopy(payload)" in text
+    copy_start = text.index("function commitLiveOperatorCopy(payload)")
+    surface_start = text.index("function loadSurface(payload, options)")
+    image_request = text.index("els.surfaceImage.src = primaryUrl;", surface_start)
+    live_copy = text.index("commitLiveOperatorCopy(payload);", surface_start)
+    full_commit = text.index("function commitOperatorState(payload)")
+    copy_contract = text[copy_start:surface_start]
+
+    assert live_copy < image_request
+    assert "state.payload = operatorState;" in copy_contract
+    assert "renderTrackingStatus(operatorState);" in copy_contract
+    assert "renderDecision(operatorState);" in copy_contract
+    assert "renderHistory(operatorState);" in copy_contract
+    assert "state.overlays =" not in copy_contract
+    assert "state.overlays = operatorOverlays;" in text[full_commit:]
+
+
+def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions() -> None:
+    text = _dashboard_text()
+
+    assert 'class="decision-questions" aria-label="The three live trading questions"' in text
+    assert text.count('class="decision-question" data-question=') == 3
+    assert 'id="market-origin-question">Where is the market from, and how did history behave?</h3>' in text
+    assert 'id="direction-study-question">Which direction was studied, and what is being studied now?</h3>' in text
+    assert (
+        'id="entry-now-question">What is the best decision to do right now?</h3>'
+        in text
+    )
+    assert 'id="story-step-one-label">Question 1</span>' in text
+    assert 'id="story-step-two-label">Question 2</span>' in text
+    assert 'id="story-step-three-label">Question 3</span>' in text
+    assert 'id="beginner-decision-title" aria-live="assertive">NO — NOT YET</h2>' in text
+    assert '<summary>Technical contracts and evidence</summary>' in text
 
     assert 'id="current-move-title"' in text
     assert 'id="inner-trend-title"' in text
     assert 'id="permission-title"' in text
-    assert 'id="story-step-one-label">Major trend</span>' in text
-    assert 'id="story-step-two-label">Inner trend</span>' in text
-    assert 'id="story-step-three-label">Regression study</span>' in text
     assert 'id="pressure-event" data-state="none"' in text
-    assert 'const action = normalizeAction(permission.action);' in text
-    assert 'setText(els.beginnerDecisionTitle, action === "WAIT" ? "CLOSED" : action);' in text
+    assert 'safeObject(safeObject(payload).three_questions)' in text
+    assert '"market_origin_history"' in text
+    assert '"studied_direction_current"' in text
+    assert '"entry_now"' in text
+    assert 'const answers = threeQuestionAnswers(payload, study, permission);' in text
+    assert 'setText(els.beginnerDecisionTitle, answers.entry.headline);' in text
     assert "function marketRegressionStudy(payload)" in text
     assert "tracking.market_study_v3" in text
     assert "regressionContract.major_trend" in text
     assert "regressionContract.inner_trend" in text
     assert "behaviorContract.market_story" in text
-    assert "Entry permission remains" in text
+    assert "function questionConfidence(value)" in text
+    assert "numeric <= 0" in text
+    assert "function completedCandleHistoryRows(payload)" in text
+    assert "closed_candle_key" in text
+    assert "function rememberCompletedStudyHistory(payload)" in text
+
+
+def test_dashboard_keeps_continuous_observation_restrained_and_non_authoritative() -> None:
+    text = _dashboard_text()
+    lowered = text.lower()
+
+    assert 'id="stream-observation" data-state="unknown" role="status" aria-live="polite"' in text
+    assert 'id="stream-observation-label">Observation health unavailable</span>' in text
+    assert 'id="stream-observation-detail">Stream health unavailable</strong>' in text
+    assert "function renderStreamObservation(payload)" in text
+    assert "function streamContract(payload)" in text
+    assert "function liveFormingRead(payload)" in text
+    assert "const stream = streamContract(payload);" in text
+    assert "function applySessionStreamEvent(event)" in text
+    assert "rememberCompletedStudyHistory(state.liveSession);" in text
+    assert "function sessionSnapshotUrl()" in text
+    assert "function refreshSessionSnapshot(options)" in text
+    assert "function refreshPublicState(options)" in text
+    assert '"DEGRADED_SNAPSHOT_FALLBACK"' in text
+    assert "Never let lower-level pixel telemetry overrule its market_read." in text
+    assert 'direction: "NEUTRAL"' in text
+    assert "direction_available: false" in text
+    assert 'label = "moving";' in text
+    assert 'label = explicitSide === "BUY"' not in text
+    assert 'running: "Continuous observation · live"' in text
+    assert 'degraded: "Continuous observation · limited"' in text
+    assert 'detail.push(formatStreamCount(stream.observed_frames) + " frames observed")' in text
+    assert 'detail.push(formatStreamCount(stream.accepted_keyframes) + " keyframes accepted")' in text
+    assert '.stream-observation[data-state="running"] .stream-observation-dot' in text
+    assert "animation: status-pulse 2.4s ease-in-out infinite;" in text
+    assert "@media (prefers-reduced-motion: reduce)" in text
+    assert lowered.count('class="decision-question" data-question=') == 3
+    assert "<video" not in lowered
+
+    compact_status = text.index('id="stream-observation"')
+    technical_details = text.index('<details class="evidence-details">')
+    detail_metrics = text.index('id="stream-observation-detail"')
+    details_end = text.index("</details>", technical_details)
+    assert compact_status < technical_details < detail_metrics < details_end
 
 
 def test_dashboard_renders_retracement_support_as_observation_only_evidence() -> None:
@@ -247,6 +327,7 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
     assert 'data-overlay-family="order_positioning"' in text
     assert ">Order areas <" in text
     for kind in (
+        "precision_entry",
         "lower_price_buy_area",
         "higher_price_sell_area",
         "upside_break_area",
@@ -257,6 +338,8 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
         assert f'"{kind}"' in text
     assert 'document.querySelectorAll("[data-overlay-kind-control]")' in text
     assert "toggleOverlayKind(button.dataset.overlayKindControl);" in text
+    assert "function overlayIsAvailableForControl(overlay)" in text
+    assert "overlayKind(overlay) === token && overlayIsAvailableForControl(overlay)" in text
     assert 'live: ["current_candles", "market_context", "council", "order_positioning"]' in text
     assert 'history: ["history", "major_swings", "local_swings", "order_positioning"]' in text
     assert "function orderPositioningContext(overlay)" in text

@@ -1777,7 +1777,9 @@ def test_window_tracker_expiry_uses_mapped_timing_instead_of_fixed_short_expiry(
         lane="COUNTERTREND_SCALP",
     )
 
-    assert expiry_for_swing == 60 * 60
+    # Fifteen completed M5 candles map to a 75-minute clock. JPCLF keeps the
+    # exact mapped duration now that the bounded ceiling is two hours.
+    assert expiry_for_swing == 75 * 60
     assert expiry_for_scalp == 15 * 60
 
     service = ContinuousWindowTrackerService(root_dir=tmp_path / "expiry")
@@ -1798,7 +1800,7 @@ def test_window_tracker_expiry_uses_mapped_timing_instead_of_fixed_short_expiry(
     assert service_expiry == 30 * 60
 
 
-def test_window_tracker_live_flow_trigger_uses_target_eta_not_m15_floor() -> None:
+def test_window_tracker_live_flow_trigger_respects_m15_floor() -> None:
     build_profile = cast(Callable[..., dict[str, Any]], getattr(window_tracker_module, "_build_execution_timing_profile"))
     profile = build_profile(
         {
@@ -1831,8 +1833,9 @@ def test_window_tracker_live_flow_trigger_uses_target_eta_not_m15_floor() -> Non
     )
 
     assert profile["timing_class"] == "current_flow_trigger"
-    assert profile["recommended_expiry_seconds"] == 5 * 60
-    assert profile["recommended_candles"] == 1.0
+    assert profile["recommended_expiry_seconds"] == 15 * 60
+    assert profile["recommended_candles"] == 3.0
+    assert profile["under_15_minutes_excluded"] is True
 
 
 def test_window_tracker_timing_blocks_buy_into_nested_resistance_history() -> None:
@@ -6718,6 +6721,56 @@ def test_frozen_study_recovers_even_when_full_window_signature_changes(
     assert refreshed["visual_observation_v3"]["last_recovery_attempt_epoch"] == 0.0
 
 
+def test_snapshot_watchdog_does_not_compete_with_cpu_stream_recovery_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = _surface(width=1280, height=720)
+    recovered = frozen.copy()
+    ImageDraw.Draw(recovered).rectangle(
+        (180, 160, 260, 260),
+        fill=(80, 210, 96),
+    )
+    backend = _RecoveringDuplicateCaptureBackend(
+        [frozen, frozen.copy(), frozen.copy(), frozen.copy()],
+        recovered,
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("SELL"),
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_THRESHOLD", "2")
+    session = tracker.create_session(session_id="pocket-live")
+    focused = tracker.set_focus_region(
+        str(session["session_id"]),
+        [0.10, 0.10, 0.88, 0.86],
+        source="test",
+    )
+    session_id = str(session["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    tracker.save_session(payload)
+    tracker._cpu_stream_failures[session_id] = {  # pyright: ignore[reportPrivateUsage]
+        "status": "fallback_snapshot",
+        "last_error": "test-owned CPU stream recovery",
+    }
+
+    def keep_snapshot_owner(_session_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(tracker, "_cpu_stream_requested_v3", lambda: True)
+    monkeypatch.setattr(tracker, "_ensure_cpu_stream_v3", keep_snapshot_owner)
+
+    for _ in range(3):
+        _allow_next_capture(tracker, session_id)
+        observed = tracker.capture_once(session_id)
+        assert int(observed["frame_index"]) == int(focused["frame_index"])
+
+    assert backend.live_recovery_calls == 0
+
+
 def test_unsafe_frozen_study_recovery_stays_waiting_and_throttles_immediate_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8860,7 +8913,7 @@ def test_tracker_http_surface_updates_capture_interval_control(tmp_path: Path) -
     assert float(payload["execution_controls"]["max_capture_interval_sec"]) == 10.0
     assert int(payload["execution_controls"]["max_executions_per_window"]) == 3
     assert float(payload["execution_controls"]["execution_window_sec"]) == 180.0
-    assert float(payload["execution_controls"]["cooldown_sec"]) == 600.0
+    assert float(payload["execution_controls"]["cooldown_sec"]) == 900.0
     assert float(payload["execution_controls"]["phoenix_report_interval_sec"]) == 24.0
     for private_key in (
         "auto_memory_projection",
@@ -9419,11 +9472,11 @@ def test_tracker_execution_controls_default_to_live_fixed_amount(tmp_path: Path)
     assert controls["trade_profile"] == "HIGH_FREQUENCY"
     assert controls["high_frequency_enabled"] is True
     assert controls["swing_fallback_enabled"] is False
-    assert int(controls["high_frequency_expiry_seconds"]) == 600
+    assert int(controls["high_frequency_expiry_seconds"]) == 900
     assert float(session["capture_interval_sec"]) == 30.0
     assert float(controls["min_capture_interval_sec"]) == 0.5
     assert float(controls["max_capture_interval_sec"]) == 30.0
-    assert float(controls["cooldown_sec"]) == 600.0
+    assert float(controls["cooldown_sec"]) == 900.0
 
     updated = tracker.update_session_controls(
         str(session["session_id"]),
@@ -9941,7 +9994,7 @@ def test_tracker_execution_reads_full_gui_when_chart_focus_excludes_order_panel(
     assert result["broker_surface"]["buy_button"]["bbox"][0] > int(full_gui.width * 0.80)
 
 
-def test_tracker_demo_random_trade_clicks_fixed_m3_expiry(tmp_path: Path) -> None:
+def test_tracker_demo_random_trade_clamps_to_fifteen_minute_expiry(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -9958,7 +10011,7 @@ def test_tracker_demo_random_trade_clicks_fixed_m3_expiry(tmp_path: Path) -> Non
     assert result["broker_execution_state"]["status"] == "blocked_by_runtime"
     assert "Demo random live execution is disabled" in result["broker_execution_state"]["message"]
     assert result["broker_execution_state"]["active_trade"] == {}
-    assert result["broker_surface"]["expiry_lock"]["configured_text"] == "00:03:00"
+    assert result["broker_surface"]["expiry_lock"]["configured_text"] == "00:15:00"
     assert float(result["broker_execution_state"]["cooldown_until_epoch"]) == 0.0
 
 

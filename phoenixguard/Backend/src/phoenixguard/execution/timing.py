@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any, Iterable, Mapping, Sequence, cast
 
+from phoenixguard.core.timing_policy_v3 import (
+    MAXIMUM_STUDIED_TRADE_DURATION_SECONDS,
+    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+)
+
 
 @dataclass(frozen=True)
 class TimingWindow:
@@ -40,10 +45,12 @@ class TimingProfile:
             raise ValueError("average_setup_duration_seconds must be > 0")
         if self.median_setup_duration_seconds <= 0:
             raise ValueError("median_setup_duration_seconds must be > 0")
-        if self.min_safe_expiry_seconds <= 0:
-            raise ValueError("min_safe_expiry_seconds must be > 0")
+        if self.min_safe_expiry_seconds < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS:
+            raise ValueError("min_safe_expiry_seconds must be at least 900")
         if self.max_safe_expiry_seconds < self.min_safe_expiry_seconds:
             raise ValueError("max_safe_expiry_seconds must be >= min_safe_expiry_seconds")
+        if self.max_safe_expiry_seconds > MAXIMUM_STUDIED_TRADE_DURATION_SECONDS:
+            raise ValueError("max_safe_expiry_seconds must not exceed 7200")
         if not self.min_safe_expiry_seconds <= self.best_historical_expiry_seconds <= self.max_safe_expiry_seconds:
             raise ValueError("best_historical_expiry_seconds must be inside safe expiry range")
         if self.late_entry_threshold_seconds <= 0:
@@ -116,9 +123,18 @@ def build_timing_profile(
     reversal_window_seconds: tuple[int, int],
     continuation_window_seconds: tuple[int, int],
 ) -> TimingProfile:
-    durations = tuple(int(value) for value in historical_durations_seconds if int(value) > 0)
+    durations = tuple(
+        int(value)
+        for value in historical_durations_seconds
+        if MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        <= int(value)
+        <= MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+    )
     if not durations:
-        raise ValueError("historical_durations_seconds must contain at least one positive value")
+        raise ValueError(
+            "historical_durations_seconds must contain at least one bounded "
+            "duration of 900 seconds or longer"
+        )
     return TimingProfile(
         symbol=symbol,
         timeframe=timeframe,
@@ -142,11 +158,11 @@ DEFAULT_TIMING_PROFILES: dict[str, TimingProfile] = {
             symbol="*",
             timeframe="*",
             setup_type="continuation",
-            average_setup_duration_seconds=150,
-            median_setup_duration_seconds=135,
-            min_safe_expiry_seconds=120,
-            max_safe_expiry_seconds=300,
-            best_historical_expiry_seconds=180,
+            average_setup_duration_seconds=1800,
+            median_setup_duration_seconds=1500,
+            min_safe_expiry_seconds=900,
+            max_safe_expiry_seconds=3600,
+            best_historical_expiry_seconds=1800,
             late_entry_threshold_seconds=210,
             fakeout_window=TimingWindow(0, 45),
             reversal_window=TimingWindow(45, 105),
@@ -156,11 +172,11 @@ DEFAULT_TIMING_PROFILES: dict[str, TimingProfile] = {
             symbol="*",
             timeframe="*",
             setup_type="reversal",
-            average_setup_duration_seconds=180,
-            median_setup_duration_seconds=165,
-            min_safe_expiry_seconds=180,
-            max_safe_expiry_seconds=420,
-            best_historical_expiry_seconds=300,
+            average_setup_duration_seconds=2400,
+            median_setup_duration_seconds=2100,
+            min_safe_expiry_seconds=1200,
+            max_safe_expiry_seconds=5400,
+            best_historical_expiry_seconds=2400,
             late_entry_threshold_seconds=260,
             fakeout_window=TimingWindow(0, 60),
             reversal_window=TimingWindow(90, 260),
@@ -170,11 +186,11 @@ DEFAULT_TIMING_PROFILES: dict[str, TimingProfile] = {
             symbol="*",
             timeframe="*",
             setup_type="fakeout",
-            average_setup_duration_seconds=90,
-            median_setup_duration_seconds=75,
-            min_safe_expiry_seconds=60,
-            max_safe_expiry_seconds=180,
-            best_historical_expiry_seconds=90,
+            average_setup_duration_seconds=1500,
+            median_setup_duration_seconds=1200,
+            min_safe_expiry_seconds=900,
+            max_safe_expiry_seconds=2700,
+            best_historical_expiry_seconds=1500,
             late_entry_threshold_seconds=120,
             fakeout_window=TimingWindow(0, 90),
             reversal_window=TimingWindow(60, 150),

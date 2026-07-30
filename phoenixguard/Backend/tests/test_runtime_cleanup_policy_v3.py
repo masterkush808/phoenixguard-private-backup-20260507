@@ -49,7 +49,11 @@ def test_cleanup_apply_deletes_disposable_state_and_preserves_operator_file(
     (old_backup / "old-runtime.json").write_text("generated", encoding="utf-8")
     reports = tmp_path / "reports"
     reports.mkdir()
-    (reports / "old-validation.json").write_text("generated", encoding="utf-8")
+    blueprint = reports / "architecture-blueprint.pdf"
+    blueprint.write_bytes(b"committed documentation")
+    cleanup_reports = tmp_path / "cleanup_reports"
+    cleanup_reports.mkdir()
+    (cleanup_reports / "old-validation.json").write_text("generated", encoding="utf-8")
     codex_runtime = tmp_path / ".codex_runtime"
     codex_runtime.mkdir()
     (codex_runtime / "old-state.json").write_text("generated", encoding="utf-8")
@@ -66,7 +70,9 @@ def test_cleanup_apply_deletes_disposable_state_and_preserves_operator_file(
     assert cleaner.main() == 0
     assert not disposable.exists()
     assert not (tmp_path / "_archive" / "runtime_backup").exists()
-    assert not reports.exists()
+    assert reports.exists()
+    assert blueprint.exists()
+    assert not cleanup_reports.exists()
     assert not codex_runtime.exists()
     assert not (web / "test-results").exists()
     assert not smoke_image.exists()
@@ -102,15 +108,15 @@ def test_cleanup_rejects_reparse_redirect_for_disposable_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_cleaner(monkeypatch, tmp_path)
-    reports = tmp_path / "reports"
-    reports.mkdir()
+    cleanup_reports = tmp_path / "cleanup_reports"
+    cleanup_reports.mkdir()
     protected = tmp_path / "data"
     protected.mkdir()
     (protected / "keep.json").write_text("{}", encoding="utf-8")
     original_reparse_check = cleaner._is_reparse_point  # pyright: ignore[reportPrivateUsage]
 
     def fake_reparse(path: Path) -> bool:
-        return path == reports or original_reparse_check(path)
+        return path == cleanup_reports or original_reparse_check(path)
 
     monkeypatch.setattr(cleaner, "_is_reparse_point", fake_reparse)
 
@@ -124,8 +130,8 @@ def test_cleanup_refuses_a_tree_with_a_nested_reparse_descendant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_cleaner(monkeypatch, tmp_path)
-    reports = tmp_path / "reports"
-    nested_redirect = reports / "nested-junction"
+    cleanup_reports = tmp_path / "cleanup_reports"
+    nested_redirect = cleanup_reports / "nested-junction"
     nested_redirect.mkdir(parents=True)
     protected_file = nested_redirect / "keep.json"
     protected_file.write_text("{}", encoding="utf-8")

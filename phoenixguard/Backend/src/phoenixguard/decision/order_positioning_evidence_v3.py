@@ -113,7 +113,14 @@ _POSITIONING_SOURCE_EXPORT_FIELDS: Final = frozenset(
     }
 )
 _ORDER_REFERENCE_SOURCE_TYPES: Final = frozenset(
-    {"DEMAND_ZONE", "SUPPLY_ZONE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"}
+    {
+        "DEMAND_ZONE",
+        "SUPPLY_ZONE",
+        "ORDER_BLOCK",
+        "RETEST_BOX",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+    }
 )
 _ORDER_REFERENCE_LIVE_STATES: Final = frozenset(
     {
@@ -812,25 +819,29 @@ def _order_reaction_window(
     session: Mapping[str, Any],
     *,
     chart_width: float,
+    allow_visual_closed_fallback: bool = False,
 ) -> dict[str, Any]:
     """Anchor a bounded visible reaction window to one named closed candle."""
 
     identity = _identity(session)
     actual = _actual_closed_candle(session, identity)
     anchor_id = _text(actual.get("track_id"))
-    if not anchor_id:
-        return {}
     anchors = order_positioning_reprojection_anchors_v3(session)
-    anchor = next(
-        (row for row in anchors if _text(row.get("anchor_id")) == anchor_id),
-        None,
+    anchor = (
+        next(
+            (row for row in anchors if _text(row.get("anchor_id")) == anchor_id),
+            None,
+        )
+        if anchor_id
+        else None
     )
     anchor_x = _number(anchor.get("x_norm")) if anchor is not None else None
+    anchor_source = "DECLARED_LATEST_COMPLETED_CANDLE" if anchor_id else ""
     if anchor_x is None:
         scene = _scene_forecast(session)
         identity_state = _mapping(scene.get("closed_candle_identity_state"))
         latest_closed = _mapping(identity_state.get("latest_closed"))
-        if _text(latest_closed.get("track_id")) == anchor_id:
+        if anchor_id and _text(latest_closed.get("track_id")) == anchor_id:
             anchor_x = _order_candle_x_norm(
                 latest_closed,
                 chart_width=chart_width,
@@ -852,7 +863,52 @@ def _order_reaction_window(
                 matching_candle,
                 chart_width=chart_width,
             )
+    forming_candle_excluded = False
+    if (
+        (not anchor_id or anchor_x is None)
+        and allow_visual_closed_fallback
+    ):
+        positioned_candles = sorted(
+            (
+                (x_norm, candle)
+                for candle in tracked_candles
+                if (
+                    x_norm := _order_candle_x_norm(
+                        candle,
+                        chart_width=chart_width,
+                    )
+                )
+                is not None
+            ),
+            key=lambda item: item[0],
+        )
+        explicit_closed = [
+            (x_norm, candle)
+            for x_norm, candle in positioned_candles
+            if candle.get("is_closed") is True
+        ]
+        fallback: tuple[float, dict[str, Any]] | None = None
+        if explicit_closed:
+            fallback = explicit_closed[-1]
+            anchor_source = "TRACKED_CANDLE_EXPLICIT_CLOSED"
+        elif len(positioned_candles) >= 2:
+            # The rightmost visible candle is still forming.  The candle
+            # immediately before it is the newest visual candle whose body
+            # cannot change, so it is safe for observational geometry only.
+            fallback = positioned_candles[-2]
+            anchor_source = "PENULTIMATE_VISIBLE_CANDLE"
+            forming_candle_excluded = True
+        if fallback is not None:
+            anchor_x, fallback_candle = fallback
+            anchor_id = _text(
+                fallback_candle.get("track_id"),
+                fallback_candle.get("candle_id"),
+                fallback_candle.get("object_id"),
+                fallback_candle.get("id"),
+            )
     if anchor_x is None or not 0.0 <= anchor_x < 1.0:
+        return {}
+    if not anchor_id:
         return {}
 
     x_values = sorted(
@@ -894,6 +950,8 @@ def _order_reaction_window(
         "geometry_role": _ORDER_REACTION_WINDOW_GEOMETRY_ROLE,
         "reaction_window_anchor": _ORDER_REACTION_WINDOW_ANCHOR,
         "reaction_window_anchor_id": anchor_id,
+        "reaction_window_anchor_source": anchor_source,
+        "forming_candle_excluded": forming_candle_excluded,
         "reaction_window_origin_x_norm": round(anchor_x, 6),
         "reaction_window_step_x_norm": round(step_x, 6),
         "reaction_window_horizon_steps": visible_steps,
@@ -1089,6 +1147,7 @@ def build_current_order_reference_map_v3(session: Mapping[str, Any]) -> dict[str
     reaction_window = _order_reaction_window(
         session,
         chart_width=chart_width,
+        allow_visual_closed_fallback=True,
     )
     reaction_x_bounds = reaction_window.get("x_bounds")
     if (
@@ -1152,10 +1211,19 @@ def build_current_order_reference_map_v3(session: Mapping[str, Any]) -> dict[str
     drafts: list[dict[str, Any]] = []
     for source in sources:
         source_type = _text(source.get("type")).upper()
-        above = source_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}
-        expected_side = "SELL" if above else "BUY"
-        if _direction(source.get("side")) != expected_side:
+        source_side = _direction(source.get("side"))
+        if source_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}:
+            expected_side = "SELL"
+        elif source_type in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"}:
+            expected_side = "BUY"
+        else:
+            # Order blocks and retests are directional objects.  A bullish
+            # object is a passive lower-price BUY reference; a bearish object
+            # is a passive higher-price SELL reference.
+            expected_side = source_side
+        if expected_side not in {"BUY", "SELL"} or source_side != expected_side:
             continue
+        above = expected_side == "SELL"
         source_bounds = _order_reference_bounds(
             source,
             chart_width=chart_width,
@@ -1173,12 +1241,7 @@ def build_current_order_reference_map_v3(session: Mapping[str, Any]) -> dict[str
             reaction_right,
             source_bounds[3],
         ]
-        if source_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}:
-            limit_kind = "SELL_LIMIT"
-        elif source_type in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"}:
-            limit_kind = "BUY_LIMIT"
-        else:
-            limit_kind = ""
+        limit_kind = "SELL_LIMIT" if above else "BUY_LIMIT"
         if limit_kind:
             drafts.append(
                 _order_reference_row(

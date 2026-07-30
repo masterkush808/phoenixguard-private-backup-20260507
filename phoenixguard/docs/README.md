@@ -8,10 +8,15 @@ Current V3 source of truth:
 
 - `../reports/PhoenixGuard_V3_Continuous_Market_Intelligence_Blueprint_2026-07-25.pdf` -
   structured operator-to-execution architecture and deep continuous-research blueprint
+- `../reports/PhoenixGuard_V3_Deep_Market_Study_Blueprint_2026-07-29.pdf` - complete V3 market-study,
+  CPU-streaming, Pair DNA, exact timing-proof, and JPCLF implementation blueprint
 - `architecture/PHOENIXGUARD_V3_MARKET_STUDY_BLUEPRINT.md` - continuous closed-candle study,
   persistence, Pair DNA, hierarchical motifs, time-to-event evidence, normalized historical paths,
   adaptive feature governance, regime drift, non-causal cross-pair associations, proof
   certificates, operator projection, and live acceptance checks
+- `architecture/PHOENIXGUARD_V3_CPU_STREAMING_ARCHITECTURE.md` - CPU-first continuous broker
+  observation, bounded latest-frame admission, source/geometry generations, event-gated V3 study,
+  three-question operator projection, failure recovery, and live certification gates
 - `architecture/ARCHITECTURE_MAP.md` - compact launcher-to-dashboard and study-authority map
 - `runtime_endpoint_map.md` - active API surface and authority classification
 

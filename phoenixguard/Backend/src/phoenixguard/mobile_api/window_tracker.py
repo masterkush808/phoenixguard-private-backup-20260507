@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 import copy
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 from importlib import import_module
@@ -28,6 +29,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageGrab
 from phoenixguard.core.decision_state import build_trade_intent, derive_state_version, derive_valid_until_epoch
 
 from phoenixguard.core.config import RUNTIME
+from phoenixguard.core.timing_policy_v3 import (
+    MAXIMUM_STUDIED_TRADE_DURATION_SECONDS,
+    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+    duration_eligibility_contract_v3,
+)
 from phoenixguard.core.utils import utc_now_iso
 from phoenixguard.paths import PROJECT_ROOT
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
@@ -309,18 +315,18 @@ _HIGH_FREQUENCY_FALLBACK_PROFILE = "AUTO"
 _HIGH_FREQUENCY_TIMEFRAME = "M5"
 _HIGH_FREQUENCY_SUPPORTED_TIMEFRAMES = frozenset({"M1", "M5"})
 _HIGH_FREQUENCY_HORIZON_CANDLES = 2
-_HIGH_FREQUENCY_FIXED_EXPIRY_SEC = 10 * 60
-_HIGH_FREQUENCY_M1_EXPIRY_SEC = 2 * 60
+_HIGH_FREQUENCY_FIXED_EXPIRY_SEC = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+_HIGH_FREQUENCY_M1_EXPIRY_SEC = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
 _HIGH_FREQUENCY_ENTRY_GRACE_SEC = 45.0
 _HIGH_FREQUENCY_MIN_CONFIDENCE = 0.44
 _CALIBRATED_SHOOTER_PACKET_VALID_SEC = 60.0
 _EXECUTION_DEFAULT_COOLDOWN_SEC = float(_HIGH_FREQUENCY_FIXED_EXPIRY_SEC)
-_EXECUTION_DEFAULT_EXPIRY_SEC = 300
-_EXECUTION_MIN_LIVE_EXPIRY_SEC = 60
-_EXECUTION_MAX_LIVE_EXPIRY_SEC = 3600
+_EXECUTION_DEFAULT_EXPIRY_SEC = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+_EXECUTION_MIN_LIVE_EXPIRY_SEC = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+_EXECUTION_MAX_LIVE_EXPIRY_SEC = MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
 _EXPIRY_OCR_BLOCK_MIN_CONFIDENCE = 0.72
 _EXPIRY_CLICK_PLAN_ASSUMED_CONFIDENCE = 0.82
-_EXECUTION_TACTICAL_MIN_SEC = 60
+_EXECUTION_TACTICAL_MIN_SEC = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
 _EXECUTION_MIN_PRIMARY_TARGET_CANDLES = 10
 _EXECUTION_MAX_PRIMARY_TARGET_CANDLES = 36
 _MAJOR_TREND_LOCK_CONFIDENCE = 0.58
@@ -584,6 +590,454 @@ def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
         if isinstance(item, Mapping):
             result.append(_mapping_to_dict(item))
     return result
+
+
+_PROVEN_CLOSED_CANDLE_TIME_SCHEMA_V3 = "PG_PROVEN_CLOSED_CANDLE_TIME_V3"
+_PROVEN_CLOSED_CANDLE_TIME_LIMIT_V3 = 32
+_PROVEN_CLOSED_CANDLE_TIMESTAMP_ALIASES_V3 = (
+    "timestamp",
+    "time",
+    "bar_open_time",
+    "open_time",
+    "open_timestamp",
+    "candle_open_epoch",
+    "closed_candle_epoch",
+    "close_time",
+)
+_PROVEN_CLOSED_CANDLE_SOURCE_CLOSE_FIELDS_V3 = (
+    "closed_candle_epoch",
+    "close_time",
+)
+_PROVEN_CLOSED_CANDLE_SOURCE_OPEN_FIELDS_V3 = (
+    "bar_open_time",
+    "open_time",
+    "open_timestamp",
+    "candle_open_epoch",
+)
+_PROVEN_CLOSED_CANDLE_TIMESTAMP_SOURCES_V3 = frozenset(
+    {
+        "SOURCE_CLOSE_TIME",
+        "SOURCE_OPEN_PLUS_TIMEFRAME",
+        "RESOLVER_BOUND_BOUNDARY_GRID",
+    }
+)
+
+
+def _exact_epoch_seconds_v3(value: object) -> float | None:
+    """Parse an explicit source time without treating capture time as a close."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    parsed: float | None = None
+    if isinstance(value, (int, float)):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    else:
+        text_value = str(value).strip()
+        if not text_value:
+            return None
+        try:
+            parsed = float(text_value)
+        except (TypeError, ValueError, OverflowError):
+            try:
+                iso_value = text_value[:-1] + "+00:00" if text_value.endswith("Z") else text_value
+                parsed_datetime = datetime.fromisoformat(iso_value)
+                if parsed_datetime.tzinfo is None:
+                    return None
+                parsed = float(parsed_datetime.timestamp())
+            except (TypeError, ValueError, OverflowError):
+                return None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    magnitude = abs(parsed)
+    if magnitude >= 1e17:
+        parsed /= 1e9
+    elif magnitude >= 1e14:
+        parsed /= 1e6
+    elif magnitude >= 1e11:
+        parsed /= 1e3
+    rounded = round(parsed)
+    if abs(parsed - rounded) > 1e-6:
+        return None
+    return float(rounded)
+
+
+def _strict_nonnegative_integer_v3(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or number < 0.0 or not number.is_integer():
+        return None
+    return int(number)
+
+
+def _canonical_closed_candle_time_proof_v3(
+    value: Mapping[str, Any],
+    *,
+    symbol: str,
+    timeframe: str,
+    source_cadence_seconds: int,
+) -> dict[str, Any] | None:
+    """Return only an internally issued, exact BAR_CLOSE proof contract."""
+
+    row = _mapping_to_dict(value)
+    canonical_symbol = " ".join(str(symbol or "").strip().upper().split())
+    canonical_timeframe = " ".join(str(timeframe or "").strip().upper().split())
+    if (
+        row.get("schema_version") != _PROVEN_CLOSED_CANDLE_TIME_SCHEMA_V3
+        or " ".join(str(row.get("symbol") or "").strip().upper().split())
+        != canonical_symbol
+        or " ".join(str(row.get("timeframe") or "").strip().upper().split())
+        != canonical_timeframe
+        or row.get("timestamp_semantic") != "BAR_CLOSE"
+        or str(row.get("timestamp_source") or "")
+        not in _PROVEN_CLOSED_CANDLE_TIMESTAMP_SOURCES_V3
+        or row.get("proof_source") != "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+    ):
+        return None
+    closed_key = str(row.get("closed_candle_key") or "").strip()
+    closed_sequence = _strict_nonnegative_integer_v3(
+        row.get("closed_candle_sequence")
+    )
+    bound_row_index = _strict_nonnegative_integer_v3(row.get("bound_row_index"))
+    cadence = _strict_nonnegative_integer_v3(row.get("source_cadence_seconds"))
+    transition_count = _strict_nonnegative_integer_v3(row.get("transition_count"))
+    close_epoch = _exact_epoch_seconds_v3(row.get("close_epoch_seconds"))
+    try:
+        observed_epoch = float(cast(Any, row.get("observed_epoch_seconds")))
+        observation_latency = float(
+            cast(Any, row.get("observation_latency_seconds"))
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not closed_key
+        or len(closed_key) > 256
+        or closed_sequence is None
+        or bound_row_index is None
+        or cadence != int(source_cadence_seconds)
+        or transition_count is None
+        or close_epoch is None
+        or not math.isfinite(observed_epoch)
+        or not math.isfinite(observation_latency)
+        or observed_epoch < close_epoch
+        or observation_latency < 0.0
+        or observation_latency >= float(source_cadence_seconds)
+        or abs((observed_epoch - close_epoch) - observation_latency) > 1e-5
+        or not isinstance(row.get("contiguous_from_previous"), bool)
+    ):
+        return None
+    return {
+        "schema_version": _PROVEN_CLOSED_CANDLE_TIME_SCHEMA_V3,
+        "symbol": canonical_symbol,
+        "timeframe": canonical_timeframe,
+        "closed_candle_key": closed_key,
+        "closed_candle_sequence": closed_sequence,
+        "close_epoch_seconds": close_epoch,
+        "timestamp_semantic": "BAR_CLOSE",
+        "timestamp_source": str(row["timestamp_source"]),
+        "proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+        "bound_row_index": bound_row_index,
+        "source_cadence_seconds": cadence,
+        "observed_epoch_seconds": round(observed_epoch, 6),
+        "observation_latency_seconds": round(observation_latency, 6),
+        "contiguous_from_previous": bool(row["contiguous_from_previous"]),
+        "transition_count": transition_count,
+    }
+
+
+def _unique_current_resolver_binding_index_v3(
+    identity_state: Mapping[str, Any],
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    closed_candle_key: str,
+    closed_candle_sequence: int,
+) -> int | None:
+    candidates: list[int] = []
+    for binding in _sequence_of_mappings(
+        identity_state.get("stable_visible_candle_bindings", [])
+    ):
+        row_index = _strict_nonnegative_integer_v3(binding.get("current_row_index"))
+        event_sequence = _strict_nonnegative_integer_v3(
+            binding.get("closed_candle_sequence")
+        )
+        sequence_distance = _strict_nonnegative_integer_v3(
+            binding.get("sequence_distance_from_latest")
+        )
+        reobserved = _mapping_to_dict(binding.get("reobserved_observation", {}))
+        reobserved_index = _strict_nonnegative_integer_v3(reobserved.get("index"))
+        if (
+            row_index is not None
+            and row_index < len(candles)
+            and reobserved_index == row_index
+            and str(binding.get("closed_candle_key") or "").strip()
+            == closed_candle_key
+            and event_sequence == closed_candle_sequence
+            and sequence_distance == 0
+        ):
+            candidates.append(row_index)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _source_bound_close_epoch_v3(
+    candle: Mapping[str, Any],
+    *,
+    source_cadence_seconds: int,
+) -> tuple[float, str] | None:
+    close_epochs = {
+        parsed
+        for field_name in _PROVEN_CLOSED_CANDLE_SOURCE_CLOSE_FIELDS_V3
+        if (parsed := _exact_epoch_seconds_v3(candle.get(field_name))) is not None
+    }
+    open_derived_epochs = {
+        parsed + float(source_cadence_seconds)
+        for field_name in _PROVEN_CLOSED_CANDLE_SOURCE_OPEN_FIELDS_V3
+        if (parsed := _exact_epoch_seconds_v3(candle.get(field_name))) is not None
+    }
+    if len(close_epochs) > 1 or len(open_derived_epochs) > 1:
+        return None
+    if close_epochs:
+        close_epoch = next(iter(close_epochs))
+        if open_derived_epochs and next(iter(open_derived_epochs)) != close_epoch:
+            return None
+        return close_epoch, "SOURCE_CLOSE_TIME"
+    if open_derived_epochs:
+        return next(iter(open_derived_epochs)), "SOURCE_OPEN_PLUS_TIMEFRAME"
+    return None
+
+
+def _advance_closed_candle_time_attestations_v3(
+    *,
+    candles: Sequence[Mapping[str, Any]],
+    symbol: str,
+    timeframe: str,
+    capture_epoch: object,
+    previous_identity_state: Mapping[str, Any] | None,
+    identity_resolution: Mapping[str, Any],
+    identity_state: Mapping[str, Any],
+    market_identity_confirmed: bool,
+    timeframe_identity_confirmed: bool,
+) -> dict[str, Any]:
+    """Bind exact source or one-step boundary time to resolver candle identity.
+
+    Capture time is evidence that a proven rollover straddled a timeframe
+    boundary. It is never itself relabeled as a candle-close timestamp.
+    """
+
+    state = copy.deepcopy(_mapping_to_dict(identity_state))
+    previous = _mapping_to_dict(previous_identity_state)
+    canonical_symbol = " ".join(str(symbol or "").strip().upper().split())
+    canonical_timeframe = " ".join(str(timeframe or "").strip().upper().split())
+    cadence = int(_EXECUTION_TIMEFRAME_SECONDS.get(canonical_timeframe, 0) or 0)
+    try:
+        observed_epoch = float(cast(Any, capture_epoch))
+    except (TypeError, ValueError, OverflowError):
+        observed_epoch = 0.0
+    capture_is_valid = bool(
+        math.isfinite(observed_epoch) and observed_epoch > 0.0
+    )
+
+    ledger: list[dict[str, Any]] = []
+    seen_identities: set[tuple[str, int]] = set()
+    for raw_proof in _sequence_of_mappings(
+        previous.get("closed_candle_time_attestations_v3", [])
+    ):
+        proof = _canonical_closed_candle_time_proof_v3(
+            raw_proof,
+            symbol=canonical_symbol,
+            timeframe=canonical_timeframe,
+            source_cadence_seconds=cadence,
+        )
+        if proof is None:
+            continue
+        identity = (
+            str(proof["closed_candle_key"]),
+            int(proof["closed_candle_sequence"]),
+        )
+        if identity in seen_identities:
+            continue
+        seen_identities.add(identity)
+        ledger.append(proof)
+    ledger = ledger[-_PROVEN_CLOSED_CANDLE_TIME_LIMIT_V3:]
+
+    current_key = str(identity_resolution.get("closed_candle_key") or "").strip()
+    current_sequence = _strict_nonnegative_integer_v3(
+        identity_resolution.get("closed_candle_sequence")
+    )
+    current_identity = (
+        (current_key, current_sequence)
+        if current_key and current_sequence is not None
+        else None
+    )
+    current_proof = next(
+        (
+            proof
+            for proof in ledger
+            if current_identity
+            == (
+                str(proof.get("closed_candle_key") or ""),
+                _strict_nonnegative_integer_v3(
+                    proof.get("closed_candle_sequence")
+                ),
+            )
+        ),
+        None,
+    )
+    bound_row_index = (
+        _unique_current_resolver_binding_index_v3(
+            state,
+            candles,
+            closed_candle_key=current_key,
+            closed_candle_sequence=int(current_sequence),
+        )
+        if current_sequence is not None
+        else None
+    )
+
+    candidate_close_epoch: float | None = None
+    candidate_timestamp_source = ""
+    transition_count = _strict_nonnegative_integer_v3(
+        identity_resolution.get("transition_count")
+    )
+    if transition_count is None:
+        transition_count = len(
+            _sequence_of_mappings(state.get("confirmed_event_batch", []))
+        )
+    if (
+        current_proof is None
+        and capture_is_valid
+        and cadence > 0
+        and market_identity_confirmed
+        and timeframe_identity_confirmed
+        and bound_row_index is not None
+    ):
+        source_time = _source_bound_close_epoch_v3(
+            candles[bound_row_index],
+            source_cadence_seconds=cadence,
+        )
+        if source_time is not None and source_time[0] <= observed_epoch:
+            candidate_close_epoch, candidate_timestamp_source = source_time
+        else:
+            previous_sequence = _strict_nonnegative_integer_v3(
+                previous.get("event_sequence")
+            )
+            previous_observed_epoch = _float_or(
+                previous.get("latest_observed_epoch_seconds_v3"),
+                0.0,
+            )
+            boundary_epoch = float(
+                math.floor(observed_epoch / float(cadence)) * cadence
+            )
+            previous_boundary_epoch = float(
+                math.floor(previous_observed_epoch / float(cadence)) * cadence
+            )
+            confirmed_batch = _sequence_of_mappings(
+                state.get("confirmed_event_batch", [])
+            )
+            confirmed = confirmed_batch[0] if len(confirmed_batch) == 1 else {}
+            transition_is_exactly_one = bool(
+                identity_resolution.get("transition_observed") is True
+                and transition_count == 1
+                and len(confirmed_batch) == 1
+                and previous_sequence is not None
+                and current_sequence == previous_sequence + 1
+                and str(confirmed.get("closed_candle_key") or "") == current_key
+                and _strict_nonnegative_integer_v3(
+                    confirmed.get("closed_candle_sequence")
+                )
+                == current_sequence
+            )
+            boundary_is_straddled = bool(
+                previous_observed_epoch > 0.0
+                and previous_observed_epoch < boundary_epoch <= observed_epoch
+                and abs(
+                    boundary_epoch
+                    - previous_boundary_epoch
+                    - float(cadence)
+                )
+                <= 1e-6
+                and 0.0 <= observed_epoch - boundary_epoch < float(cadence)
+            )
+            if transition_is_exactly_one and boundary_is_straddled:
+                candidate_close_epoch = boundary_epoch
+                candidate_timestamp_source = "RESOLVER_BOUND_BOUNDARY_GRID"
+
+    if (
+        current_proof is None
+        and candidate_close_epoch is not None
+        and current_identity is not None
+        and current_sequence is not None
+        and bound_row_index is not None
+    ):
+        previous_attestation = next(
+            (
+                proof
+                for proof in reversed(ledger)
+                if int(proof.get("closed_candle_sequence", -1))
+                == int(current_sequence) - 1
+            ),
+            None,
+        )
+        contiguous_from_previous = bool(
+            candidate_timestamp_source == "RESOLVER_BOUND_BOUNDARY_GRID"
+            or (
+                previous_attestation is not None
+                and abs(
+                    candidate_close_epoch
+                    - float(previous_attestation["close_epoch_seconds"])
+                    - float(cadence)
+                )
+                <= 1e-6
+            )
+        )
+        current_proof = {
+            "schema_version": _PROVEN_CLOSED_CANDLE_TIME_SCHEMA_V3,
+            "symbol": canonical_symbol,
+            "timeframe": canonical_timeframe,
+            "closed_candle_key": current_key,
+            "closed_candle_sequence": int(current_sequence),
+            "close_epoch_seconds": float(candidate_close_epoch),
+            "timestamp_semantic": "BAR_CLOSE",
+            "timestamp_source": candidate_timestamp_source,
+            "proof_source": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+            "bound_row_index": int(bound_row_index),
+            "source_cadence_seconds": cadence,
+            "observed_epoch_seconds": round(observed_epoch, 6),
+            "observation_latency_seconds": round(
+                observed_epoch - candidate_close_epoch,
+                6,
+            ),
+            "contiguous_from_previous": contiguous_from_previous,
+            "transition_count": int(transition_count),
+        }
+        canonical_proof = _canonical_closed_candle_time_proof_v3(
+            current_proof,
+            symbol=canonical_symbol,
+            timeframe=canonical_timeframe,
+            source_cadence_seconds=cadence,
+        )
+        if canonical_proof is not None:
+            ledger.append(canonical_proof)
+            ledger = ledger[-_PROVEN_CLOSED_CANDLE_TIME_LIMIT_V3:]
+
+    state["closed_candle_time_attestations_v3"] = ledger
+    previous_observed_epoch = _float_or(
+        previous.get("latest_observed_epoch_seconds_v3"),
+        0.0,
+    )
+    if capture_is_valid:
+        state["latest_observed_epoch_seconds_v3"] = max(
+            previous_observed_epoch,
+            observed_epoch,
+        )
+    elif previous_observed_epoch > 0.0:
+        state["latest_observed_epoch_seconds_v3"] = previous_observed_epoch
+    return state
 
 
 _SESSION_NESTED_DUPLICATE_KEYS = frozenset(
@@ -3669,8 +4123,15 @@ def _build_high_frequency_candle_cycle_context(
             )
         ),
     )
+    minimum_horizon_candles = int(
+        math.ceil(
+            MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+            / float(max(1, timeframe_seconds))
+        )
+    )
     horizon_candles = max(
         _HIGH_FREQUENCY_HORIZON_CANDLES,
+        minimum_horizon_candles,
         int(
             float(
                 controls.get("high_frequency_horizon_candles", _HIGH_FREQUENCY_HORIZON_CANDLES)
@@ -3695,10 +4156,14 @@ def _build_high_frequency_candle_cycle_context(
     elif not candle_closed:
         reason = f"Current {timeframe_label or configured_timeframe} candle is still open; {clock['seconds_remaining']:.1f}s until close."
     else:
-        reason = f"{side} two-candle cycle is ready for a fixed {expiry_seconds}s {configured_timeframe} read."
+        reason = (
+            f"{side} short-horizon direction evidence is ready; the candidate "
+            f"duration is held to {expiry_seconds}s so sub-15-minute moves are "
+            "not considered."
+        )
     closed_epoch = float(clock.get("last_closed_epoch", now_epoch) or now_epoch)
     return {
-        "schema_version": "PG_HIGH_FREQUENCY_CANDLE_CYCLE_V1",
+        "schema_version": "PG_MINIMUM_DURATION_CANDLE_CYCLE_V3",
         "enabled": bool(enabled),
         "profile": profile,
         "swing_fallback_enabled": swing_fallback_enabled,
@@ -3730,6 +4195,12 @@ def _build_high_frequency_candle_cycle_context(
         "second_next_candle_forecast": second_forecast,
         "forecast_agreement": bool(agreement_side in {"BUY", "SELL"}),
         "targets_future_candle_window": True,
+        "duration_policy": duration_eligibility_contract_v3(expiry_seconds),
+        "minimum_eligible_duration_seconds": (
+            MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        ),
+        "under_15_minutes_excluded": True,
+        "short_horizon_direction_is_not_timing_authority": True,
         "do_not_render_synthetic_candles": True,
         "uses_unseen_future_candles": False,
         "does_not_trade_seen_last_two_candles": True,
@@ -3758,12 +4229,85 @@ def _execution_expiry_window(timeframe_seconds: int) -> tuple[int, int, int, int
         fast = max(300, int(round(tf * 0.75)))
         standard = min(_EXECUTION_MAX_LIVE_EXPIRY_SEC, max(fast, int(round(tf * 2.0))))
         maximum = _EXECUTION_MAX_LIVE_EXPIRY_SEC
-    minimum = min(fast, _EXECUTION_TACTICAL_MIN_SEC)
+    # JPCLF timing does not admit sub-15-minute contracts.  Keep the adaptive
+    # shape above the floor, but never let a low timeframe collapse the OTC
+    # clock back to a scalp-sized expiry.
+    minimum = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+    fast = min(_EXECUTION_MAX_LIVE_EXPIRY_SEC, max(minimum, fast))
+    standard = min(
+        _EXECUTION_MAX_LIVE_EXPIRY_SEC,
+        max(fast, standard),
+    )
+    maximum = min(
+        _EXECUTION_MAX_LIVE_EXPIRY_SEC,
+        max(standard, maximum),
+    )
     return (
         int(max(1, minimum)),
         int(max(minimum, fast)),
         int(max(fast, standard)),
         int(max(standard, maximum)),
+    )
+
+
+def _jpclf_planned_contract_duration_seconds(
+    timeframe: object,
+    decision_kernel: Mapping[str, Any],
+    execution_controls: Mapping[str, Any],
+) -> int:
+    """Freeze the explicit duration studied by JPCLF for this closed candle.
+
+    This planner intentionally runs before the executable timing packet exists.
+    It uses only the current closed-candle decision horizon, the visible
+    timeframe, and an explicit operator timing control.  The result is a
+    study candidate, never entry permission.
+    """
+
+    timeframe_seconds = _timeframe_seconds(timeframe, default=300)
+    if timeframe_seconds > MAXIMUM_STUDIED_TRADE_DURATION_SECONDS:
+        # A closed H4/D1 candle cannot prove a sub-candle expiry inside the
+        # bounded two-hour field, so the JPCLF lane must abstain.
+        return 0
+    _minimum, _tactical, standard, maximum = _execution_expiry_window(
+        timeframe_seconds
+    )
+    try:
+        horizon_candles = int(decision_kernel.get("target_horizon_candles", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        horizon_candles = 0
+    mapped_seconds = (
+        max(0, horizon_candles) * timeframe_seconds
+        if horizon_candles > 0
+        else 0
+    )
+    configured_seconds = 0
+    configured_timeframe = str(
+        execution_controls.get("high_frequency_timeframe") or ""
+    ).strip().upper()
+    if configured_timeframe == str(timeframe or "").strip().upper():
+        try:
+            configured_seconds = int(
+                execution_controls.get("high_frequency_expiry_seconds", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            configured_seconds = 0
+    candidate = max(
+        MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+        standard,
+        mapped_seconds,
+        configured_seconds,
+    )
+    # A closed-candle-only field may mature only on an actually observed close.
+    # Align to source cadence instead of inventing an intrabar expiry boundary.
+    candidate = int(
+        math.ceil(candidate / float(max(1, timeframe_seconds)))
+        * max(1, timeframe_seconds)
+    )
+    return int(
+        max(
+            MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+            min(MAXIMUM_STUDIED_TRADE_DURATION_SECONDS, maximum, candidate),
+        )
     )
 
 
@@ -4125,6 +4669,121 @@ def _nearest_opposing_force_zone(
     return nearest, _clip01(nearest.get("opposing_force_risk", 0.0)), candidates
 
 
+def _current_promoted_jpclf_timing_v3(
+    tracking_summary: Mapping[str, Any],
+    *,
+    side: object,
+) -> dict[str, Any]:
+    """Return only a current, safe, promoted JPCLF timing read.
+
+    A hard duration veto is valid without empirical promotion. Every other
+    support/veto must have passed the four-axis replay gate. This helper never
+    creates permission; callers may only retain or reduce their existing
+    `entry_allowed` result.
+    """
+
+    study = _mapping_to_dict(tracking_summary.get("market_study_v3", {}))
+    if str(study.get("status") or "").strip().upper() != "STUDIED":
+        return {}
+    field = _mapping_to_dict(
+        study.get(
+            "path_clock_liquidity_v3",
+            study.get("path_clock_liquidity", {}),
+        )
+    )
+    if (
+        field.get("schema_version")
+        != "PG_PATH_CLOCK_LIQUIDITY_PUBLIC_STUDY_V3"
+        or field.get("study_only") is not True
+        or field.get("causal") is not True
+        or field.get("execution_authority") is not False
+        or field.get("grants_entry_permission") is not False
+        or field.get("may_issue_orders") is not False
+    ):
+        return {}
+    timing = _mapping_to_dict(field.get("timing_read", {}))
+    if (
+        timing.get("study_only") is not True
+        or timing.get("causal") is not True
+        or timing.get("execution_authority") is not False
+        or timing.get("grants_entry_permission") is not False
+        or timing.get("may_issue_orders") is not False
+    ):
+        return {}
+    study_key = str(study.get("closed_candle_key") or "").strip()
+    field_key = str(field.get("closed_candle_key") or "").strip()
+    timing_key = str(timing.get("closed_candle_key") or "").strip()
+    if not study_key or field_key != study_key or timing_key != study_key:
+        return {}
+    expected_side = _upper_action(side)
+    timing_side = _upper_action(
+        timing.get("side", timing.get("studied_direction", "HOLD"))
+    )
+    if timing_side in {"UP", "UPTREND", "BULL", "BULLISH"}:
+        timing_side = "BUY"
+    elif timing_side in {"DOWN", "DOWNTREND", "BEAR", "BEARISH"}:
+        timing_side = "SELL"
+    if expected_side not in {"BUY", "SELL"} or timing_side != expected_side:
+        return {}
+
+    hard_duration_veto = str(timing.get("status") or "").strip().upper() == (
+        "HARD_DURATION_VETO"
+    )
+    gate = _mapping_to_dict(
+        timing.get("promotion_gate", field.get("promotion_gate", {}))
+    )
+    promoted = bool(
+        gate.get("passed") is True
+        and gate.get("all_axes_improved") is True
+        and _mapping_to_dict(gate.get("support", {})).get("passed") is True
+    )
+    if not hard_duration_veto and not promoted:
+        return {}
+
+    if not hard_duration_veto:
+        for key in (
+            "contract_duration_seconds",
+            "candidate_horizon_seconds",
+            "remaining_seconds",
+        ):
+            raw_value = timing.get(key)
+            if raw_value is None:
+                return {}
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                return {}
+            if (
+                not math.isfinite(value)
+                or value < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+                or value > MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+            ):
+                return {}
+    return {
+        "status": str(timing.get("status") or ""),
+        "state": str(timing.get("state") or ""),
+        "side": timing_side,
+        "contract_duration_seconds": timing.get("contract_duration_seconds"),
+        "candidate_horizon_seconds": timing.get("candidate_horizon_seconds"),
+        "remaining_seconds": timing.get("remaining_seconds"),
+        "support_count": timing.get("support_count"),
+        "survival_probability": timing.get("survival_probability"),
+        "probability_worst_drawdown_still_ahead": timing.get(
+            "probability_worst_drawdown_still_ahead"
+        ),
+        "new_entry_eligible": timing.get("new_entry_eligible") is True,
+        "timing_supports_entry": timing.get("timing_supports_entry") is True,
+        "timing_veto": timing.get("timing_veto") is True,
+        "closed_candle_key": timing_key,
+        "observed_at": timing.get("observed_at"),
+        "valid_until": timing.get("valid_until"),
+        "promotion_gate": gate,
+        "study_only": True,
+        "execution_authority": False,
+        "grants_entry_permission": False,
+    }
+
+
 def _build_execution_timing_profile(
     latest_signal: Mapping[str, Any],
     tracking_summary: Mapping[str, Any],
@@ -4164,9 +4823,40 @@ def _build_execution_timing_profile(
 
     if lane_key == _HIGH_FREQUENCY_LANE:
         fixed_expiry = int(_high_frequency_profile_expiry_seconds(timeframe))
-        fixed_horizon = int(_HIGH_FREQUENCY_HORIZON_CANDLES)
+        jpclf_timing = _current_promoted_jpclf_timing_v3(
+            tracking_summary,
+            side=side,
+        )
+        if bool(jpclf_timing.get("timing_supports_entry", False)):
+            try:
+                supported_duration = int(
+                    _float_or(
+                        jpclf_timing.get("contract_duration_seconds"),
+                        float(fixed_expiry),
+                    )
+                )
+            except (TypeError, ValueError, OverflowError):
+                supported_duration = fixed_expiry
+            fixed_expiry = int(
+                max(
+                    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+                    min(MAXIMUM_STUDIED_TRADE_DURATION_SECONDS, supported_duration),
+                )
+            )
+        jpclf_veto = bool(
+            jpclf_timing
+            and (
+                jpclf_timing.get("timing_veto") is True
+                or jpclf_timing.get("new_entry_eligible") is not True
+            )
+        )
+        fixed_horizon = max(
+            int(_HIGH_FREQUENCY_HORIZON_CANDLES),
+            int(math.ceil(fixed_expiry / float(max(1, timeframe_sec)))),
+        )
+        duration_policy = duration_eligibility_contract_v3(fixed_expiry)
         return {
-            "version": "high_frequency_two_candle_timing_v1",
+            "version": "jpclf_minimum_duration_timing_v3",
             "side": execution_side if execution_side in {"BUY", "SELL"} else "HOLD",
             "candidate_side": side if side in {"BUY", "SELL"} else "HOLD",
             "lane": lane_key,
@@ -4191,12 +4881,31 @@ def _build_execution_timing_profile(
             "recommended_candles": round(float(fixed_expiry) / float(max(1, timeframe_sec)), 3),
             "minimum_seconds": fixed_expiry,
             "maximum_seconds": fixed_expiry,
-            "timing_class": "high_frequency_two_candle_cycle",
-            "entry_allowed": True,
-            "block_reason": "",
-            "rationale": f"current {str(timeframe or _HIGH_FREQUENCY_TIMEFRAME).upper()} candle closed; study the next two-candle window with a fixed profile expiry",
-            "quick_profit_mode": True,
-            "hold_intent": "next_two_candle_window",
+            "timing_class": "minimum_duration_direction_cycle",
+            "entry_allowed": not jpclf_veto,
+            "block_reason": (
+                "JPCLF timing vetoed this new entry; keep observing the "
+                "late sweep/pullback instead of forcing the clock."
+                if jpclf_veto
+                else ""
+            ),
+            "rationale": (
+                f"current {str(timeframe or _HIGH_FREQUENCY_TIMEFRAME).upper()} candle "
+                "closed; retain the direction study but use no contract shorter than "
+                "the 15-minute JPCLF eligibility floor"
+            ),
+            "quick_profit_mode": False,
+            "hold_intent": "minimum_eligible_path_clock_window",
+            "duration_policy": duration_policy,
+            "minimum_eligible_duration_seconds": (
+                MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+            ),
+            "under_15_minutes_excluded": True,
+            "path_clock_liquidity_timing_v3": jpclf_timing,
+            "jpclf_timing_supports_entry": bool(
+                jpclf_timing.get("timing_supports_entry", False)
+            ),
+            "jpclf_timing_veto": jpclf_veto,
             "price_position": {},
             "global_extreme_risk": 0.0,
             "history_area_risk": 0.0,
@@ -4544,6 +5253,43 @@ def _build_execution_timing_profile(
             entry_allowed = False
             block_reason = "Nearest significant support/resistance is opposing the entry before a clean trigger."
 
+    jpclf_timing = _current_promoted_jpclf_timing_v3(
+        tracking_summary,
+        side=side,
+    )
+    jpclf_recommended_duration_seconds = 0
+    if jpclf_timing:
+        if bool(jpclf_timing.get("timing_veto", False)) or not bool(
+            jpclf_timing.get("new_entry_eligible", False)
+        ):
+            entry_allowed = False
+            timing_state = str(jpclf_timing.get("state") or "").upper()
+            if timing_state == "DRAWDOWN_AHEAD":
+                block_reason = (
+                    "JPCLF timing says the worst historical pullback is likely "
+                    "still ahead; stand aside for this entry window."
+                )
+            elif timing_state == "SWEEP_RISK":
+                block_reason = (
+                    "JPCLF timing shows insufficient stop survival for this "
+                    "clock; stand aside instead of entering into the sweep."
+                )
+            else:
+                block_reason = (
+                    "JPCLF timing has not admitted a new entry inside the "
+                    "15-minute minimum-duration contract."
+                )
+        elif bool(jpclf_timing.get("timing_supports_entry", False)):
+            try:
+                jpclf_recommended_duration_seconds = int(
+                    _float_or(
+                        jpclf_timing.get("contract_duration_seconds"),
+                        0.0,
+                    )
+                )
+            except (TypeError, ValueError, OverflowError):
+                jpclf_recommended_duration_seconds = 0
+
     compression_pressure = bool(
         force_risk >= 0.52
         or p_expire_before_trigger >= 0.42
@@ -4640,6 +5386,17 @@ def _build_execution_timing_profile(
         recommended = int(max(standard_sec, min(map_horizon_seconds, structural_target_seconds)))
         timing_class = "measured_continuation"
     recommended = int(max(min_sec, min(max_sec, recommended)))
+    if (
+        entry_allowed
+        and jpclf_recommended_duration_seconds
+        >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+    ):
+        recommended = int(
+            max(
+                min_sec,
+                min(max_sec, jpclf_recommended_duration_seconds),
+            )
+        )
 
     rationale = (
         "wait for price to rotate into the mapped significant entry area"
@@ -4650,7 +5407,7 @@ def _build_execution_timing_profile(
         if lane_key == "COUNTERTREND_SCALP"
         else "active opposing force reaction uses the mapped target/stale/invalidation timing window"
         if reaction_lane
-        else "current live flow uses adaptive target timing instead of a fixed M15 floor"
+        else "current live flow uses adaptive target timing above the 15-minute eligibility floor"
         if current_market_lane
         else "compress only because reversal/opposing-force pressure is active"
         if compression_pressure and not breakout_confirmation
@@ -4658,12 +5415,13 @@ def _build_execution_timing_profile(
         if breakout_confirmation
         else "trigger accepted; let price travel toward the studied target map"
         if entry_ready
-        else "clean continuation with mapped timing instead of a fixed short expiry"
+        else "clean continuation with mapped timing above the 15-minute eligibility floor"
         if strong_clean_continuation
         else "measured continuation using historical target timing"
     )
+    duration_policy = duration_eligibility_contract_v3(recommended)
     return {
-        "version": "opposing_force_timing_v1",
+        "version": "jpclf_aware_timing_v3",
         "side": execution_side if execution_side in {"BUY", "SELL"} else "HOLD",
         "candidate_side": side if side in {"BUY", "SELL"} else "HOLD",
         "lane": lane_key,
@@ -4694,6 +5452,16 @@ def _build_execution_timing_profile(
         "rationale": rationale,
         "quick_profit_mode": bool(recommended <= standard_sec),
         "hold_intent": "mapped_excursion" if recommended > standard_sec else "compressed_or_tactical",
+        "duration_policy": duration_policy,
+        "minimum_eligible_duration_seconds": (
+            MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        ),
+        "under_15_minutes_excluded": True,
+        "path_clock_liquidity_timing_v3": jpclf_timing,
+        "jpclf_timing_supports_entry": bool(
+            jpclf_timing.get("timing_supports_entry", False)
+        ),
+        "jpclf_timing_veto": bool(jpclf_timing.get("timing_veto", False)),
         "price_position": price_position,
         "global_extreme_risk": round(float(extreme_risk), 4),
         "history_area_risk": round(float(history_area_risk), 4),
@@ -5166,6 +5934,10 @@ class CaptureSurfaceUnavailableError(RuntimeError):
     """Raised when a matched browser window is visible but does not contain a usable trading surface."""
 
 
+class StaleCPUStreamKeyframeError(RuntimeError):
+    """Raised when an immutable stream keyframe no longer matches live session identity."""
+
+
 def _capture_looks_like_pocket_option_surface(image: Image.Image) -> bool:
     try:
         width, height = image.size
@@ -5472,6 +6244,106 @@ def _window_descriptor_is_capture_usable(descriptor: Mapping[str, Any]) -> bool:
                 return False
         except (TypeError, ValueError):
             return False
+    return True
+
+
+def _native_window_identity_fields_v3(user32: Any, hwnd: Any) -> dict[str, Any]:
+    """Read stable native identity fields when the desktop API exposes them."""
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd_value = wintypes.HWND(int(hwnd or 0))
+        if int(hwnd or 0) <= 0:
+            return {}
+        result: dict[str, Any] = {}
+        process_reader = getattr(user32, "GetWindowThreadProcessId", None)
+        if callable(process_reader):
+            process_id = wintypes.DWORD()
+            process_reader(hwnd_value, ctypes.byref(process_id))
+            if int(process_id.value) > 0:
+                result["process_id"] = int(process_id.value)
+        class_reader = getattr(user32, "GetClassNameW", None)
+        if callable(class_reader):
+            class_buffer = ctypes.create_unicode_buffer(256)
+            class_name_length = cast(Callable[..., Any], class_reader)(
+                hwnd_value,
+                class_buffer,
+                len(class_buffer),
+            )
+            if int(class_name_length or 0) > 0:
+                class_name = str(class_buffer.value or "").strip()
+                if class_name:
+                    result["class_name"] = class_name
+        return result
+    except Exception:
+        return {}
+
+
+def _cpu_stream_window_identity_matches_v3(
+    locked: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    require_geometry: bool = True,
+) -> bool:
+    """Match stable identity while tolerating benign browser-title drift."""
+
+    try:
+        locked_hwnd = int(locked.get("hwnd", 0) or 0)
+        current_hwnd = int(current.get("hwnd", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if locked_hwnd <= 0 or current_hwnd != locked_hwnd:
+        return False
+    if not _window_descriptor_is_capture_usable(current):
+        return False
+
+    locked_title = str(locked.get("title", "") or "").strip()
+    title_query = str(locked.get("window_query", "") or locked_title).strip()
+    current_title = str(current.get("title", "") or "").strip()
+    if (
+        not title_query
+        or not current_title
+        or not _title_matches_window_query(current_title, title_query)
+        or _title_has_any_token(current_title, _WINDOW_REACQUIRE_BLOCK_TOKENS)
+    ):
+        return False
+
+    try:
+        expected_process = int(
+            locked.get("process_id", locked.get("pid", 0)) or 0
+        )
+        current_process = int(
+            current.get("process_id", current.get("pid", 0)) or 0
+        )
+    except (TypeError, ValueError):
+        return False
+    if expected_process > 0 and current_process != expected_process:
+        return False
+    expected_class = str(
+        locked.get("class_name", locked.get("window_class", "")) or ""
+    ).strip().casefold()
+    current_class = str(
+        current.get("class_name", current.get("window_class", "")) or ""
+    ).strip().casefold()
+    if expected_class and current_class != expected_class:
+        return False
+
+    if require_geometry:
+        locked_bbox = list(cast(Sequence[Any], locked.get("bbox", [])))[:4]
+        current_bbox = list(cast(Sequence[Any], current.get("bbox", [])))[:4]
+        if len(locked_bbox) == 4 and current_bbox != locked_bbox:
+            return False
+        if len(locked_bbox) != 4:
+            for dimension in ("width", "height"):
+                try:
+                    expected = int(locked.get(dimension, 0) or 0)
+                    observed = int(current.get(dimension, 0) or 0)
+                except (TypeError, ValueError):
+                    return False
+                if expected > 0 and observed != expected:
+                    return False
     return True
 
 
@@ -6078,6 +6950,16 @@ def _surface_signature(image: Image.Image) -> str:
         sample.thumbnail((96, 96), Image.Resampling.BILINEAR)
     digest = sample.tobytes()
     return uuid4().hex[:6] if not digest else f"{abs(hash(digest)) & 0xFFFFFFFF:08x}"
+
+
+def _cpu_stream_frame_hash_v3(image: Image.Image) -> str:
+    """Match the CPU observer's exact RGB keyframe SHA-256 contract."""
+
+    rgb = image.convert("RGB")
+    digest = hashlib.sha256()
+    digest.update(f"RGB\0{rgb.width}\0{rgb.height}\0".encode("ascii"))
+    digest.update(rgb.tobytes())
+    return digest.hexdigest()
 
 
 def _market_selector_visual_fingerprint(image: Image.Image) -> str:
@@ -7667,13 +8549,41 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["high_frequency_timeframe"] = _normalize_high_frequency_timeframe(
         controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME)
     )
+    high_frequency_timeframe_seconds = _timeframe_seconds(
+        controls["high_frequency_timeframe"]
+    )
+    minimum_horizon_candles = int(
+        math.ceil(
+            MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+            / float(max(1, high_frequency_timeframe_seconds))
+        )
+    )
+    maximum_horizon_candles = int(
+        math.ceil(
+            MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+            / float(max(1, high_frequency_timeframe_seconds))
+        )
+    )
     controls["high_frequency_horizon_candles"] = max(
-        1,
+        minimum_horizon_candles,
         min(
-            12,
-            int(controls.get("high_frequency_horizon_candles", _HIGH_FREQUENCY_HORIZON_CANDLES) or _HIGH_FREQUENCY_HORIZON_CANDLES),
+            maximum_horizon_candles,
+            int(
+                controls.get(
+                    "high_frequency_horizon_candles",
+                    minimum_horizon_candles,
+                )
+                or minimum_horizon_candles
+            ),
         ),
     )
+    controls["minimum_eligible_trade_duration_seconds"] = (
+        MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+    )
+    controls["maximum_studied_trade_duration_seconds"] = (
+        MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+    )
+    controls["under_15_minutes_excluded"] = True
     controls["high_frequency_expiry_seconds"] = max(
         _EXECUTION_MIN_LIVE_EXPIRY_SEC,
         min(
@@ -9021,6 +9931,103 @@ class WindowsWindowCaptureBackend:
     def is_windows(self) -> bool:
         return self._is_windows()
 
+    @staticmethod
+    def _configure_desktop_api_v3(user32: Any, kernel32: Any, wintypes: Any) -> None:
+        """Declare the Win32 desktop APIs used from the sandbox-safe runtime."""
+
+        user32.OpenDesktopW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        user32.OpenDesktopW.restype = wintypes.HANDLE
+        user32.OpenInputDesktop.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        user32.CloseDesktop.restype = wintypes.BOOL
+        user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+        user32.SetThreadDesktop.restype = wintypes.BOOL
+        user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        user32.GetThreadDesktop.restype = wintypes.HANDLE
+        kernel32.GetCurrentThreadId.argtypes = []
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+    @classmethod
+    def _open_interactive_desktops_v3(
+        cls,
+        user32: Any,
+        kernel32: Any,
+        wintypes: Any,
+    ) -> list[int]:
+        """Open bounded handles to Default/input desktops in the current session."""
+
+        cls._configure_desktop_api_v3(user32, kernel32, wintypes)
+        desktop_access = 0x0001 | 0x0040 | 0x0100
+        handles: list[int] = []
+        # Prefer the active input desktop. Codex and other sandboxed launchers
+        # can own a different desktop also named ``Default``; attaching a
+        # capture thread to that handle makes desktop grabs live but unrelated
+        # to the user's chart. ``OpenInputDesktop`` is the authoritative source
+        # for pixels the operator can currently see.
+        try:
+            input_handle = int(user32.OpenInputDesktop(0, False, desktop_access) or 0)
+            if input_handle > 0 and input_handle not in handles:
+                handles.append(input_handle)
+        except Exception:
+            LOGGER.debug("Unable to open the Windows input desktop.", exc_info=True)
+        try:
+            default_handle = int(
+                user32.OpenDesktopW("Default", 0, False, desktop_access) or 0
+            )
+            if default_handle > 0 and default_handle not in handles:
+                handles.append(default_handle)
+        except Exception:
+            LOGGER.debug("Unable to open the Windows Default desktop.", exc_info=True)
+        return handles
+
+    def _ensure_interactive_desktop_for_current_thread_v3(self) -> bool:
+        """Attach a capture thread to WinSta0\\Default without activating a window."""
+
+        if not self._is_windows():
+            return True
+        thread_state = getattr(self, "_desktop_thread_state_v3", None)
+        if thread_state is None:
+            thread_state = threading.local()
+            setattr(self, "_desktop_thread_state_v3", thread_state)
+        if bool(getattr(thread_state, "attached", False)):
+            return True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            handles = self._open_interactive_desktops_v3(user32, kernel32, wintypes)
+            previous_handle = int(
+                user32.GetThreadDesktop(kernel32.GetCurrentThreadId()) or 0
+            )
+            for handle in handles:
+                if bool(user32.SetThreadDesktop(handle)):
+                    for unused_handle in handles:
+                        if unused_handle != handle:
+                            user32.CloseDesktop(unused_handle)
+                    thread_state.attached = True
+                    thread_state.desktop_handle = int(handle)
+                    thread_state.previous_desktop_handle = previous_handle
+                    return True
+                user32.CloseDesktop(handle)
+        except Exception:
+            LOGGER.debug(
+                "Unable to attach capture thread to the interactive desktop.",
+                exc_info=True,
+            )
+        return False
+
     def list_windows(self, title_query: str | None = None) -> list[dict[str, Any]]:
         if hasattr(self, "_list_windows_override"):
             return cast(list[dict[str, Any]], getattr(self, "_list_windows_override")(title_query))
@@ -9032,12 +10039,17 @@ class WindowsWindowCaptureBackend:
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
         query = str(title_query or "").strip().lower()
         windows: list[dict[str, Any]] = []
+        seen_hwnds: set[int] = set()
 
         enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
         def _callback(hwnd: int, _lparam: int) -> bool:
+            normalized_hwnd = int(hwnd)
+            if normalized_hwnd in seen_hwnds:
+                return True
             if not bool(user32.IsWindowVisible(hwnd)):
                 return True
             length = int(user32.GetWindowTextLengthW(hwnd))
@@ -9055,19 +10067,33 @@ class WindowsWindowCaptureBackend:
             height = int(rect.bottom - rect.top)
             if width < 64 or height < 64:
                 return True
+            seen_hwnds.add(normalized_hwnd)
             windows.append(
                 {
-                    "hwnd": int(hwnd),
+                    "hwnd": normalized_hwnd,
                     "title": title,
                     "bbox": [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)],
                     "width": width,
                     "height": height,
                     "is_minimized": bool(user32.IsIconic(hwnd)),
+                    **_native_window_identity_fields_v3(user32, normalized_hwnd),
                 }
             )
             return True
 
-        user32.EnumWindows(enum_proc(_callback), 0)
+        callback = enum_proc(_callback)
+        desktop_handles = self._open_interactive_desktops_v3(
+            user32,
+            kernel32,
+            wintypes,
+        )
+        for desktop_handle in desktop_handles:
+            try:
+                user32.EnumDesktopWindows(desktop_handle, callback, 0)
+            finally:
+                user32.CloseDesktop(desktop_handle)
+        if not windows:
+            user32.EnumWindows(callback, 0)
         windows.sort(key=lambda item: (len(str(item.get("title", ""))), int(item.get("hwnd", 0))), reverse=True)
         if not query:
             return windows
@@ -9230,6 +10256,107 @@ class WindowsWindowCaptureBackend:
             raise CaptureSurfaceUnavailableError("Visible broker-frame recovery did not include Pocket Option pixels.")
         return image
 
+    def _capture_window_stream_offscreen(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        """Use PrintWindow only; this path must never activate a broker window."""
+
+        if not self._is_windows():
+            return self.capture_window(descriptor)
+        hwnd = int(descriptor.get("hwnd", 0) or 0)
+        locked_title = str(
+            descriptor.get("title", descriptor.get("window_query", "")) or ""
+        ).strip()
+        current = self._visible_descriptor_for_hwnd(hwnd)
+        if (
+            hwnd <= 0
+            or current is None
+            or not _cpu_stream_window_identity_matches_v3(descriptor, current)
+        ):
+            raise CaptureSurfaceUnavailableError(
+                "Non-disruptive CPU stream capture lost the stable locked-window identity."
+            )
+        offscreen = self._capture_window_printwindow(hwnd, current)
+        if (
+            offscreen is None
+            or self._looks_blank(offscreen)
+            or self._looks_browser_content_blank(offscreen)
+        ):
+            raise CaptureSurfaceUnavailableError(
+                "Non-disruptive CPU stream capture could not read usable offscreen pixels."
+            )
+        image = offscreen.convert("RGB")
+        if _is_pocket_option_query(locked_title) and not _capture_looks_like_pocket_option_visible_surface(
+            image,
+            current,
+            require_broker_page_evidence=True,
+        ):
+            raise CaptureSurfaceUnavailableError(
+                "Non-disruptive CPU stream capture did not include Pocket Option pixels."
+            )
+        return image
+
+    def capture_window_stream(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        """Capture fresh visible pixels without activating or stealing focus.
+
+        The high-rate CPU observer may use the direct desktop path only while
+        the already-locked HWND owns the foreground before and after capture.
+        Otherwise it falls back to the established non-disruptive snapshot
+        chain (PrintWindow first for Pocket Option).
+        """
+
+        if not self._is_windows():
+            return self.capture_window(descriptor)
+        self._ensure_dpi_awareness()
+        self._ensure_interactive_desktop_for_current_thread_v3()
+        hwnd = int(descriptor.get("hwnd", 0) or 0)
+        if hwnd <= 0 or self.foreground_window_hwnd() != hwnd:
+            return self._capture_window_stream_offscreen(descriptor)
+        before_descriptor = self._visible_descriptor_for_hwnd(hwnd)
+        if before_descriptor is None:
+            return self._capture_window_stream_offscreen(descriptor)
+        locked_title = str(descriptor.get("title", descriptor.get("window_query", "")) or "").strip()
+        visible_title_before = str(before_descriptor.get("title", "") or "").strip()
+        if not _cpu_stream_window_identity_matches_v3(descriptor, before_descriptor):
+            return self._capture_window_stream_offscreen(descriptor)
+        if _is_pocket_option_query(locked_title) and (
+            not _is_pocket_option_like_title(visible_title_before)
+            or _title_has_any_token(visible_title_before, _WINDOW_REACQUIRE_BLOCK_TOKENS)
+        ):
+            return self._capture_window_stream_offscreen(descriptor)
+        try:
+            image = self._capture_window_imagegrab(descriptor).convert("RGB")
+        except Exception:
+            LOGGER.debug("Direct CPU stream ImageGrab failed; using snapshot fallback.", exc_info=True)
+            return self._capture_window_stream_offscreen(descriptor)
+        foreground_after = self.foreground_window_hwnd()
+        after_descriptor = self._visible_descriptor_for_hwnd(hwnd)
+        visible_title_after = str((after_descriptor or {}).get("title", "") or "").strip()
+        if (
+            foreground_after != hwnd
+            or after_descriptor is None
+            or visible_title_after != visible_title_before
+            or not _cpu_stream_window_identity_matches_v3(
+                before_descriptor,
+                after_descriptor,
+            )
+            or self._looks_blank(image)
+            or self._looks_browser_content_blank(image)
+        ):
+            return self._capture_window_stream_offscreen(descriptor)
+        if _is_pocket_option_query(locked_title):
+            identity_descriptor = {
+                **dict(descriptor),
+                "visible_title": visible_title_after,
+                "foreground_hwnd_before": hwnd,
+                "foreground_hwnd_after": foreground_after,
+            }
+            if not _capture_looks_like_pocket_option_visible_surface(
+                image,
+                identity_descriptor,
+                require_broker_page_evidence=True,
+            ):
+                return self._capture_window_stream_offscreen(descriptor)
+        return image
+
     def _activate_window_for_visible_capture(self, hwnd: int) -> bool:
         if hwnd <= 0 or not self._is_windows():
             return False
@@ -9239,7 +10366,9 @@ class WindowsWindowCaptureBackend:
         try:
             import ctypes
 
+            self._ensure_interactive_desktop_for_current_thread_v3()
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             hwnd_ptr = ctypes.c_void_p(int(hwnd))
             try:
                 if bool(user32.IsIconic(hwnd)):
@@ -9275,6 +10404,42 @@ class WindowsWindowCaptureBackend:
                 user32.SetForegroundWindow(hwnd)
             except Exception:
                 pass
+            # Windows may reject SetForegroundWindow when the runtime did not
+            # receive the latest user input. Temporarily join the foreground
+            # and target GUI input queues, retry the same focus-only operation,
+            # then detach immediately. This never synthesizes a mouse/key event.
+            if int(user32.GetForegroundWindow() or 0) != int(hwnd):
+                current_thread_id = int(kernel32.GetCurrentThreadId() or 0)
+                attached_thread_ids: list[int] = []
+                foreground_hwnd = int(user32.GetForegroundWindow() or 0)
+                try:
+                    for candidate_hwnd in (foreground_hwnd, int(hwnd)):
+                        thread_id = int(
+                            user32.GetWindowThreadProcessId(candidate_hwnd, None) or 0
+                        )
+                        if (
+                            thread_id > 0
+                            and thread_id != current_thread_id
+                            and thread_id not in attached_thread_ids
+                            and bool(
+                                user32.AttachThreadInput(
+                                    current_thread_id,
+                                    thread_id,
+                                    True,
+                                )
+                            )
+                        ):
+                            attached_thread_ids.append(thread_id)
+                    user32.BringWindowToTop(hwnd_ptr)
+                    user32.SetActiveWindow(hwnd_ptr)
+                    user32.SetForegroundWindow(hwnd_ptr)
+                finally:
+                    for thread_id in reversed(attached_thread_ids):
+                        user32.AttachThreadInput(
+                            current_thread_id,
+                            thread_id,
+                            False,
+                        )
             time.sleep(0.35)
             try:
                 return int(user32.GetForegroundWindow()) == int(hwnd)
@@ -9296,12 +10461,20 @@ class WindowsWindowCaptureBackend:
         )
         width = max(1, int(rect[2] - rect[0]))
         height = max(1, int(rect[3] - rect[1]))
-        use_mss = str(os.getenv("PHOENIXGUARD_CAPTURE_USE_MSS", "1") or "1").strip().lower() not in {
-            "0",
-            "false",
-            "off",
-            "no",
-        }
+        thread_state = getattr(self, "_desktop_thread_state_v3", None)
+        interactive_desktop_attached = bool(
+            thread_state is not None and getattr(thread_state, "attached", False)
+        )
+        use_mss = (
+            not interactive_desktop_attached
+            and str(os.getenv("PHOENIXGUARD_CAPTURE_USE_MSS", "1") or "1").strip().lower()
+            not in {
+                "0",
+                "false",
+                "off",
+                "no",
+            }
+        )
         if use_mss:
             try:
                 mss_factory = cast(Callable[[], _MssCapture], getattr(import_module("mss"), "mss"))
@@ -9343,6 +10516,7 @@ class WindowsWindowCaptureBackend:
         import ctypes
         from ctypes import wintypes
 
+        self._ensure_interactive_desktop_for_current_thread_v3()
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
         pw_render_full_content = 0x00000002
@@ -9494,6 +10668,50 @@ class WindowsWindowCaptureBackend:
             return os.name == "nt"
         except Exception:
             return False
+
+    def close(self) -> None:
+        screen_capture = cast(
+            _MssCapture | None,
+            getattr(self, "_mss_screen_capture", None),
+        )
+        if screen_capture is not None:
+            try:
+                screen_capture.close()
+            except Exception:
+                LOGGER.debug("Unable to close MSS CPU stream capture cleanly.", exc_info=True)
+        try:
+            delattr(self, "_mss_screen_capture")
+        except AttributeError:
+            pass
+        thread_state = getattr(self, "_desktop_thread_state_v3", None)
+        desktop_handle = int(
+            getattr(thread_state, "desktop_handle", 0) or 0
+        ) if thread_state is not None else 0
+        previous_handle = int(
+            getattr(thread_state, "previous_desktop_handle", 0) or 0
+        ) if thread_state is not None else 0
+        if desktop_handle > 0 and self._is_windows():
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                self._configure_desktop_api_v3(user32, kernel32, wintypes)
+                restored = bool(
+                    previous_handle > 0 and user32.SetThreadDesktop(previous_handle)
+                )
+                if restored:
+                    user32.CloseDesktop(desktop_handle)
+                if thread_state is not None:
+                    thread_state.attached = False
+                    thread_state.desktop_handle = 0
+                    thread_state.previous_desktop_handle = 0
+            except Exception:
+                LOGGER.debug(
+                    "Unable to release the interactive desktop capture handle.",
+                    exc_info=True,
+                )
 
     def _ensure_dpi_awareness(self) -> None:
         if self.__class__._dpi_awareness_attempted:
@@ -10483,6 +11701,7 @@ class PocketOptionBrokerExecutionBackend:
                 "width": width,
                 "height": height,
                 "is_minimized": is_minimized,
+                **_native_window_identity_fields_v3(user32, int(hwnd)),
             }
         except Exception:
             return {}
@@ -18425,6 +19644,7 @@ class PhoenixGuardWindowTrackingAdapter:
         timeframe: str,
         market: str,
         frame_id: int,
+        capture_epoch: float | None = None,
         projection: Mapping[str, Any],
         candle_statistics: Mapping[str, Any],
         behavior_payload: Mapping[str, Any],
@@ -18443,11 +19663,14 @@ class PhoenixGuardWindowTrackingAdapter:
                 context_key,
                 ("", -1),
             )
+            previous_identity_state = copy.deepcopy(
+                self._scene_candle_identity_states.get(context_key, {})
+            )
             identity_resolution = resolve_closed_candle_identity_v3(
                 candles,
                 pair=pair,
                 timeframe=timeframe_key,
-                previous_state=self._scene_candle_identity_states.get(context_key),
+                previous_state=previous_identity_state,
                 previous_key=previous_key,
                 previous_sequence=previous_sequence,
             )
@@ -18455,7 +19678,17 @@ class PhoenixGuardWindowTrackingAdapter:
             closed_sequence = int(
                 identity_resolution["closed_candle_sequence"]
             )
-            identity_state = _mapping_to_dict(identity_resolution.get("state", {}))
+            identity_state = _advance_closed_candle_time_attestations_v3(
+                candles=candles,
+                symbol=pair,
+                timeframe=timeframe_key,
+                capture_epoch=capture_epoch,
+                previous_identity_state=previous_identity_state,
+                identity_resolution=identity_resolution,
+                identity_state=_mapping_to_dict(identity_resolution.get("state", {})),
+                market_identity_confirmed=True,
+                timeframe_identity_confirmed=True,
+            )
             prior_close_reobservation = _mapping_to_dict(
                 identity_resolution.get("prior_close_reobservation", {})
             )
@@ -19269,6 +20502,7 @@ class PhoenixGuardWindowTrackingAdapter:
         structure_boxes: Sequence[Mapping[str, Any]],
         historical_structure: Sequence[Mapping[str, Any]],
         support_resistance_zones: Sequence[Mapping[str, Any]],
+        contract_duration_seconds: int | None = None,
         smart_money_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the study-only V3 intelligence lane from proven candle closes."""
@@ -19411,7 +20645,36 @@ class PhoenixGuardWindowTrackingAdapter:
             and len(by_sequence[event_sequence]) == 1
         }
 
+        source_cadence_seconds = _timeframe_seconds(timeframe, default=300)
+        time_proofs_by_identity: dict[tuple[str, int], dict[str, Any]] = {}
+        ambiguous_time_proof_identities: set[tuple[str, int]] = set()
+        if identity_state_is_current:
+            for raw_proof in _sequence_of_mappings(
+                identity_state.get("closed_candle_time_attestations_v3", [])
+            )[-_PROVEN_CLOSED_CANDLE_TIME_LIMIT_V3:]:
+                proof = _canonical_closed_candle_time_proof_v3(
+                    raw_proof,
+                    symbol=market,
+                    timeframe=timeframe,
+                    source_cadence_seconds=source_cadence_seconds,
+                )
+                if proof is None:
+                    continue
+                proof_identity = (
+                    str(proof["closed_candle_key"]),
+                    int(proof["closed_candle_sequence"]),
+                )
+                if proof_identity in ambiguous_time_proof_identities:
+                    continue
+                if proof_identity in time_proofs_by_identity:
+                    # Ambiguous duplicate timing evidence fails closed.
+                    time_proofs_by_identity.pop(proof_identity, None)
+                    ambiguous_time_proof_identities.add(proof_identity)
+                    continue
+                time_proofs_by_identity[proof_identity] = proof
+
         closed_candles: list[dict[str, Any]] = []
+        jpclf_bound_index_by_identity: dict[tuple[str, int], int] = {}
         candle_count = len(candles)
         for index, raw in enumerate(candles):
             row = dict(raw)
@@ -19424,9 +20687,17 @@ class PhoenixGuardWindowTrackingAdapter:
             row.pop("stable_candle_identity", None)
             row.pop("identity_proof_source", None)
             row.pop("closed_candle_sequence", None)
+            row.pop("resolver_bound_row_index", None)
+            row.pop("timestamp_proof_source", None)
+            for timestamp_alias in _PROVEN_CLOSED_CANDLE_TIMESTAMP_ALIASES_V3:
+                row.pop(timestamp_alias, None)
             resolver_mark = resolver_marks.get(index)
+            time_proof: dict[str, Any] | None = None
             if resolver_mark is not None:
                 stable_identity, stable_sequence = resolver_mark
+                time_proof = time_proofs_by_identity.get(
+                    (stable_identity, stable_sequence)
+                )
                 row.update(
                     {
                         "identity_stable": True,
@@ -19437,6 +20708,16 @@ class PhoenixGuardWindowTrackingAdapter:
                         "closed_candle_sequence": stable_sequence,
                     }
                 )
+                if time_proof is not None:
+                    row.update(
+                        {
+                            "timestamp": time_proof["close_epoch_seconds"],
+                            "resolver_bound_row_index": index,
+                            "timestamp_proof_source": time_proof[
+                                "timestamp_source"
+                            ],
+                        }
+                    )
             candle_id = str(
                 row.get("candle_id")
                 or row.get("track_id")
@@ -19444,16 +20725,23 @@ class PhoenixGuardWindowTrackingAdapter:
                 or index
             )
             try:
-                closed_candles.append(
-                    adapt_tracker_candle_v3(
-                        row,
-                        closure_proof={
-                            "proven_closed": True,
-                            "event_key": f"{closed_key}:visible-history:{candle_id}",
-                            "candle_id": candle_id,
-                        },
-                    )
+                adapted = adapt_tracker_candle_v3(
+                    row,
+                    closure_proof={
+                        "proven_closed": True,
+                        "event_key": f"{closed_key}:visible-history:{candle_id}",
+                        "candle_id": candle_id,
+                    },
                 )
+                closed_candles.append(adapted)
+                if resolver_mark is not None and time_proof is not None:
+                    jpclf_identity = (
+                        str(resolver_mark[0]),
+                        int(resolver_mark[1]),
+                    )
+                    jpclf_bound_index_by_identity[jpclf_identity] = len(
+                        jpclf_bound_index_by_identity
+                    )
             except ValueError as exc:
                 LOGGER.debug(
                     "Skipping malformed closed candle %s in V3 market study: %s",
@@ -19530,6 +20818,20 @@ class PhoenixGuardWindowTrackingAdapter:
                 stable_candle_identities_by_index
             ),
         )
+        current_time_proof = time_proofs_by_identity.get(
+            (closed_key, closed_sequence)
+        )
+        current_jpclf_bound_index = jpclf_bound_index_by_identity.get(
+            (closed_key, closed_sequence)
+        )
+        service_time_proof: dict[str, Any] | None = None
+        if current_time_proof is not None and current_jpclf_bound_index is not None:
+            service_time_proof = {
+                **current_time_proof,
+                # This handoff index is in the exact ordered
+                # resolver-bound+attested subset consumed by JPCLF.
+                "bound_row_index": current_jpclf_bound_index,
+            }
         try:
             return service.study(
                 closed_candles,
@@ -19541,6 +20843,8 @@ class PhoenixGuardWindowTrackingAdapter:
                 regression=regression,
                 objects=objects,
                 observed_at=_now_iso(),
+                contract_duration_seconds=contract_duration_seconds,
+                closed_candle_time_proof=service_time_proof,
             )
         except Exception as exc:  # Study failure must not interrupt live safety.
             LOGGER.exception("PhoenixGuard V3 market study degraded: %s", exc)
@@ -19565,6 +20869,15 @@ class PhoenixGuardWindowTrackingAdapter:
         candles = [dict(item) for item in tracked_candles]
         session_row = _mapping_to_dict(session_payload)
         self._restore_scene_belief_checkpoint(session_row)
+        capture_started_epoch_v3 = _float_or(
+            session_row.get("_capture_started_epoch_v3"),
+            0.0,
+        )
+        if (
+            not math.isfinite(capture_started_epoch_v3)
+            or capture_started_epoch_v3 <= 0.0
+        ):
+            capture_started_epoch_v3 = 0.0
         execution_controls = _normalize_execution_controls(
             _mapping_to_dict(session_row.get("execution_controls", {}))
         )
@@ -19938,6 +21251,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 timeframe=timeframe,
                 market=market,
                 frame_id=frame_index,
+                capture_epoch=capture_started_epoch_v3,
                 projection=projection,
                 candle_statistics=candle_statistics,
                 behavior_payload=behavior_payload,
@@ -20134,6 +21448,11 @@ class PhoenixGuardWindowTrackingAdapter:
             candle_statistics=candle_statistics,
             decision_kernel=decision_kernel,
         )
+        jpclf_contract_duration_seconds = _jpclf_planned_contract_duration_seconds(
+            timeframe,
+            decision_kernel,
+            execution_controls,
+        )
         market_study_v3 = self._build_market_study_v3(
             candles=candles,
             market=market,
@@ -20156,6 +21475,7 @@ class PhoenixGuardWindowTrackingAdapter:
             structure_boxes=structure_boxes,
             historical_structure=historical_structure,
             support_resistance_zones=support_resistance_zones,
+            contract_duration_seconds=jpclf_contract_duration_seconds,
             smart_money_context=smart_money_context,
         )
 
@@ -20231,6 +21551,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "major_trend_direction": major_trend_side,
             "major_trend_confidence": major_trend_confidence,
             "market_study_v3": market_study_v3,
+            "jpclf_contract_duration_seconds": jpclf_contract_duration_seconds,
+            "jpclf_duration_policy": duration_eligibility_contract_v3(
+                jpclf_contract_duration_seconds
+            ),
         }
         candle_movement_context = build_candle_movement_context_v3(tracking_summary)
         tracking_summary["candle_movement_context_v3"] = candle_movement_context
@@ -20249,6 +21573,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "major_trend_direction": major_trend_side,
             "major_trend_confidence": major_trend_confidence,
             "market_study_v3": market_study_v3,
+            "jpclf_contract_duration_seconds": jpclf_contract_duration_seconds,
             "execution_confidence": confidence if execution_action != "HOLD" else confidence * 0.65,
             "confidence": confidence,
             "effective_confidence": confidence,
@@ -24418,6 +25743,63 @@ class _WorkerControl:
     capture_now_evt: threading.Event
 
 
+@dataclass(slots=True)
+class _CPUStreamKeyframeV3:
+    """One bounded, immutable handoff from the light stream to heavy study."""
+
+    image: Image.Image
+    captured_epoch: float
+    source: dict[str, Any]
+    lineage: dict[str, Any]
+    attempts: int = 0
+
+
+def _empty_cpu_stream_lineage_v3() -> dict[str, Any]:
+    return {}
+
+
+@dataclass(slots=True)
+class _CPUStreamControlV3:
+    thread: threading.Thread
+    stop_evt: threading.Event
+    observer: Any
+    capture_backend: WindowCaptureBackend
+    target_fps: float
+    lock: Any = field(default_factory=threading.Lock)
+    latest_keyframe: _CPUStreamKeyframeV3 | None = None
+    in_flight_keyframe: _CPUStreamKeyframeV3 | None = None
+    status: str = "starting"
+    last_error: str = ""
+    started_epoch: float = 0.0
+    last_capture_epoch: float = 0.0
+    last_event_epoch: float = 0.0
+    observed_frames: int = 0
+    accepted_events: int = 0
+    dropped_keyframes: int = 0
+    capture_errors: int = 0
+    recoveries: int = 0
+    duplicate_streak_frames: int = 0
+    duplicate_recovery_pending: bool = False
+    duplicate_recovery_attempts: int = 0
+    duplicate_recovery_successes: int = 0
+    duplicate_recovery_errors: int = 0
+    last_duplicate_recovery_attempt_epoch: float = 0.0
+    last_duplicate_recovery_success_epoch: float = 0.0
+    last_duplicate_recovery_error: str = ""
+    last_duplicate_recovery_lineage: dict[str, Any] = field(
+        default_factory=_empty_cpu_stream_lineage_v3
+    )
+    stale_generation_drops: int = 0
+    study_gate_requeues: int = 0
+    coalesced_keyframe_drops: int = 0
+    last_lineage: dict[str, Any] = field(default_factory=_empty_cpu_stream_lineage_v3)
+    last_observation_lineage: dict[str, Any] = field(
+        default_factory=_empty_cpu_stream_lineage_v3
+    )
+    cleanup_completed: bool = False
+    stopped_epoch: float = 0.0
+
+
 class ContinuousWindowTrackerService:
     def __init__(
         self,
@@ -24429,6 +25811,8 @@ class ContinuousWindowTrackerService:
         focus_selector_backend: FocusSelectionBackend | None = None,
         execution_backend: BrokerExecutionBackend | None = None,
         market_study_root: Path | None = None,
+        cpu_stream_capture_backend_factory: Callable[[], WindowCaptureBackend] | None = None,
+        cpu_stream_observer_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.observer_service = observer_service
         self.root_dir = Path(root_dir or (RUNTIME.data_dir / "window_tracker"))
@@ -24448,6 +25832,7 @@ class ContinuousWindowTrackerService:
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
         self.execution_backend = execution_backend or PocketOptionBrokerExecutionBackend()
         self._lock = threading.RLock()
+        self._shutdown_evt = threading.Event()
         # Session JSON commits are serialized per session.  The process-wide
         # service lock protects in-memory registries only; it must never be
         # held across multi-megabyte JSON preparation or filesystem I/O.
@@ -24455,6 +25840,11 @@ class ContinuousWindowTrackerService:
         self._session_commit_locks: dict[str, Any] = {}
         self._memory_projection_warmup_thread: threading.Thread | None = None
         self._workers: dict[str, _WorkerControl] = {}
+        self._cpu_streams: dict[str, _CPUStreamControlV3] = {}
+        self._cpu_stream_starting_session_id = ""
+        self._cpu_stream_failures: dict[str, dict[str, Any]] = {}
+        self._cpu_stream_capture_backend_factory = cpu_stream_capture_backend_factory
+        self._cpu_stream_observer_factory = cpu_stream_observer_factory
         self._next_capture_epoch: dict[str, float] = {}
         self._last_capture_time: dict[str, float] = {}
         self._model_councils: dict[str, ModelCouncilV3] = {}
@@ -24870,17 +26260,37 @@ class ContinuousWindowTrackerService:
             else ""
         )
         if broker_candidate_active:
+            raw_broker_expiry = broker_execution_state.get(
+                "expiry_seconds",
+                broker_execution_timing.get(
+                    "expiry_seconds",
+                    broker_execution_timing.get(
+                        "recommended_expiry_seconds",
+                        MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+                    ),
+                ),
+            )
+            try:
+                broker_expiry_seconds = int(raw_broker_expiry or 0)
+            except (TypeError, ValueError, OverflowError):
+                broker_expiry_seconds = 0
+            broker_expiry_seconds = max(
+                MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+                min(
+                    MAXIMUM_STUDIED_TRADE_DURATION_SECONDS,
+                    broker_expiry_seconds
+                    or MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+                ),
+            )
             execution_timing = {
                 **broker_execution_timing,
                 "state": "READY",
                 "side": broker_side,
-                "expiry_seconds": int(
-                    broker_execution_state.get(
-                        "expiry_seconds",
-                        broker_execution_timing.get("expiry_seconds", broker_execution_timing.get("recommended_expiry_seconds", 300)),
-                    )
-                    or 300
+                "expiry_seconds": broker_expiry_seconds,
+                "minimum_eligible_duration_seconds": (
+                    MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
                 ),
+                "under_15_minutes_excluded": True,
                 "reason": str(
                     broker_execution_timing.get("rationale")
                     or broker_execution_state.get("message")
@@ -26995,6 +28405,7 @@ class ContinuousWindowTrackerService:
             "state_version": int(raw.get("state_version", 0) or 0),
             "decision_version": int(raw.get("decision_version", 0) or 0),
             "decision_valid_until_epoch": _float_or(raw.get("decision_valid_until_epoch", 0.0), 0.0),
+            "cpu_stream_v3": _mapping_to_dict(raw.get("cpu_stream_v3", {})),
             "locked_window": locked_window,
             "locked_title": locked_title,
             "manual_focus_region": {
@@ -28353,7 +29764,7 @@ class ContinuousWindowTrackerService:
         session_id: str,
         *,
         side: str | None = None,
-        expiry_seconds: int = 180,
+        expiry_seconds: int = MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
         force: bool = False,
     ) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -28389,9 +29800,21 @@ class ContinuousWindowTrackerService:
                 if selected_side not in {"BUY", "SELL"}:
                     selected_side = str(secrets.choice(("BUY", "SELL")))
 
-        requested_expiry = max(_EXECUTION_MIN_LIVE_EXPIRY_SEC, min(3600, int(expiry_seconds or _EXECUTION_MIN_LIVE_EXPIRY_SEC)))
+        requested_expiry = max(
+            _EXECUTION_MIN_LIVE_EXPIRY_SEC,
+            min(
+                MAXIMUM_STUDIED_TRADE_DURATION_SECONDS,
+                int(expiry_seconds or _EXECUTION_MIN_LIVE_EXPIRY_SEC),
+            ),
+        )
         timing_expiry = int(timing_snapshot.get("recommended_expiry_seconds", 0) or 0) if timing_has_authority and not bool(force) else 0
-        selected_expiry = max(_EXECUTION_MIN_LIVE_EXPIRY_SEC, min(3600, timing_expiry or requested_expiry))
+        selected_expiry = max(
+            _EXECUTION_MIN_LIVE_EXPIRY_SEC,
+            min(
+                MAXIMUM_STUDIED_TRADE_DURATION_SECONDS,
+                timing_expiry or requested_expiry,
+            ),
+        )
 
         descriptor = self._resolve_window_descriptor(payload)
         descriptor = self._activate_descriptor_for_execution(payload, descriptor)
@@ -29190,6 +30613,7 @@ class ContinuousWindowTrackerService:
         return self.get_session(str(payload["session_id"]))
 
     def shutdown(self) -> None:
+        self._shutdown_evt.set()
         self._emergency_hotkey_stop_evt.set()
         hotkey_thread = self._emergency_hotkey_thread
         if hotkey_thread is not None and hotkey_thread.is_alive():
@@ -29197,23 +30621,40 @@ class ContinuousWindowTrackerService:
 
         with self._lock:
             workers = list(self._workers.items())
+            cpu_streams = list(self._cpu_streams.items())
             for _session_id, worker in workers:
                 worker.stop_evt.set()
                 worker.capture_now_evt.set()
+            for _session_id, stream in cpu_streams:
+                stream.stop_evt.set()
         deadline = time.monotonic() + 30.0
         for _session_id, worker in workers:
             remaining = max(0.0, deadline - time.monotonic())
             worker.thread.join(timeout=remaining)
+        for _session_id, stream in cpu_streams:
+            remaining = max(0.0, deadline - time.monotonic())
+            stream.thread.join(timeout=remaining)
         with self._lock:
             for session_id, worker in workers:
                 if not worker.thread.is_alive():
                     self._workers.pop(session_id, None)
                     self._next_capture_epoch.pop(session_id, None)
+            for session_id, stream in cpu_streams:
+                if not stream.thread.is_alive():
+                    self._cpu_streams.pop(session_id, None)
         alive = [session_id for session_id, worker in workers if worker.thread.is_alive()]
         if alive:
             LOGGER.warning(
                 "Tracker shutdown timed out with active workers: %s",
                 ",".join(sorted(alive)),
+            )
+        alive_streams = [
+            session_id for session_id, stream in cpu_streams if stream.thread.is_alive()
+        ]
+        if alive_streams:
+            LOGGER.warning(
+                "Tracker shutdown timed out with active CPU streams: %s",
+                ",".join(sorted(alive_streams)),
             )
 
     def _on_focus_selected(self, session_id: str, normalized_bbox: list[float], source: str) -> None:
@@ -29257,12 +30698,1007 @@ class ContinuousWindowTrackerService:
         except Exception:
             LOGGER.exception("Failed to update focus state for session %s.", session_id)
 
+    def _cpu_stream_requested_v3(self) -> bool:
+        configured = str(os.getenv("PHOENIXGUARD_CPU_STREAM_ENABLED", "") or "").strip().lower()
+        if configured:
+            return configured not in {"0", "false", "off", "no"}
+        # Default-on is deliberately limited to the local native V3 capture
+        # path.  External frame feeds and test doubles keep their existing
+        # snapshot behavior unless they opt in explicitly.
+        return bool(
+            sys.platform.startswith("win")
+            and isinstance(self.capture_backend, WindowsWindowCaptureBackend)
+        )
+
+    @staticmethod
+    def _cpu_stream_target_fps_v3() -> float:
+        try:
+            configured = float(
+                os.getenv("PHOENIXGUARD_CPU_STREAM_FPS", "0.25") or "0.25"
+            )
+        except ValueError:
+            configured = 0.25
+        return min(8.0, max(0.25, configured))
+
+    @staticmethod
+    def _cpu_stream_snapshot_fallback_sec_v3() -> float:
+        try:
+            configured = float(
+                os.getenv("PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC", "15.0")
+                or "15.0"
+            )
+        except ValueError:
+            configured = 15.0
+        return min(120.0, max(5.0, configured))
+
+    @staticmethod
+    def _cpu_stream_duplicate_recovery_threshold_v3() -> int:
+        """Return the bounded duplicate streak that arms one live capture."""
+
+        return min(
+            10,
+            _env_int(
+                "PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_THRESHOLD",
+                3,
+                2,
+            ),
+        )
+
+    @staticmethod
+    def _cpu_stream_duplicate_recovery_min_interval_sec_v3() -> float:
+        """Throttle visible recovery without allowing an unbounded setting."""
+
+        return min(
+            300.0,
+            _env_float(
+                "PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_MIN_INTERVAL_SEC",
+                15.0,
+                1.0,
+            ),
+        )
+
+    def _new_cpu_stream_capture_backend_v3(self) -> WindowCaptureBackend:
+        factory = self._cpu_stream_capture_backend_factory
+        if factory is not None:
+            backend = factory()
+            if backend is self.capture_backend:
+                raise RuntimeError("CPU stream capture backend must be separate from snapshot capture.")
+            return backend
+        clone_for_stream = getattr(self.capture_backend, "clone_for_stream", None)
+        if callable(clone_for_stream):
+            backend = cast(WindowCaptureBackend, clone_for_stream())
+            if backend is self.capture_backend:
+                raise RuntimeError("CPU stream capture clone returned the snapshot backend instance.")
+            return backend
+        if isinstance(self.capture_backend, WindowsWindowCaptureBackend):
+            return WindowsWindowCaptureBackend()
+        raise RuntimeError("No independent CPU stream capture backend is available.")
+
+    def _new_cpu_stream_observer_v3(self, session_id: str) -> Any:
+        module = import_module("phoenixguard.vision.cpu_stream_v3")
+        config_type = getattr(module, "CPUStreamConfig")
+        observer_type = getattr(module, "CPUStreamObserver")
+        config = config_type()
+        stream_id = f"pgcpu-{session_id}-{uuid4().hex[:12]}"
+        factory = self._cpu_stream_observer_factory
+        if factory is not None:
+            return factory(config=config, stream_id=stream_id)
+        return observer_type(config=config, stream_id=stream_id)
+
+    @staticmethod
+    def _cpu_stream_locked_descriptor_v3(
+        payload: Mapping[str, Any],
+        capture_backend: WindowCaptureBackend,
+    ) -> dict[str, Any]:
+        """Resolve the stable live HWND identity without freezing browser tab text."""
+
+        locked = _mapping_to_dict(payload.get("locked_window", {}))
+        locked_hwnd = int(locked.get("hwnd", 0) or 0)
+        locked_title = str(
+            payload.get("locked_title", "") or locked.get("title", "") or ""
+        ).strip()
+        if locked_hwnd <= 0 or not locked_title:
+            raise CaptureSurfaceUnavailableError(
+                "The CPU stream requires an exact locked HWND and title."
+            )
+        locked["title"] = locked_title
+        locked["window_query"] = str(
+            payload.get("window_query", "") or locked.get("window_query", "") or locked_title
+        ).strip()
+        current = next(
+            (
+                dict(row)
+                for row in capture_backend.list_windows(None)
+                if int(row.get("hwnd", 0) or 0) == locked_hwnd
+            ),
+            None,
+        )
+        if (
+            current is None
+            or not _cpu_stream_window_identity_matches_v3(
+                locked,
+                current,
+                require_geometry=False,
+            )
+        ):
+            raise CaptureSurfaceUnavailableError(
+                "The CPU stream's live window no longer matches the stable session lock."
+            )
+        return {
+            **current,
+            "window_query": locked["window_query"],
+        }
+
+    @staticmethod
+    def _cpu_stream_identity_v3(
+        payload: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+        image: Image.Image,
+        *,
+        selector_image: Image.Image | None = None,
+    ) -> dict[str, Any]:
+        tracking = _mapping_to_dict(payload.get("tracking_summary", {}))
+        signal = _mapping_to_dict(payload.get("latest_signal", {}))
+        locked = _mapping_to_dict(payload.get("locked_window", {}))
+        canonical_title = str(
+            payload.get("locked_title", "")
+            or locked.get("title", "")
+            or descriptor.get("title", "")
+            or ""
+        ).strip()
+        market = _normalize_fx_market_candidate(
+            signal.get("market", tracking.get("detected_market", payload.get("market", "")))
+        )
+        timeframe = str(
+            signal.get("focus_timeframe", tracking.get("detected_timeframe", "")) or ""
+        ).strip().upper()
+        # ``image`` is the full broker window and therefore includes browser
+        # chrome plus Pocket Option's animated payout/tab strip.  The selected
+        # pair and timeframe controls live inside the locked chart focus.
+        # Fingerprinting the full window falsely treated those unrelated
+        # animations as pair switches and repeatedly reset the stream.  Keep
+        # full-window geometry authoritative, but derive visual instrument
+        # identity from the exact focus pixels consumed by the observer.
+        selector_surface = selector_image if selector_image is not None else image
+        selector_visual_fingerprint = _market_selector_visual_fingerprint(
+            selector_surface
+        )
+        focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
+        descriptor_bbox = [
+            int(round(float(value)))
+            for value in list(cast(Sequence[Any], descriptor.get("bbox", [])))[:4]
+        ]
+        focus_bbox = [
+            round(float(value), 8)
+            for value in list(cast(Sequence[Any], focus.get("normalized_bbox", [])))[:4]
+        ]
+        geometry = {
+            "window_size": [int(image.width), int(image.height)],
+            "window_bbox": descriptor_bbox,
+            "focus_normalized_bbox": focus_bbox,
+        }
+        geometry_hash = hashlib.sha256(
+            json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return {
+            "session_id": str(payload.get("session_id", "") or ""),
+            "window_handle": str(descriptor.get("hwnd", "") or ""),
+            "window_title": canonical_title,
+            "window_process_id": int(
+                descriptor.get("process_id", descriptor.get("pid", 0)) or 0
+            ),
+            "window_class_name": str(
+                descriptor.get("class_name", descriptor.get("window_class", "")) or ""
+            ),
+            "symbol_hint": market,
+            "timeframe_hint": timeframe,
+            "selector_visual_fingerprint": selector_visual_fingerprint,
+            "market_identity_proven": False,
+            "geometry_hash": geometry_hash,
+            "geometry": geometry,
+        }
+
+    @staticmethod
+    def _cpu_stream_decision_lineage_v3(
+        decision: Any,
+        *,
+        captured_epoch: float,
+        identity: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        temporal_evidence = _mapping_to_dict(getattr(decision, "temporal_evidence", {}))
+        input_frame_hash = str(getattr(decision, "input_frame_hash", "") or "")
+        identity_hash = hashlib.sha256(
+            json.dumps(dict(identity), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        return {
+            "schema_version": "PG_CPU_STREAM_KEYFRAME_LINEAGE_V3",
+            "stream_id": str(getattr(decision, "stream_id", "") or ""),
+            "stream_generation": int(getattr(decision, "stream_generation", 0) or 0),
+            "frame_seq": int(getattr(decision, "frame_seq", 0) or 0),
+            "input_frame_hash": input_frame_hash,
+            "focus_sha256": input_frame_hash,
+            "captured_epoch": float(captured_epoch),
+            "accepted_reason": str(getattr(decision, "reason", "") or ""),
+            "identity_hash": identity_hash,
+            "geometry_hash": str(identity.get("geometry_hash", "") or ""),
+            "symbol_hint": str(identity.get("symbol_hint", "") or ""),
+            "timeframe_hint": str(identity.get("timeframe_hint", "") or ""),
+            "selector_visual_fingerprint": str(
+                identity.get("selector_visual_fingerprint", "") or ""
+            ),
+            "market_identity_proven": False,
+            "window_handle": str(identity.get("window_handle", "") or ""),
+            "window_title": str(identity.get("window_title", "") or ""),
+            "window_process_id": int(identity.get("window_process_id", 0) or 0),
+            "window_class_name": str(identity.get("window_class_name", "") or ""),
+            "focus_normalized_bbox": list(
+                cast(Sequence[Any], _mapping_to_dict(identity.get("geometry", {})).get("focus_normalized_bbox", []))
+            ),
+            "temporal_evidence": temporal_evidence,
+            "broker_click_authority": False,
+        }
+
+    def _cpu_stream_producer_loop_v3(
+        self,
+        session_id: str,
+        control: _CPUStreamControlV3,
+    ) -> None:
+        interval_sec = 1.0 / max(0.5, float(control.target_fps))
+        next_tick = time.monotonic()
+        status_publish_at = 0.0
+        cached_payload: dict[str, Any] = {}
+        payload_refresh_at = 0.0
+        consecutive_errors = 0
+        duplicate_recovery_threshold = (
+            self._cpu_stream_duplicate_recovery_threshold_v3()
+        )
+        duplicate_recovery_min_interval_sec = (
+            self._cpu_stream_duplicate_recovery_min_interval_sec_v3()
+        )
+        with control.lock:
+            control.status = "active"
+            control.started_epoch = _now_epoch()
+        self._publish_cpu_stream_status_v3(session_id)
+        status_publish_at = time.monotonic() + 1.0
+        try:
+            while not control.stop_evt.is_set():
+                now_monotonic = time.monotonic()
+                if now_monotonic < next_tick:
+                    control.stop_evt.wait(timeout=max(0.0, next_tick - now_monotonic))
+                    continue
+                use_visible_duplicate_recovery = False
+                try:
+                    with control.lock:
+                        recovery_identity_refresh_due = bool(
+                            control.duplicate_recovery_pending
+                            and control.latest_keyframe is None
+                            and control.in_flight_keyframe is None
+                        )
+                    if (
+                        recovery_identity_refresh_due
+                        or now_monotonic >= payload_refresh_at
+                        or not cached_payload
+                    ):
+                        cached_payload = _mapping_to_dict(
+                            self._load_session(session_id)
+                        )
+                        payload_refresh_at = now_monotonic + 1.0
+                    if not cached_payload or not bool(cached_payload.get("tracking_enabled", False)):
+                        break
+                    stream_payload = cast(Mapping[str, Any], cached_payload)
+                    descriptor = self._cpu_stream_locked_descriptor_v3(
+                        stream_payload,
+                        control.capture_backend,
+                    )
+                    manual_focus = _public_manual_focus_region(
+                        stream_payload.get("manual_focus_region", {})
+                    )
+                    focus_bbox = list(
+                        cast(
+                            Sequence[Any],
+                            manual_focus.get("normalized_bbox", []),
+                        )
+                    )
+                    explicitly_locked_chart = bool(
+                        manual_focus.get("enabled") is True
+                        and len(focus_bbox) >= 4
+                    )
+                    visible_recovery_capture = getattr(
+                        control.capture_backend,
+                        "capture_window_live",
+                        None,
+                    )
+                    with control.lock:
+                        recovery_study_slot_free = bool(
+                            control.latest_keyframe is None
+                            and control.in_flight_keyframe is None
+                        )
+                        use_visible_duplicate_recovery = bool(
+                            control.duplicate_recovery_pending
+                            and explicitly_locked_chart
+                            and callable(visible_recovery_capture)
+                            and recovery_study_slot_free
+                        )
+                        # A scheduled recovery owns exactly one capture slot.
+                        # Success or failure always returns the producer to its
+                        # ordinary non-disruptive stream capture on the next
+                        # iteration.
+                        if use_visible_duplicate_recovery or (
+                            not explicitly_locked_chart
+                            or not callable(visible_recovery_capture)
+                        ):
+                            control.duplicate_recovery_pending = False
+                    captured_epoch = _now_epoch()
+                    if use_visible_duplicate_recovery:
+                        with control.lock:
+                            control.duplicate_recovery_attempts += 1
+                            control.last_duplicate_recovery_attempt_epoch = (
+                                captured_epoch
+                            )
+                        recovery_capture = cast(
+                            Callable[[Mapping[str, Any]], Image.Image],
+                            visible_recovery_capture,
+                        )
+                        window_image = recovery_capture(descriptor).convert("RGB")
+                    else:
+                        stream_capture = getattr(
+                            control.capture_backend,
+                            "capture_window_stream",
+                            None,
+                        )
+                        window_image = (
+                            cast(Image.Image, stream_capture(descriptor))
+                            if callable(stream_capture)
+                            else control.capture_backend.capture_window(descriptor)
+                        ).convert("RGB")
+                    max_stream_pixels = int(
+                        getattr(
+                            getattr(control.observer, "config", None),
+                            "max_frame_pixels",
+                            16_777_216,
+                        )
+                        or 16_777_216
+                    )
+                    full_window_pixels = int(window_image.width) * int(window_image.height)
+                    if full_window_pixels > max_stream_pixels:
+                        raise CaptureSurfaceUnavailableError(
+                            "CPU stream full-window capture exceeds the bounded pixel budget."
+                        )
+                    stream_surface, _focus_meta = _crop_normalized_bbox(
+                        window_image,
+                        focus_bbox,
+                    )
+                    identity = self._cpu_stream_identity_v3(
+                        stream_payload,
+                        descriptor,
+                        window_image,
+                        selector_image=stream_surface,
+                    )
+                    with control.lock:
+                        allow_study_keyframe = bool(
+                            control.latest_keyframe is None
+                            and control.in_flight_keyframe is None
+                        )
+                        decision = control.observer.push(
+                            stream_surface,
+                            captured_epoch=captured_epoch,
+                            identity=identity,
+                            allow_heartbeat=(
+                                allow_study_keyframe
+                                and not use_visible_duplicate_recovery
+                            ),
+                            allow_study_keyframe=allow_study_keyframe,
+                            force_study_keyframe=(
+                                use_visible_duplicate_recovery
+                            ),
+                        )
+                        accepted = bool(getattr(decision, "accepted_for_study", False))
+                        temporal_evidence = _mapping_to_dict(
+                            getattr(decision, "temporal_evidence", {})
+                        )
+                        observation_state = str(
+                            temporal_evidence.get("state", "") or ""
+                        ).strip().lower()
+                        lineage = self._cpu_stream_decision_lineage_v3(
+                            decision,
+                            captured_epoch=captured_epoch,
+                            identity=identity,
+                        )
+                        forced_recovery_keyframe = bool(
+                            str(getattr(decision, "reason", "") or "")
+                            == "visible_duplicate_recovery"
+                        )
+                        recovery_produced_fresh_pixels = bool(
+                            use_visible_duplicate_recovery
+                            and accepted
+                            and observation_state
+                            in {"keyframe", "rest", "motion", "material_change"}
+                        )
+                        if recovery_produced_fresh_pixels:
+                            control.duplicate_recovery_successes += 1
+                            control.last_duplicate_recovery_success_epoch = (
+                                captured_epoch
+                            )
+                            control.last_duplicate_recovery_error = ""
+                        if observation_state == "duplicate":
+                            control.duplicate_streak_frames = min(
+                                duplicate_recovery_threshold,
+                                control.duplicate_streak_frames + 1,
+                            )
+                            recovery_time_eligible = bool(
+                                control.last_duplicate_recovery_attempt_epoch <= 0.0
+                                or captured_epoch
+                                - control.last_duplicate_recovery_attempt_epoch
+                                >= duplicate_recovery_min_interval_sec
+                            )
+                            control.duplicate_recovery_pending = bool(
+                                not use_visible_duplicate_recovery
+                                and explicitly_locked_chart
+                                and callable(visible_recovery_capture)
+                                and control.duplicate_streak_frames
+                                >= duplicate_recovery_threshold
+                                and recovery_time_eligible
+                            )
+                        else:
+                            # Rest and real motion are legitimate live states;
+                            # neither may arm the stale-PrintWindow recovery.
+                            control.duplicate_streak_frames = 0
+                            control.duplicate_recovery_pending = False
+                        lineage["capture_mode"] = (
+                            "visible_duplicate_recovery"
+                            if use_visible_duplicate_recovery
+                            else "offscreen_stream"
+                        )
+                        lineage["duplicate_recovery_v3"] = {
+                            "attempted": use_visible_duplicate_recovery,
+                            "succeeded": recovery_produced_fresh_pixels,
+                            "forced_keyframe": forced_recovery_keyframe,
+                            "pending": control.duplicate_recovery_pending,
+                            "duplicate_streak_frames": (
+                                control.duplicate_streak_frames
+                            ),
+                            "threshold_frames": duplicate_recovery_threshold,
+                            "min_interval_sec": (
+                                duplicate_recovery_min_interval_sec
+                            ),
+                            "attempt_count": control.duplicate_recovery_attempts,
+                            "success_count": control.duplicate_recovery_successes,
+                            "error_count": control.duplicate_recovery_errors,
+                        }
+                        if use_visible_duplicate_recovery:
+                            control.last_duplicate_recovery_lineage = dict(
+                                lineage
+                            )
+                        if consecutive_errors:
+                            control.recoveries += 1
+                        control.status = "active"
+                        control.last_error = ""
+                        control.last_capture_epoch = captured_epoch
+                        control.observed_frames += 1
+                        control.last_observation_lineage = dict(lineage)
+                    consecutive_errors = 0
+                    next_tick = time.monotonic() + interval_sec
+                    if time.monotonic() >= status_publish_at:
+                        self._publish_cpu_stream_status_v3(session_id)
+                        status_publish_at = time.monotonic() + 1.0
+                    if not accepted:
+                        continue
+                    source = {
+                        "source_id": str(lineage.get("stream_id", "") or f"cpu-stream-{session_id}"),
+                        "source_type": "local_cpu_window_stream_v3",
+                        "local_cpu_stream_v3": True,
+                        "symbol": "",
+                        "timeframe": "",
+                        "symbol_hint": str(identity.get("symbol_hint", "") or ""),
+                        "timeframe_hint": str(identity.get("timeframe_hint", "") or ""),
+                        "sequence_id": (
+                            f"{lineage.get('stream_id', '')}:{lineage.get('stream_generation', 0)}"
+                        ),
+                        "frame_id": int(lineage.get("frame_seq", 0) or 0),
+                        "capture_epoch_ms": int(captured_epoch * 1000.0),
+                        "window_descriptor": dict(descriptor),
+                        "cpu_stream_lineage_v3": dict(lineage),
+                    }
+                    keyframe = _CPUStreamKeyframeV3(
+                        image=window_image.copy(),
+                        captured_epoch=captured_epoch,
+                        source=source,
+                        lineage=dict(lineage),
+                    )
+                    with control.lock:
+                        if control.latest_keyframe is not None:
+                            control.dropped_keyframes += 1
+                        control.latest_keyframe = keyframe
+                        control.accepted_events += 1
+                        control.last_event_epoch = captured_epoch
+                        control.last_lineage = dict(lineage)
+                    with self._lock:
+                        worker = self._workers.get(session_id)
+                        if worker is not None:
+                            worker.capture_now_evt.set()
+                    next_tick = time.monotonic() + interval_sec
+                except Exception as exc:
+                    if use_visible_duplicate_recovery:
+                        recovery_message = (
+                            "CPU stream duplicate recovery failed; ordinary "
+                            f"offscreen capture resumes: {exc}"
+                        )
+                        with control.lock:
+                            control.duplicate_recovery_errors += 1
+                            control.last_duplicate_recovery_error = (
+                                recovery_message
+                            )
+                            control.last_error = recovery_message
+                            control.status = "active"
+                        _safe_worker_log(
+                            logging.WARNING,
+                            "%s (%s)",
+                            recovery_message,
+                            session_id,
+                        )
+                        self._publish_cpu_stream_status_v3(session_id)
+                        status_publish_at = time.monotonic() + 1.0
+                        next_tick = time.monotonic() + interval_sec
+                        continue
+                    consecutive_errors += 1
+                    cached_payload = {}
+                    payload_refresh_at = 0.0
+                    message = f"CPU stream degraded; snapshot timer remains active: {exc}"
+                    if consecutive_errors in {1, 3, 10} or consecutive_errors % 30 == 0:
+                        _safe_worker_log(
+                            logging.WARNING,
+                            "%s (%s; consecutive_errors=%s)",
+                            message,
+                            session_id,
+                            consecutive_errors,
+                        )
+                    with control.lock:
+                        control.status = "degraded_snapshot_fallback"
+                        control.last_error = message
+                        control.capture_errors += 1
+                    if consecutive_errors == 1 or time.monotonic() >= status_publish_at:
+                        self._publish_cpu_stream_status_v3(session_id)
+                        status_publish_at = time.monotonic() + 1.0
+                    if consecutive_errors == 1:
+                        with self._lock:
+                            worker = self._workers.get(session_id)
+                            if worker is not None:
+                                worker.capture_now_evt.set()
+                    backoff_sec = min(2.0, max(interval_sec, 0.25 * (2 ** min(3, consecutive_errors - 1))))
+                    next_tick = time.monotonic() + backoff_sec
+        finally:
+            close_backend = getattr(control.capture_backend, "close", None)
+            if callable(close_backend):
+                try:
+                    close_backend()
+                except Exception as exc:
+                    _safe_worker_log(
+                        logging.WARNING,
+                        "CPU stream backend cleanup failed for %s: %s",
+                        session_id,
+                        exc,
+                    )
+                    with control.lock:
+                        control.last_error = f"CPU stream cleanup failed: {exc}"
+            with control.lock:
+                control.status = "stopped"
+                control.cleanup_completed = True
+                control.stopped_epoch = _now_epoch()
+            self._publish_cpu_stream_status_v3(session_id)
+
+    def _ensure_cpu_stream_v3(self, session_id: str) -> None:
+        if not self._cpu_stream_requested_v3() or self._shutdown_evt.is_set():
+            return
+        with self._lock:
+            existing = self._cpu_streams.get(session_id)
+            if existing is not None and existing.thread.is_alive():
+                return
+            if self._cpu_stream_starting_session_id:
+                if self._cpu_stream_starting_session_id == session_id:
+                    return
+                failure = {
+                    "status": "capacity_snapshot_fallback",
+                    "last_error": "The bounded local CPU stream is already starting for another session.",
+                    "updated_epoch": _now_epoch(),
+                }
+                self._cpu_stream_failures[session_id] = failure
+                self._publish_cpu_stream_failure_status_v3(session_id, failure)
+                return
+            active_other_session = next(
+                (
+                    other_session_id
+                    for other_session_id, other in self._cpu_streams.items()
+                    if other_session_id != session_id
+                    and (
+                        other.thread.is_alive()
+                        or other.status in {"starting", "active"}
+                    )
+                ),
+                "",
+            )
+            if active_other_session:
+                failure = {
+                    "status": "capacity_snapshot_fallback",
+                    "last_error": (
+                        "The bounded local CPU stream is already assigned to "
+                        f"session {active_other_session}; this session uses snapshot timing."
+                    ),
+                    "updated_epoch": _now_epoch(),
+                }
+                self._cpu_stream_failures[session_id] = failure
+                self._publish_cpu_stream_failure_status_v3(session_id, failure)
+                return
+            self._cpu_stream_starting_session_id = session_id
+        capture_backend: WindowCaptureBackend | None = None
+        try:
+            capture_backend = self._new_cpu_stream_capture_backend_v3()
+            observer = self._new_cpu_stream_observer_v3(session_id)
+            stop_evt = threading.Event()
+            placeholder = threading.current_thread()
+            control = _CPUStreamControlV3(
+                thread=placeholder,
+                stop_evt=stop_evt,
+                observer=observer,
+                capture_backend=capture_backend,
+                target_fps=self._cpu_stream_target_fps_v3(),
+            )
+            thread = threading.Thread(
+                target=self._cpu_stream_producer_loop_v3,
+                args=(session_id, control),
+                name=f"window-tracker-cpu-stream-{session_id}",
+                daemon=True,
+            )
+            control.thread = thread
+            with self._lock:
+                if self._shutdown_evt.is_set():
+                    raise RuntimeError("Tracker service is shutting down.")
+                self._cpu_streams[session_id] = control
+                self._cpu_stream_starting_session_id = ""
+                self._cpu_stream_failures.pop(session_id, None)
+                thread.start()
+        except Exception as exc:
+            close_backend = getattr(capture_backend, "close", None)
+            if callable(close_backend):
+                try:
+                    close_backend()
+                except Exception:
+                    LOGGER.debug("Unable to close failed CPU stream backend.", exc_info=True)
+            message = f"CPU stream unavailable; using snapshot timer: {exc}"
+            LOGGER.warning("%s (%s)", message, session_id)
+            with self._lock:
+                if self._cpu_stream_starting_session_id == session_id:
+                    self._cpu_stream_starting_session_id = ""
+                self._cpu_streams.pop(session_id, None)
+                failure = {
+                    "status": "fallback_snapshot",
+                    "last_error": message,
+                    "updated_epoch": _now_epoch(),
+                }
+                self._cpu_stream_failures[session_id] = failure
+                self._publish_cpu_stream_failure_status_v3(session_id, failure)
+
+    def _stop_cpu_stream_v3(self, session_id: str, *, join_timeout: float = 3.0) -> None:
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+            if control is None:
+                return
+            control.stop_evt.set()
+        if control.thread is not threading.current_thread():
+            control.thread.join(timeout=max(0.0, join_timeout))
+        with self._lock:
+            if not control.thread.is_alive():
+                self._cpu_streams.pop(session_id, None)
+                self._cpu_stream_failures.pop(session_id, None)
+                return
+            message = "CPU stream did not stop within the bounded join timeout."
+            with control.lock:
+                control.status = "stuck_stopping"
+                control.last_error = message
+            self._cpu_stream_failures[session_id] = {
+                "status": "stuck_stopping",
+                "last_error": message,
+                "updated_epoch": _now_epoch(),
+                "thread_alive": True,
+            }
+
+    def _take_cpu_stream_keyframe_v3(self, session_id: str) -> _CPUStreamKeyframeV3 | None:
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        if control is None:
+            return None
+        with control.lock:
+            keyframe = control.latest_keyframe
+            control.latest_keyframe = None
+            if keyframe is not None:
+                control.in_flight_keyframe = keyframe
+            return keyframe
+
+    def _finish_cpu_stream_keyframe_v3(
+        self,
+        session_id: str,
+        keyframe: _CPUStreamKeyframeV3,
+    ) -> None:
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        if control is None:
+            return
+        with control.lock:
+            if control.in_flight_keyframe is keyframe:
+                control.in_flight_keyframe = None
+
+    def _requeue_cpu_stream_keyframe_v3(
+        self,
+        session_id: str,
+        keyframe: _CPUStreamKeyframeV3,
+    ) -> None:
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        if control is None:
+            return
+        requeued = False
+        with control.lock:
+            if control.in_flight_keyframe is keyframe:
+                control.in_flight_keyframe = None
+            snapshot = _mapping_to_dict(control.observer.snapshot())
+            still_newest = bool(
+                snapshot
+                and str(snapshot.get("stream_id", "") or "")
+                == str(keyframe.lineage.get("stream_id", "") or "")
+                and int(snapshot.get("stream_generation", 0) or 0)
+                == int(keyframe.lineage.get("stream_generation", 0) or 0)
+                and int(snapshot.get("last_keyframe_seq", 0) or 0)
+                == int(keyframe.lineage.get("frame_seq", 0) or 0)
+                and str(snapshot.get("last_keyframe_hash", "") or "")
+                == str(keyframe.lineage.get("input_frame_hash", "") or "")
+            )
+            if still_newest and control.latest_keyframe is None and keyframe.attempts < 2:
+                keyframe.attempts += 1
+                control.latest_keyframe = keyframe
+                control.study_gate_requeues += 1
+                requeued = True
+            else:
+                control.coalesced_keyframe_drops += 1
+        if requeued:
+            with self._lock:
+                worker = self._workers.get(session_id)
+                if worker is not None:
+                    worker.capture_now_evt.set()
+
+    def _cpu_stream_active_v3(self, session_id: str) -> bool:
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        if control is None or not control.thread.is_alive():
+            return False
+        with control.lock:
+            return control.status in {
+                "starting",
+                "active",
+                "degraded_snapshot_fallback",
+            }
+
+    @contextmanager
+    def _cpu_stream_publication_guard_v3(
+        self,
+        session_id: str,
+        lineage: Mapping[str, Any],
+    ) -> Any:
+        """Serialize a stream generation reset against one publication commit."""
+
+        if not lineage:
+            yield True
+            return
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        if control is None:
+            yield False
+            return
+        control.lock.acquire()
+        try:
+            snapshot = _mapping_to_dict(control.observer.snapshot())
+            current = bool(
+                snapshot
+                and str(snapshot.get("stream_id", "") or "")
+                == str(lineage.get("stream_id", "") or "")
+                and int(snapshot.get("stream_generation", 0) or 0)
+                == int(lineage.get("stream_generation", 0) or 0)
+                and int(snapshot.get("last_keyframe_seq", 0) or 0)
+                == int(lineage.get("frame_seq", 0) or 0)
+                and str(snapshot.get("last_keyframe_hash", "") or "")
+                == str(lineage.get("input_frame_hash", "") or "")
+            )
+            if not current:
+                control.stale_generation_drops += 1
+            yield current
+        finally:
+            control.lock.release()
+
+    def _record_cpu_stream_duplicate_v3(
+        self,
+        session_id: str,
+        lineage: Mapping[str, Any],
+    ) -> bool:
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        with self._cpu_stream_publication_guard_v3(session_id, lineage) as current:
+            if current and control is not None:
+                control.last_lineage = {
+                    **dict(lineage),
+                    "analysis_result": "DUPLICATE_VISUAL_FRAME_NO_NEW_EVIDENCE",
+                }
+            return bool(current)
+
+    def _record_cpu_stream_stale_drop_v3(
+        self,
+        session_id: str,
+        lineage: Mapping[str, Any],
+        reason: str,
+    ) -> None:
+        """Record a rejected old keyframe in memory without mutating live trade state."""
+
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+        if control is None:
+            return
+        with control.lock:
+            control.stale_generation_drops += 1
+            control.last_lineage = {
+                **dict(lineage),
+                "analysis_result": "STALE_KEYFRAME_REJECTED",
+                "rejection_reason": str(reason or "stale stream keyframe"),
+            }
+
+    def _cpu_stream_public_health_v3(
+        self,
+        session_id: str,
+        persisted: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        requested = self._cpu_stream_requested_v3()
+        with self._lock:
+            control = self._cpu_streams.get(session_id)
+            failure = dict(self._cpu_stream_failures.get(session_id, {}))
+        persisted_runtime = _mapping_to_dict((persisted or {}).get("cpu_stream_v3", {}))
+        sidecar_runtime = self._load_cpu_stream_status_v3(session_id)
+        base = {**persisted_runtime, **sidecar_runtime}
+        health: dict[str, Any] = {
+            "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+            "requested": requested,
+            "enabled": requested,
+            "available": False,
+            "status": "disabled" if not requested else "fallback_snapshot",
+            "mode": "snapshot_timer" if not requested else "snapshot_fallback",
+            "target_fps": self._cpu_stream_target_fps_v3(),
+            "keyframe_slot_capacity": 1,
+            "full_model_policy": "ACCEPTED_EVENT_OR_HEARTBEAT_ONLY",
+            "broker_click_authority": False,
+            "duplicate_recovery_threshold_frames": (
+                self._cpu_stream_duplicate_recovery_threshold_v3()
+            ),
+            "duplicate_recovery_min_interval_sec": (
+                self._cpu_stream_duplicate_recovery_min_interval_sec_v3()
+            ),
+        }
+        health.update(base)
+        health.update(
+            {
+                "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                "requested": requested,
+                "enabled": requested,
+                "target_fps": self._cpu_stream_target_fps_v3(),
+                "keyframe_slot_capacity": 1,
+                "full_model_policy": "ACCEPTED_EVENT_OR_HEARTBEAT_ONLY",
+                "broker_click_authority": False,
+                "duplicate_recovery_threshold_frames": (
+                    self._cpu_stream_duplicate_recovery_threshold_v3()
+                ),
+                "duplicate_recovery_min_interval_sec": (
+                    self._cpu_stream_duplicate_recovery_min_interval_sec_v3()
+                ),
+            }
+        )
+        if failure:
+            health.update(failure)
+        if control is None:
+            status_updated_epoch = _float_or(health.get("status_updated_epoch", 0.0), 0.0)
+            if status_updated_epoch > 0.0 and _now_epoch() - status_updated_epoch > 5.0:
+                health.update(
+                    {
+                        "available": False,
+                        "status": "stale_snapshot_fallback",
+                        "mode": "snapshot_fallback",
+                        "last_error": (
+                            "CPU stream runtime telemetry is stale; the snapshot timer "
+                            "remains authoritative."
+                        ),
+                    }
+                )
+            return health
+        try:
+            observer_snapshot = _mapping_to_dict(control.observer.snapshot())
+            if observer_snapshot:
+                health["observer"] = observer_snapshot
+        except Exception as exc:
+            health["observer_error"] = str(exc)
+        with control.lock:
+            observed_duration_sec = max(0.0, _now_epoch() - float(control.started_epoch))
+            actual_fps = (
+                float(control.observed_frames) / observed_duration_sec
+                if observed_duration_sec > 0.0
+                else 0.0
+            )
+            health.update(
+                {
+                    "available": bool(control.thread.is_alive()),
+                    "status": str(control.status),
+                    "mode": (
+                        "event_driven_cpu_stream"
+                        if control.status in {"starting", "active"}
+                        else "snapshot_fallback"
+                    ),
+                    "started_epoch": float(control.started_epoch),
+                    "last_capture_epoch": float(control.last_capture_epoch),
+                    "last_event_epoch": float(control.last_event_epoch),
+                    "observed_frames": int(control.observed_frames),
+                    "actual_fps": round(actual_fps, 3),
+                    "acquisition_fps": round(actual_fps, 3),
+                    "accepted_events": int(control.accepted_events),
+                    "dropped_keyframes": int(control.dropped_keyframes),
+                    "capture_errors": int(control.capture_errors),
+                    "recoveries": int(control.recoveries),
+                    "duplicate_streak_frames": int(
+                        control.duplicate_streak_frames
+                    ),
+                    "duplicate_recovery_pending": bool(
+                        control.duplicate_recovery_pending
+                    ),
+                    "duplicate_recovery_attempts": int(
+                        control.duplicate_recovery_attempts
+                    ),
+                    "duplicate_recovery_successes": int(
+                        control.duplicate_recovery_successes
+                    ),
+                    "duplicate_recovery_errors": int(
+                        control.duplicate_recovery_errors
+                    ),
+                    "last_duplicate_recovery_attempt_epoch": float(
+                        control.last_duplicate_recovery_attempt_epoch
+                    ),
+                    "last_duplicate_recovery_success_epoch": float(
+                        control.last_duplicate_recovery_success_epoch
+                    ),
+                    "last_duplicate_recovery_error": str(
+                        control.last_duplicate_recovery_error
+                    ),
+                    "last_duplicate_recovery_lineage": dict(
+                        control.last_duplicate_recovery_lineage
+                    ),
+                    "stale_generation_drops": int(control.stale_generation_drops),
+                    "study_gate_requeues": int(control.study_gate_requeues),
+                    "coalesced_keyframe_drops": int(control.coalesced_keyframe_drops),
+                    "pending_keyframe": bool(control.latest_keyframe is not None),
+                    "in_flight_keyframe": bool(control.in_flight_keyframe is not None),
+                    "last_error": str(control.last_error),
+                    "last_keyframe_lineage": dict(control.last_lineage),
+                    "last_observation_lineage": dict(control.last_observation_lineage),
+                }
+            )
+        return health
+
+    def cpu_stream_health_v3(
+        self,
+        session_id: str,
+        persisted: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded cross-process CPU stream health for public read paths."""
+
+        return self._cpu_stream_public_health_v3(session_id, persisted)
+
     def _ensure_worker(self, session_id: str, *, capture_now: bool = False) -> None:
         with self._lock:
             worker = self._workers.get(session_id)
             if worker is not None and worker.thread.is_alive():
                 if capture_now:
                     worker.capture_now_evt.set()
+                self._ensure_cpu_stream_v3(session_id)
                 return
             stop_evt = threading.Event()
             capture_now_evt = threading.Event()
@@ -29280,8 +31716,10 @@ class ContinuousWindowTrackerService:
                 capture_now_evt=capture_now_evt,
             )
             thread.start()
+            self._ensure_cpu_stream_v3(session_id)
 
     def _stop_worker(self, session_id: str) -> None:
+        self._stop_cpu_stream_v3(session_id)
         with self._lock:
             worker = self._workers.get(session_id)
             if worker is None:
@@ -29327,7 +31765,28 @@ class ContinuousWindowTrackerService:
                     LOGGER.info("Signal state changed for %s; due capture will study it now.", session_id)
                 last_signal_state_hash = signal_state_hash
                 try:
-                    self.capture_and_analyze(session_id)
+                    stream_keyframe = self._take_cpu_stream_keyframe_v3(session_id)
+                    if stream_keyframe is not None:
+                        try:
+                            stream_processed = self._capture_and_analyze(
+                                session_id,
+                                force=True,
+                                external_window_image=stream_keyframe.image,
+                                external_source=stream_keyframe.source,
+                                external_capture_epoch=stream_keyframe.captured_epoch,
+                            )
+                            if not stream_processed:
+                                self._requeue_cpu_stream_keyframe_v3(
+                                    session_id,
+                                    stream_keyframe,
+                                )
+                        finally:
+                            self._finish_cpu_stream_keyframe_v3(
+                                session_id,
+                                stream_keyframe,
+                            )
+                    else:
+                        self.capture_and_analyze(session_id)
                 except KeyError:
                     LOGGER.warning(
                         "Tracker session %s was temporarily unavailable during capture; worker will retry.",
@@ -29344,6 +31803,14 @@ class ContinuousWindowTrackerService:
                 )
                 plan = self.adaptive_capture_interval_plan(payload or {})
                 interval_sec = float(plan.get("interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC) or _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC)
+                if self._cpu_stream_active_v3(session_id):
+                    # Accepted stream events wake this worker immediately.  The
+                    # timer remains only as a bounded snapshot watchdog, so it
+                    # cannot turn 4-8 FPS acquisition into 4-8 FPS inference.
+                    interval_sec = max(
+                        interval_sec,
+                        self._cpu_stream_snapshot_fallback_sec_v3(),
+                    )
                 # Schedule from completion, not the previous due time.  A
                 # capture that takes longer than its nominal interval must not
                 # trigger an immediate second full study and monopolize the API
@@ -29373,6 +31840,7 @@ class ContinuousWindowTrackerService:
                         message=str(payload["last_error"]),
                     )
         finally:
+            self._stop_cpu_stream_v3(session_id, join_timeout=1.0)
             with self._lock:
                 self._workers.pop(session_id, None)
                 self._next_capture_epoch.pop(session_id, None)
@@ -31800,6 +34268,18 @@ class ContinuousWindowTrackerService:
                 external_capture_epoch=external_capture_epoch,
             )
             return True
+        except StaleCPUStreamKeyframeError as exc:
+            lineage = _mapping_to_dict(
+                _mapping_to_dict(external_source or {}).get("cpu_stream_lineage_v3", {})
+            )
+            self._record_cpu_stream_stale_drop_v3(session_id, lineage, str(exc))
+            _safe_worker_log(
+                logging.DEBUG,
+                "Dropped stale CPU stream keyframe for session %s without changing live state: %s",
+                session_id,
+                exc,
+            )
+            return True
         except CaptureSurfaceUnavailableError as exc:
             message = str(exc) or "Pocket Option capture did not include the broker/chart surface."
             _safe_worker_log(logging.DEBUG, "Capture source unavailable for session %s: %s", session_id, message)
@@ -31821,6 +34301,16 @@ class ContinuousWindowTrackerService:
             payload = self._load_session_with_display_state(session_id) or self._require_session(session_id)
             tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
             latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
+            cpu_stream_lineage = _mapping_to_dict(
+                observation.get("cpu_stream_lineage_v3", {})
+            )
+            if cpu_stream_lineage:
+                cpu_runtime = _mapping_to_dict(payload.get("cpu_stream_v3", {}))
+                cpu_runtime["last_keyframe_lineage"] = dict(cpu_stream_lineage)
+                cpu_runtime["last_analysis_result"] = "DUPLICATE_VISUAL_FRAME_NO_NEW_EVIDENCE"
+                payload["cpu_stream_v3"] = cpu_runtime
+                tracking_summary["cpu_stream_lineage_v3"] = dict(cpu_stream_lineage)
+                latest_signal["cpu_stream_lineage_v3"] = dict(cpu_stream_lineage)
             previous_packet = _model_council_packet_from_payload(
                 payload,
                 require_live_overlay_truth=False,
@@ -31921,6 +34411,15 @@ class ContinuousWindowTrackerService:
         capture_started_at = time.monotonic()
         external_frame_source = _mapping_to_dict(external_source or {})
         using_external_frame = external_window_image is not None
+        using_local_cpu_stream_frame = bool(
+            using_external_frame
+            and external_frame_source.get("local_cpu_stream_v3") is True
+            and str(external_frame_source.get("source_type", "") or "")
+            == "local_cpu_window_stream_v3"
+        )
+        cpu_stream_lineage = _mapping_to_dict(
+            external_frame_source.get("cpu_stream_lineage_v3", {})
+        )
         capture_started_epoch = float(external_capture_epoch or _now_epoch())
         if capture_started_epoch <= 0.0 or capture_started_epoch > _now_epoch() + 5.0:
             capture_started_epoch = _now_epoch()
@@ -31982,7 +34481,11 @@ class ContinuousWindowTrackerService:
                 payload["status"] = "running"
         capture_started_with_tracking_enabled = bool(payload.get("tracking_enabled", False))
         manual_focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
-        if using_external_frame and not bool(manual_focus.get("enabled", False)):
+        if (
+            using_external_frame
+            and not using_local_cpu_stream_frame
+            and not bool(manual_focus.get("enabled", False))
+        ):
             manual_focus = {
                 "enabled": True,
                 "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
@@ -32003,7 +34506,158 @@ class ContinuousWindowTrackerService:
                 self._save_session(payload)
             return
 
-        if using_external_frame:
+        if using_local_cpu_stream_frame:
+            assert external_window_image is not None
+            keyframe_descriptor = _mapping_to_dict(
+                external_frame_source.get("window_descriptor", {})
+            )
+            if not keyframe_descriptor or int(keyframe_descriptor.get("hwnd", 0) or 0) <= 0:
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe is missing the locked local window identity."
+                )
+            try:
+                descriptor = self._cpu_stream_locked_descriptor_v3(
+                    payload,
+                    self.capture_backend,
+                )
+            except CaptureSurfaceUnavailableError as exc:
+                raise StaleCPUStreamKeyframeError(str(exc)) from exc
+            locked_descriptor = _mapping_to_dict(payload.get("locked_window", {}))
+            locked_hwnd = int(locked_descriptor.get("hwnd", 0) or 0)
+            keyframe_hwnd = int(keyframe_descriptor.get("hwnd", 0) or 0)
+            locked_title = str(
+                payload.get("locked_title", "") or locked_descriptor.get("title", "") or ""
+            ).strip()
+            stable_lock = {
+                **locked_descriptor,
+                "title": locked_title,
+                "window_query": str(
+                    payload.get("window_query", "") or locked_title
+                ).strip(),
+            }
+            keyframe_process_id = int(
+                keyframe_descriptor.get("process_id", keyframe_descriptor.get("pid", 0)) or 0
+            )
+            keyframe_class_name = str(
+                keyframe_descriptor.get(
+                    "class_name", keyframe_descriptor.get("window_class", "")
+                )
+                or ""
+            ).strip()
+            if (
+                locked_hwnd <= 0
+                or keyframe_hwnd != locked_hwnd
+                or not locked_title
+                or not _cpu_stream_window_identity_matches_v3(
+                    stable_lock,
+                    keyframe_descriptor,
+                    require_geometry=False,
+                )
+                or str(cpu_stream_lineage.get("window_handle", "") or "")
+                != str(locked_hwnd)
+                or str(cpu_stream_lineage.get("window_title", "") or "")
+                != locked_title
+                or (
+                    keyframe_process_id > 0
+                    and int(cpu_stream_lineage.get("window_process_id", 0) or 0)
+                    != keyframe_process_id
+                )
+                or (
+                    bool(keyframe_class_name)
+                    and str(cpu_stream_lineage.get("window_class_name", "") or "").strip().casefold()
+                    != keyframe_class_name.casefold()
+                )
+            ):
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe does not match the session's stable locked-window identity."
+                )
+            if list(cast(Sequence[Any], keyframe_descriptor.get("bbox", [])))[:4] != list(
+                cast(Sequence[Any], descriptor.get("bbox", []))
+            )[:4]:
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe geometry was superseded by a live window move or resize."
+                )
+            current_focus_bbox = [
+                round(float(value), 8)
+                for value in list(
+                    cast(Sequence[Any], manual_focus.get("normalized_bbox", []))
+                )[:4]
+            ]
+            keyframe_focus_bbox = [
+                round(float(value), 8)
+                for value in list(
+                    cast(
+                        Sequence[Any],
+                        cpu_stream_lineage.get("focus_normalized_bbox", []),
+                    )
+                )[:4]
+            ]
+            if (
+                len(current_focus_bbox) != 4
+                or keyframe_focus_bbox != current_focus_bbox
+            ):
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe focus geometry no longer matches the session focus."
+                )
+            keyframe_focus_image, _keyframe_focus_meta = _crop_normalized_bbox(
+                external_window_image,
+                current_focus_bbox,
+            )
+            focus_sha256 = _cpu_stream_frame_hash_v3(keyframe_focus_image)
+            if (
+                not focus_sha256
+                or focus_sha256
+                != str(cpu_stream_lineage.get("input_frame_hash", "") or "")
+                or focus_sha256
+                != str(cpu_stream_lineage.get("focus_sha256", "") or "")
+            ):
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe focus hash does not match its captured lineage."
+                )
+            current_identity = self._cpu_stream_identity_v3(
+                payload,
+                descriptor,
+                external_window_image,
+                selector_image=keyframe_focus_image,
+            )
+            if str(current_identity.get("geometry_hash", "") or "") != str(
+                cpu_stream_lineage.get("geometry_hash", "") or ""
+            ):
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe geometry hash no longer matches the live session."
+                )
+            keyframe_selector_fingerprint = str(
+                cpu_stream_lineage.get("selector_visual_fingerprint", "") or ""
+            )
+            if keyframe_selector_fingerprint != str(
+                current_identity.get("selector_visual_fingerprint", "") or ""
+            ):
+                raise StaleCPUStreamKeyframeError(
+                    "CPU stream keyframe selector fingerprint no longer matches its pixels."
+                )
+            previous_tracking = _mapping_to_dict(payload.get("tracking_summary", {}))
+            previous_signal = _mapping_to_dict(payload.get("latest_signal", {}))
+            previous_selector_fingerprint = str(
+                previous_signal.get(
+                    "market_selector_visual_fingerprint",
+                    previous_tracking.get(
+                        "market_selector_visual_fingerprint",
+                        payload.get("market_selector_visual_fingerprint", ""),
+                    ),
+                )
+                or ""
+            ).strip()
+            if (
+                keyframe_selector_fingerprint
+                and keyframe_selector_fingerprint != previous_selector_fingerprint
+            ):
+                payload["_force_market_selector_scan_once"] = True
+            payload["locked_window"] = dict(descriptor)
+            payload["locked_title"] = str(descriptor.get("title", "") or "")
+            window_image = external_window_image.convert("RGB")
+            window_signature = _surface_signature(window_image)
+            mark_stage("ingest_cpu_stream_keyframe")
+        elif using_external_frame:
             assert external_window_image is not None
             source_id = str(external_frame_source.get("source_id", "external-frame-feed") or "external-frame-feed").strip()
             descriptor: dict[str, Any] = {
@@ -32078,6 +34732,15 @@ class ContinuousWindowTrackerService:
         recovery_attempted = False
         duplicate_study_count = 0
         identical_window_count = 0
+        with self._lock:
+            cpu_stream_runtime_present = bool(
+                str(payload["session_id"]) in self._cpu_streams
+                or str(payload["session_id"]) in self._cpu_stream_failures
+            )
+        cpu_stream_owns_duplicate_recovery = bool(
+            self._cpu_stream_requested_v3()
+            and cpu_stream_runtime_present
+        )
         if duplicate_study_surface:
             prior_waiting = str(previous_observation.get("status", "") or "").upper() == _VISUAL_OBSERVATION_WAITING
             duplicate_study_count = (
@@ -32117,6 +34780,7 @@ class ContinuousWindowTrackerService:
             )
             recovery_due = bool(
                 not using_external_frame
+                and not cpu_stream_owns_duplicate_recovery
                 and duplicate_study_count >= recovery_threshold
                 and recovery_time_eligible
             )
@@ -32163,6 +34827,19 @@ class ContinuousWindowTrackerService:
                     mark_stage("recover_duplicate_surface")
 
         if duplicate_study_surface:
+            if using_local_cpu_stream_frame:
+                self._record_cpu_stream_duplicate_v3(
+                    str(payload["session_id"]),
+                    cpu_stream_lineage,
+                )
+                # Stream heartbeats are observation-health events, not new
+                # candle evidence.  Never revoke or refresh the current V3
+                # decision merely because identical pixels were re-observed.
+                return
+            if cpu_stream_owns_duplicate_recovery:
+                # Snapshot watchdog duplicates follow the same non-evidence
+                # contract while the CPU stream is degraded or recovering.
+                return
             attempted_at = _now_iso()
             self._publish_duplicate_visual_wait(
                 str(payload["session_id"]),
@@ -32183,6 +34860,7 @@ class ContinuousWindowTrackerService:
                     "recovery_attempted": recovery_attempted,
                     "recovery_succeeded": False,
                     "last_recovery_attempt_epoch": last_recovery_attempt_epoch,
+                    "cpu_stream_lineage_v3": dict(cpu_stream_lineage),
                 },
             )
             return
@@ -32205,6 +34883,7 @@ class ContinuousWindowTrackerService:
             "recovery_attempted": recovery_attempted,
             "recovery_succeeded": recovered_new_frame,
             "last_recovery_attempt_epoch": 0.0,
+            "cpu_stream_lineage_v3": dict(cpu_stream_lineage),
         }
         base_capture_count = max(
             int(payload.get("capture_count", 0) or 0),
@@ -32304,7 +34983,7 @@ class ContinuousWindowTrackerService:
                 )
         mark_stage("display_artifact_write")
         source_lock_study_source_expected = True
-        if using_external_frame:
+        if using_external_frame and not using_local_cpu_stream_frame:
             broker_source_lock = _external_frame_source_lock_v3(
                 external_frame_source,
                 window_image,
@@ -32439,7 +35118,14 @@ class ContinuousWindowTrackerService:
             latest_signal["freshness_score"] = 1.0
             latest_signal["freshness_window_sec"] = _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC
             latest_signal["pipeline_timing"] = guard_timing
-            with self._session_commit_lock_for(str(payload["session_id"])):
+            with (
+                self._cpu_stream_publication_guard_v3(
+                    str(payload["session_id"]), cpu_stream_lineage
+                ) as stream_generation_current,
+                self._session_commit_lock_for(str(payload["session_id"])),
+            ):
+                if not stream_generation_current:
+                    return
                 guarded_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
                     guarded_payload["tracking_enabled"] = True
@@ -32501,6 +35187,10 @@ class ContinuousWindowTrackerService:
             study_payload = dict(payload)
             study_payload["_study_focus_region"] = dict(study_focus_meta)
             study_payload["_selected_focus_region"] = dict(focus_meta)
+            # Private in-process lineage only. This is the exact frame-capture
+            # epoch used to attest a resolver-proven boundary straddle; it is
+            # never persisted or relabeled directly as a candle close.
+            study_payload["_capture_started_epoch_v3"] = capture_started_epoch
             study = self.tracking_adapter.study(study_surface_image, session_payload=study_payload)
             mark_stage("tracker_study")
         except Exception as exc:
@@ -32592,6 +35282,35 @@ class ContinuousWindowTrackerService:
                 "source": "tracking_adapter",
             }
             latest_signal = dict(study.latest_signal)
+        if cpu_stream_lineage:
+            scene_forecast = _mapping_to_dict(
+                tracking_summary.get("scene_forecast", latest_signal.get("scene_forecast", {}))
+            )
+            closed_candle_key = str(
+                scene_forecast.get("closed_candle_key")
+                or tracking_summary.get("closed_candle_key")
+                or latest_signal.get("closed_candle_key")
+                or ""
+            ).strip()
+            cpu_stream_lineage = {
+                **cpu_stream_lineage,
+                "analysis_frame_id": int(frame_index),
+                "analysis_capture_count": int(capture_count),
+                "analysis_study_input_frame_hash": str(study_surface_signature),
+                "closed_candle_key": closed_candle_key,
+                "broker_click_authority": False,
+            }
+            cpu_runtime = _mapping_to_dict(payload.get("cpu_stream_v3", {}))
+            cpu_runtime.update(
+                {
+                    "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                    "last_keyframe_lineage": dict(cpu_stream_lineage),
+                    "last_analysis_result": "ACCEPTED_FOR_HEAVY_STUDY",
+                }
+            )
+            payload["cpu_stream_v3"] = cpu_runtime
+            tracking_summary["cpu_stream_lineage_v3"] = dict(cpu_stream_lineage)
+            latest_signal["cpu_stream_lineage_v3"] = dict(cpu_stream_lineage)
         tracking_summary["broker_source_lock"] = broker_source_lock
         tracking_summary["broker_source"] = dict(broker_source_summary)
         latest_signal["broker_source_lock"] = broker_source_lock
@@ -32691,7 +35410,14 @@ class ContinuousWindowTrackerService:
             latest_signal["freshness_score"] = 1.0
             latest_signal["freshness_window_sec"] = visual_ready_freshness_window_sec
             latest_signal["pipeline_timing"] = visual_ready_timing
-            with self._session_commit_lock_for(str(payload["session_id"])):
+            with (
+                self._cpu_stream_publication_guard_v3(
+                    str(payload["session_id"]), cpu_stream_lineage
+                ) as stream_generation_current,
+                self._session_commit_lock_for(str(payload["session_id"])),
+            ):
+                if not stream_generation_current:
+                    return
                 visual_ready_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
                     visual_ready_payload["tracking_enabled"] = True
@@ -32792,6 +35518,8 @@ class ContinuousWindowTrackerService:
             input_frame_hash=study_surface_signature,
             capture_started_epoch=capture_started_epoch,
         )
+        if cpu_stream_lineage:
+            model_council_result["cpu_stream_lineage_v3"] = dict(cpu_stream_lineage)
         mark_stage("model_council")
         payload["model_council_result"] = model_council_result
         payload["model_council"] = _mapping_to_dict(model_council_result.get("model_council"))
@@ -33066,7 +35794,14 @@ class ContinuousWindowTrackerService:
         latest_signal["freshness_score"] = 1.0
         latest_signal["freshness_window_sec"] = visual_freshness_window_sec
         latest_signal["pipeline_timing"] = visual_pipeline_timing
-        with self._session_commit_lock_for(str(payload["session_id"])):
+        with (
+            self._cpu_stream_publication_guard_v3(
+                str(payload["session_id"]), cpu_stream_lineage
+            ) as stream_generation_current,
+            self._session_commit_lock_for(str(payload["session_id"])),
+        ):
+            if not stream_generation_current:
+                return
             visual_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
             visual_display_window_path = str(window_path)
             visual_display_surface_signature = window_signature
@@ -33234,8 +35969,21 @@ class ContinuousWindowTrackerService:
         broker_execution_state = _normalize_broker_execution_state(payload.get("broker_execution_state", {}))
         execution_memory_projection: dict[str, Any] | None = None
         try:
+            broker_evaluation_payload = payload
+            if using_local_cpu_stream_frame:
+                # A stream keyframe may inform the human-facing V3 decision,
+                # but stream metadata is never broker-click authority.  Use a
+                # shadow copy for the broker evaluator while preserving the
+                # real session controls and all model/packet gates.
+                broker_evaluation_payload = dict(payload)
+                stream_shadow_controls = _normalize_execution_controls(
+                    payload.get("execution_controls", {})
+                )
+                stream_shadow_controls["live_execution_enabled"] = False
+                stream_shadow_controls["execution_mode"] = "shadow"
+                broker_evaluation_payload["execution_controls"] = stream_shadow_controls
             broker_surface, broker_execution_state, execution_memory_projection = self._evaluate_broker_execution(
-                payload=payload,
+                payload=broker_evaluation_payload,
                 descriptor=descriptor,
                 window_image=window_image,
                 surface_image=surface_image,
@@ -33269,7 +36017,7 @@ class ContinuousWindowTrackerService:
             latest_signal["market"] = ""
             latest_signal["market_confidence"] = 0.0
             payload["market"] = ""
-        if using_external_frame:
+        if using_external_frame and not using_local_cpu_stream_frame:
             broker_source_lock = _external_frame_source_lock_v3(
                 external_frame_source,
                 window_image,
@@ -33503,7 +36251,14 @@ class ContinuousWindowTrackerService:
         )
         history = history[:24]
 
-        with self._session_commit_lock_for(str(payload["session_id"])):
+        with (
+            self._cpu_stream_publication_guard_v3(
+                str(payload["session_id"]), cpu_stream_lineage
+            ) as stream_generation_current,
+            self._session_commit_lock_for(str(payload["session_id"])),
+        ):
+            if not stream_generation_current:
+                return
             persisted_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {}))
             persisted_last_capture_epoch = _float_or(persisted_payload.get("last_capture_epoch", 0.0), 0.0)
             if persisted_last_capture_epoch > float(published_epoch) + 0.001:
@@ -33969,6 +36724,80 @@ class ContinuousWindowTrackerService:
     def _compact_live_state_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "compact_live_state.json"
 
+    def _cpu_stream_status_path_v3(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "cpu_stream_v3.json"
+
+    def _load_cpu_stream_status_v3(self, session_id: str) -> dict[str, Any]:
+        payload = _mapping_to_dict(_read_json(self._cpu_stream_status_path_v3(session_id), {}))
+        if not payload:
+            return {}
+        if str(payload.get("schema_version", "") or "") != "PG_CPU_STREAM_RUNTIME_V3":
+            return {}
+        if str(payload.get("session_id", "") or "") != str(session_id):
+            return {}
+        return payload
+
+    def _publish_cpu_stream_status_v3(self, session_id: str) -> None:
+        """Publish one replace-in-place telemetry record; never persist video frames."""
+
+        try:
+            payload = self._cpu_stream_public_health_v3(session_id)
+            payload["session_id"] = str(session_id)
+            payload["status_updated_epoch"] = _now_epoch()
+            _write_json_atomic(self._cpu_stream_status_path_v3(session_id), payload)
+        except Exception:
+            LOGGER.debug(
+                "Unable to publish CPU stream status for %s.",
+                session_id,
+                exc_info=True,
+            )
+
+    def _publish_cpu_stream_failure_status_v3(
+        self,
+        session_id: str,
+        failure: Mapping[str, Any],
+    ) -> None:
+        """Cross the process boundary even when stream construction never completes."""
+
+        try:
+            requested = self._cpu_stream_requested_v3()
+            payload = {
+                "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                "session_id": str(session_id),
+                "requested": requested,
+                "enabled": requested,
+                "available": False,
+                "status": "fallback_snapshot",
+                "mode": "snapshot_fallback",
+                "target_fps": self._cpu_stream_target_fps_v3(),
+                "keyframe_slot_capacity": 1,
+                "full_model_policy": "ACCEPTED_EVENT_OR_HEARTBEAT_ONLY",
+                "broker_click_authority": False,
+                **dict(failure),
+                "status_updated_epoch": _now_epoch(),
+            }
+            payload.update(
+                {
+                    "schema_version": "PG_CPU_STREAM_RUNTIME_V3",
+                    "session_id": str(session_id),
+                    "requested": requested,
+                    "enabled": requested,
+                    "available": False,
+                    "mode": "snapshot_fallback",
+                    "target_fps": self._cpu_stream_target_fps_v3(),
+                    "keyframe_slot_capacity": 1,
+                    "full_model_policy": "ACCEPTED_EVENT_OR_HEARTBEAT_ONLY",
+                    "broker_click_authority": False,
+                }
+            )
+            _write_json_atomic(self._cpu_stream_status_path_v3(session_id), payload)
+        except Exception:
+            LOGGER.debug(
+                "Unable to publish CPU stream failure status for %s.",
+                session_id,
+                exc_info=True,
+            )
+
     def _load_display_state(self, session_id: str) -> dict[str, Any]:
         payload = _mapping_to_dict(_read_json(self._display_state_path(session_id), {}))
         if not payload:
@@ -34188,6 +37017,7 @@ class ContinuousWindowTrackerService:
     def _public_session_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         public = _synchronize_session_versions(payload)
         session_id = str(public.get("session_id", "") or "")
+        public["cpu_stream_v3"] = self._cpu_stream_public_health_v3(session_id, public)
         public["manual_focus_region"] = _public_manual_focus_region(public.get("manual_focus_region", {}))
         public["event_log_path"] = str(self._event_log_path(session_id)) if session_id else ""
         public["focus_selector"] = _public_focus_selector_state(
