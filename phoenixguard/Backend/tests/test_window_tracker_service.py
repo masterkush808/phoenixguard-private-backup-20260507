@@ -1565,6 +1565,83 @@ def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_pat
     assert refreshed["tracking_summary"]["source_capture_status"] == "WAITING_FOR_SOURCE_PIXELS"
 
 
+def test_temporarily_missing_locked_window_preserves_last_market_forecast(
+    tmp_path: Path,
+) -> None:
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_ListedWindowCaptureBackend([]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    session_id = str(tracker.create_session(session_id="pocket-live")["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    original_published_epoch = 100.0
+    existing_chart = tmp_path / "existing_chart.png"
+    _surface().save(existing_chart)
+    payload.update(
+        {
+            "tracking_enabled": True,
+            "status": "running",
+            "frame_index": 4,
+            "overlay_frame_id": 4,
+            "market": "EUR/NZD OTC",
+            "last_chart_path": str(existing_chart),
+            "tracking_summary": {
+                "chart_valid": True,
+                "detected_market": "EUR/NZD OTC",
+                "detected_timeframe": "M5",
+                "market_identity_confirmed": True,
+                "timeframe_identity_confirmed": True,
+                "market_study_v3": {
+                    "status": "STUDIED",
+                    "symbol": "EUR/NZD OTC",
+                    "timeframe": "M5",
+                    "closed_candle_key": "closed-eurnzd-otc-m5",
+                },
+            },
+            "latest_signal": {
+                "status": "tracking",
+                "market": "EUR/NZD OTC",
+                "focus_timeframe": "M5",
+                "market_identity_confirmed": True,
+                "timeframe_identity_confirmed": True,
+                "action": "BUY",
+                "summary": "BUY leading 3–5 completed M5 candles after the anchor close",
+                "published_epoch": original_published_epoch,
+            },
+        }
+    )
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+
+    tracker._mark_capture_surface_unavailable(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        session_id,
+        "The locked broker window is not visible right now.",
+        session_status="waiting_for_window",
+        signal_status="waiting_for_window",
+    )
+    refreshed = tracker.get_session(session_id)
+
+    assert refreshed["status"] == "running"
+    assert refreshed["frame_index"] == 4
+    assert refreshed["tracking_summary"]["detected_market"] == "EUR/NZD OTC"
+    assert refreshed["tracking_summary"]["detected_timeframe"] == "M5"
+    assert refreshed["tracking_summary"]["market_study_v3"]["closed_candle_key"] == (
+        "closed-eurnzd-otc-m5"
+    )
+    assert refreshed["tracking_summary"]["source_capture_status"] == (
+        "WAITING_FOR_SOURCE_PIXELS"
+    )
+    assert refreshed["latest_signal"]["market"] == "EUR/NZD OTC"
+    assert refreshed["latest_signal"]["focus_timeframe"] == "M5"
+    assert refreshed["latest_signal"]["action"] == "BUY"
+    assert refreshed["latest_signal"]["published_epoch"] == original_published_epoch
+    assert refreshed["latest_signal"]["status"] == "waiting_for_window"
+    assert refreshed["latest_signal"]["source_capture_blocked_v3"]["status"] == (
+        "WAITING_FOR_SOURCE_PIXELS"
+    )
+
+
 def test_tradingview_window_query_matches_compact_visible_tab_title() -> None:
     assert window_tracker_module.title_matches_window_query(
         "EURUSD Chart - TradingView - Microsoft Edge",
@@ -3086,6 +3163,8 @@ def test_window_tracker_rejects_garbled_broker_markettext() -> None:
 
     assert normalize("AUD/CHF OTC") == "AUD/CHF OTC"
     assert normalize("GBPJPY OTC") == "GBP/JPY OTC"
+    assert normalize("EUR/NZDOTE") == "EUR/NZD OTC"
+    assert normalize("EUR/NZDABC") == "EUR/NZD"
     assert normalize("W D0CR01ILJI . /JFW1 P IY W P 1") == ""
 
 
@@ -3304,6 +3383,43 @@ def test_market_selector_fingerprint_ignores_live_candle_motion() -> None:
     assert fingerprint(sell_surface) == buy_fingerprint
 
 
+def test_market_selector_second_raster_lane_can_only_enrich_same_pair_to_otc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    reads: Iterator[dict[str, Any]] = iter(
+        (
+            {"value": "EUR/NZD", "source": "header_text", "confidence": 0.58},
+            {"value": "EUR/NZD OTC", "source": "header_text", "confidence": 0.57},
+        )
+    )
+    monkeypatch.setattr(adapter, "_detect_market_selector_once", lambda *_args, **_kwargs: next(reads))
+
+    recovered = adapter._detect_market_selector(surface)  # noqa: SLF001
+
+    assert recovered["value"] == "EUR/NZD OTC"
+    assert recovered["specificity_recovery"] == "jpeg_raster_ocr_lane"
+    assert recovered["specificity_recovered_from"] == "EUR/NZD"
+
+    disagreeing_reads: Iterator[dict[str, Any]] = iter(
+        (
+            {"value": "EUR/NZD", "source": "header_text", "confidence": 0.58},
+            {"value": "EUR/USD OTC", "source": "header_text", "confidence": 0.59},
+        )
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector_once",
+        lambda *_args, **_kwargs: next(disagreeing_reads),
+    )
+
+    disagreed = adapter._detect_market_selector(surface)  # noqa: SLF001
+
+    assert disagreed["value"] == "EUR/NZD"
+    assert "specificity_recovery" not in disagreed
+
+
 def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3315,6 +3431,9 @@ def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matc
     surface = _synthetic_chart_surface("buy", width=900, height=520)
     _paint_realistic_market_selector(surface, "AUD/NZD OTC")
     selector_fingerprint = fingerprint(surface)
+    normalizer_version = str(
+        getattr(window_tracker_module, "_FX_MARKET_NORMALIZER_VERSION")
+    )
 
     def fail_market_detector(
         image: Image.Image,
@@ -3336,9 +3455,66 @@ def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matc
                 "detected_timeframe": "M5",
                 "timeframe_confidence": 1.0,
                 "market_selector_visual_fingerprint": selector_fingerprint,
+                "market_normalizer_version": normalizer_version,
             },
             "latest_signal": {
                 "market": "AUD/NZD",
+                "market_confidence": 0.91,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+                "market_normalizer_version": normalizer_version,
+            },
+        },
+    )
+
+    assert study.latest_signal["market"] == "AUD/NZD"
+    assert study.latest_signal["market_source"] == "live_cached_selector"
+    assert study.latest_signal["market_selector_visual_changed"] is False
+
+
+def test_market_normalizer_upgrade_forces_cached_pair_rescan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    _paint_realistic_market_selector(surface, "EUR/NZD OTC")
+    selector_fingerprint = fingerprint(surface)
+    detector_calls = 0
+
+    def detect_market_selector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal detector_calls
+        _ = image
+        _ = timeframe_selector
+        detector_calls += 1
+        return {
+            "value": "EUR/NZDOTE",
+            "source": "header_text",
+            "confidence": 0.79,
+        }
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", detect_market_selector)
+    study = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": {
+                "detected_market": "EUR/NZD",
+                "market_confidence": 0.91,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+            },
+            "latest_signal": {
+                "market": "EUR/NZD",
                 "market_confidence": 0.91,
                 "focus_timeframe": "M5",
                 "focus_timeframe_confidence": 1.0,
@@ -3347,9 +3523,173 @@ def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matc
         },
     )
 
-    assert study.latest_signal["market"] == "AUD/NZD"
-    assert study.latest_signal["market_source"] == "live_cached_selector"
-    assert study.latest_signal["market_selector_visual_changed"] is False
+    assert detector_calls == 1
+    assert study.latest_signal["market"] == "EUR/NZD OTC"
+    assert study.latest_signal["market_source"] == "header_text"
+    assert study.latest_signal["market_normalizer_version"] == getattr(
+        window_tracker_module,
+        "_FX_MARKET_NORMALIZER_VERSION",
+    )
+
+
+def test_unsuffixed_forced_scan_gets_one_stability_rescan_before_cache_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    _paint_realistic_market_selector(surface, "EUR/NZD OTC")
+    selector_fingerprint = fingerprint(surface)
+    detector_values = iter(("EUR/NZD", "EUR/NZD OTC"))
+    detector_calls = 0
+
+    def detect_market_selector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal detector_calls
+        _ = image
+        _ = timeframe_selector
+        detector_calls += 1
+        return {
+            "value": next(detector_values),
+            "source": "header_text",
+            "confidence": 0.79,
+        }
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", detect_market_selector)
+    first = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": {
+                "detected_market": "EUR/NZD",
+                "market_confidence": 0.91,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+            },
+            "latest_signal": {
+                "market": "EUR/NZD",
+                "market_confidence": 0.91,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+            },
+        },
+    )
+
+    assert detector_calls == 1
+    assert first.latest_signal["market"] == "EUR/NZD"
+    assert first.latest_signal["market_selector_rebind_required"] is True
+    assert first.latest_signal["market_identity_confirmed"] is False
+
+    second = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": first.tracking_summary,
+            "latest_signal": first.latest_signal,
+        },
+    )
+
+    assert detector_calls == 2
+    assert second.latest_signal["market"] == "EUR/NZD OTC"
+    assert second.latest_signal["market_selector_rebind_required"] is False
+    assert second.latest_signal["market_identity_confirmed"] is True
+
+    third = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": second.tracking_summary,
+            "latest_signal": second.latest_signal,
+        },
+    )
+
+    assert detector_calls == 2
+    assert third.latest_signal["market"] == "EUR/NZD OTC"
+    assert third.latest_signal["market_source"] == "live_cached_selector"
+
+
+def test_pending_unsuffixed_market_survives_one_empty_read_then_accepts_otc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    _paint_realistic_market_selector(surface, "EUR/NZD OTC")
+    selector_fingerprint = fingerprint(surface)
+    detector_values: Iterator[dict[str, Any]] = iter(
+        (
+            {"value": "EUR/NZD", "source": "header_text", "confidence": 0.79},
+            {},
+            {"value": "EUR/NZD OTC", "source": "header_text", "confidence": 0.79},
+        )
+    )
+
+    def detect_market_selector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = image
+        _ = timeframe_selector
+        return next(detector_values)
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", detect_market_selector)
+    payload: dict[str, Any] = {
+        "session_id": "pocket-live",
+        "manual_focus_region": {"enabled": True},
+        "tracking_summary": {
+            "detected_market": "EUR/NZD",
+            "market_confidence": 0.91,
+            "detected_timeframe": "M5",
+            "timeframe_confidence": 1.0,
+            "market_selector_visual_fingerprint": selector_fingerprint,
+        },
+        "latest_signal": {
+            "market": "EUR/NZD",
+            "market_confidence": 0.91,
+            "focus_timeframe": "M5",
+            "focus_timeframe_confidence": 1.0,
+            "market_selector_visual_fingerprint": selector_fingerprint,
+        },
+    }
+
+    first = adapter.study(surface, session_payload=payload)
+    second = adapter.study(
+        surface,
+        session_payload={
+            **payload,
+            "tracking_summary": first.tracking_summary,
+            "latest_signal": first.latest_signal,
+        },
+    )
+    third = adapter.study(
+        surface,
+        session_payload={
+            **payload,
+            "tracking_summary": second.tracking_summary,
+            "latest_signal": second.latest_signal,
+        },
+    )
+
+    assert first.latest_signal["market_selector_rebind_required"] is True
+    assert second.latest_signal["market"] == "EUR/NZD"
+    assert second.latest_signal["market_selector_rebind_required"] is True
+    assert second.latest_signal["market_identity_confirmed"] is False
+    assert third.latest_signal["market"] == "EUR/NZD OTC"
+    assert third.latest_signal["market_selector_rebind_required"] is False
+    assert third.latest_signal["market_identity_confirmed"] is True
 
 
 def test_window_tracker_rebinds_market_when_selector_fingerprint_changes(
@@ -3643,6 +3983,127 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     assert lstm["selective_authorized"] is False
     assert lstm["trade_authorization_status"] == "NO_EDGE"
     assert lstm["contribution"] == 0.0
+
+
+def test_scene_resolver_hydrates_pair_dna_raw_sequence_after_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line = [
+        [0.40 + index * 0.02, 0.55 - index * 0.005]
+        for index in range(13)
+    ]
+    forecast_candles = [
+        {
+            "step": index,
+            "label": f"E{index}",
+            "x_norm": line[index][0],
+            "open_y_norm": line[index - 1][1],
+            "high_y_norm": min(line[index - 1][1], line[index][1])
+            - 0.002,
+            "low_y_norm": max(line[index - 1][1], line[index][1])
+            + 0.002,
+            "close_y_norm": line[index][1],
+            "movement_side": "BUY",
+            "body_bias": "BUY",
+        }
+        for index in range(1, 13)
+    ]
+
+    def scene_stub(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+            "path_side": "BUY",
+            "side": "BUY",
+            "probability_calibrated": False,
+            "raw_side_probabilities": {
+                "BUY": 0.58,
+                "HOLD": 0.24,
+                "SELL": 0.18,
+            },
+            "line_points": line,
+            "forecast_candles": forecast_candles,
+            "forecast_scenarios": [
+                {
+                    "role": role,
+                    "side": "BUY",
+                    "probability": probability,
+                    "selected": role == "base",
+                    "line_points": line,
+                    "forecast_candles": forecast_candles,
+                }
+                for role, probability in (
+                    ("base", 0.58),
+                    ("bull", 0.24),
+                    ("bear", 0.18),
+                )
+            ],
+            "model_version": "TEST_SCENE_FORECASTER",
+        }
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_scene_forecast_contribution_v3",
+        scene_stub,
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    resolver_reads: list[tuple[object, object]] = []
+
+    def resolver_order_state(symbol: object, timeframe: object) -> dict[str, Any]:
+        resolver_reads.append((symbol, timeframe))
+        return {
+            "status": "READY",
+            "order_domain": "TRACKER_EVENT_SEQUENCE_V3",
+            "raw_sequence_high_watermark": 54,
+            "durable_high_watermark": 129,
+            "sequence_epoch": 3,
+            "rebase_count": 2,
+        }
+
+    setattr(
+        adapter,
+        "_market_study_service",
+        SimpleNamespace(resolver_order_state=resolver_order_state),
+    )
+    chart = _surface(width=620, height=420)
+    candles = _manual_candle_tracks(
+        [300, 286, 272, 258, 244, 230, 216, 202],
+        image_width=chart.width,
+        image_height=chart.height,
+    )
+
+    build_scene = cast(
+        Callable[..., dict[str, Any]],
+        getattr(adapter, "_build_scene_forecast_contribution"),
+    )
+    result = build_scene(
+        candles=candles,
+        chart_image=chart,
+        timeframe="M5",
+        market="CHF/JPY OTC",
+        frame_id=700,
+        capture_epoch=1_000.0,
+        projection={},
+        candle_statistics={},
+        behavior_payload={},
+        decision_kernel={},
+        smart_money_context={},
+        support_resistance_context={},
+        support_resistance_zones=[],
+        trend_slopes={},
+        trend_directions={},
+    )
+
+    assert resolver_reads == [("CHF/JPY OTC", "M5")]
+    assert result["closed_candle_sequence"] == 54
+    assert result["closed_candle_identity_state"]["event_sequence"] == 54
+    assert result["resolver_order_hydration_v3"] == {
+        "status": "HYDRATED",
+        "source": "PAIR_DNA_RAW_SEQUENCE_HIGH_WATERMARK",
+        "raw_sequence_high_watermark": 54,
+        "sequence_epoch": 3,
+        "rebase_count": 2,
+        "execution_authority": False,
+    }
 
 
 @pytest.mark.parametrize("identity_confidence", (0.0, 0.419))
@@ -4925,6 +5386,7 @@ def test_start_session_reconciles_missing_worker_without_resetting_automatic_his
             "capture_count": 37,
             "last_capture_epoch": 1234.5,
             "decision_valid_until_epoch": 1294.5,
+            "stream_continuity_generation_v3": 7,
             "last_chart_path": str(preserved_chart_path),
             "latest_signal": latest_signal,
             "recent_studies": [preserved_history_row],
@@ -4956,6 +5418,7 @@ def test_start_session_reconciles_missing_worker_without_resetting_automatic_his
     assert reconciled["recent_studies"] == [preserved_history_row]
     stored = recycled_process.load_session("pocket-live")
     assert stored is not None
+    assert stored["stream_continuity_generation_v3"] == 8
     assert stored["decision_valid_until_epoch"] == 1294.5
     assert stored["model_council_study_packet"]["packet_id"] == "study-preserved"
 
@@ -10644,6 +11107,10 @@ def test_historical_structure_path_uses_body_center_not_wick_spike() -> None:
 def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_chart_surface("buy")
+    normalizer_version = getattr(
+        window_tracker_module,
+        "_FX_MARKET_NORMALIZER_VERSION",
+    )
     # This cache contract requires visible selector evidence.  A chart-only
     # surface intentionally produces no identity fingerprint and must not be
     # allowed to make a stale cached pair authoritative.
@@ -10657,6 +11124,7 @@ def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch
             "timeframe_confidence": 0.93,
             "detected_market": "EUR/JPY OTC",
             "market_confidence": 0.91,
+            "market_normalizer_version": normalizer_version,
             "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
         },
         "latest_signal": {
@@ -10664,6 +11132,7 @@ def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch
             "focus_timeframe_confidence": 0.93,
             "market": "EUR/JPY OTC",
             "market_confidence": 0.91,
+            "market_normalizer_version": normalizer_version,
         },
     }
     warmup = adapter.study(image, session_payload=session_payload)
@@ -11028,10 +11497,15 @@ def test_pair_a_to_pair_b_full_refresh_keeps_pair_b_on_causal_right_lane(
 
 
 def test_compact_live_state_preserves_confirmed_instrument_identity_flags() -> None:
+    normalizer_version = getattr(
+        window_tracker_module,
+        "_FX_MARKET_NORMALIZER_VERSION",
+    )
     identity = {
         "detected_market": "GBP/USD OTC",
         "detected_timeframe": "M5",
         "market_identity_confirmed": True,
+        "market_normalizer_version": normalizer_version,
         "timeframe_identity_confirmed": True,
         "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
     }
@@ -11041,14 +11515,23 @@ def test_compact_live_state_preserves_confirmed_instrument_identity_flags() -> N
             "market": "GBP/USD OTC",
             "focus_timeframe": "M5",
             "market_identity_confirmed": True,
+            "market_normalizer_version": normalizer_version,
             "timeframe_identity_confirmed": True,
             "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
         }
     )
 
     assert compact_market["market_identity_confirmed"] is True
+    assert (
+        compact_market["market_normalizer_version"]
+        == normalizer_version
+    )
     assert compact_market["timeframe_identity_confirmed"] is True
     assert compact_signal["market_identity_confirmed"] is True
+    assert (
+        compact_signal["market_normalizer_version"]
+        == normalizer_version
+    )
     assert compact_signal["timeframe_identity_confirmed"] is True
 
 
@@ -11247,6 +11730,10 @@ def test_real_tracking_adapter_unknown_market_fast_locked_context_fails_closed(
     selector_fingerprint = str(
         getattr(window_tracker_module, "_market_selector_visual_fingerprint")(image)
     )
+    normalizer_version = getattr(
+        window_tracker_module,
+        "_FX_MARKET_NORMALIZER_VERSION",
+    )
     session_payload: dict[str, Any] = {
         "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
         "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
@@ -11255,6 +11742,7 @@ def test_real_tracking_adapter_unknown_market_fast_locked_context_fails_closed(
             "detected_timeframe": "M5",
             "timeframe_confidence": 0.93,
             "detected_market": "",
+            "market_normalizer_version": normalizer_version,
             "market_selector_visual_fingerprint": selector_fingerprint,
             "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
         },
@@ -11262,6 +11750,7 @@ def test_real_tracking_adapter_unknown_market_fast_locked_context_fails_closed(
             "focus_timeframe": "M5",
             "focus_timeframe_confidence": 0.93,
             "market": "",
+            "market_normalizer_version": normalizer_version,
             "market_selector_visual_fingerprint": selector_fingerprint,
         },
     }

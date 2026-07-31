@@ -41,6 +41,12 @@ PATH_CLOCK_TRAJECTORY_SCHEMA_VERSION = "PG_PATH_CLOCK_TRAJECTORY_V3"
 PATH_CLOCK_FREEZE_SCHEMA_VERSION = "PG_PATH_CLOCK_LIQUIDITY_FREEZE_V3"
 PATH_CLOCK_REPLAY_SCORE_SCHEMA_VERSION = "PG_PATH_CLOCK_REPLAY_SCORE_V3"
 PATH_CLOCK_PROMOTION_GATE_SCHEMA_VERSION = "PG_PATH_CLOCK_PROMOTION_GATE_V3"
+PATH_CLOCK_FORWARD_TIMING_FORECAST_SCHEMA_VERSION = (
+    "PG_JPCLF_FORWARD_TIMING_FORECAST_V3"
+)
+PATH_CLOCK_FORWARD_PROBABILITY_SEMANTICS_VERSION = (
+    "PG_JPCLF_FORWARD_PROBABILITY_SEMANTICS_V3"
+)
 PATH_CLOCK_PAIR_DNA_PARTITION_SCHEMA_VERSION = (
     "PG_PATH_CLOCK_LIQUIDITY_PAIR_DNA_PARTITION_V3"
 )
@@ -79,6 +85,14 @@ _PROMOTION_AXES = (
     "sweep_survival_rate",
     "calibration_score",
 )
+_FORECAST_TARGET_MRU = 0.5
+_FORECAST_INVALIDATION_MRU = 0.5
+_FORECAST_SWEEP_MRU = 0.25
+_MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT = 3
+_MIN_FORWARD_PAIR_TIMING_SUPPORT = 3
+_MIN_FORWARD_LIVE_HISTORY_CANDLES = 8
+_MIN_FORWARD_LIVE_COMPLETED_SEGMENTS = 2
+_UNCONDITIONAL_SURVIVAL_OBJECT_TYPES = {"", "NONE", "ALL", "PAIR_STATE"}
 
 
 class PathClockLiquidityValidationError(ValueError):
@@ -214,6 +228,1639 @@ def _safety_contract() -> dict[str, object]:
         "grants_entry_permission": False,
         "grants_execution_permission": False,
     }
+
+
+def _optional_mapping(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
+
+
+def _optional_rows(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return []
+    return [
+        dict(cast(Mapping[str, Any], row))
+        for row in cast(Sequence[object], value)
+        if isinstance(row, Mapping)
+    ]
+
+
+def _safe_number(value: object, default: float = 0.0) -> float:
+    if value is None or isinstance(value, bool):
+        return float(default)
+    try:
+        parsed = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return parsed if math.isfinite(parsed) else float(default)
+
+
+def _safe_count(value: object, default: int = 0) -> int:
+    parsed = _safe_number(value, float(default))
+    return max(0, int(math.floor(parsed)))
+
+
+def _optional_unit_interval(value: object) -> float | None:
+    """Return a declared unit-interval value without inventing a zero."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return max(0.0, min(1.0, parsed))
+
+
+def _optional_nonnegative_number(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed
+
+
+def _forecast_direction(value: object) -> str:
+    token = " ".join(str(value or "").strip().upper().split())
+    if token in {"BUY", "BULL", "BULLISH", "UP", "UPTREND", "UP_SWING"}:
+        return "UP"
+    if token in {
+        "SELL",
+        "BEAR",
+        "BEARISH",
+        "DOWN",
+        "DOWNTREND",
+        "DOWN_SWING",
+    }:
+        return "DOWN"
+    return ""
+
+
+def _aligned_forecast_candles(
+    value: float,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    return max(minimum, min(maximum, int(math.ceil(max(0.0, value)))))
+
+
+def _window_point(candles: int, cadence_seconds: int) -> dict[str, object]:
+    seconds = max(0, int(candles)) * cadence_seconds
+    return {
+        "seconds": seconds,
+        "minutes": _rounded(seconds / 60.0, 2),
+        "candles": max(0, int(candles)),
+    }
+
+
+def _current_motif_token(
+    motif_lattice: Mapping[str, Any],
+) -> tuple[str, int]:
+    candle_count = _safe_count(motif_lattice.get("closed_candle_count"))
+    latest_index = candle_count - 1
+    if latest_index < 0:
+        return "", -1
+    candidates: list[tuple[int, int, str]] = []
+    for level in _optional_rows(motif_lattice.get("levels")):
+        level_index = _safe_count(level.get("level"))
+        for node in _optional_rows(level.get("nodes")):
+            span = _optional_mapping(node.get("span"))
+            if _safe_count(span.get("end_index"), -1) != latest_index:
+                continue
+            token = str(node.get("motif_token") or "").strip().upper()
+            if token:
+                candidates.append(
+                    (
+                        level_index,
+                        _safe_count(span.get("candle_count")),
+                        token,
+                    )
+                )
+    if not candidates:
+        return "", -1
+    selected = max(candidates, key=lambda row: (row[0], row[1], row[2]))
+    return selected[2], selected[0]
+
+
+def _pair_behavior_without_coordinate_prefix(
+    value: Mapping[str, Any],
+) -> dict[str, object]:
+    """Aggregate Pair DNA behavior keys by the suffix after the last ``|``."""
+
+    raw_counts = _optional_mapping(value.get("segment_counts"))
+    raw_candle_sums = _optional_mapping(value.get("segment_candle_sum"))
+    raw_duration_sums = _optional_mapping(value.get("segment_duration_sum"))
+    raw_averages = _optional_mapping(value.get("segment_averages"))
+    counts: dict[str, int] = {}
+    for token, count in raw_counts.items():
+        state = str(token).rsplit("|", maxsplit=1)[-1].upper()
+        counts[state] = counts.get(state, 0) + _safe_count(count)
+
+    weighted_averages: dict[str, dict[str, float]] = {}
+    average_tokens = set(raw_averages) | set(raw_counts)
+    for token in sorted(average_tokens):
+        state = str(token).rsplit("|", maxsplit=1)[-1].upper()
+        row = _optional_mapping(raw_averages.get(token))
+        weight = max(1, _safe_count(raw_counts.get(token), 1))
+        candles = (
+            _safe_number(row.get("candles"))
+            if row
+            else _safe_number(raw_candle_sums.get(token)) / weight
+        )
+        duration_seconds = (
+            _safe_number(row.get("duration_seconds"))
+            if row
+            else _safe_number(raw_duration_sums.get(token)) / weight
+        )
+        aggregate = weighted_averages.setdefault(
+            state,
+            {"weight": 0.0, "candles": 0.0, "duration_seconds": 0.0},
+        )
+        aggregate["weight"] += weight
+        aggregate["candles"] += candles * weight
+        aggregate["duration_seconds"] += duration_seconds * weight
+    averages = {
+        state: {
+            "candles": _rounded(row["candles"] / row["weight"], 4),
+            "duration_seconds": _rounded(
+                row["duration_seconds"] / row["weight"], 2
+            ),
+        }
+        for state, row in weighted_averages.items()
+        if row["weight"] > 0.0
+    }
+
+    raw_transition_counts = _optional_mapping(value.get("transition_counts"))
+    transition_counts: dict[str, int] = {}
+    for token, count in raw_transition_counts.items():
+        transition = str(token).rsplit("|", maxsplit=1)[-1].upper()
+        transition_counts[transition] = (
+            transition_counts.get(transition, 0) + _safe_count(count)
+        )
+    outgoing: dict[str, int] = {}
+    for token, count in transition_counts.items():
+        source = token.split("->", maxsplit=1)[0]
+        outgoing[source] = outgoing.get(source, 0) + count
+    transitions = {
+        token: count / outgoing[token.split("->", maxsplit=1)[0]]
+        for token, count in transition_counts.items()
+        if outgoing.get(token.split("->", maxsplit=1)[0], 0) > 0
+    }
+    if not transitions:
+        for token, probability in _optional_mapping(
+            value.get("transition_probabilities")
+        ).items():
+            transition = str(token).rsplit("|", maxsplit=1)[-1].upper()
+            transitions[transition] = max(
+                0.0, min(1.0, _safe_number(probability))
+            )
+    return {
+        "segment_counts": counts,
+        "segment_averages": averages,
+        "transition_counts": transition_counts,
+        "transition_probabilities": transitions,
+    }
+
+
+def _curve_window(
+    curve: Mapping[str, Any],
+    *,
+    minimum_candles: int,
+    horizon_candles: int,
+) -> tuple[tuple[int, int, int], float] | None:
+    points = _optional_rows(curve.get("curve"))
+    if not points:
+        return None
+
+    def threshold(value: float, fallback: int) -> int:
+        return next(
+            (
+                _safe_count(point.get("closed_candles"), fallback)
+                for point in points
+                if _safe_number(point.get("cumulative_event_probability"))
+                >= value
+            ),
+            fallback,
+        )
+
+    earliest = _aligned_forecast_candles(
+        threshold(0.20, horizon_candles),
+        minimum=minimum_candles,
+        maximum=horizon_candles,
+    )
+    central = _aligned_forecast_candles(
+        threshold(0.50, horizon_candles),
+        minimum=earliest,
+        maximum=horizon_candles,
+    )
+    latest = _aligned_forecast_candles(
+        threshold(0.80, horizon_candles),
+        minimum=central,
+        maximum=horizon_candles,
+    )
+    available = [
+        point
+        for point in points
+        if _safe_count(point.get("closed_candles")) <= horizon_candles
+    ]
+    event_probability = (
+        _safe_number(available[-1].get("cumulative_event_probability"))
+        if available
+        else 0.0
+    )
+    return (earliest, central, latest), max(0.0, min(1.0, event_probability))
+
+
+def _motif_observations(
+    trajectory_library: Mapping[str, Any],
+    *,
+    motif_token: str,
+    direction: str,
+    minimum_candles: int,
+    horizon_candles: int,
+) -> list[dict[str, object]]:
+    observations: list[dict[str, object]] = []
+    for entry in _optional_rows(trajectory_library.get("entries")):
+        if str(entry.get("motif_token") or "").strip().upper() != motif_token:
+            continue
+        if _forecast_direction(entry.get("reference_direction")) != direction:
+            continue
+        target_candles: int | None = None
+        sweep_before_move = False
+        invalidated = False
+        rest_candles = 0
+        for point in _optional_rows(entry.get("points")):
+            offset = _safe_count(point.get("offset_closed_candles"))
+            if offset <= 0 or offset > horizon_candles:
+                continue
+            favorable = _safe_number(
+                point.get("cumulative_favorable_excursion_in_median_ranges")
+            )
+            adverse = _safe_number(
+                point.get("cumulative_adverse_excursion_in_median_ranges")
+            )
+            if target_candles is None:
+                sweep_before_move = bool(
+                    sweep_before_move or adverse >= _FORECAST_SWEEP_MRU
+                )
+                invalidated = bool(
+                    invalidated or adverse >= _FORECAST_INVALIDATION_MRU
+                )
+                if str(point.get("state") or "").upper() == "REST":
+                    rest_candles += 1
+                if favorable >= _FORECAST_TARGET_MRU:
+                    target_candles = offset
+        considered_target = bool(
+            target_candles is not None and target_candles >= minimum_candles
+        )
+        observations.append(
+            {
+                "success": considered_target and not invalidated,
+                "target_candles": target_candles if considered_target else None,
+                "sweep_before_move": sweep_before_move,
+                "rest_candles": rest_candles,
+            }
+        )
+    return observations
+
+
+def build_hierarchical_forward_timing_forecast_v3(
+    *,
+    candidate_direction: object,
+    duration_contract: Mapping[str, Any],
+    source_cadence_seconds: object,
+    directional_confidence: object = 0.0,
+    current_regime: object = "UNKNOWN",
+    current_behavior: Mapping[str, Any] | None = None,
+    pair_profile: Mapping[str, Any] | None = None,
+    motif_lattice: Mapping[str, Any] | None = None,
+    survival_network: Mapping[str, Any] | None = None,
+    motif_trajectory_library: Mapping[str, Any] | None = None,
+    exact_jpclf_estimate: Mapping[str, Any] | None = None,
+    exact_time_proven: bool = False,
+    exact_promotion_passed: bool = False,
+    lineage: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    """Publish a bounded forecast even while exact pair JPCLF matures.
+
+    Evidence is selected through the declared hierarchy and shrunk toward its
+    broader parent.  The final pooled value is an explicitly uncalibrated
+    neutral policy prior, never disguised as observed pair evidence.
+    """
+
+    cadence = _integer(
+        source_cadence_seconds,
+        field="source_cadence_seconds",
+        minimum=30,
+        maximum=MAX_STUDIED_DURATION_SECONDS,
+    )
+    duration_row = dict(duration_contract)
+    duration = _safe_count(
+        duration_row.get(
+            "requested_duration_seconds",
+            duration_row.get("duration_seconds"),
+        )
+    )
+    duration_eligible = bool(
+        duration_row.get("new_entry_eligible") is True
+        or duration_row.get("eligible") is True
+    )
+    direction = _forecast_direction(candidate_direction)
+    regime = " ".join(
+        str(current_regime or "UNKNOWN").strip().upper().split()
+    )[:64]
+    if not regime:
+        regime = "UNKNOWN"
+    raw_lineage = _optional_mapping(lineage)
+    anchor_close_epoch_seconds = (
+        _optional_nonnegative_number(
+            raw_lineage.get("anchor_close_epoch_seconds")
+        )
+        if exact_time_proven
+        else None
+    )
+    source_lineage: dict[str, object] = {
+        "symbol": " ".join(
+            str(raw_lineage.get("symbol") or "").strip().upper().split()
+        )[:64],
+        "timeframe": " ".join(
+            str(raw_lineage.get("timeframe") or "").strip().upper().split()
+        )[:32],
+        "closed_candle_key": str(
+            raw_lineage.get("closed_candle_key") or ""
+        ).strip()[:256],
+        "closed_candle_sequence": _safe_count(
+            raw_lineage.get("closed_candle_sequence")
+        ),
+        "source_cadence_seconds": cadence,
+    }
+    if anchor_close_epoch_seconds is not None:
+        source_lineage["anchor_close_epoch_seconds"] = _rounded(
+            anchor_close_epoch_seconds,
+            6,
+        )
+    lineage_bound = bool(
+        source_lineage["symbol"]
+        and source_lineage["timeframe"]
+        and source_lineage["closed_candle_key"]
+    )
+    source_lineage["lineage_bound"] = lineage_bound
+    source_lineage["freshness_state"] = (
+        "CURRENT_CLOSED_CANDLE" if lineage_bound else "UNBOUND"
+    )
+    source_lineage["lineage_digest"] = _digest(source_lineage)
+    horizon_candles = max(1, duration // cadence) if duration else 0
+    minimum_candles = int(math.ceil(MIN_ELIGIBLE_DURATION_SECONDS / cadence))
+    forecast_available = bool(
+        duration_eligible
+        and duration >= MIN_ELIGIBLE_DURATION_SECONDS
+        and duration <= MAX_STUDIED_DURATION_SECONDS
+        and horizon_candles >= minimum_candles
+        and direction
+    )
+    status = (
+        "FORECAST_AVAILABLE"
+        if forecast_available
+        else "DIRECTION_UNRESOLVED"
+        if duration_eligible and not direction
+        else "INELIGIBLE_DURATION"
+    )
+    if not forecast_available:
+        result: dict[str, object] = {
+            "schema_version": PATH_CLOCK_FORWARD_TIMING_FORECAST_SCHEMA_VERSION,
+            "probability_semantics_version": (
+                PATH_CLOCK_FORWARD_PROBABILITY_SEMANTICS_VERSION
+            ),
+            "status": status,
+            "candidate_direction": direction or "UNRESOLVED",
+            "current_regime": regime,
+            "forecast_horizon_seconds": duration or None,
+            "lineage": source_lineage,
+            "move_window": {
+                "earliest": None,
+                "central": None,
+                "latest": None,
+                "basis": "CLOSED_CANDLE_RELATIVE",
+                "exact_wall_clock_proven": False,
+                "anchor_time_proven": False,
+                "estimate_calibrated": False,
+                "event_definition": "UNAVAILABLE",
+                "relative_to": "CLOSED_CANDLE_ANCHOR",
+                "rolling_wall_clock": False,
+            },
+            "probability": {
+                "value": None,
+                "confidence": None,
+                "metric": "UNAVAILABLE",
+                "source_tier": "NONE",
+                "calibration_grade": "UNRATED",
+                "calibrated": False,
+                "support_count": 0,
+                "shrinkage_weight": None,
+                "compatibility_alias_for": "event_likelihood",
+            },
+            "directional_model": {
+                "candidate_direction": direction or "UNRESOLVED",
+                "score": None,
+                "source": "CURRENT_DIRECTIONAL_ENSEMBLE",
+                "is_event_likelihood": False,
+            },
+            "timing_estimate": {
+                "source_tier": "NONE",
+                "basis": "NO_ELIGIBLE_DURATION_WINDOW",
+                "event_definition": "UNAVAILABLE",
+                "empirical_timing_evidence": False,
+                "support_count": 0,
+                "current_sequence_candle_count": 0,
+                "current_target_state": "UNRESOLVED",
+                "components": {},
+            },
+            "event_likelihood": {
+                "value": None,
+                "event": "UNAVAILABLE",
+                "source_tier": "NONE",
+                "support_count": 0,
+                "calibrated": False,
+            },
+            "evidence_confidence": {
+                "value": None,
+                "basis": "NO_EMPIRICAL_OUTCOME_SUPPORT",
+                "support_count": 0,
+            },
+            "state_transition_estimate": {
+                "value": None,
+                "transition": "UNAVAILABLE",
+                "target_count": 0,
+                "support_count": 0,
+                "minimum_support": _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT,
+                "eligible": False,
+            },
+            "stop_survival": {
+                "value": None,
+                "source_tier": "NONE",
+                "support_count": 0,
+                "exact_wall_clock_proven": False,
+                "calibrated": False,
+            },
+            "adverse_excursion_risk": {
+                "worst_drawdown_still_ahead_probability": None,
+                "source_tier": "NONE",
+                "support_count": 0,
+            },
+            "expected_pre_move": {
+                "state": "NOT_STUDIED",
+                "rest_window_candles": None,
+                "rest_window_minutes": None,
+                "rest_source_tier": "NONE",
+                "rest_support_count": 0,
+                "rest_zero_observed": False,
+                "sweep_probability": None,
+                "sweep_risk": "UNKNOWN",
+            },
+            "invalidation": {
+                "direction": "",
+                "condition": "No timing forecast is active.",
+                "adverse_distance_mru": _FORECAST_INVALIDATION_MRU,
+                "expires_after_seconds": duration or None,
+                "expires_after_candles": horizon_candles or None,
+                "closed_candles_only": True,
+            },
+            "enter_now": {
+                "permission": False,
+                "permission_determined": False,
+                "forecast_horizon_eligible": duration_eligible,
+                "timing_advisory": status,
+                "reason": (
+                    "Entry permission remains an independent contract; this "
+                    "forecast cannot grant it."
+                ),
+                "permission_source": "INDEPENDENT_ENTRY_CONTRACT_REQUIRED",
+            },
+            "evidence_hierarchy": {
+                "selected_tier": "NONE",
+                "attempted_tiers": [],
+                "pooled_prior_is_empirical_pair_evidence": False,
+                "pooled_prior_published_as_likelihood": False,
+            },
+            **_safety_contract(),
+        }
+        result["forecast_digest"] = _digest(result)
+        return result
+
+    prior_window = (
+        minimum_candles,
+        _aligned_forecast_candles(
+            (minimum_candles + horizon_candles) / 2.0,
+            minimum=minimum_candles,
+            maximum=horizon_candles,
+        ),
+        horizon_candles,
+    )
+    selected_window = prior_window
+    timing_source_tier = "POLICY_WINDOW"
+    timing_basis = "CANONICAL_DURATION_POLICY_WINDOW"
+    timing_support_count = 0
+    timing_empirical = False
+    timing_weight = 0.0
+    event_likelihood: float | None = None
+    event_kind = "UNAVAILABLE"
+    event_source_tier = "NONE"
+    event_support_count = 0
+    event_calibrated = False
+    evidence_confidence: float | None = None
+    sweep_probability: float | None = None
+    sweep_source_tier = "NONE"
+    sweep_support_count = 0
+    stop_survival_probability: float | None = None
+    stop_survival_support_count = 0
+    adverse_excursion_probability: float | None = None
+    rest_center: float | None = None
+    rest_source_tier = "NONE"
+    rest_support_count = 0
+    rest_zero_observed = False
+    timing_event_definition = "UNAVAILABLE"
+    timing_components: dict[str, object] = {}
+    attempted: list[dict[str, object]] = []
+
+    raw_behavior = _optional_mapping(
+        _optional_mapping(pair_profile).get("behavior")
+    )
+    behavior = _pair_behavior_without_coordinate_prefix(raw_behavior)
+    segment_averages = _optional_mapping(behavior.get("segment_averages"))
+    segment_counts = _optional_mapping(behavior.get("segment_counts"))
+    transition_counts = _optional_mapping(behavior.get("transition_counts"))
+    current = _optional_mapping(_optional_mapping(current_behavior).get("current_state"))
+    current_state = str(current.get("state") or "REST").strip().upper()
+    target_state = "UP_SWING" if direction == "UP" else "DOWN_SWING"
+    opposite_state = "DOWN_SWING" if target_state == "UP_SWING" else "UP_SWING"
+    target_move_already_active = current_state == target_state
+    target_state_support = _safe_count(segment_counts.get(target_state))
+
+    sequence_count = _safe_count(
+        _optional_mapping(current_behavior).get("candle_count")
+    )
+    swing_summary = _optional_mapping(
+        _optional_mapping(current_behavior).get("swing_summary")
+    )
+    target_summary = _optional_mapping(
+        swing_summary.get("up" if direction == "UP" else "down")
+    )
+    target_sequence_segment_count = _safe_count(
+        target_summary.get("segment_count")
+    )
+    target_sequence_average_candles = _safe_number(
+        target_summary.get("average_candles")
+    )
+    target_sequence_maximum_candles = max(
+        target_sequence_average_candles,
+        _safe_number(target_summary.get("maximum_candles")),
+    )
+    opposite_summary = _optional_mapping(
+        swing_summary.get("down" if direction == "UP" else "up")
+    )
+    opposite_sequence_segment_count = _safe_count(
+        opposite_summary.get("segment_count")
+    )
+    opposite_sequence_average_candles = _safe_number(
+        opposite_summary.get("average_candles")
+    )
+    rest_summary = _optional_mapping(
+        _optional_mapping(current_behavior).get("rest_summary")
+    )
+    rest_sequence_segment_count = _safe_count(rest_summary.get("segment_count"))
+    rest_sequence_average_candles = _safe_number(
+        rest_summary.get("average_candles")
+    )
+    rest_sequence_maximum_candles = max(
+        rest_sequence_average_candles,
+        _safe_number(rest_summary.get("maximum_candles")),
+    )
+    live_completed_segment_count = (
+        target_sequence_segment_count
+        + opposite_sequence_segment_count
+        + rest_sequence_segment_count
+    )
+    current_sequence_state_supported = bool(
+        (
+            current_state == "REST"
+            and rest_sequence_segment_count > 0
+        )
+        or (
+            current_state == opposite_state
+            and opposite_sequence_segment_count > 0
+            and opposite_sequence_average_candles > 0.0
+            and rest_sequence_segment_count > 0
+        )
+        or (
+            current_state == target_state
+            and target_sequence_segment_count > 0
+            and target_sequence_average_candles > 0.0
+            and rest_sequence_segment_count > 0
+        )
+    )
+    directional_model_score = _optional_unit_interval(directional_confidence)
+    sequence_available = bool(
+        sequence_count >= _MIN_FORWARD_LIVE_HISTORY_CANDLES
+        and live_completed_segment_count
+        >= _MIN_FORWARD_LIVE_COMPLETED_SEGMENTS
+        and target_sequence_segment_count > 0
+        and target_sequence_average_candles > 0.0
+        and current_sequence_state_supported
+        and directional_model_score is not None
+        and directional_model_score > 0.0
+    )
+    attempted.append(
+        {
+            "tier": "LIVE_M5_SEQUENCE",
+            "available": sequence_available,
+            "support_count": 0,
+            "current_sequence_candle_count": sequence_count,
+            "minimum_history_candles": _MIN_FORWARD_LIVE_HISTORY_CANDLES,
+            "completed_segment_count": live_completed_segment_count,
+            "minimum_completed_segments": (
+                _MIN_FORWARD_LIVE_COMPLETED_SEGMENTS
+            ),
+            "target_segment_count": target_sequence_segment_count,
+            "rest_segment_count": rest_sequence_segment_count,
+            "current_state_supported": current_sequence_state_supported,
+            "target_move_already_active": target_move_already_active,
+            "basis": "CURRENT_CLOSED_CANDLE_BEHAVIOR_AND_DIRECTIONAL_ENSEMBLE",
+        }
+    )
+    if sequence_available:
+        current_count = _safe_number(current.get("candle_count"), 0.0)
+        if current_state == target_state:
+            current_remaining = max(
+                0.0,
+                target_sequence_average_candles - current_count,
+            )
+            expected_intermediate_rest = rest_sequence_average_candles
+            local_center = current_remaining + expected_intermediate_rest
+            target_distribution_spread = max(
+                0.0,
+                target_sequence_maximum_candles
+                - target_sequence_average_candles,
+            )
+            rest_distribution_spread = max(
+                0.0,
+                rest_sequence_maximum_candles
+                - rest_sequence_average_candles,
+            )
+            local_uncertainty = max(
+                1.0,
+                target_distribution_spread + rest_distribution_spread,
+            )
+            rest_center = expected_intermediate_rest
+        elif current_state == "REST":
+            current_remaining = max(
+                0.0,
+                rest_sequence_average_candles - current_count,
+            )
+            expected_intermediate_rest = 0.0
+            local_center = current_remaining
+            local_uncertainty = max(
+                1.0,
+                rest_sequence_average_candles / 2.0,
+            )
+            rest_center = current_remaining
+        else:
+            current_remaining = max(
+                0.0,
+                opposite_sequence_average_candles - current_count,
+            )
+            expected_intermediate_rest = rest_sequence_average_candles
+            local_center = current_remaining + expected_intermediate_rest
+            local_uncertainty = max(
+                1.0,
+                (
+                    opposite_sequence_average_candles
+                    + rest_sequence_average_candles
+                )
+                / 2.0,
+            )
+            rest_center = expected_intermediate_rest
+        live_window = (
+            _aligned_forecast_candles(
+                local_center - local_uncertainty,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            ),
+            _aligned_forecast_candles(
+                local_center,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            ),
+            _aligned_forecast_candles(
+                local_center + local_uncertainty,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            ),
+        )
+        live_weight = min(0.75, sequence_count / (sequence_count + 8.0))
+        selected_window = tuple(
+            _aligned_forecast_candles(
+                (1.0 - live_weight) * prior + live_weight * empirical,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            )
+            for prior, empirical in zip(
+                selected_window, live_window, strict=True
+            )
+        )
+        timing_source_tier = "LIVE_M5_SEQUENCE"
+        timing_basis = "CURRENT_CLOSED_CANDLE_SEQUENCE_AND_DECLARED_CADENCE"
+        timing_support_count = 0
+        timing_empirical = False
+        timing_weight = live_weight
+        timing_event_definition = (
+            "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+            if target_move_already_active
+            else "TARGET_MOVE_START_AFTER_ANCHOR"
+        )
+        timing_basis = (
+            "CURRENT_ACTIVE_TARGET_COMPLETION_AND_OBSERVED_REST"
+            if target_move_already_active
+            else timing_basis
+        )
+        timing_components = {
+            "current_state": current_state,
+            "current_state_candle_count": _rounded(current_count, 4),
+            "current_state_remaining_candles": _rounded(
+                current_remaining,
+                4,
+            ),
+            "expected_intermediate_rest_candles": _rounded(
+                expected_intermediate_rest,
+                4,
+            ),
+            "wait_to_target_start_candles": _rounded(local_center, 4),
+            "target_duration_included": False,
+            "active_target_remaining_included": target_move_already_active,
+        }
+        if target_move_already_active:
+            timing_components.update(
+                {
+                    "target_distribution": {
+                        "segment_count": target_sequence_segment_count,
+                        "average_candles": _rounded(
+                            target_sequence_average_candles,
+                            4,
+                        ),
+                        "maximum_candles": _rounded(
+                            target_sequence_maximum_candles,
+                            4,
+                        ),
+                    },
+                    "rest_distribution": {
+                        "segment_count": rest_sequence_segment_count,
+                        "average_candles": _rounded(
+                            rest_sequence_average_candles,
+                            4,
+                        ),
+                        "maximum_candles": _rounded(
+                            rest_sequence_maximum_candles,
+                            4,
+                        ),
+                    },
+                    "distribution_uncertainty_candles": _rounded(
+                        local_uncertainty,
+                        4,
+                    ),
+                }
+            )
+        rest_source_tier = "LIVE_BEHAVIOR"
+        rest_support_count = rest_sequence_segment_count
+        rest_zero_observed = rest_center == 0.0
+    target_state_average_candles = _safe_number(
+        _optional_mapping(segment_averages.get(target_state)).get("candles")
+    )
+    pair_rest_support = _safe_count(segment_counts.get("REST"))
+    pair_rest_average = _safe_number(
+        _optional_mapping(segment_averages.get("REST")).get("candles")
+    )
+    pair_opposite_support = _safe_count(segment_counts.get(opposite_state))
+    pair_opposite_average = _safe_number(
+        _optional_mapping(segment_averages.get(opposite_state)).get("candles")
+    )
+    pair_prerequisite_support = (
+        pair_rest_support
+        if current_state == "REST"
+        else min(pair_opposite_support, pair_rest_support)
+        if current_state == opposite_state
+        else 0
+    )
+    pair_effective_support = min(
+        target_state_support,
+        pair_prerequisite_support,
+    )
+    pair_prerequisite_duration_available = bool(
+        (
+            current_state == "REST"
+            and pair_rest_support > 0
+            and pair_rest_average >= 0.0
+        )
+        or (
+            current_state == opposite_state
+            and pair_opposite_support > 0
+            and pair_opposite_average > 0.0
+            and pair_rest_support > 0
+            and pair_rest_average >= 0.0
+        )
+    )
+    pair_available = bool(
+        not target_move_already_active
+        and target_state in segment_averages
+        and pair_effective_support >= _MIN_FORWARD_PAIR_TIMING_SUPPORT
+        and target_state_average_candles > 0.0
+        and pair_prerequisite_duration_available
+    )
+    transition_key = f"{current_state}->{target_state}"
+    transition_target_count = _safe_count(transition_counts.get(transition_key))
+    transition_support_count = sum(
+        _safe_count(count)
+        for token, count in transition_counts.items()
+        if str(token).split("->", maxsplit=1)[0].upper() == current_state
+    )
+    transition_estimate = (
+        transition_target_count / transition_support_count
+        if transition_support_count > 0
+        else None
+    )
+    attempted.append(
+        {
+            "tier": "PAIR",
+            "available": pair_available,
+            "support_count": pair_effective_support,
+            "minimum_support": _MIN_FORWARD_PAIR_TIMING_SUPPORT,
+            "basis": "PAIR_DNA_TARGET_START_WAIT",
+            "target_state": target_state,
+            "target_state_support": target_state_support,
+            "prerequisite_state_support": pair_prerequisite_support,
+            "target_move_already_active": target_move_already_active,
+        }
+    )
+    if pair_available:
+        current_count = _safe_number(current.get("candle_count"), 0.0)
+        if current_state == "REST":
+            current_remaining = max(
+                0.0,
+                pair_rest_average - current_count,
+            )
+            expected_intermediate_rest = 0.0
+            central_raw = current_remaining
+            pair_uncertainty = max(1.0, pair_rest_average / 2.0)
+            rest_center = current_remaining
+        else:
+            current_remaining = max(
+                0.0,
+                pair_opposite_average - current_count,
+            )
+            expected_intermediate_rest = pair_rest_average
+            central_raw = current_remaining + expected_intermediate_rest
+            pair_uncertainty = max(
+                1.0,
+                (pair_opposite_average + pair_rest_average) / 2.0,
+            )
+            rest_center = expected_intermediate_rest
+        pair_window = (
+            _aligned_forecast_candles(
+                central_raw - pair_uncertainty,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            ),
+            _aligned_forecast_candles(
+                central_raw,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            ),
+            _aligned_forecast_candles(
+                central_raw + pair_uncertainty,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            ),
+        )
+        pair_window = (
+            pair_window[0],
+            max(pair_window[0], pair_window[1]),
+            max(pair_window[1], pair_window[2]),
+        )
+        pair_weight = pair_effective_support / (pair_effective_support + 16.0)
+        selected_window = tuple(
+            _aligned_forecast_candles(
+                (1.0 - pair_weight) * prior + pair_weight * empirical,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            )
+            for prior, empirical in zip(prior_window, pair_window, strict=True)
+        )
+        timing_source_tier = "PAIR"
+        timing_basis = "PAIR_DNA_TARGET_START_WAIT"
+        timing_support_count = pair_effective_support
+        timing_empirical = True
+        timing_weight = pair_weight
+        timing_event_definition = "TARGET_MOVE_START_AFTER_ANCHOR"
+        timing_components = {
+            "current_state": current_state,
+            "current_state_candle_count": _rounded(current_count, 4),
+            "current_state_remaining_candles": _rounded(
+                current_remaining,
+                4,
+            ),
+            "expected_intermediate_rest_candles": _rounded(
+                expected_intermediate_rest,
+                4,
+            ),
+            "wait_to_target_start_candles": _rounded(central_raw, 4),
+            "target_duration_included": False,
+        }
+        rest_source_tier = "PAIR_DNA_REST_DURATION"
+        rest_support_count = pair_rest_support
+        rest_zero_observed = rest_center == 0.0
+
+    survival = _optional_mapping(survival_network)
+    event_type = (
+        "REST_END"
+        if current_state == "REST"
+        else "DIRECTION_CHANGE"
+        if current_state != target_state
+        else "NEXT_SWING"
+    )
+    scoped_curves = [
+        curve
+        for curve in _optional_rows(survival.get("curves"))
+        if str(curve.get("origin_state") or "").upper() == current_state
+        and str(curve.get("event_type") or "").upper() == event_type
+    ]
+    unconditional_curves = [
+        curve
+        for curve in scoped_curves
+        if " ".join(str(curve.get("object_type") or "").upper().split())
+        in _UNCONDITIONAL_SURVIVAL_OBJECT_TYPES
+    ]
+    supported_curves = [
+        curve
+        for curve in unconditional_curves
+        if str(curve.get("status") or "").upper() == "SUPPORTED"
+        and _safe_count(curve.get("minimum_support")) > 0
+        and _safe_count(curve.get("support"))
+        >= max(
+            _safe_count(curve.get("minimum_support")),
+            _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT,
+        )
+    ]
+    matching_curve: dict[str, Any] = (
+        max(
+            supported_curves,
+            key=lambda curve: (
+                _safe_count(curve.get("support")),
+                str(curve.get("object_type") or ""),
+            ),
+        )
+        if supported_curves
+        else {}
+    )
+    curve_support = _safe_count(matching_curve.get("support"))
+    curve_minimum_support = _safe_count(matching_curve.get("minimum_support"))
+    curve_evidence = _curve_window(
+        matching_curve,
+        minimum_candles=minimum_candles,
+        horizon_candles=horizon_candles,
+    )
+    regime_available = bool(curve_evidence and curve_support > 0)
+    attempted.insert(
+        0,
+        {
+            "tier": "PAIR_STATE_SURVIVAL",
+            "available": regime_available,
+            "support_count": curve_support,
+            "minimum_support": curve_minimum_support,
+            "basis": "PAIR_CLOSED_CANDLE_STATE_SURVIVAL_CURVE",
+            "unconditional_only": True,
+            "rejected_object_conditioned_count": (
+                len(scoped_curves) - len(unconditional_curves)
+            ),
+            "rejected_unsupported_count": (
+                len(unconditional_curves) - len(supported_curves)
+            ),
+        },
+    )
+    if curve_evidence is not None and curve_support > 0:
+        curve_window, event_probability = curve_evidence
+        regime_weight = curve_support / (curve_support + 8.0)
+        selected_window = tuple(
+            _aligned_forecast_candles(
+                (1.0 - regime_weight) * parent + regime_weight * empirical,
+                minimum=minimum_candles,
+                maximum=horizon_candles,
+            )
+            for parent, empirical in zip(
+                selected_window, curve_window, strict=True
+            )
+        )
+        timing_source_tier = "PAIR_STATE_SURVIVAL"
+        timing_basis = "PAIR_CLOSED_CANDLE_STATE_SURVIVAL_CURVE"
+        timing_support_count = curve_support
+        timing_empirical = True
+        timing_weight = regime_weight
+        timing_event_definition = f"{event_type}_AFTER_ANCHOR"
+        timing_components = {
+            "origin_state": current_state,
+            "survival_event_type": event_type,
+            "target_duration_included": False,
+        }
+        event_likelihood = event_probability
+        event_kind = f"{event_type}_BY_FORECAST_HORIZON"
+        event_source_tier = "PAIR_STATE_SURVIVAL"
+        event_support_count = curve_support
+        evidence_confidence = regime_weight
+
+    motif = _optional_mapping(motif_lattice)
+    motif_token, motif_level = _current_motif_token(motif)
+    motif_observations = _motif_observations(
+        _optional_mapping(motif_trajectory_library),
+        motif_token=motif_token,
+        direction=direction,
+        minimum_candles=minimum_candles,
+        horizon_candles=horizon_candles,
+    ) if motif_token else []
+    motif_support = len(motif_observations)
+    motif_timing_eligible = (
+        motif_support >= _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT
+    )
+    attempted.insert(
+        0,
+        {
+            "tier": "PAIR_MOTIF",
+            "available": motif_timing_eligible,
+            "raw_match_available": motif_support > 0,
+            "support_count": motif_support,
+            "minimum_outcome_support": _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT,
+            "timing_window_eligible": motif_timing_eligible,
+            "outcome_probability_eligible": motif_timing_eligible,
+            "sparse_diagnostic_only": bool(
+                motif_support > 0 and not motif_timing_eligible
+            ),
+            "basis": "MATCHED_HISTORICAL_MOTIF_FOLLOW_THROUGH",
+            "motif_token": motif_token,
+            "motif_level": motif_level,
+        },
+    )
+    if motif_observations:
+        motif_weight = motif_support / (motif_support + 4.0)
+        motif_probability = sum(
+            row["success"] is True for row in motif_observations
+        ) / motif_support
+        target_values = [
+            float(cast(Any, row["target_candles"]))
+            for row in motif_observations
+            if row.get("target_candles") is not None
+        ]
+        if target_values and motif_timing_eligible:
+            motif_window = (
+                _quantile(target_values, 0.10),
+                _quantile(target_values, 0.50),
+                _quantile(target_values, 0.90),
+            )
+            selected_window = tuple(
+                _aligned_forecast_candles(
+                    (1.0 - motif_weight) * parent
+                    + motif_weight * empirical,
+                    minimum=minimum_candles,
+                    maximum=horizon_candles,
+                )
+                for parent, empirical in zip(
+                    selected_window, motif_window, strict=True
+                )
+            )
+            timing_source_tier = "PAIR_MOTIF"
+            timing_basis = "MATCHED_HISTORICAL_MOTIF_FOLLOW_THROUGH"
+            timing_support_count = motif_support
+            timing_empirical = True
+            timing_weight = motif_weight
+            timing_event_definition = "TARGET_MOVE_THRESHOLD_AFTER_ANCHOR"
+            timing_components = {
+                "target_threshold_mru": _FORECAST_TARGET_MRU,
+                "matched_motif_support": motif_support,
+                "target_duration_included": False,
+            }
+        if motif_timing_eligible:
+            rest_center = median(
+                float(cast(Any, row["rest_candles"]))
+                for row in motif_observations
+            )
+            rest_source_tier = "PAIR_MOTIF"
+            rest_support_count = motif_support
+            rest_zero_observed = rest_center == 0.0
+            sweep_probability = (
+                sum(
+                    row["sweep_before_move"] is True
+                    for row in motif_observations
+                )
+                / motif_support
+            )
+            sweep_source_tier = "PAIR_MOTIF"
+            sweep_support_count = motif_support
+            event_likelihood = motif_probability
+            event_kind = "MOTIF_TARGET_FOLLOW_THROUGH_WITHIN_FORECAST_HORIZON"
+            event_source_tier = "PAIR_MOTIF"
+            event_support_count = motif_support
+            evidence_confidence = motif_weight
+
+    exact = _optional_mapping(exact_jpclf_estimate)
+    exact_support = _safe_count(exact.get("support_count"))
+    exact_minimum_support = max(
+        _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT,
+        _safe_count(exact.get("minimum_support")),
+    )
+    exact_probability_value = _optional_unit_interval(
+        exact.get("survival_probability")
+    )
+    exact_available = bool(
+        exact_probability_value is not None
+        and exact_support >= exact_minimum_support
+        and exact_time_proven
+        and anchor_close_epoch_seconds is not None
+    )
+    exact_window_used = False
+    exact_raw_window_seconds: tuple[float, float, float] | None = None
+    if exact_available:
+        exact_weight = 1.0 if exact_promotion_passed else exact_support / (
+            exact_support + 8.0
+        )
+        stop_survival_probability = exact_probability_value
+        stop_survival_support_count = exact_support
+        target_times = _optional_mapping(exact.get("target_time_seconds"))
+        exact_window_seconds = (
+            _safe_number(target_times.get("p10")),
+            _safe_number(target_times.get("median")),
+            _safe_number(target_times.get("p90")),
+        )
+        if all(value > 0.0 for value in exact_window_seconds):
+            exact_window_used = True
+            exact_raw_window_seconds = exact_window_seconds
+            exact_window = tuple(
+                _aligned_forecast_candles(
+                    value / cadence,
+                    minimum=minimum_candles,
+                    maximum=horizon_candles,
+                )
+                for value in exact_window_seconds
+            )
+            selected_window = tuple(
+                _aligned_forecast_candles(
+                    (1.0 - exact_weight) * parent
+                    + exact_weight * empirical,
+                    minimum=minimum_candles,
+                    maximum=horizon_candles,
+                )
+                for parent, empirical in zip(
+                    selected_window, exact_window, strict=True
+                )
+            )
+            timing_source_tier = "EXACT_JPCLF"
+            timing_basis = "EXACT_PATH_CLOCK_LIQUIDITY_TARGET_TIME"
+            timing_support_count = exact_support
+            timing_empirical = True
+            timing_weight = exact_weight
+            timing_event_definition = (
+                "EXACT_TARGET_MOVE_THRESHOLD_AFTER_ANCHOR"
+            )
+            timing_components = {
+                "target_threshold_mru": _optional_nonnegative_number(
+                    exact.get("move_size_mru")
+                ),
+                "raw_target_time_seconds": {
+                    "p10": _rounded(exact_window_seconds[0], 6),
+                    "median": _rounded(exact_window_seconds[1], 6),
+                    "p90": _rounded(exact_window_seconds[2], 6),
+                },
+                "target_duration_included": False,
+            }
+        adverse_excursion_probability = _optional_unit_interval(
+            exact.get("probability_worst_drawdown_still_ahead")
+        )
+        attempted.insert(
+            0,
+            {
+                "tier": "EXACT_JPCLF",
+                "available": True,
+                "support_count": exact_support,
+                "minimum_support": exact_minimum_support,
+                "basis": (
+                    "EXACT_PATH_CLOCK_LIQUIDITY_TARGET_TIME_AND_STOP_SURVIVAL"
+                    if exact_window_used
+                    else "EXACT_PATH_CLOCK_LIQUIDITY_STOP_SURVIVAL_ONLY"
+                ),
+            },
+        )
+    elif exact_support > 0:
+        attempted.insert(
+            0,
+            {
+                "tier": "EXACT_JPCLF",
+                "available": False,
+                "support_count": exact_support,
+                "minimum_support": exact_minimum_support,
+                "basis": (
+                    "EXACT_SUPPORT_FLOOR_NOT_MET"
+                    if exact_support < exact_minimum_support
+                    else "EXACT_WALL_CLOCK_ANCHOR_REQUIRED"
+                ),
+            },
+        )
+
+    earliest, central, latest = selected_window
+    central = max(earliest, central)
+    latest = max(central, latest)
+    if sweep_probability is not None:
+        sweep_probability = max(0.0, min(1.0, sweep_probability))
+    rest_min: int | None = None
+    rest_central: int | None = None
+    rest_latest: int | None = None
+    if rest_center is not None:
+        rest_min = max(0, int(math.floor(rest_center - 1.0)))
+        rest_central = max(rest_min, int(round(rest_center)))
+        rest_latest = max(
+            rest_central,
+            int(math.ceil(rest_center + 1.0)),
+        )
+    event_calibration_grade = (
+        "EMPIRICAL_UNCALIBRATED" if event_support_count > 0 else "UNRATED"
+    )
+    invalidation_direction = "DOWN" if direction == "UP" else "UP"
+    sweep_risk = (
+        "UNRATED"
+        if sweep_probability is None
+        else "HIGH"
+        if sweep_probability >= 0.65
+        else "MEDIUM"
+        if sweep_probability >= 0.35
+        else "LOW"
+    )
+    attempted.append(
+        {
+            "tier": "POLICY_WINDOW",
+            "available": True,
+            "support_count": 0,
+            "basis": "CANONICAL_DURATION_POLICY_WINDOW_ONLY",
+        }
+    )
+    tier_order = {
+        "EXACT_JPCLF": 0,
+        "PAIR_MOTIF_JPCLF": 0,
+        "PAIR_JPCLF": 0,
+        "PAIR_MOTIF": 1,
+        "PAIR_STATE_SURVIVAL": 2,
+        "PAIR": 3,
+        "LIVE_M5_SEQUENCE": 4,
+        "POLICY_WINDOW": 5,
+    }
+    attempted.sort(key=lambda row: tier_order.get(str(row["tier"]), 99))
+    timing_window_available = timing_source_tier != "POLICY_WINDOW"
+    public_status = (
+        "FORECAST_AVAILABLE"
+        if timing_window_available
+        else "TARGET_MOVE_ALREADY_ACTIVE"
+        if target_move_already_active
+        else "TIMING_UNRATED"
+    )
+    if timing_window_available:
+        expected_state = (
+            "SWEEP_THEN_MOVE"
+            if sweep_probability is not None and sweep_risk == "HIGH"
+            else "PRE_MOVE_STATE_UNRATED"
+            if rest_center is None
+            else "DIRECT_MOVE_POSSIBLE"
+            if rest_zero_observed
+            else "REST_THEN_MOVE"
+            if rest_central is not None and rest_central > 0
+            else "PRE_MOVE_STATE_UNRATED"
+        )
+    else:
+        expected_state = (
+            "TARGET_MOVE_ALREADY_ACTIVE"
+            if target_move_already_active
+            else "TIMING_UNRATED"
+        )
+    move_window: dict[str, object] = {
+        "earliest": (
+            _window_point(earliest, cadence)
+            if timing_window_available
+            else None
+        ),
+        "central": (
+            _window_point(central, cadence)
+            if timing_window_available
+            else None
+        ),
+        "latest": (
+            _window_point(latest, cadence)
+            if timing_window_available
+            else None
+        ),
+        "basis": (
+            "EXACT_EMPIRICAL_CLOCK_ANCHORED_WINDOW"
+            if exact_window_used and exact_promotion_passed
+            else "CLOCK_ANCHORED_SHRUNK_ESTIMATE"
+            if exact_window_used
+            else "CLOSED_CANDLE_RELATIVE_DECLARED_CADENCE"
+            if timing_window_available
+            else "TARGET_MOVE_ALREADY_ACTIVE_AT_ANCHOR"
+            if target_move_already_active
+            else "POLICY_HORIZON_ONLY_NO_MOVE_WINDOW"
+        ),
+        "exact_wall_clock_proven": exact_window_used,
+        "anchor_time_proven": exact_window_used,
+        "estimate_calibrated": bool(
+            exact_window_used and exact_promotion_passed
+        ),
+        "event_definition": (
+            timing_event_definition
+            if timing_window_available
+            else "TARGET_MOVE_ALREADY_ACTIVE_AT_ANCHOR"
+            if target_move_already_active
+            else "UNAVAILABLE"
+        ),
+        "relative_to": "CLOSED_CANDLE_ANCHOR",
+        "rolling_wall_clock": False,
+    }
+    if exact_window_used and anchor_close_epoch_seconds is not None:
+        move_window.update(
+            {
+                "anchor_close_epoch_seconds": _rounded(
+                    anchor_close_epoch_seconds,
+                    6,
+                ),
+                "target_window_start_epoch_seconds": _rounded(
+                    anchor_close_epoch_seconds + earliest * cadence,
+                    6,
+                ),
+                "target_window_central_epoch_seconds": _rounded(
+                    anchor_close_epoch_seconds + central * cadence,
+                    6,
+                ),
+                "target_window_end_epoch_seconds": _rounded(
+                    anchor_close_epoch_seconds + latest * cadence,
+                    6,
+                ),
+                "raw_empirical_target_time_seconds": (
+                    {
+                        "p10": _rounded(exact_raw_window_seconds[0], 6),
+                        "median": _rounded(exact_raw_window_seconds[1], 6),
+                        "p90": _rounded(exact_raw_window_seconds[2], 6),
+                    }
+                    if exact_raw_window_seconds is not None
+                    else None
+                ),
+            }
+        )
+    rest_window_candles: dict[str, int] | None = None
+    rest_window_minutes: dict[str, float] | None = None
+    if (
+        timing_window_available
+        and rest_min is not None
+        and rest_central is not None
+        and rest_latest is not None
+    ):
+        rest_window_candles = {
+            "earliest": rest_min,
+            "central": rest_central,
+            "latest": rest_latest,
+        }
+        rest_window_minutes = {
+            "earliest": _rounded(rest_min * cadence / 60.0, 2),
+            "central": _rounded(rest_central * cadence / 60.0, 2),
+            "latest": _rounded(rest_latest * cadence / 60.0, 2),
+        }
+    result = {
+        "schema_version": PATH_CLOCK_FORWARD_TIMING_FORECAST_SCHEMA_VERSION,
+        "probability_semantics_version": (
+            PATH_CLOCK_FORWARD_PROBABILITY_SEMANTICS_VERSION
+        ),
+        "status": public_status,
+        "candidate_direction": direction,
+        "current_regime": regime,
+        "forecast_horizon_seconds": duration,
+        "lineage": source_lineage,
+        "move_window": move_window,
+        "directional_model": {
+            "candidate_direction": direction,
+            "score": (
+                _rounded(directional_model_score, 6)
+                if directional_model_score is not None
+                else None
+            ),
+            "source": "CURRENT_DIRECTIONAL_ENSEMBLE",
+            "is_event_likelihood": False,
+        },
+        "timing_estimate": {
+            "source_tier": timing_source_tier,
+            "basis": timing_basis,
+            "event_definition": (
+                timing_event_definition
+                if timing_window_available
+                else "TARGET_MOVE_ALREADY_ACTIVE_AT_ANCHOR"
+                if target_move_already_active
+                else "UNAVAILABLE"
+            ),
+            "empirical_timing_evidence": timing_empirical,
+            "support_count": timing_support_count,
+            "current_sequence_candle_count": sequence_count,
+            "current_target_state": (
+                "ALREADY_ACTIVE_AT_ANCHOR"
+                if target_move_already_active
+                else "NOT_ACTIVE_AT_ANCHOR"
+            ),
+            "components": timing_components if timing_window_available else {},
+            "window_blend_weight": _rounded(timing_weight, 6),
+        },
+        "event_likelihood": {
+            "value": (
+                _rounded(event_likelihood, 6)
+                if event_likelihood is not None and event_support_count > 0
+                else None
+            ),
+            "event": event_kind,
+            "source_tier": event_source_tier,
+            "support_count": event_support_count,
+            "calibrated": event_calibrated,
+        },
+        "evidence_confidence": {
+            "value": (
+                _rounded(evidence_confidence, 6)
+                if evidence_confidence is not None and event_support_count > 0
+                else None
+            ),
+            "basis": (
+                "EMPIRICAL_OUTCOME_SUPPORT_SATURATION"
+                if event_support_count > 0
+                else "NO_EMPIRICAL_OUTCOME_SUPPORT"
+            ),
+            "support_count": event_support_count,
+        },
+        "probability": {
+            "value": (
+                _rounded(event_likelihood, 6)
+                if event_likelihood is not None and event_support_count > 0
+                else None
+            ),
+            "confidence": (
+                _rounded(evidence_confidence, 6)
+                if evidence_confidence is not None and event_support_count > 0
+                else None
+            ),
+            "metric": event_kind,
+            "source_tier": event_source_tier,
+            "calibration_grade": event_calibration_grade,
+            "calibrated": event_calibrated,
+            "support_count": event_support_count,
+            "shrinkage_weight": None,
+            "compatibility_alias_for": "event_likelihood",
+        },
+        "state_transition_estimate": {
+            "value": (
+                _rounded(transition_estimate, 6)
+                if transition_estimate is not None
+                and transition_support_count
+                >= _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT
+                else None
+            ),
+            "transition": transition_key,
+            "target_count": transition_target_count,
+            "support_count": transition_support_count,
+            "minimum_support": _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT,
+            "eligible": (
+                transition_support_count
+                >= _MIN_FORWARD_EMPIRICAL_OUTCOME_SUPPORT
+            ),
+            "source_tier": "PAIR_STATE_TRANSITIONS",
+            "is_directional_likelihood": False,
+        },
+        "stop_survival": {
+            "value": (
+                _rounded(stop_survival_probability, 6)
+                if stop_survival_probability is not None
+                and stop_survival_support_count > 0
+                else None
+            ),
+            "source_tier": (
+                "EXACT_JPCLF" if stop_survival_support_count > 0 else "NONE"
+            ),
+            "support_count": stop_survival_support_count,
+            "exact_wall_clock_proven": bool(
+                stop_survival_support_count >= exact_minimum_support
+                and exact_time_proven
+                and anchor_close_epoch_seconds is not None
+            ),
+            "calibrated": bool(
+                stop_survival_support_count > 0 and exact_promotion_passed
+            ),
+            "stop_distance_mru": (
+                _rounded(value, 6)
+                if (
+                    value := _optional_nonnegative_number(
+                        exact.get("stop_distance_mru")
+                    )
+                )
+                is not None
+                else None
+            ),
+            "move_size_mru": (
+                _rounded(value, 6)
+                if (
+                    value := _optional_nonnegative_number(
+                        exact.get("move_size_mru")
+                    )
+                )
+                is not None
+                else None
+            ),
+        },
+        "adverse_excursion_risk": {
+            "worst_drawdown_still_ahead_probability": (
+                _rounded(adverse_excursion_probability, 6)
+                if adverse_excursion_probability is not None
+                and stop_survival_support_count > 0
+                else None
+            ),
+            "source_tier": (
+                "EXACT_JPCLF" if stop_survival_support_count > 0 else "NONE"
+            ),
+            "support_count": stop_survival_support_count,
+        },
+        "expected_pre_move": {
+            "state": expected_state,
+            "rest_window_candles": rest_window_candles,
+            "rest_window_minutes": rest_window_minutes,
+            "rest_source_tier": rest_source_tier,
+            "rest_support_count": rest_support_count,
+            "rest_zero_observed": rest_zero_observed,
+            "sweep_probability": (
+                _rounded(sweep_probability, 6)
+                if sweep_probability is not None and sweep_support_count > 0
+                else None
+            ),
+            "sweep_risk": sweep_risk,
+            "sweep_source_tier": sweep_source_tier,
+            "sweep_support_count": sweep_support_count,
+        },
+        "invalidation": {
+            "direction": invalidation_direction,
+            "condition": (
+                f"Invalidate after a proven closed candle changes the studied "
+                f"direction to {invalidation_direction} or moves at least "
+                f"{_FORECAST_INVALIDATION_MRU:.2f} MRU against the anchor."
+            ),
+            "adverse_distance_mru": _FORECAST_INVALIDATION_MRU,
+            "expires_after_seconds": duration if timing_window_available else None,
+            "expires_after_candles": (
+                horizon_candles if timing_window_available else None
+            ),
+            "closed_candles_only": True,
+        },
+        "enter_now": {
+            "permission": False,
+            "permission_determined": False,
+            "forecast_horizon_eligible": True,
+            "timing_advisory": (
+                "FORWARD_WINDOW_AVAILABLE"
+                if timing_window_available
+                else public_status
+            ),
+            "reason": (
+                "This forecast describes timing only. Entry permission must be "
+                "open in the independent entry contract."
+            ),
+            "permission_source": "INDEPENDENT_ENTRY_CONTRACT_REQUIRED",
+        },
+        "evidence_hierarchy": {
+            "selected_tier": timing_source_tier,
+            "attempted_tiers": attempted,
+            "pooled_prior": {
+                "version": "PG_JPCLF_POLICY_WINDOW_V3",
+                "direction_probability": None,
+                "calibrated": False,
+                "empirical_pair_evidence": False,
+                "published_as_likelihood": False,
+                "used_for": "FORECAST_HORIZON_BOUNDS_ONLY",
+            },
+            "closed_candle_relative_evidence_allowed_without_exact_time_proof": True,
+            "exact_survival_claim_requires_exact_time_proof": True,
+        },
+        **_safety_contract(),
+    }
+    result["forecast_digest"] = _digest(result)
+    return result
 
 
 def _validate_scope(
@@ -2106,12 +3753,14 @@ __all__ = [
     "MAX_STUDIED_DURATION_SECONDS",
     "MIN_ELIGIBLE_DURATION_SECONDS",
     "PATH_CLOCK_FREEZE_SCHEMA_VERSION",
+    "PATH_CLOCK_FORWARD_TIMING_FORECAST_SCHEMA_VERSION",
     "PATH_CLOCK_LIQUIDITY_SCHEMA_VERSION",
     "PATH_CLOCK_PAIR_DNA_PARTITION_SCHEMA_VERSION",
     "PATH_CLOCK_PROMOTION_GATE_SCHEMA_VERSION",
     "PATH_CLOCK_REPLAY_SCORE_SCHEMA_VERSION",
     "PATH_CLOCK_TRAJECTORY_SCHEMA_VERSION",
     "PathClockLiquidityValidationError",
+    "build_hierarchical_forward_timing_forecast_v3",
     "evaluate_path_clock_promotion_gate_v3",
     "score_path_clock_replays_v3",
 ]

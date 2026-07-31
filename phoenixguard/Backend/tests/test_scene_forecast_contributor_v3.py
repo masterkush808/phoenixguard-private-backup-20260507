@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Iterator
 from typing import Any
@@ -74,6 +75,101 @@ def _coverage_candles(count: int) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _ambiguous_fixed_width_boundary_rollover() -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Return a true one-bar shift whose two volatile edge rows rescaled."""
+
+    prior = _candles()
+    # Make the two stable predecessors unique so their ordered shift is an
+    # identity proof rather than a match against a repeated candle motif.
+    prior[-4].update(
+        {
+            "direction": "SELL",
+            "open_y_px": 145.0,
+            "close_y_px": 163.0,
+            "wick_top_px": 139.0,
+            "wick_bottom_px": 171.0,
+        }
+    )
+    prior[-3].update(
+        {
+            "direction": "BUY",
+            "open_y_px": 160.0,
+            "close_y_px": 126.0,
+            "wick_top_px": 118.0,
+            "wick_bottom_px": 168.0,
+        }
+    )
+    prior[-2].update(
+        {
+            "direction": "BUY",
+            "open_y_px": 105.0,
+            "close_y_px": 75.0,
+            "wick_top_px": 65.0,
+            "wick_bottom_px": 112.0,
+        }
+    )
+    prior[-1].update(
+        {
+            "direction": "SELL",
+            "open_y_px": 20.0,
+            "close_y_px": 250.0,
+            "wick_top_px": 10.0,
+            "wick_bottom_px": 260.0,
+        }
+    )
+
+    current: list[dict[str, Any]] = []
+    for index, source in enumerate(prior[1:]):
+        row = copy.deepcopy(source)
+        row["track_id"] = index
+        row["center_x"] = 30.0 + index * 10.0
+        row["bbox"][0] = float(row["bbox"][0]) - 10.0
+        row["bbox"][2] = float(row["bbox"][2]) - 10.0
+        row["is_closed"] = True
+        current.append(row)
+
+    # The detector substantially re-estimated both edge candles. This defeats
+    # direct former-forming/predecessor matching while older ordered history
+    # still proves that the chart advanced exactly one visible slot.
+    current[-2].update(
+        {
+            "direction": "SELL",
+            "open_y_px": 205.0,
+            "close_y_px": 175.0,
+            "wick_top_px": 166.0,
+            "wick_bottom_px": 214.0,
+        }
+    )
+    current[-1].update(
+        {
+            "direction": "BUY",
+            "open_y_px": 180.0,
+            "close_y_px": 145.0,
+            "wick_top_px": 138.0,
+            "wick_bottom_px": 188.0,
+        }
+    )
+    current.append(
+        {
+            "track_id": 29,
+            "direction": "SELL",
+            "center_x": 320.0,
+            "open_y_px": 145.0,
+            "close_y_px": 166.0,
+            "wick_top_px": 139.0,
+            "wick_bottom_px": 172.0,
+            "price_proxy": 1.0 - 166.0 / 300.0,
+            "bbox": [317.0, 139.0, 323.0, 172.0],
+            "parse_confidence": 0.94,
+            "is_closed": False,
+        }
+    )
+    return prior, current
 
 
 @pytest.fixture(autouse=True)
@@ -224,6 +320,10 @@ def test_stateful_identity_reuses_event_when_detector_reclassifies_closed_candle
         candles,
         pair="NZDUSD",
         timeframe="M5",
+        stream_frame_id=10,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
     )
 
     # Reproduce the live 842 -> 843 failure shape: latest-closed ordinal and
@@ -421,6 +521,313 @@ def test_stateful_identity_advances_when_prior_forming_candle_becomes_closed() -
     assert proof["prior_closed_candle_key"] == initial["closed_candle_key"]
     assert proof["prior_closed_candle_sequence"] == 0
     assert proof["current_row_index"] == 28
+
+
+def test_continuous_stream_boundary_advances_one_ambiguous_m5_event_when_enabled() -> (
+    None
+):
+    candles, current = _ambiguous_fixed_width_boundary_rollover()
+    initial = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        stream_frame_id=10,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    previous_state = dict(initial["state"])
+    previous_state["latest_observed_epoch_seconds_v3"] = 299.0
+
+    candidate = resolve_closed_candle_identity_v3(
+        current,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=301.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=11,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    resolution = resolve_closed_candle_identity_v3(
+        current,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=candidate["state"],
+        capture_epoch=302.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=12,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+
+    assert candidate["transition_observed"] is False
+    assert candidate["closed_candle_sequence"] == 0
+    assert candidate["transition_reason"] == (
+        "STREAM_BOUNDARY_CANDIDATE_PENDING_CONFIRMATION"
+    )
+    assert candidate["state"]["confirmed_event_batch"] == []
+    assert candidate["state"]["stream_boundary_candidate_v3"]["status"] == (
+        "PENDING_CONFIRMATION"
+    )
+    assert candidate["match_scores"][
+        "stream_boundary_predecessor_chain_proven"
+    ] is True
+    assert resolution["transition_observed"] is True
+    assert resolution["transition_count"] == 1
+    assert resolution["closed_candle_sequence"] == 1
+    assert (
+        resolution["transition_reason"]
+        == "STREAM_CONTINUITY_BOUNDARY_CONFIRMED_CLOSED_CANDLE"
+    )
+    assert resolution["match_scores"]["stream_boundary_transition"] is True
+
+    replay_state = dict(resolution["state"])
+    replay_state["latest_observed_epoch_seconds_v3"] = 302.0
+    replay = resolve_closed_candle_identity_v3(
+        current,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=replay_state,
+        capture_epoch=303.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=13,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    assert replay["transition_observed"] is False
+    assert replay["closed_candle_sequence"] == 1
+    assert replay["state"]["confirmed_event_batch"] == []
+
+
+def test_continuous_stream_boundary_proof_is_opt_in_and_gap_bounded() -> None:
+    candles = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        stream_frame_id=10,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    previous_state = dict(initial["state"])
+    previous_state["latest_observed_epoch_seconds_v3"] = 299.0
+
+    disabled = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=301.0,
+    )
+    frozen_surface = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=301.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=11,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    capture_gap = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=601.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=11,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+
+    assert disabled["transition_observed"] is False
+    assert disabled["closed_candle_sequence"] == 0
+    assert frozen_surface["transition_observed"] is False
+    assert frozen_surface["closed_candle_sequence"] == 0
+    assert (
+        frozen_surface["match_scores"]["stream_boundary_reason"]
+        == "EDGE_OBSERVATION_NOT_MATERIAL"
+    )
+    assert capture_gap["transition_observed"] is False
+    assert capture_gap["closed_candle_sequence"] == 0
+    assert (
+        capture_gap["match_scores"]["stream_boundary_reason"]
+        == "STREAM_CONTINUITY_GAP_TOO_LARGE"
+    )
+
+
+def test_continuous_stream_boundary_rejects_disjoint_pan_with_two_coincidences() -> (
+    None
+):
+    candles = _candles()
+    initial = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        stream_frame_id=20,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    previous_state = dict(initial["state"])
+    previous_state["latest_observed_epoch_seconds_v3"] = 299.0
+
+    # Model a stable same-count pan/rezoom with two coincidentally identical,
+    # non-adjacent historical candles. The former loose overlap-count proof
+    # accepted this even though no ordered one-bar predecessor chain survived.
+    disjoint = copy.deepcopy(candles)
+    for index, row in enumerate(disjoint):
+        if index in {6, 13}:
+            continue
+        for key in (
+            "open_y_px",
+            "close_y_px",
+            "wick_top_px",
+            "wick_bottom_px",
+        ):
+            row[key] = float(row[key]) + 200.0
+        row["direction"] = (
+            "SELL" if str(row["direction"]) == "BUY" else "BUY"
+        )
+
+    rejected = resolve_closed_candle_identity_v3(
+        disjoint,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=301.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=21,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+
+    assert rejected["transition_observed"] is False
+    assert rejected["closed_candle_sequence"] == 0
+    assert "stream_boundary_candidate_v3" not in rejected["state"]
+    assert rejected["match_scores"]["stream_boundary_reason"] == (
+        "EXPECTED_PREDECESSOR_CHAIN_NOT_PROVEN"
+    )
+    assert rejected["match_scores"][
+        "stream_boundary_predecessor_chain_proven"
+    ] is False
+
+
+@pytest.mark.parametrize(
+    ("confirmation_frame", "confirmation_process", "confirmation_source"),
+    (
+        (32, "process-a", "window-b"),
+        (33, "process-a", "window-a"),
+        (32, "process-b", "window-a"),
+    ),
+)
+def test_continuous_stream_boundary_confirmation_rejects_broken_lineage(
+    confirmation_frame: int,
+    confirmation_process: str,
+    confirmation_source: str,
+) -> None:
+    candles, current = _ambiguous_fixed_width_boundary_rollover()
+    initial = resolve_closed_candle_identity_v3(
+        candles,
+        pair="NZDUSD",
+        timeframe="M5",
+        stream_frame_id=30,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    previous_state = dict(initial["state"])
+    previous_state["latest_observed_epoch_seconds_v3"] = 299.0
+    candidate = resolve_closed_candle_identity_v3(
+        current,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=301.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=31,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    assert candidate["transition_reason"] == (
+        "STREAM_BOUNDARY_CANDIDATE_PENDING_CONFIRMATION"
+    )
+
+    rejected = resolve_closed_candle_identity_v3(
+        current,
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=candidate["state"],
+        capture_epoch=302.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=confirmation_frame,
+        stream_process_token=confirmation_process,
+        stream_source_token=confirmation_source,
+        stream_continuity_eligible=True,
+    )
+    assert rejected["transition_observed"] is False
+    assert rejected["closed_candle_sequence"] == 0
+    assert rejected["match_scores"][
+        "stream_boundary_confirmation_reason"
+    ] == "STREAM_CAPTURE_LINEAGE_NOT_CONTIGUOUS"
+    assert "stream_boundary_candidate_v3" not in rejected["state"]
+
+
+@pytest.mark.parametrize(
+    ("prior_count", "current_count", "expected_audit_field"),
+    (
+        (39, 64, "stream_boundary_coverage_rebase"),
+        (64, 39, "stream_boundary_coverage_degraded"),
+    ),
+)
+def test_continuous_stream_boundary_rejects_detector_coverage_changes(
+    prior_count: int,
+    current_count: int,
+    expected_audit_field: str,
+) -> None:
+    initial = resolve_closed_candle_identity_v3(
+        _coverage_candles(prior_count),
+        pair="NZDUSD",
+        timeframe="M5",
+        stream_frame_id=40,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    previous_state = dict(initial["state"])
+    previous_state["latest_observed_epoch_seconds_v3"] = 299.0
+    rejected = resolve_closed_candle_identity_v3(
+        _coverage_candles(current_count),
+        pair="NZDUSD",
+        timeframe="M5",
+        previous_state=previous_state,
+        capture_epoch=301.0,
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=41,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+
+    assert rejected["transition_observed"] is False
+    assert rejected["closed_candle_sequence"] == 0
+    assert rejected["match_scores"]["stream_boundary_reason"] == (
+        "DETECTOR_COVERAGE_CHANGE_VETOES_STREAM_BOUNDARY"
+    )
+    assert rejected["match_scores"][expected_audit_field] is True
+    assert "stream_boundary_candidate_v3" not in rejected["state"]
 
 
 def _roll_forward_candles(

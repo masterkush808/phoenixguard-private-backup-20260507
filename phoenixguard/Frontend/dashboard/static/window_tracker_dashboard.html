@@ -520,7 +520,7 @@
       margin: 0;
       color: var(--ink);
       font-family: var(--font-display);
-      font-size: clamp(34px, 3.2vw, 48px);
+      font-size: clamp(27px, 2.55vw, 38px);
       font-stretch: condensed;
       font-weight: 800;
       letter-spacing: -0.055em;
@@ -546,9 +546,62 @@
     }
 
     .decision-confidence {
+      display: block;
+      width: 100%;
       color: #c9b982;
       font-family: var(--font-mono);
-      font-size: 11px;
+      font-size: 10px;
+      line-height: 1.55;
+    }
+
+    .decision-projection {
+      margin-top: 15px;
+    }
+
+    .decision-projection .decision-kicker {
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .decision-projection .answer-copy {
+      margin-top: 0;
+    }
+
+    .operator-action-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 16px;
+      padding: 11px 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .operator-action-row span {
+      color: var(--quiet);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 740;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .operator-action-row strong {
+      color: var(--gold-pale);
+      font-family: var(--font-display);
+      font-size: clamp(18px, 1.7vw, 25px);
+      font-stretch: condensed;
+      font-weight: 790;
+      letter-spacing: -0.025em;
+    }
+
+    .operator-action-row[data-action="enter_now"] strong {
+      color: var(--up);
+    }
+
+    .operator-action-row[data-action="avoid"] strong {
+      color: var(--down);
     }
 
     .decision-instruction {
@@ -656,6 +709,15 @@
       color: var(--muted);
       font-size: 10px;
       line-height: 1.55;
+    }
+
+    .decision-risk {
+      margin-top: 13px;
+    }
+
+    .decision-risk .decision-kicker {
+      display: block;
+      margin-bottom: 5px;
     }
 
     .decision-advanced-link {
@@ -2388,14 +2450,25 @@
           <span class="story-label" id="story-step-three-label">Question 3</span>
           <h3 id="entry-now-question">What is the best decision to do right now?</h3>
           <div class="decision-action-row">
-            <h2 id="beginner-decision-title" aria-live="assertive">NO — NOT YET</h2>
-            <span class="decision-confidence" id="beginner-confidence">Building evidence</span>
+            <h2 id="beginner-decision-title" aria-live="assertive">STAY OUT</h2>
+            <span class="decision-confidence" id="beginner-confidence">No current verified entry window</span>
           </div>
-          <p class="decision-instruction" id="beginner-instruction">Do not enter until the model confirms a side.</p>
-          <p class="decision-reason" id="beginner-reason">The entry decision is still being built.</p>
+          <div class="decision-projection">
+            <span class="decision-kicker">Study projection</span>
+            <p class="answer-copy" id="beginner-forecast-summary">Pair-specific timing evidence is still being built. A study projection is not an entry signal.</p>
+          </div>
+          <div class="operator-action-row" id="beginner-action-row" data-action="avoid">
+            <span>Right now</span>
+            <strong id="beginner-action-label" aria-live="assertive">STAY OUT</strong>
+          </div>
+          <p class="decision-instruction" id="beginner-instruction">Wait for the first current completed-candle forecast.</p>
+          <div class="decision-risk">
+            <span class="decision-kicker">Why this answer</span>
+            <p class="decision-reason" id="beginner-reason">No current rest or sweep estimate is available.</p>
+          </div>
           <div class="decision-next">
-            <span class="decision-kicker">What changes the answer</span>
-            <strong id="beginner-next-condition">A current chart must explicitly confirm BUY NOW or SELL NOW.</strong>
+            <span class="decision-kicker">Invalidation</span>
+            <strong id="beginner-next-condition">Reassess after a current completed candle binds this pair and timeframe.</strong>
           </div>
         </li>
       </ol>
@@ -2759,6 +2832,9 @@
       streamObservationDetail: byId("stream-observation-detail"),
       beginnerDecisionTitle: byId("beginner-decision-title"),
       beginnerConfidence: byId("beginner-confidence"),
+      beginnerForecastSummary: byId("beginner-forecast-summary"),
+      beginnerActionRow: byId("beginner-action-row"),
+      beginnerActionLabel: byId("beginner-action-label"),
       beginnerInstruction: byId("beginner-instruction"),
       beginnerReason: byId("beginner-reason"),
       beginnerNextCondition: byId("beginner-next-condition"),
@@ -3170,6 +3246,29 @@
       return "WAIT";
     }
 
+    function normalizeOperatorAction(value) {
+      const action = safeText(value, "AVOID").toUpperCase().replace(/[ -]+/g, "_");
+      if (["ENTER", "ENTER_NOW", "BUY_NOW", "SELL_NOW"].includes(action)) {
+        return "ENTER_NOW";
+      }
+      if (["WAIT_FOR_PULLBACK", "WAIT_PULLBACK", "WATCH_PULLBACK", "WATCH_RETRACE"].includes(action)) {
+        return "WAIT_FOR_PULLBACK";
+      }
+      if (["PREPARE", "TRACK", "OBSERVE", "FORMING"].includes(action)) {
+        return "PREPARE";
+      }
+      return "AVOID";
+    }
+
+    function operatorActionLabel(value) {
+      return {
+        ENTER_NOW: "ENTER NOW",
+        WAIT_FOR_PULLBACK: "WAIT FOR PULLBACK",
+        PREPARE: "PREPARE",
+        AVOID: "STAY OUT",
+      }[normalizeOperatorAction(value)];
+    }
+
     function entryWindowLabel(permission) {
       const contract = safeObject(permission);
       const seconds = Number(contract.valid_for_seconds || 0);
@@ -3333,7 +3432,7 @@
           updateVisualStatus("chart", "offline", "Broker frame retained · Connection lost");
           invalidateLiveEntryDecision(
             "The live connection was lost, so the previous entry answer is no longer current.",
-            "NO — CONNECTION LOST",
+            "STAY OUT",
             "Reconnect and wait for a new current-frame entry answer.",
             "offline",
           );
@@ -3539,10 +3638,13 @@
       setText(els.innerTrendTitle, "No active directional study");
       setText(els.beginnerNextRead, "The model needs a current chart before it can compare the earlier and active direction.");
       setText(els.directionStudyConfidence, "");
-      setText(els.beginnerDecisionTitle, "NO — OFFLINE");
-      setText(els.beginnerConfidence, "No current model answer");
+      setText(els.beginnerDecisionTitle, "STAY OUT");
+      setText(els.beginnerConfidence, "Estimated likelihood unavailable · Calibration UNRATED · source offline");
+      setText(els.beginnerForecastSummary, "No current study projection is available. Not an entry time: the chart is offline.");
+      els.beginnerActionRow.dataset.action = "avoid";
+      setText(els.beginnerActionLabel, "STAY OUT");
       setText(els.beginnerInstruction, "Do not enter while the live chart is unavailable.");
-      setText(els.beginnerReason, message);
+      setText(els.beginnerReason, "No current rest or sweep estimate is available. " + message);
       setText(els.beginnerNextCondition, "Reconnect the chart and wait for a new current observation.");
       setText(els.retracementEvidence, "Retracement evidence: unavailable while the live workspace is offline. Observation only; never entry permission.");
       renderStreamObservation({tracking: {stream: {enabled: false, state: "OFFLINE"}}});
@@ -3563,10 +3665,15 @@
         els.beginnerStorySummary,
         "The market and study answers remain visible as history; entry permission is closed.",
       );
-      setText(els.beginnerDecisionTitle, safeText(headline, "NO — ENTRY CLOSED"));
-      setText(els.beginnerConfidence, "No current entry permission");
+      setText(els.beginnerDecisionTitle, "STAY OUT");
+      setText(
+        els.beginnerForecastSummary,
+        "The prior study projection remains historical context. Not an entry time: current permission is closed.",
+      );
+      els.beginnerActionRow.dataset.action = "avoid";
+      setText(els.beginnerActionLabel, "STAY OUT");
       setText(els.beginnerInstruction, "Do not enter from the previous answer.");
-      setText(els.beginnerReason, safeText(reason, "The previous entry answer is no longer current."));
+      setText(els.beginnerReason, safeText(reason, "Current entry permission is unavailable."));
       setText(
         els.beginnerNextCondition,
         safeText(nextCondition, "Wait for a new current-frame BUY NOW or SELL NOW answer."),
@@ -3601,7 +3708,7 @@
       if (remainingMs <= 0) {
         invalidateLiveEntryDecision(
           "The verified entry window has expired.",
-          "NO — WINDOW EXPIRED",
+          "STAY OUT",
           "Wait for a newly detected setup with its own verified window.",
           "expired",
         );
@@ -3611,7 +3718,7 @@
         state.entryExpiryTimer = 0;
         invalidateLiveEntryDecision(
           "The verified entry window has expired.",
-          "NO — WINDOW EXPIRED",
+          "STAY OUT",
           "Wait for a newly detected setup with its own verified window.",
           "expired",
         );
@@ -4073,19 +4180,11 @@
         || ["ENTER", "ENTER_NOW", "AUTHORIZED_NOW"].includes(entryState)
         || /^(YES\b|ENTER\b|BUY NOW\b|SELL NOW\b)/.test(contractHeadline);
       const contractAnswerTrusted = enterNow || !contractClaimsEntry;
-      const fallbackEntryHeadline = enterNow
-        ? "YES — " + entryAction
-        : entryClosedByDeadline
-          ? "NO — WINDOW EXPIRED"
-        : "NO — NOT YET";
       const closedReason = entryClosedByDeadline
         ? "The verified entry window or its live observation has expired."
         : contractClaimsEntry
           ? "The entry brief did not match current verified permission."
           : "";
-      const closedNextTrigger = entryClosedByDeadline
-        ? "Wait for a newly detected setup with its own verified window."
-        : "Wait for one atomic, current entry answer.";
       const permissionMessage = safeText(
         permissionContract.message
           || permissionContract.instruction
@@ -4094,9 +4193,227 @@
         enterNow ? "The model has confirmed a current entry." : "The model has not confirmed a current entry.",
       );
       const entryGuidance = entryLocationGuidance(permissionContract, entryAction);
-      const entryConfidence = (contractAnswerTrusted ? questionConfidence(entryContract.confidence).replace("% model confidence", "% ensemble study score") : "")
-        || (contractAnswerTrusted ? questionField(entryContract, ["timing_state", "state"], "") : "")
-        || (entryAction === "WAIT" ? "No entry confirmation" : entryWindowLabel(permissionContract) || "Current entry confirmed");
+      const rawTimingForecast = safeObject(entryContract.timing_forecast);
+      const forecastScope = safeObject(rawTimingForecast.scope);
+      const currentMarket = safeObject(operatorState.market);
+      const identityToken = function (value) {
+        return safeText(value, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      };
+      const scopeSymbol = safeText(forecastScope.symbol, "");
+      const scopeTimeframe = safeText(forecastScope.timeframe, "").toUpperCase();
+      const currentSymbol = safeText(currentMarket.symbol || currentMarket.market, "");
+      const currentTimeframe = safeText(currentMarket.timeframe, "").toUpperCase();
+      const scopeClosedCandleKey = safeText(forecastScope.closed_candle_key, "");
+      const currentClosedCandleKey = safeText(
+        studyEvidence.closed_candle_key,
+        "",
+      );
+      const forecastIdentityMatches = forecastScope.identity_proven === true
+        && Boolean(scopeSymbol)
+        && Boolean(scopeTimeframe)
+        && Boolean(scopeClosedCandleKey)
+        && Boolean(currentClosedCandleKey)
+        && (
+        identityToken(scopeSymbol) === identityToken(currentSymbol)
+        && scopeTimeframe === currentTimeframe
+        && scopeClosedCandleKey === currentClosedCandleKey
+      );
+      const timingForecast = forecastIdentityMatches ? rawTimingForecast : {};
+      const actionContract = safeObject(entryContract.operator_action);
+      const forecastSide = studyDirection(timingForecast.side || entryContract.side || studiedSide);
+      const nextCloseLabel = currentTimeframe || "chart";
+      const timingEventDefinition = safeText(timingForecast.event_definition, "").toUpperCase();
+      const activeTargetNextImpulse = timingForecast.active_target_next_impulse === true
+        || timingEventDefinition === "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST";
+      const horizonLabel = questionField(
+        timingForecast,
+        ["horizon_label"],
+        "next completed-close timing study",
+      );
+      const fallbackForecastHeadline = activeTargetNextImpulse && forecastSide !== "HOLD"
+        ? forecastSide + " is active · next " + forecastSide + " impulse estimated " + horizonLabel
+        : forecastSide !== "HOLD"
+          ? forecastSide + " timing forecast is forming · reassess after the next " + nextCloseLabel + " close"
+          : "Direction unresolved · reassess after the next " + nextCloseLabel + " close";
+      const rawForecastHeadline = questionField(
+        timingForecast,
+        ["headline"],
+        fallbackForecastHeadline,
+      );
+      const forecastHeadline = /\bNOT YET\b/i.test(rawForecastHeadline)
+        ? fallbackForecastHeadline
+        : rawForecastHeadline;
+      const forecastSummary = forecastIdentityMatches
+        ? questionField(
+            timingForecast,
+            ["summary", "closed_candle_summary"],
+            activeTargetNextImpulse && forecastSide !== "HOLD"
+              ? "The current " + forecastSide + " move is mature and active. This estimates the next "
+                + forecastSide + " impulse after one completed rest or pullback; it is not permission to chase or enter."
+              : "This is the current completed-candle timing study; it does not grant entry permission.",
+          )
+        : "The timing study is paused until the current pair, timeframe, and completed candle share one verified lineage.";
+      const timingSupportCount = Number(
+        timingForecast.event_likelihood_support_count !== undefined
+          ? timingForecast.event_likelihood_support_count
+          : timingForecast.support_count || 0,
+      );
+      const calibrationGrade = safeText(
+        timingForecast.calibration_grade,
+        "UNRATED",
+      ).toUpperCase();
+      const projectionTimingUnproven = forecastIdentityMatches && (
+        !Number.isFinite(timingSupportCount)
+        || timingSupportCount <= 0
+        || timingForecast.calibrated !== true
+        || ["", "UNKNOWN", "UNRATED"].includes(calibrationGrade)
+      );
+      let projectionDetail = forecastSummary;
+      if (
+        forecastHeadline
+        && projectionDetail.toLowerCase().startsWith(forecastHeadline.toLowerCase())
+      ) {
+        projectionDetail = projectionDetail
+          .slice(forecastHeadline.length)
+          .replace(/^[\s.:;·—-]+/, "");
+      }
+      const projectionHeadline = forecastIdentityMatches
+        ? projectionTimingUnproven
+          ? forecastSide !== "HOLD"
+            ? forecastSide + " direction studied · timing range withheld"
+            : "Direction study active · timing range withheld"
+          : forecastHeadline
+        : "Timing study is waiting for current chart identity";
+      const projectionSupportMessage = timingSupportCount > 0
+        ? "Study only: " + timingSupportCount + " matching outcomes are recorded, but replay calibration has not passed. The candle range is not published and is not an entry signal."
+        : "Study only: this pair has no replay-calibrated matching outcome yet. The candle range is not published and is not an entry signal.";
+      const studyProjection = [
+        /[.!?]$/.test(projectionHeadline)
+          ? projectionHeadline
+          : projectionHeadline + ".",
+        projectionTimingUnproven ? projectionSupportMessage : projectionDetail,
+      ].filter(Boolean).join(" ");
+      const estimatedLikelihoodLabel = questionField(
+        timingForecast,
+        ["estimated_likelihood_label"],
+        "Estimated likelihood unavailable",
+      );
+      const evidenceConfidenceLabel = questionField(
+        timingForecast,
+        ["evidence_confidence_label", "confidence_label"],
+        "Evidence confidence unavailable",
+      );
+      const directionalModelScoreLabel = questionField(
+        timingForecast,
+        ["directional_model_score_label"],
+        "Directional model score unavailable",
+      );
+      const calibrationLabel = questionField(
+        timingForecast,
+        ["calibration_label"],
+        "Calibration UNRATED · not replay-calibrated",
+      );
+      const forecastSourceLabel = forecastIdentityMatches
+        ? questionField(
+            timingForecast,
+            ["timing_evidence_label", "source_label", "source"],
+            "Timing source unavailable",
+          )
+        : "No lineage-matched timing source";
+      const timingBasisLabel = timingForecast.exact_wall_clock_proven === true
+        ? "Clock anchored · " + horizonLabel
+        : horizonLabel;
+      const forecastMeta = [
+        estimatedLikelihoodLabel,
+        evidenceConfidenceLabel,
+        directionalModelScoreLabel,
+        calibrationLabel,
+        "Timing basis: " + timingBasisLabel,
+        "Source: " + forecastSourceLabel,
+      ].filter(function (value, index, list) {
+        return value && list.indexOf(value) === index;
+      }).join(" · ");
+
+      let operatorActionState = normalizeOperatorAction(
+        actionContract.state || actionContract.label,
+      );
+      if (enterNow) {
+        operatorActionState = "ENTER_NOW";
+      } else if (entryClosedByDeadline || !contractAnswerTrusted) {
+        operatorActionState = "AVOID";
+      } else if (operatorActionState === "ENTER_NOW") {
+        // A display contract can never bypass current atomic permission.
+        operatorActionState = "AVOID";
+      } else if (!Object.keys(actionContract).length) {
+        operatorActionState = activeTargetNextImpulse
+          ? "WAIT_FOR_PULLBACK"
+          : ["MISSED", "TIMING_DELAY", "WATCHING_RETRACE"].includes(entryState)
+          ? "WAIT_FOR_PULLBACK"
+          : forecastSide !== "HOLD"
+            ? "PREPARE"
+            : "AVOID";
+      }
+      const actionHeadline = enterNow
+        ? "ENTER — " + entryAction
+        : operatorActionState === "WAIT_FOR_PULLBACK"
+          ? "WAIT FOR PULLBACK"
+          : operatorActionState === "PREPARE"
+            ? "PREPARE"
+            : "STAY OUT";
+      const entryContractConfidence = questionConfidence(
+        entryContract.confidence,
+      ).replace("model confidence", "ensemble study score");
+      const actionConfidence = enterNow
+        ? entryContractConfidence
+          || entryWindowLabel(permissionContract)
+          || "Current atomic permission"
+        : operatorActionState === "WAIT_FOR_PULLBACK"
+          ? "Entry closed · completed pullback confirmation required"
+          : operatorActionState === "PREPARE"
+            ? "Entry closed · studied setup is being prepared"
+            : "Entry closed · no current verified permission";
+      const actionInstruction = enterNow
+        ? entryGuidance || questionField(actionContract, ["instruction"], permissionMessage)
+        : entryClosedByDeadline
+          ? "The previous entry window expired. Keep the forecast as study and wait for a fresh verified window."
+          : !contractAnswerTrusted
+            ? "Do not enter: the brief conflicts with current verified permission."
+            : questionField(
+                actionContract,
+                ["instruction"],
+                !Object.keys(actionContract).length
+                  ? questionField(
+                      entryContract,
+                      ["answer", "instruction"],
+                      permissionMessage,
+                    )
+                  : operatorActionState === "WAIT_FOR_PULLBACK"
+                  ? activeTargetNextImpulse && forecastSide !== "HOLD"
+                    ? "Wait for the active " + forecastSide + " move to mature, then wait for one completed rest or pullback before reassessing the next "
+                      + forecastSide + " impulse. Do not chase the current move."
+                    : "Wait for the pullback or sweep to complete before reassessing entry."
+                  : operatorActionState === "PREPARE"
+                    ? "Prepare for the studied side, but enter only if a current verified window opens."
+                    : "Stay out until a current completed-candle forecast and entry window agree.",
+              );
+      const forecastRisk = questionField(
+        timingForecast,
+        ["rest_sweep_risk", "base_rest_sweep_risk"],
+        questionField(entryContract, ["reason"], closedReason || permissionMessage),
+      );
+      const forecastInvalidation = questionField(
+        timingForecast,
+        ["invalidation"],
+        questionField(
+          entryContract,
+          ["next_trigger"],
+          questionField(
+            permissionContract,
+            ["next_condition", "next_trigger"],
+            "Reassess if the completed direction, pair, timeframe, or verified entry window changes.",
+          ),
+        ),
+      );
 
       return {
         origin: {
@@ -4128,38 +4445,17 @@
         },
         entry: {
           question: "What is the best decision to do right now?",
-          headline: enterNow
-            ? fallbackEntryHeadline
-            : contractAnswerTrusted
-            ? questionField(entryContract, ["headline"], fallbackEntryHeadline)
-            : fallbackEntryHeadline,
-          answer: contractAnswerTrusted
-            ? questionField(
-                entryContract,
-                ["answer"],
-                enterNow ? entryGuidance || permissionMessage : "Do not enter this trade yet.",
-              )
-            : "Do not enter this trade; the entry brief conflicts with current permission.",
-          reason: entryClosedByDeadline
-            ? closedReason
-            : contractAnswerTrusted
-            ? questionField(entryContract, ["reason"], permissionMessage)
-            : closedReason,
-          nextTrigger: entryClosedByDeadline
-            ? closedNextTrigger
-            : contractAnswerTrusted
-            ? questionField(
-                entryContract,
-                ["next_trigger"],
-                permissionContract.next_condition || "Wait for a current BUY NOW or SELL NOW confirmation.",
-              )
-            : closedNextTrigger,
+          headline: actionHeadline,
+          forecastSummary: studyProjection,
+          answer: actionInstruction,
+          reason: forecastRisk,
+          nextTrigger: forecastInvalidation,
           evidence: entryClosedByDeadline
             ? "Entry closed because the verified window is no longer current."
             : contractAnswerTrusted
             ? questionEvidence(entryContract, permissionMessage)
             : "Entry closed because the brief did not match current verified permission.",
-          confidence: entryConfidence,
+          confidence: actionConfidence,
           state: contractAnswerTrusted
             ? questionField(
                 entryContract,
@@ -4168,6 +4464,8 @@
               )
             : "CONFLICT",
           action: entryAction,
+          operatorAction: operatorActionLabel(operatorActionState),
+          operatorActionState: operatorActionState,
           enterNow: enterNow,
         },
       };
@@ -4227,6 +4525,12 @@
       setText(els.directionStudyConfidence, answers.studied.confidence);
       setText(els.beginnerDecisionTitle, answers.entry.headline);
       setText(els.beginnerConfidence, answers.entry.confidence);
+      setText(els.beginnerForecastSummary, answers.entry.forecastSummary);
+      els.beginnerActionRow.dataset.action = safeText(
+        answers.entry.operatorActionState,
+        "avoid",
+      ).toLowerCase();
+      setText(els.beginnerActionLabel, answers.entry.operatorAction);
       setText(els.beginnerInstruction, answers.entry.answer);
       setText(els.beginnerReason, answers.entry.reason);
       setText(els.beginnerNextCondition, answers.entry.nextTrigger);

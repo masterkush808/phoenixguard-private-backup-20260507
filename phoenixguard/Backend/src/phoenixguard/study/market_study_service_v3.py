@@ -652,6 +652,8 @@ def _survival_topology(
             "status": _mapping(object_conditioned).get("status"),
             "curve_count": len(_rows(_mapping(object_conditioned).get("curves"))),
             "uses_durable_matured_pair_history": True,
+            "uses_durable_resolver_stable_observation_history": True,
+            "requires_outcome_labels": False,
             "current_frame_objects_used_as_historical_support": False,
         },
     }
@@ -665,7 +667,7 @@ def _object_conditioned_time_to_event(
     max_object_types: int = 16,
     max_horizon: int = 64,
 ) -> dict[str, Any]:
-    """Estimate bounded object-and-state survival from matured Pair DNA rows."""
+    """Estimate bounded survival from resolver-stable Pair DNA observations."""
 
     rows = _rows(_mapping(pair_profile).get("recent_sequences"))[
         -max_recent_sequences:
@@ -2280,6 +2282,19 @@ def _compact_pair_profile(value: object) -> dict[str, Any]:
         return {}
     candle = _mapping(profile.get("candle"))
     behavior = _mapping(profile.get("behavior"))
+    segment_counts = _top_counts(behavior.get("segment_counts"), limit=16)
+    transition_counts = _top_counts(
+        behavior.get("transition_counts"), limit=16
+    )
+    all_segment_counts = _mapping(behavior.get("segment_counts"))
+
+    def state_segment_support(state: str) -> int:
+        return sum(
+            int(count or 0)
+            for key, count in all_segment_counts.items()
+            if str(key).upper().rsplit("|", maxsplit=1)[-1] == state
+        )
+
     correlations = _rows(
         profile.get("marginal_and_pairwise_outcome_associations")
         or profile.get("correlation_summary")
@@ -2335,6 +2350,9 @@ def _compact_pair_profile(value: object) -> dict[str, Any]:
         "symbol": profile.get("symbol"),
         "timeframe": profile.get("timeframe"),
         "observation_count": int(profile.get("observation_count", 0) or 0),
+        "outcome_label_count": int(
+            profile.get("outcome_label_count", 0) or 0
+        ),
         "candle_count": int(profile.get("candle_count", 0) or 0),
         "first_observed_at": profile.get("first_observed_at"),
         "last_observed_at": profile.get("last_observed_at"),
@@ -2347,10 +2365,29 @@ def _compact_pair_profile(value: object) -> dict[str, Any]:
         },
         "behavior": {
             "state_candle_counts": _top_counts(behavior.get("state_candle_counts")),
+            "segment_counts": segment_counts,
+            "transition_counts": transition_counts,
             "major_trend_counts": _top_counts(behavior.get("major_trend_counts")),
             "inner_trend_counts": _top_counts(behavior.get("inner_trend_counts")),
             "transition_probabilities": deepcopy(_mapping(behavior.get("transition_probabilities"))),
             "segment_averages": deepcopy(_mapping(behavior.get("segment_averages"))),
+            "timing_support": {
+                "completed_segments": sum(
+                    int(count or 0)
+                    for count in all_segment_counts.values()
+                ),
+                "up_swing_segments": state_segment_support("UP_SWING"),
+                "down_swing_segments": state_segment_support("DOWN_SWING"),
+                "rest_segments": state_segment_support("REST"),
+                "transition_boundaries": sum(
+                    int(count or 0)
+                    for count in _mapping(
+                        behavior.get("transition_counts")
+                    ).values()
+                ),
+                "duration_basis": "DECLARED_TIMEFRAME_CANDLE_COUNTS",
+                "exact_wall_clock_proven": False,
+            },
         },
         "regime_counts": _top_counts(profile.get("regime_counts")),
         "object_type_counts": _top_counts(profile.get("object_type_counts")),
@@ -2577,6 +2614,16 @@ class MarketStudyServiceV3:
         self._lock = threading.RLock()
         self._pending: dict[tuple[str, str], dict[str, Any]] = {}
         self._result_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._pair_observation_seen: set[tuple[str, str]] = set()
+
+    def resolver_order_state(
+        self,
+        symbol: object,
+        timeframe: object,
+    ) -> dict[str, Any]:
+        """Expose Pair DNA's read-only resolver restart floor."""
+
+        return self.pair_dna.get_resolver_order_state(symbol, timeframe)
 
     @staticmethod
     def _pending_key(pair_key: tuple[str, str]) -> str:
@@ -2986,6 +3033,11 @@ class MarketStudyServiceV3:
         contract_duration_seconds: object | None,
         object_relationship_graph: Mapping[str, Any],
         closed_candle_time_proof: Mapping[str, Any] | None = None,
+        regime: object = "UNKNOWN",
+        directional_confidence: object = 0.0,
+        current_behavior: Mapping[str, Any] | None = None,
+        pair_profile: Mapping[str, Any] | None = None,
+        advanced_studies: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Advance the pair timing field without affecting trade permission."""
 
@@ -2993,6 +3045,28 @@ class MarketStudyServiceV3:
             candles,
             closed_candle_time_proof,
         )
+        advanced = _mapping(advanced_studies)
+        path_reconstruction = _mapping(advanced.get("path_reconstruction"))
+        forecast_context = {
+            "candidate_direction": studied_direction,
+            "directional_confidence": directional_confidence,
+            "current_regime": str(regime or "UNKNOWN"),
+            "current_behavior": deepcopy(_mapping(current_behavior)),
+            "pair_profile": deepcopy(_mapping(pair_profile)),
+            "motif_lattice": deepcopy(_mapping(advanced.get("motif_lattice"))),
+            "survival_network": deepcopy(
+                _mapping(advanced.get("survival_network"))
+            ),
+            "motif_trajectory_library": deepcopy(
+                _mapping(path_reconstruction.get("trajectory_library"))
+            ),
+            "lineage": {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "closed_candle_key": closed_candle_key,
+                "closed_candle_sequence": closed_candle_sequence,
+            },
+        }
         try:
             return self.path_clock_liquidity.observe_closed_candle(
                 symbol=symbol,
@@ -3008,12 +3082,20 @@ class MarketStudyServiceV3:
                     jpclf_candles,
                     object_relationship_graph,
                 ),
+                forecast_context=forecast_context,
             )
         except PathClockLiquidityStoreValidationError as exc:
             pending = pending_path_clock_liquidity_v3(
                 "JPCLF failed closed because exact contiguous timing evidence "
                 f"could not be proven: {exc}",
                 contract_duration_seconds=contract_duration_seconds,
+                candidate_direction=studied_direction,
+                source_cadence_seconds=timeframe_seconds,
+                forecast_context=forecast_context,
+                symbol=symbol,
+                timeframe=timeframe,
+                closed_candle_key=closed_candle_key,
+                closed_candle_sequence=closed_candle_sequence,
             )
             pending["status"] = "CENSORED_INVALID_TIMING_EVIDENCE"
             return pending
@@ -3131,6 +3213,7 @@ class MarketStudyServiceV3:
                     contract_duration_seconds=contract_duration_seconds,
                     closed_candle_time_proof=closed_candle_time_proof,
                     object_relationship_graph={},
+                    regime=regime,
                 )
                 result["path_clock_liquidity_v3"] = path_clock_pending
                 result["path_clock_liquidity"] = deepcopy(path_clock_pending)
@@ -3189,22 +3272,11 @@ class MarketStudyServiceV3:
                     timeframe_seconds=timeframe_seconds,
                 )
             )
-            historical_pair_profile = _mapping(
-                self.pair_dna.get_profile(
-                    canonical_symbol,
-                    canonical_timeframe,
-                ).get("profile")
-            )
-            advanced_studies = _continuous_advanced_studies(
-                advanced_candles,
-                advanced_behavior,
-                symbol=canonical_symbol,
-                timeframe=canonical_timeframe,
-                history_source=advanced_history_source,
-                pair_profile=historical_pair_profile,
-            )
             current_close = float(_mapping(latest_candle.get("ohlc")).get("close", 0.0) or 0.0)
             pair_key = (canonical_symbol, canonical_timeframe)
+            allow_tracker_sequence_rebase = (
+                pair_key not in self._pair_observation_seen
+            )
             prior = self._load_pending_pair(pair_key)
             current_sequence = max(0, _integer(closed_candle_sequence))
             maturation: dict[str, Any] = {
@@ -3262,7 +3334,7 @@ class MarketStudyServiceV3:
                     enriched = deepcopy(_mapping(prior.get("fingerprint")))
                     enriched["outcome"] = outcome
                     self.historical.add(enriched)
-                    self.pair_dna.record_study(
+                    self.pair_dna.record_outcome(
                         symbol=canonical_symbol,
                         timeframe=canonical_timeframe,
                         candle_study=_mapping(prior.get("candle_study")),
@@ -3273,6 +3345,9 @@ class MarketStudyServiceV3:
                         outcome=outcome,
                         retracement_study=(
                             _mapping(prior.get("retracement_study")) or None
+                        ),
+                        allow_tracker_sequence_rebase=(
+                            allow_tracker_sequence_rebase
                         ),
                     )
                     maturation = {
@@ -3296,6 +3371,42 @@ class MarketStudyServiceV3:
                         "execution_authority": False,
                     }
 
+            # Advanced object-conditioned survival must see only evidence that
+            # predates the current frame.  The current observation is written
+            # immediately afterwards and is reloaded separately for JPCLF and
+            # the public Pair DNA support contract.
+            advanced_pair_profile = _mapping(
+                self.pair_dna.get_profile(
+                    canonical_symbol,
+                    canonical_timeframe,
+                ).get("profile")
+            )
+            advanced_studies = _continuous_advanced_studies(
+                advanced_candles,
+                advanced_behavior,
+                symbol=canonical_symbol,
+                timeframe=canonical_timeframe,
+                history_source=advanced_history_source,
+                pair_profile=advanced_pair_profile,
+            )
+            self.pair_dna.record_observation(
+                symbol=canonical_symbol,
+                timeframe=canonical_timeframe,
+                candle_study=candle_study,
+                behavior_study=behavior_study,
+                sequence_id=sequence_id,
+                observed_at=observed_at,
+                objects=object_rows,
+                allow_tracker_sequence_rebase=(
+                    allow_tracker_sequence_rebase
+                ),
+            )
+            self._pair_observation_seen.add(pair_key)
+            profile_result = self.pair_dna.get_profile(
+                canonical_symbol,
+                canonical_timeframe,
+            )
+            historical_pair_profile = _mapping(profile_result.get("profile"))
             similarity = self.historical.search(
                 fingerprint,
                 top_k=8,
@@ -3315,7 +3426,6 @@ class MarketStudyServiceV3:
                 symbol=canonical_symbol,
                 timeframe=canonical_timeframe,
             )
-            profile_result = self.pair_dna.get_profile(canonical_symbol, canonical_timeframe)
             compact_behavior = _compact_behavior(behavior_study)
             compact_similarity = _compact_similarity(similarity)
             compact_similarity["similarity_graph"] = deepcopy(graph)
@@ -3347,6 +3457,11 @@ class MarketStudyServiceV3:
                 contract_duration_seconds=contract_duration_seconds,
                 closed_candle_time_proof=closed_candle_time_proof,
                 object_relationship_graph=object_relationship_graph,
+                regime=regime,
+                directional_confidence=directional.get("confidence", 0.0),
+                current_behavior=advanced_behavior,
+                pair_profile=historical_pair_profile,
+                advanced_studies=advanced_studies,
             )
             material_studies = {
                 "regression": regression_row,

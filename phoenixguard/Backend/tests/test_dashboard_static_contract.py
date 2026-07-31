@@ -189,7 +189,14 @@ def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions
     assert 'id="story-step-one-label">Question 1</span>' in text
     assert 'id="story-step-two-label">Question 2</span>' in text
     assert 'id="story-step-three-label">Question 3</span>' in text
-    assert 'id="beginner-decision-title" aria-live="assertive">NO — NOT YET</h2>' in text
+    assert 'id="beginner-decision-title" aria-live="assertive">STAY OUT</h2>' in text
+    assert 'id="beginner-forecast-summary"' in text
+    assert '<span class="decision-kicker">Study projection</span>' in text
+    assert 'id="beginner-action-label" aria-live="assertive">STAY OUT</strong>' in text
+    assert '<span>Right now</span>' in text
+    assert '<span class="decision-kicker">Why this answer</span>' in text
+    assert '<span class="decision-kicker">Invalidation</span>' in text
+    assert "NO — NOT YET" not in text
     assert '<summary>Technical contracts and evidence</summary>' in text
 
     assert 'id="current-move-title"' in text
@@ -202,6 +209,32 @@ def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions
     assert '"entry_now"' in text
     assert 'const answers = threeQuestionAnswers(payload, study, permission);' in text
     assert 'setText(els.beginnerDecisionTitle, answers.entry.headline);' in text
+    assert 'setText(els.beginnerForecastSummary, answers.entry.forecastSummary);' in text
+    assert 'setText(els.beginnerActionLabel, answers.entry.operatorAction);' in text
+    assert 'const rawTimingForecast = safeObject(entryContract.timing_forecast);' in text
+    assert '"Evidence confidence unavailable"' in text
+    assert '"No lineage-matched timing source"' in text
+    assert (
+        '"The timing study is paused until the current pair, timeframe, and '
+        'completed candle share one verified lineage.' in text
+    )
+    assert '"Clock anchored · " + horizonLabel' in text
+    assert '"Timing basis: " + timingBasisLabel' in text
+    assert 'const actionContract = safeObject(entryContract.operator_action);' in text
+    assert "const projectionTimingUnproven = forecastIdentityMatches" in text
+    assert 'forecastSide + " direction studied · timing range withheld"' in text
+    assert "The candle range is not published and is not an entry signal." in text
+    assert 'const actionHeadline = enterNow' in text
+    assert 'headline: actionHeadline' in text
+    assert 'forecastSummary: studyProjection' in text
+    assert (
+        'timingEventDefinition === "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"'
+        in text
+    )
+    assert 'else if (!Object.keys(actionContract).length)' in text
+    assert 'operatorActionState = activeTargetNextImpulse' in text
+    assert "Do not chase the current move." in text
+    assert 'function normalizeOperatorAction(value)' in text
     assert "function marketRegressionStudy(payload)" in text
     assert "tracking.market_study_v3" in text
     assert "regressionContract.major_trend" in text

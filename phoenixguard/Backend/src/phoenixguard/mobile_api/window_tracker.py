@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from functools import cached_property, lru_cache
+from io import BytesIO
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Mapping, Protocol, Sequence, TypedDict, Unpack, cast
@@ -268,6 +269,7 @@ _WINDOW_REACQUIRE_BLOCK_TOKENS = (
     "program manager",
 )
 _VISUAL_OBSERVATION_SCHEMA_VERSION = "PG_VISUAL_OBSERVATION_V3"
+_FX_MARKET_NORMALIZER_VERSION = "PG_FX_MARKET_NORMALIZER_V3_OTC_OCR_ENSEMBLE"
 _VISUAL_OBSERVATION_WAITING = "WAITING_FOR_NEW_FRAME"
 _VISUAL_OBSERVATION_NEW = "NEW_FRAME"
 _VISUAL_OBSERVATION_RECOVERED = "RECOVERED_NEW_FRAME"
@@ -289,6 +291,23 @@ def _normalize_fx_market_candidate(text: Any) -> str:
 
     compact = raw.replace(" ", "")
     has_otc = "OTC" in compact
+    # The broker's small selector glyph regularly turns the final ``C`` in
+    # ``OTC`` into ``E`` (for example ``EUR/NZDOTE``).  Preserve the OTC
+    # namespace only when the selector contains one valid FX pair followed by
+    # exactly one three-glyph suffix that differs from OTC by at most one
+    # glyph.  Keeping this pair-anchored and length-bounded avoids promoting
+    # unrelated trailing toolbar text to an OTC instrument.
+    pair_with_suffix = re.fullmatch(r"([A-Z]{3})/?([A-Z]{3})([A-Z0-9]{3})", compact)
+    if pair_with_suffix:
+        left, right, suffix = pair_with_suffix.groups()
+        suffix_distance = sum(actual != expected for actual, expected in zip(suffix, "OTC", strict=True))
+        if (
+            left in _FX_CURRENCY_CODES
+            and right in _FX_CURRENCY_CODES
+            and left != right
+            and suffix_distance <= 1
+        ):
+            has_otc = True
     compact = compact.replace("OTC", "")
     pair = ""
     slash_match = re.search(r"([A-Z]{3})/([A-Z]{3})", compact)
@@ -930,11 +949,44 @@ def _advance_closed_candle_time_attestations_v3(
                 previous.get("latest_observed_epoch_seconds_v3"),
                 0.0,
             )
-            boundary_epoch = float(
-                math.floor(observed_epoch / float(cadence)) * cadence
+            resolver_scores = _mapping_to_dict(
+                identity_resolution.get("match_scores", {})
+            )
+            two_frame_boundary_confirmed = bool(
+                str(
+                    identity_resolution.get("transition_reason") or ""
+                )
+                == "STREAM_CONTINUITY_BOUNDARY_CONFIRMED_CLOSED_CANDLE"
+                and resolver_scores.get("stream_boundary_confirmation")
+                is True
+            )
+            confirmed_boundary_epoch = _float_or(
+                resolver_scores.get("stream_boundary_epoch"),
+                0.0,
+            )
+            boundary_previous_observed_epoch = (
+                _float_or(
+                    resolver_scores.get(
+                        "stream_boundary_previous_epoch"
+                    ),
+                    0.0,
+                )
+                if two_frame_boundary_confirmed
+                else previous_observed_epoch
+            )
+            boundary_epoch = (
+                confirmed_boundary_epoch
+                if two_frame_boundary_confirmed
+                and confirmed_boundary_epoch > 0.0
+                else float(
+                    math.floor(observed_epoch / float(cadence)) * cadence
+                )
             )
             previous_boundary_epoch = float(
-                math.floor(previous_observed_epoch / float(cadence)) * cadence
+                math.floor(
+                    boundary_previous_observed_epoch / float(cadence)
+                )
+                * cadence
             )
             confirmed_batch = _sequence_of_mappings(
                 state.get("confirmed_event_batch", [])
@@ -953,8 +1005,10 @@ def _advance_closed_candle_time_attestations_v3(
                 == current_sequence
             )
             boundary_is_straddled = bool(
-                previous_observed_epoch > 0.0
-                and previous_observed_epoch < boundary_epoch <= observed_epoch
+                boundary_previous_observed_epoch > 0.0
+                and boundary_previous_observed_epoch
+                < boundary_epoch
+                <= observed_epoch
                 and abs(
                     boundary_epoch
                     - previous_boundary_epoch
@@ -2112,6 +2166,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "market",
         "market_confidence",
         "market_identity_confirmed",
+        "market_normalizer_version",
         "market_selector_visual_fingerprint",
         "market_selector_rebind_required",
         "market_selector_studying_new_pair",
@@ -2141,6 +2196,8 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "signal_age_sec",
         "signal_id",
         "signal_thesis_v3",
+        "source_capture_blocked_v3",
+        "source_capture_status",
         "stale",
         "state_version",
         "status",
@@ -3391,6 +3448,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "market",
         "market_confidence",
         "market_identity_confirmed",
+        "market_normalizer_version",
         "market_selector_rebind_required",
         "market_selector_studying_new_pair",
         "market_selector_identity_rebound",
@@ -5654,6 +5712,8 @@ def _kernel_trigger_promotion_decision(
     }
 
 
+
+
 def _friendly_phrase(value: Any, fallback: str = "--") -> str:
     text = str(value or "").strip().replace("_", " ")
     text = re.sub(r"\s+", " ", text)
@@ -7014,6 +7074,36 @@ def _artifact_frame_id_from_path(path: Path | str | None, default: int = 0) -> i
 def _stable_short_hash(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _locked_stream_source_token_v3(payload: Mapping[str, Any]) -> str:
+    """Return a bounded identity for one locked broker-window source."""
+
+    locked = _mapping_to_dict(payload.get("locked_window", {}))
+    try:
+        hwnd = int(locked.get("hwnd", 0) or 0)
+        process_id = int(
+            locked.get("process_id", locked.get("pid", 0)) or 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    session_id = str(payload.get("session_id") or "").strip()
+    if hwnd <= 0 or not session_id:
+        return ""
+    return _stable_short_hash(
+        {
+            "session_id": session_id,
+            "hwnd": hwnd,
+            "process_id": process_id,
+            "title": str(locked.get("title") or "").strip(),
+            "continuity_generation": int(
+                _float_or(
+                    payload.get("stream_continuity_generation_v3"), 0.0
+                )
+                or 0
+            ),
+        }
+    )
 
 
 def _instrument_viewport_hash(payload: Mapping[str, Any]) -> str:
@@ -13019,6 +13109,10 @@ class PhoenixGuardWindowTrackingAdapter:
         self._scene_belief_tracker = ForecastBeliefTrackerV3(
             ForecastBeliefConfigV3()
         )
+        # Boundary inference must never span an API/tracker process restart.
+        # This process-local token is also checked with the locked-window
+        # identity and adjacent captured frame ids by the candle resolver.
+        self._scene_stream_process_token = uuid4().hex
         self._scene_belief_restore_attempted = False
         self._market_study_config_lock = threading.RLock()
         self._market_study_service = (
@@ -13361,6 +13455,56 @@ class PhoenixGuardWindowTrackingAdapter:
         image: Image.Image,
         timeframe_selector: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        primary = self._detect_market_selector_once(
+            image,
+            timeframe_selector=timeframe_selector,
+        )
+        primary_market = _normalize_fx_market_candidate(primary.get("value"))
+        if not re.fullmatch(r"[A-Z]{3}/[A-Z]{3}", primary_market):
+            return primary
+
+        # The native Windows capture occasionally preserves a low-contrast OTC
+        # suffix below the first OCR mask threshold even though the base pair is
+        # sharp.  A second, deterministic rasterization lane is an OCR ensemble,
+        # not an identity guess: only an explicitly re-read ``same pair + OTC``
+        # may enrich the primary result.  This lane runs only on an otherwise
+        # valid suffix-free read, so stable cached frames pay no recurring cost.
+        try:
+            import cv2  # type: ignore[import-not-found]
+
+            rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            encoded_ok, encoded = cv2.imencode(
+                ".jpg",
+                bgr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 82],
+            )
+            if not encoded_ok:
+                return primary
+            with Image.open(BytesIO(encoded.tobytes())) as encoded_image:
+                recovered_image = encoded_image.convert("RGB")
+            recovered = self._detect_market_selector_once(
+                recovered_image,
+                timeframe_selector=timeframe_selector,
+            )
+        except Exception:
+            LOGGER.debug("Market selector specificity recovery failed.", exc_info=True)
+            return primary
+
+        recovered_market = _normalize_fx_market_candidate(recovered.get("value"))
+        if recovered_market != f"{primary_market} OTC":
+            return primary
+        enriched = dict(recovered)
+        enriched["value"] = recovered_market
+        enriched["specificity_recovery"] = "jpeg_raster_ocr_lane"
+        enriched["specificity_recovered_from"] = primary_market
+        return enriched
+
+    def _detect_market_selector_once(
+        self,
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
         if arr.ndim != 3:
             return {}
@@ -13562,6 +13706,22 @@ class PhoenixGuardWindowTrackingAdapter:
         if fast_selectors:
             previous_tracking = _mapping_to_dict(selector_session_payload.get("tracking_summary", {}))
             previous_signal = _mapping_to_dict(selector_session_payload.get("latest_signal", {}))
+            previous_market_normalizer_version = str(
+                previous_signal.get(
+                    "market_normalizer_version",
+                    previous_tracking.get("market_normalizer_version", ""),
+                )
+                or ""
+            ).strip()
+            # Cached pair authority must be re-read once whenever normalization
+            # semantics change.  Otherwise a process restart can preserve an
+            # old ``EUR/NZD`` namespace forever even though the same selector
+            # now correctly resolves the OCR form ``EUR/NZDOTE`` as OTC.
+            force_market_selector_scan = bool(
+                force_market_selector_scan
+                or previous_market_normalizer_version
+                != _FX_MARKET_NORMALIZER_VERSION
+            )
             previous_market_selector_rebind_pending = bool(
                 previous_signal.get("market_selector_rebind_required")
                 or previous_signal.get("market_selector_studying_new_pair")
@@ -13611,6 +13771,8 @@ class PhoenixGuardWindowTrackingAdapter:
                 and previous_market_selector_fingerprint
                 and market_selector_fingerprint
                 and previous_market_selector_fingerprint == market_selector_fingerprint
+                and not previous_market_selector_rebind_pending
+                and not force_market_selector_scan
             )
             timeframe_selector: dict[str, Any] = (
                 {
@@ -13663,18 +13825,51 @@ class PhoenixGuardWindowTrackingAdapter:
                 )
                 if detected_market_selector and detected_market:
                     market_selector = dict(detected_market_selector)
+                    # A suffix-free FX read can be a legitimate non-OTC pair,
+                    # but it can also be a transient first-frame OCR read that
+                    # missed the visible ``OTC`` suffix.  Do one additional
+                    # closed-loop selector scan before promoting that less
+                    # specific identity after a forced migration scan or pair
+                    # change.  The existing rebind contract persists through
+                    # compact live state, so the next frame performs the scan;
+                    # a matching non-OTC read then confirms normally, while a
+                    # richer OTC read upgrades the namespace instead of caching
+                    # the incomplete first result forever.
+                    unsuffixed_market = bool(
+                        re.fullmatch(r"[A-Z]{3}/[A-Z]{3}", detected_market)
+                    )
+                    confirms_pending_unsuffixed_market = bool(
+                        unsuffixed_market
+                        and previous_market_selector_rebind_pending
+                        and not market_selector_visual_changed
+                        and cached_market == detected_market
+                    )
+                    unsuffixed_identity_needs_confirmation = bool(
+                        unsuffixed_market
+                        and not confirms_pending_unsuffixed_market
+                    )
                     # OCR has rebound the chart identity.  A changed pair gets
                     # a new forecast/cache namespace immediately; rebind flags
                     # describe unresolved identity only and therefore clear.
-                    market_selector_rebind_required = False
-                    market_selector["studying_new_pair"] = False
+                    market_selector_rebind_required = bool(
+                        unsuffixed_identity_needs_confirmation
+                    )
+                    market_selector["studying_new_pair"] = bool(
+                        unsuffixed_identity_needs_confirmation
+                    )
                     market_selector["market_selector_identity_rebound"] = bool(
-                        confirmed_pair_change
-                        or previous_market_selector_rebind_pending
+                        not unsuffixed_identity_needs_confirmation
+                        and (
+                            confirmed_pair_change
+                            or previous_market_selector_rebind_pending
+                        )
                     )
                     market_selector["market_selector_pair_changed"] = bool(
-                        confirmed_pair_change
-                        or previous_market_selector_rebind_pending
+                        not unsuffixed_identity_needs_confirmation
+                        and (
+                            confirmed_pair_change
+                            or previous_market_selector_rebind_pending
+                        )
                     )
                 elif market_selector_visual_changed and cached_market:
                     # A changed selector that OCR cannot read is not authority
@@ -13690,9 +13885,17 @@ class PhoenixGuardWindowTrackingAdapter:
                 elif previous_market_selector_rebind_pending:
                     market_selector_rebind_required = True
                     market_selector = {
-                        "value": "",
+                        # Keep the unconfirmed candidate visible for the next
+                        # stability comparison, but never mark it authoritative
+                        # until a later selector read confirms or enriches it.
+                        "value": cached_market,
                         "source": "selector_identity_rebind_pending",
-                        "confidence": 0.0,
+                        "confidence": _clip01(
+                            previous_signal.get(
+                                "market_confidence",
+                                previous_tracking.get("market_confidence", 0.0),
+                            )
+                        ),
                         "studying_new_pair": True,
                     }
                 elif (
@@ -13754,6 +13957,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
                 market_selector["market_selector_visual_changed"] = False
                 market_selector["market_selector_rebind_required"] = False
+        market_selector["market_normalizer_version"] = _FX_MARKET_NORMALIZER_VERSION
         mark_study_stage("detect_selectors")
         cached_chart_bbox_enabled = (
             fast_selectors
@@ -19645,6 +19849,8 @@ class PhoenixGuardWindowTrackingAdapter:
         market: str,
         frame_id: int,
         capture_epoch: float | None = None,
+        stream_source_token: str = "",
+        stream_continuity_eligible: bool = False,
         projection: Mapping[str, Any],
         candle_statistics: Mapping[str, Any],
         behavior_payload: Mapping[str, Any],
@@ -19666,6 +19872,84 @@ class PhoenixGuardWindowTrackingAdapter:
             previous_identity_state = copy.deepcopy(
                 self._scene_candle_identity_states.get(context_key, {})
             )
+            resolver_order_hydration: dict[str, Any] = {
+                "status": "NOT_REQUIRED",
+                "source": "PROCESS_LOCAL_IDENTITY_STATE",
+                "raw_sequence_high_watermark": None,
+                "execution_authority": False,
+            }
+            if not previous_identity_state:
+                service = self._market_study_service
+                if service is None:
+                    resolver_order_hydration = {
+                        "status": "UNAVAILABLE",
+                        "source": "PAIR_DNA_NOT_CONFIGURED",
+                        "raw_sequence_high_watermark": None,
+                        "execution_authority": False,
+                    }
+                else:
+                    try:
+                        durable_order = _mapping_to_dict(
+                            service.resolver_order_state(
+                                pair,
+                                timeframe_key,
+                            )
+                        )
+                    except (OSError, TypeError, ValueError):
+                        LOGGER.warning(
+                            "Unable to hydrate the closed-candle resolver "
+                            "from Pair DNA.",
+                            exc_info=True,
+                        )
+                        resolver_order_hydration = {
+                            "status": "UNAVAILABLE",
+                            "source": "PAIR_DNA_READ_FAILED",
+                            "raw_sequence_high_watermark": None,
+                            "execution_authority": False,
+                        }
+                    else:
+                        raw_high_watermark = _strict_nonnegative_integer_v3(
+                            durable_order.get(
+                                "raw_sequence_high_watermark"
+                            )
+                        )
+                        if (
+                            durable_order.get("status") == "READY"
+                            and durable_order.get("order_domain")
+                            == "TRACKER_EVENT_SEQUENCE_V3"
+                            and raw_high_watermark is not None
+                        ):
+                            # Pair DNA persists the resolver's raw local
+                            # sequence separately from its mapped lifelong
+                            # order.  Seed only from that raw watermark: the
+                            # mapped order must never be fed back into the
+                            # screenshot resolver as though it were local.
+                            previous_sequence = max(
+                                previous_sequence,
+                                raw_high_watermark,
+                            )
+                            previous_key = ""
+                            resolver_order_hydration = {
+                                "status": "HYDRATED",
+                                "source": "PAIR_DNA_RAW_SEQUENCE_HIGH_WATERMARK",
+                                "raw_sequence_high_watermark": (
+                                    raw_high_watermark
+                                ),
+                                "sequence_epoch": durable_order.get(
+                                    "sequence_epoch"
+                                ),
+                                "rebase_count": durable_order.get(
+                                    "rebase_count"
+                                ),
+                                "execution_authority": False,
+                            }
+                        else:
+                            resolver_order_hydration = {
+                                "status": "NOT_INITIALIZED",
+                                "source": "PAIR_DNA_RESOLVER_ORDER_STATE",
+                                "raw_sequence_high_watermark": None,
+                                "execution_authority": False,
+                            }
             identity_resolution = resolve_closed_candle_identity_v3(
                 candles,
                 pair=pair,
@@ -19673,6 +19957,16 @@ class PhoenixGuardWindowTrackingAdapter:
                 previous_state=previous_identity_state,
                 previous_key=previous_key,
                 previous_sequence=previous_sequence,
+                capture_epoch=capture_epoch,
+                # This builder is reached only after pair and timeframe OCR
+                # are both confirmed. A continuously observed single cadence
+                # boundary may therefore close one candle when detector
+                # rescaling makes visual re-identification ambiguous.
+                allow_continuous_stream_boundary=True,
+                stream_frame_id=frame_id,
+                stream_process_token=self._scene_stream_process_token,
+                stream_source_token=stream_source_token,
+                stream_continuity_eligible=stream_continuity_eligible,
             )
             closed_key = str(identity_resolution["closed_candle_key"])
             closed_sequence = int(
@@ -19859,6 +20153,9 @@ class PhoenixGuardWindowTrackingAdapter:
                         "confirmed_closed_candle_batch": copy.deepcopy(
                             confirmed_closed_candle_batch
                         ),
+                        "resolver_order_hydration_v3": copy.deepcopy(
+                            resolver_order_hydration
+                        ),
                     }
                 )
                 return result
@@ -20041,6 +20338,9 @@ class PhoenixGuardWindowTrackingAdapter:
                     ),
                     "confirmed_closed_candle_batch": copy.deepcopy(
                         confirmed_closed_candle_batch
+                    ),
+                    "resolver_order_hydration_v3": copy.deepcopy(
+                        resolver_order_hydration
                     ),
                     "same_event_cache_rebuild_required": False,
                     "detector_coverage_rebase_applied": same_event_cache_rebuild,
@@ -20583,6 +20883,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "UNIQUE_VISUAL_REOBSERVATION_V3",
             "SOURCE_BAR_ID_ADVANCED",
             "SOURCE_FORMING_BAR_BECAME_CLOSED",
+            "STREAM_CONTINUITY_BOUNDARY_CONFIRMED_CLOSED_CANDLE",
             "VISUAL_CLOSED_CANDLE_GAP_REACQUIRED",
             "VISUAL_FORMING_CANDLE_BECAME_CLOSED",
             "CONFIRMED_EVENT_V3",
@@ -20885,6 +21186,28 @@ class PhoenixGuardWindowTrackingAdapter:
             execution_controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME)
         )
         frame_index = int(session_row.get("frame_index", session_row.get("display_frame_id", 0)) or 0)
+        stream_source_token_v3 = _locked_stream_source_token_v3(session_row)
+        prior_tracking_row = _mapping_to_dict(
+            session_row.get("tracking_summary", {})
+        )
+        prior_signal_row = _mapping_to_dict(
+            session_row.get("latest_signal", {})
+        )
+        source_capture_was_blocked = bool(
+            _mapping_to_dict(
+                prior_signal_row.get("source_capture_blocked_v3", {})
+            )
+            or str(
+                prior_tracking_row.get("source_capture_status") or ""
+            ).upper()
+            == "WAITING_FOR_SOURCE_PIXELS"
+        )
+        stream_continuity_eligible_v3 = bool(
+            frame_index >= 0
+            and capture_started_epoch_v3 > 0.0
+            and stream_source_token_v3
+            and not source_capture_was_blocked
+        )
         sequence_id = f"seq_{str(session_row.get('session_id', '') or 'tracker').strip()}_{frame_index}"
         detected_chart_timeframe = str(
             timeframe_selector.get("value", "") or ""
@@ -20918,6 +21241,13 @@ class PhoenixGuardWindowTrackingAdapter:
         market_selector_pair_changed = bool(
             market_row.get("market_selector_pair_changed", False)
         )
+        market_normalizer_version = str(
+            market_row.get(
+                "market_normalizer_version",
+                _FX_MARKET_NORMALIZER_VERSION,
+            )
+            or _FX_MARKET_NORMALIZER_VERSION
+        ).strip()
         min_market_identity_confidence = _clip01(
             execution_controls.get("min_market_confidence", 0.42)
         )
@@ -20962,6 +21292,7 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["market_selector_studying_new_pair"] = market_selector_studying_new_pair
             tracking["market_selector_identity_rebound"] = market_selector_identity_rebound
             tracking["market_selector_pair_changed"] = market_selector_pair_changed
+            tracking["market_normalizer_version"] = market_normalizer_version
             tracking["market_identity_confirmed"] = market_identity_confirmed
             tracking["timeframe_identity_confirmed"] = timeframe_identity_confirmed
             tracking["market_study_v3"] = market_study_v3
@@ -20984,6 +21315,7 @@ class PhoenixGuardWindowTrackingAdapter:
             signal["market_selector_studying_new_pair"] = market_selector_studying_new_pair
             signal["market_selector_identity_rebound"] = market_selector_identity_rebound
             signal["market_selector_pair_changed"] = market_selector_pair_changed
+            signal["market_normalizer_version"] = market_normalizer_version
             signal["market_identity_confirmed"] = market_identity_confirmed
             signal["timeframe_identity_confirmed"] = timeframe_identity_confirmed
             signal["market_study_v3"] = market_study_v3
@@ -21252,6 +21584,8 @@ class PhoenixGuardWindowTrackingAdapter:
                 market=market,
                 frame_id=frame_index,
                 capture_epoch=capture_started_epoch_v3,
+                stream_source_token=stream_source_token_v3,
+                stream_continuity_eligible=stream_continuity_eligible_v3,
                 projection=projection,
                 candle_statistics=candle_statistics,
                 behavior_payload=behavior_payload,
@@ -21502,6 +21836,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "market_selector_studying_new_pair": market_selector_studying_new_pair,
             "market_selector_identity_rebound": market_selector_identity_rebound,
             "market_selector_pair_changed": market_selector_pair_changed,
+            "market_normalizer_version": market_normalizer_version,
             "market_identity_confirmed": market_identity_confirmed,
             "timeframe_identity_confirmed": timeframe_identity_confirmed,
             "global_direction": global_direction,
@@ -21557,6 +21892,13 @@ class PhoenixGuardWindowTrackingAdapter:
             ),
         }
         candle_movement_context = build_candle_movement_context_v3(tracking_summary)
+        candle_movement_context.update(
+            {
+                "frame_id": frame_index,
+                "display_frame_id": frame_index,
+                "observed_epoch": capture_started_epoch_v3,
+            }
+        )
         tracking_summary["candle_movement_context_v3"] = candle_movement_context
         tracking_summary["candle_movement_context"] = candle_movement_context
         signal: dict[str, Any] = {
@@ -21605,6 +21947,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "market_selector_studying_new_pair": market_selector_studying_new_pair,
             "market_selector_identity_rebound": market_selector_identity_rebound,
             "market_selector_pair_changed": market_selector_pair_changed,
+            "market_normalizer_version": market_normalizer_version,
             "market_identity_confirmed": market_identity_confirmed,
             "timeframe_identity_confirmed": timeframe_identity_confirmed,
             "execution_permission": execution_permission,
@@ -28373,6 +28716,16 @@ class ContinuousWindowTrackerService:
             "observer_policy": dict(_mapping_to_dict(raw.get("observer_policy", {}))),
             "status": status,
             "tracking_enabled": tracking_enabled,
+            "stream_continuity_generation_v3": max(
+                0,
+                int(
+                    _float_or(
+                        raw.get("stream_continuity_generation_v3"),
+                        0.0,
+                    )
+                    or 0
+                ),
+            ),
             "created_at": str(raw.get("created_at", "") or _now_iso()),
             "updated_at": str(raw.get("updated_at", "") or _now_iso()),
             "last_capture_started_at": str(raw.get("last_capture_started_at", "") or ""),
@@ -29175,6 +29528,25 @@ class ContinuousWindowTrackerService:
             with self._lock:
                 worker = self._workers.get(normalized_session_id)
                 worker_was_alive = bool(worker is not None and worker.thread.is_alive())
+                if not worker_was_alive:
+                    # A persisted running intent does not prove uninterrupted
+                    # observation when its process-local worker disappeared.
+                    # Rotate and persist the lineage before the replacement
+                    # worker can publish its first capture.
+                    payload["stream_continuity_generation_v3"] = (
+                        int(
+                            _float_or(
+                                payload.get(
+                                    "stream_continuity_generation_v3"
+                                ),
+                                0.0,
+                            )
+                            or 0
+                        )
+                        + 1
+                    )
+                    payload["updated_at"] = _now_iso()
+                    self._save_session(payload)
             self._ensure_worker(
                 normalized_session_id,
                 capture_now=not worker_was_alive,
@@ -29189,6 +29561,16 @@ class ContinuousWindowTrackerService:
             return self.get_session_snapshot(normalized_session_id)
         with self._lock:
             payload["tracking_enabled"] = True
+            payload["stream_continuity_generation_v3"] = (
+                int(
+                    _float_or(
+                        payload.get("stream_continuity_generation_v3"),
+                        0.0,
+                    )
+                    or 0
+                )
+                + 1
+            )
             payload["status"] = "running"
             payload["updated_at"] = _now_iso()
             payload["last_error"] = ""
@@ -34202,7 +34584,14 @@ class ContinuousWindowTrackerService:
             return False
         return isinstance(self.capture_backend, WindowsWindowCaptureBackend)
 
-    def _mark_capture_surface_unavailable(self, session_id: str, message: str) -> None:
+    def _mark_capture_surface_unavailable(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        session_status: str = "waiting_for_broker_surface",
+        signal_status: str = "waiting_for_broker_surface",
+    ) -> None:
         now_epoch = _now_epoch()
         now_iso = _epoch_to_utc_iso(now_epoch)
         with self._session_commit_lock_for(session_id):
@@ -34224,15 +34613,31 @@ class ContinuousWindowTrackerService:
             tracking_summary["source_capture_status"] = "WAITING_FOR_SOURCE_PIXELS"
             tracking_summary["summary"] = str(tracking_summary.get("summary") or message)
             latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
+            existing_signal = bool(latest_signal)
             if not latest_signal:
-                latest_signal = _default_signal(message=message, status="waiting_for_broker_surface")
-            latest_signal["status"] = "waiting_for_broker_surface"
-            latest_signal["summary"] = message
-            latest_signal["timestamp"] = now_iso
-            latest_signal["published_at"] = now_iso
-            latest_signal["published_epoch"] = now_epoch
-            latest_signal["signal_age_sec"] = 0.0
-            payload["status"] = "waiting_for_broker_surface" if tracking_enabled else str(payload.get("status", "ready") or "ready")
+                latest_signal = _default_signal(
+                    message=message,
+                    status=signal_status,
+                )
+            latest_signal["status"] = signal_status
+            latest_signal["source_capture_blocked_v3"] = {
+                "schema_version": "PG_SOURCE_CAPTURE_BLOCKED_V3",
+                "status": "WAITING_FOR_SOURCE_PIXELS",
+                "message": message,
+                "blocked_epoch": now_epoch,
+                "preserved_frame_index": int(payload.get("frame_index", 0) or 0),
+            }
+            if not existing_signal:
+                latest_signal["summary"] = message
+                latest_signal["timestamp"] = now_iso
+                latest_signal["published_at"] = now_iso
+                latest_signal["published_epoch"] = now_epoch
+                latest_signal["signal_age_sec"] = 0.0
+            payload["status"] = (
+                session_status
+                if tracking_enabled
+                else str(payload.get("status", "ready") or "ready")
+            )
             payload["last_error"] = message
             payload["tracking_summary"] = tracking_summary
             payload["latest_signal"] = latest_signal
@@ -34677,16 +35082,12 @@ class ContinuousWindowTrackerService:
             resolved_descriptor = self._resolve_window_descriptor(payload)
             mark_stage("resolve_window")
             if resolved_descriptor is None:
-                with self._lock:
-                    payload["status"] = "waiting_for_window"
-                    payload["tracking_summary"] = _default_tracking_summary(message="The locked broker window is not visible right now.")
-                    payload["latest_signal"] = _default_signal(
-                        message="The locked broker window is not visible right now.",
-                        status="waiting_for_window",
-                    )
-                    payload["last_error"] = "The locked broker window is not visible right now."
-                    payload["updated_at"] = _now_iso()
-                    self._save_session(payload)
+                self._mark_capture_surface_unavailable(
+                    str(payload["session_id"]),
+                    "The locked broker window is not visible right now.",
+                    session_status="waiting_for_window",
+                    signal_status="waiting_for_window",
+                )
                 return
             descriptor = dict(resolved_descriptor)
             payload["locked_window"] = dict(descriptor)

@@ -35,6 +35,88 @@ def _tracker_window(closed_count: int) -> list[dict[str, Any]]:
     return rows
 
 
+def _ambiguous_tracker_boundary_rollover() -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    prior = _tracker_window(8)
+    prior[-4].update(
+        {
+            "direction": "SELL",
+            "open_y_px": 245.0,
+            "close_y_px": 263.0,
+            "wick_top_px": 239.0,
+            "wick_bottom_px": 271.0,
+        }
+    )
+    prior[-3].update(
+        {
+            "direction": "BUY",
+            "open_y_px": 260.0,
+            "close_y_px": 226.0,
+            "wick_top_px": 218.0,
+            "wick_bottom_px": 268.0,
+        }
+    )
+    prior[-2].update(
+        {
+            "direction": "BUY",
+            "open_y_px": 205.0,
+            "close_y_px": 175.0,
+            "wick_top_px": 165.0,
+            "wick_bottom_px": 212.0,
+        }
+    )
+    prior[-1].update(
+        {
+            "direction": "SELL",
+            "open_y_px": 120.0,
+            "close_y_px": 350.0,
+            "wick_top_px": 110.0,
+            "wick_bottom_px": 360.0,
+        }
+    )
+
+    current: list[dict[str, Any]] = []
+    for index, source in enumerate(prior[1:]):
+        row = dict(source)
+        row["track_id"] = index
+        row["center_x"] = 30.0 + index * 10.0
+        row["is_closed"] = True
+        current.append(row)
+    current[-2].update(
+        {
+            "direction": "SELL",
+            "open_y_px": 305.0,
+            "close_y_px": 275.0,
+            "wick_top_px": 266.0,
+            "wick_bottom_px": 314.0,
+        }
+    )
+    current[-1].update(
+        {
+            "direction": "BUY",
+            "open_y_px": 280.0,
+            "close_y_px": 245.0,
+            "wick_top_px": 238.0,
+            "wick_bottom_px": 288.0,
+        }
+    )
+    current.append(
+        {
+            "track_id": 8,
+            "direction": "SELL",
+            "center_x": 110.0,
+            "open_y_px": 245.0,
+            "close_y_px": 266.0,
+            "wick_top_px": 239.0,
+            "wick_bottom_px": 272.0,
+            "is_closed": False,
+        }
+    )
+    return prior, current
+
+
 def _scene(resolution: dict[str, Any]) -> dict[str, Any]:
     state = dict(resolution["state"])
     return {
@@ -88,12 +170,23 @@ def _timed_resolution(
     *,
     capture_epoch: float,
     previous_state: dict[str, Any] | None = None,
+    allow_continuous_stream_boundary: bool = False,
+    stream_frame_id: int | None = None,
+    stream_process_token: str = "",
+    stream_source_token: str = "",
+    stream_continuity_eligible: bool = False,
 ) -> dict[str, Any]:
     resolution = resolve_closed_candle_identity_v3(
         candles,
         pair="CAD/JPY OTC",
         timeframe="M5",
         previous_state=previous_state,
+        capture_epoch=capture_epoch,
+        allow_continuous_stream_boundary=allow_continuous_stream_boundary,
+        stream_frame_id=stream_frame_id,
+        stream_process_token=stream_process_token,
+        stream_source_token=stream_source_token,
+        stream_continuity_eligible=stream_continuity_eligible,
     )
     state = _advance_closed_candle_time_attestations_v3(
         candles=candles,
@@ -271,7 +364,10 @@ def test_live_screenshot_rollover_bridges_one_authoritative_close_to_pair_dna(
     second = _study(adapter, second_rows, _scene(second_resolution))
 
     assert second["outcome_maturation"]["status"] == "MATURED"
-    assert second["pair_dna"]["candle_count"] == 1
+    # Both resolver-proven closes are available to descriptive timing memory;
+    # only the first has received its strict +1 outcome label at this point.
+    assert second["pair_dna"]["candle_count"] == 2
+    assert second["pair_dna"]["outcome_label_count"] == 1
     profile = adapter._market_study_service.pair_dna.get_profile(  # pyright: ignore[reportOptionalMemberAccess,reportPrivateUsage]
         "CAD/JPY OTC",
         "M5",
@@ -323,7 +419,10 @@ def test_multi_interval_source_gap_cannot_mature_one_candle_pair_dna(
     repeated = _study(adapter, gap_rows, _scene(gap_resolution))
     assert repeated == first
     assert repeated["outcome_maturation"]["status"] == "NO_PREVIOUS_SEQUENCE"
-    assert repeated["pair_dna"].get("observation_count", 0) == 0
+    # The first proven close is valid descriptive timing evidence even though
+    # the unproven source gap cannot mature an outcome or create a new event.
+    assert repeated["pair_dna"].get("observation_count", 0) == 1
+    assert repeated["pair_dna"].get("outcome_label_count", 0) == 0
 
 
 def test_source_rollovers_build_stable_history_and_production_object_confluence(
@@ -569,6 +668,56 @@ def test_one_step_straddled_rollovers_attest_and_restamp_stable_history(
     ] == 1
     assert timing["censorship_audit"]["censored_anchor_count"] == 0
     assert timing["censorship_audit"]["discontinuity_count"] == 0
+
+
+def test_continuous_locked_stream_boundary_attests_ambiguous_rollover() -> None:
+    boundary_epoch = 1_800_000_000.0
+    initial_rows, current_rows = _ambiguous_tracker_boundary_rollover()
+    initial = _timed_resolution(
+        initial_rows,
+        capture_epoch=boundary_epoch - 1.0,
+        stream_frame_id=70,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+
+    candidate = _timed_resolution(
+        current_rows,
+        capture_epoch=boundary_epoch + 2.0,
+        previous_state=initial["state"],
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=71,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+    assert candidate["transition_observed"] is False
+    assert candidate["transition_reason"] == (
+        "STREAM_BOUNDARY_CANDIDATE_PENDING_CONFIRMATION"
+    )
+    assert candidate["state"]["closed_candle_time_attestations_v3"] == []
+
+    resolution = _timed_resolution(
+        current_rows,
+        capture_epoch=boundary_epoch + 3.0,
+        previous_state=candidate["state"],
+        allow_continuous_stream_boundary=True,
+        stream_frame_id=72,
+        stream_process_token="process-a",
+        stream_source_token="window-a",
+        stream_continuity_eligible=True,
+    )
+
+    assert resolution["transition_reason"] == (
+        "STREAM_CONTINUITY_BOUNDARY_CONFIRMED_CLOSED_CANDLE"
+    )
+    assert resolution["closed_candle_sequence"] == 1
+    assert len(resolution["state"]["closed_candle_time_attestations_v3"]) == 1
+    proof = resolution["state"]["closed_candle_time_attestations_v3"][0]
+    assert proof["timestamp_source"] == "RESOLVER_BOUND_BOUNDARY_GRID"
+    assert proof["close_epoch_seconds"] == boundary_epoch
+    assert proof["transition_count"] == 1
 
 
 def test_screenshot_rollover_rejects_no_straddle_gap_and_multiple_boundaries() -> None:

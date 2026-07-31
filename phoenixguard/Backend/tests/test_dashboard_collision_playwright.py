@@ -297,6 +297,117 @@ def _operator_payload(
     }
 
 
+def _with_timing_forecast(
+    payload: dict[str, Any],
+    *,
+    side: str = "BUY",
+    action_state: str = "PREPARE",
+    enter_now: bool = False,
+) -> dict[str, Any]:
+    result = copy.deepcopy(payload)
+    closed_candle_key = "operator-eurusd-m5-close-42"
+    result["three_questions"] = {
+        "studied_direction_current": {
+            "question": "Which direction was studied, and what is being studied now?",
+            "headline": f"{side} remains the completed-candle study",
+            "answer": f"The latest completed regression studies {side}.",
+            "state": "CURRENT",
+            "side": side,
+            "confidence": 0.74,
+            "evidence": {
+                "ensemble_studied_side": side,
+                "current_regression_side": side,
+                "closed_candle_key": closed_candle_key,
+                "summary": "Closed-candle direction and pair identity agree.",
+            },
+        },
+        "entry_now": {
+            "question": "What is the best decision to do right now?",
+            "headline": (
+                f"{side} leading 3–6 completed M5 candles after the anchor close"
+            ),
+            "answer": "The completed-candle timing study published a bounded window.",
+            "state": "ENTER_NOW" if enter_now else "FORMING",
+            "side": side,
+            "confidence": 0.74,
+            "evidence": {"summary": "Timing and permission remain separate."},
+            "enter_now": enter_now,
+            "action": f"{side}_NOW" if enter_now else "DO_NOT_ENTER",
+            "reason": "Rest may persist 1–3 candles before continuation.",
+            "next_trigger": "Invalidate after a completed candle changes direction.",
+            "timing_state": "ENTER_NOW" if enter_now else "FORMING",
+            "timing_forecast": {
+                "schema_version": "PG_OPERATOR_TIMING_FORECAST_V3",
+                "status": "FORECAST_AVAILABLE",
+                "headline": (
+                    f"{side} leading 3–6 completed M5 candles after the anchor close"
+                ),
+                "summary": (
+                    f"{side} is the leading studied path 3–6 completed M5 candles "
+                    "after the anchor close."
+                ),
+                "side": side,
+                "scope": {
+                    "symbol": "EUR/USD",
+                    "timeframe": "M5",
+                    "closed_candle_key": closed_candle_key,
+                    "identity_proven": True,
+                },
+                "horizon_label": (
+                    "3–6 completed M5 candles after the anchor close"
+                ),
+                "horizon_seconds_low": 900,
+                "horizon_seconds_high": 1_800,
+                "horizon_candles_low": 3,
+                "horizon_candles_high": 6,
+                "exact_wall_clock_proven": False,
+                "estimated_likelihood": 0.68,
+                "estimated_likelihood_label": (
+                    "68% estimated likelihood · not replay-calibrated"
+                ),
+                "evidence_confidence": 0.41,
+                "evidence_confidence_label": "41% evidence confidence",
+                "directional_model_score": 0.74,
+                "directional_model_score_label": (
+                    "74% directional model score · not probability"
+                ),
+                "calibration_grade": "C_SPARSE_PAIR",
+                "calibration_label": (
+                    "Evidence grade C · sparse pair history · 11 cases "
+                    "· not replay-calibrated"
+                ),
+                "source": "PAIR",
+                "source_label": "Pair history",
+                "timing_evidence_label": (
+                    "Pair history · 11 timing observations"
+                ),
+                "event_likelihood_support_count": 11,
+                "support_count": 11,
+                "calibrated": False,
+                "rest_sweep_risk": (
+                    "Rest may persist 1–3 candles. Estimated medium sweep risk is 43%."
+                ),
+                "invalidation": (
+                    "Invalidate after a completed candle changes direction."
+                ),
+            },
+            "operator_action": {
+                "schema_version": "PG_OPERATOR_ACTION_V3",
+                "state": action_state,
+                "label": action_state.replace("_", " "),
+                "instruction": (
+                    "Enter only inside the verified window."
+                    if enter_now
+                    else "Prepare for the studied side; entry permission is separate."
+                ),
+                "enter_now": enter_now,
+                "entry_permission_authorized": enter_now,
+            },
+        },
+    }
+    return result
+
+
 @pytest.fixture(scope="module")
 def chromium_browser() -> Generator[Browser, None, None]:
     with sync_playwright() as playwright:
@@ -498,6 +609,8 @@ def test_live_session_stream_updates_forming_read_and_completed_history_immediat
             "answer": "The last completed study favored the upward regression.",
         }
     }
+
+
     payload["tracking"]["market_study_v3"] = {
         "symbol": "EUR/USD",
         "timeframe": "M5",
@@ -917,7 +1030,7 @@ def test_market_story_and_history_prefer_v3_regression_study(
     ]
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
         assert page.locator("#story-step-one-label").inner_text() == "QUESTION 1"
         assert page.locator("#story-step-two-label").inner_text() == "QUESTION 2"
         assert page.locator("#story-step-three-label").inner_text() == "QUESTION 3"
@@ -1004,12 +1117,12 @@ def test_three_question_contract_is_the_plain_language_source_of_truth(
             "87% model confidence"
         )
         assert page.locator("#beginner-decision-title").inner_text() == (
-            "YES — SELL NOW"
+            "ENTER — SELL NOW"
         )
         assert page.locator("#beginner-confidence").inner_text() == (
             "84% ensemble study score"
         )
-        assert "do not chase lower" in page.locator("#beginner-instruction").inner_text()
+        assert "do not chase lows" in page.locator("#beginner-instruction").inner_text()
         assert "current rejection confirms" in page.locator("#beginner-reason").inner_text()
         assert "upper reaction area fails" in page.locator(
             "#beginner-next-condition"
@@ -1018,6 +1131,233 @@ def test_three_question_contract_is_the_plain_language_source_of_truth(
             "data-tone"
         ) == "sell"
         assert page.locator(".evidence-details").get_attribute("open") is None
+
+
+def test_q3_renders_timing_forecast_and_keeps_live_action_separate(
+    chromium_browser: Browser,
+) -> None:
+    payload = _with_timing_forecast(_operator_payload(action="WAIT"))
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator(".decision-question").count() == 3
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "PREPARE"
+        )
+        assert page.locator(
+            ".decision-projection .decision-kicker"
+        ).inner_text() == "STUDY PROJECTION"
+        assert page.locator("#beginner-confidence").inner_text() == (
+            "Entry closed · studied setup is being prepared"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == "PREPARE"
+        assert page.locator("#beginner-action-row").get_attribute(
+            "data-action"
+        ) == "prepare"
+        assert "timing range withheld" in page.locator(
+            "#beginner-forecast-summary"
+        ).inner_text()
+        assert "11 matching outcomes are recorded" in page.locator(
+            "#beginner-forecast-summary"
+        ).inner_text()
+        assert "1–3 candles" in page.locator("#beginner-reason").inner_text()
+        assert "completed candle changes direction" in page.locator(
+            "#beginner-next-condition"
+        ).inner_text()
+        assert "NOT YET" not in page.locator("#question-entry-now").inner_text().upper()
+
+        refreshed = copy.deepcopy(payload)
+        refreshed["revision"] += 1
+        refreshed_entry = refreshed["three_questions"]["entry_now"]
+        refreshed_entry["operator_action"]["state"] = "WAIT_FOR_PULLBACK"
+        refreshed_entry["operator_action"]["label"] = "WAIT FOR PULLBACK"
+        refreshed_entry["operator_action"]["instruction"] = (
+            "Wait for the pullback and sweep to complete."
+        )
+        page.evaluate("value => window.renderOperatorState(value)", refreshed)
+
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        assert "pullback and sweep" in page.locator(
+            "#beginner-instruction"
+        ).inner_text()
+
+
+def test_q3_explains_active_move_as_next_impulse_without_chase_language(
+    chromium_browser: Browser,
+) -> None:
+    payload = _with_timing_forecast(
+        _operator_payload(action="WAIT"),
+        side="BUY",
+        action_state="WAIT_FOR_PULLBACK",
+        enter_now=False,
+    )
+    entry = payload["three_questions"]["entry_now"]
+    forecast = entry["timing_forecast"]
+    forecast.update(
+        {
+            "event_definition": (
+                "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+            ),
+            "active_target_next_impulse": True,
+            "target_move_already_active": True,
+            "estimated_likelihood": None,
+            "estimated_likelihood_label": (
+                "Event likelihood unavailable for next target swing start"
+            ),
+        }
+    )
+    forecast.pop("headline")
+    forecast.pop("summary")
+    entry["operator_action"].pop("instruction")
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        summary = page.locator("#beginner-forecast-summary").inner_text()
+        assert "BUY direction studied · timing range withheld" in summary
+        assert "11 matching outcomes are recorded" in summary
+        assert "candle range is not published" in summary
+        assert "3–6" not in summary
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        instruction = page.locator("#beginner-instruction").inner_text()
+        assert "one completed rest or pullback" in instruction
+        assert "Do not chase the current move" in instruction
+        question = page.locator("#question-entry-now").inner_text().lower()
+        assert "timing unrated" not in question
+        assert "enter now" not in question
+
+        refreshed = copy.deepcopy(payload)
+        refreshed["revision"] += 1
+        refreshed_action = refreshed["three_questions"]["entry_now"][
+            "operator_action"
+        ]
+        refreshed_action["state"] = "PREPARE"
+        refreshed_action["label"] = "PREPARE"
+        page.evaluate("value => window.renderOperatorState(value)", refreshed)
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "PREPARE"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
+
+
+def test_q3_unrated_projection_never_leads_and_atomic_permission_controls_enter(
+    chromium_browser: Browser,
+) -> None:
+    payload = _with_timing_forecast(
+        _operator_payload(action="WAIT"),
+        side="BUY",
+        action_state="PREPARE",
+        enter_now=False,
+    )
+    forecast = payload["three_questions"]["entry_now"]["timing_forecast"]
+    forecast.update(
+        {
+            "estimated_likelihood": None,
+            "estimated_likelihood_label": "Event likelihood unavailable",
+            "evidence_confidence": None,
+            "evidence_confidence_label": "Evidence confidence unavailable",
+            "event_likelihood_support_count": 0,
+            "support_count": 0,
+            "calibrated": False,
+            "calibration_grade": "UNRATED",
+            "calibration_label": (
+                "Calibration UNRATED · not replay-calibrated"
+            ),
+        }
+    )
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
+        assert "BUY" not in page.locator(
+            "#beginner-decision-title"
+        ).inner_text()
+        assert page.locator(
+            ".decision-projection .decision-kicker"
+        ).inner_text() == "STUDY PROJECTION"
+        projection = page.locator("#beginner-forecast-summary").inner_text()
+        assert "BUY direction studied · timing range withheld" in projection
+        assert "3–6" not in projection
+        assert "no replay-calibrated matching outcome yet" in projection
+        assert page.locator("#beginner-action-label").inner_text() == "PREPARE"
+
+    enter_payload = _with_timing_forecast(
+        _operator_payload(action="BUY_NOW"),
+        side="BUY",
+        action_state="ENTER_NOW",
+        enter_now=True,
+    )
+    enter_forecast = enter_payload["three_questions"]["entry_now"][
+        "timing_forecast"
+    ]
+    enter_forecast.update(
+        {
+            "event_likelihood_support_count": 0,
+            "support_count": 0,
+            "calibrated": False,
+            "calibration_grade": "UNRATED",
+        }
+    )
+    with _dashboard_page(chromium_browser, enter_payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ENTER — BUY NOW"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == "ENTER NOW"
+        assert "candle range is not published" in page.locator(
+            "#beginner-forecast-summary"
+        ).inner_text()
+
+
+def test_q3_rejects_wrong_forecast_scope_without_fabricating_confidence_or_source(
+    chromium_browser: Browser,
+) -> None:
+    payload = _with_timing_forecast(_operator_payload(action="WAIT"))
+    entry = payload["three_questions"]["entry_now"]
+    entry["confidence"] = 0.84
+    entry["timing_forecast"]["scope"]["closed_candle_key"] = "wrong-close"
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        meta = page.locator("#beginner-confidence").inner_text()
+        summary = page.locator("#beginner-forecast-summary").inner_text()
+
+        assert meta == "Entry closed · studied setup is being prepared"
+        assert "84%" not in meta
+        assert "current pair, timeframe, and completed candle" in summary
+
+
+def test_q3_shows_clock_anchored_only_for_proven_fixed_epoch_window(
+    chromium_browser: Browser,
+) -> None:
+    payload = _with_timing_forecast(_operator_payload(action="WAIT"))
+    forecast = payload["three_questions"]["entry_now"]["timing_forecast"]
+    forecast.update(
+        {
+            "headline": "BUY leading path · fixed window opens in 15 min",
+            "horizon_label": "Fixed window opens in 15 min · closes in 30 min",
+            "exact_wall_clock_proven": True,
+            "anchor_close_epoch_seconds": 4_102_444_500.0,
+            "target_window_start_epoch_seconds": 4_102_445_400.0,
+            "target_window_end_epoch_seconds": 4_102_446_300.0,
+            "event_likelihood_support_count": 32,
+            "support_count": 32,
+            "calibrated": True,
+            "calibration_grade": "A_REPLAY_CALIBRATED",
+        }
+    )
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-confidence").inner_text() == (
+            "Entry closed · studied setup is being prepared"
+        )
+        assert "fixed window opens in 15 min" in page.locator(
+            "#beginner-forecast-summary"
+        ).inner_text()
 
 
 def test_continuous_observation_health_stays_compact_until_details_are_opened(
@@ -1112,7 +1452,7 @@ def test_three_question_entry_answer_cannot_override_or_conflict_with_permission
     }
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "STAY OUT"
         assert "do not enter" in page.locator("#beginner-instruction").inner_text().lower()
         assert page.locator("#beginner-decision-shell").get_attribute("data-tone") == "hold"
 
@@ -1123,7 +1463,7 @@ def test_live_yes_is_invalidated_immediately_when_refresh_loses_connection(
     with _dashboard_page(
         chromium_browser, _operator_payload(action="SELL_NOW")
     ) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "ENTER — SELL NOW"
         page.evaluate(
             """
             () => {
@@ -1133,7 +1473,7 @@ def test_live_yes_is_invalidated_immediately_when_refresh_loses_connection(
             """
         )
         page.wait_for_function(
-            "() => document.querySelector('#beginner-decision-title')?.textContent === 'NO — CONNECTION LOST'"
+            "() => document.querySelector('#beginner-decision-title')?.textContent === 'STAY OUT'"
         )
         assert page.locator("#beginner-decision-shell").get_attribute("data-tone") == "blocked"
         assert "do not enter" in page.locator("#beginner-instruction").inner_text().lower()
@@ -1145,7 +1485,7 @@ def test_live_yes_closes_at_its_client_verified_expiry(
     payload = _operator_payload(action="SELL_NOW")
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "ENTER — SELL NOW"
         page.evaluate(
             """
             () => {
@@ -1158,9 +1498,9 @@ def test_live_yes_closes_at_its_client_verified_expiry(
             }
             """
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "ENTER — SELL NOW"
         page.wait_for_function(
-            "() => document.querySelector('#beginner-decision-title')?.textContent === 'NO — WINDOW EXPIRED'",
+            "() => document.querySelector('#beginner-decision-title')?.textContent === 'STAY OUT'",
             timeout=5_000,
         )
         assert page.locator("#beginner-decision-shell").get_attribute("data-tone") == "blocked"
@@ -2085,7 +2425,7 @@ def test_ended_sell_pressure_and_current_up_move_keep_entry_closed_and_study_upt
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload(action="WAIT")) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
         assert page.locator("#current-move-title").inner_text() == "From an upward market"
         assert "rising" in page.locator("#beginner-now-read").inner_text().lower()
         pressure = page.locator("#pressure-event")
@@ -2143,9 +2483,9 @@ def test_retracement_evidence_shows_current_and_full_pair_support_without_permis
             "full Pair DNA 14; 71.8% experimental/nonstandard — current graph 1, "
             "full Pair DNA 9. Observation only; never entry permission."
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
         assert page.locator("#beginner-confidence").inner_text() == (
-            "No entry confirmation"
+            "Entry closed · studied setup is being prepared"
         )
 
         page.evaluate("payload => window.renderOperatorState(payload)", updated)
@@ -2156,7 +2496,7 @@ def test_retracement_evidence_shows_current_and_full_pair_support_without_permis
         assert page.evaluate(
             "() => document.activeElement === document.querySelector('.evidence-details summary')"
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
 
         page.evaluate(
             "() => window.renderUnavailableState(new Error('Workspace offline'))"
@@ -2201,7 +2541,7 @@ def test_zero_retracement_support_waits_for_history_and_stays_observation_only(
             "for the 70.5% OTE reference and the 71.8% experimental, nonstandard "
             "level. Observation only; never entry permission."
         )
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
 
 
 def test_partial_retracement_dto_does_not_claim_unknown_full_support_is_zero(
@@ -2244,7 +2584,7 @@ def test_fresh_explicit_buy_permission_renders_buy_now(
     chromium_browser: Browser,
 ) -> None:
     with _dashboard_page(chromium_browser, _operator_payload(action="BUY_NOW")) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "YES — BUY NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "ENTER — BUY NOW"
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert "Buy low · entry open" in (
             page.locator("#beginner-evidence-safety").text_content() or ""
@@ -2269,7 +2609,7 @@ def test_fresh_explicit_sell_permission_renders_sell_high(
     with _dashboard_page(
         chromium_browser, _operator_payload(action="SELL_NOW")
     ) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "YES — SELL NOW"
+        assert page.locator("#beginner-decision-title").inner_text() == "ENTER — SELL NOW"
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert "Sell high · entry open" in (
             page.locator("#beginner-evidence-safety").text_content() or ""
@@ -2293,14 +2633,15 @@ def test_open_setup_wait_keeps_entry_closed_while_permission_refreshes(
 ) -> None:
     payload = _operator_payload(action="WAIT", window_open=True)
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "NO — NOT YET"
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
         assert page.locator("#permission-title").inner_text() == "History leans upward"
         assert (
             page.locator("#beginner-confidence").inner_text()
-            == "No entry confirmation"
+            == "Entry closed · studied setup is being prepared"
         )
         instruction = page.locator("#beginner-instruction").inner_text().lower()
-        assert instruction == "do not enter this trade yet."
+        assert "setup window remains open" in instruction
+        assert "current-frame permission is refreshing" in instruction
         reason = page.locator("#beginner-reason").inner_text().lower()
         assert "setup window remains open" in reason
         assert "current-frame permission is refreshing" in reason

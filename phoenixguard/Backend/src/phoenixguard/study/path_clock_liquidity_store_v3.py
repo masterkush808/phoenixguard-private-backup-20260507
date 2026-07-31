@@ -33,6 +33,7 @@ from phoenixguard.study.path_clock_liquidity_v3 import (
     MAX_STUDIED_DURATION_SECONDS,
     MIN_ELIGIBLE_DURATION_SECONDS,
     PathClockLiquidityValidationError,
+    build_hierarchical_forward_timing_forecast_v3,
     evaluate_path_clock_promotion_gate_v3,
     score_path_clock_replays_v3,
 )
@@ -966,6 +967,7 @@ class PathClockLiquiditySideStoreV3:
         duration: Mapping[str, Any],
         latest_freeze: Mapping[str, Any] | None,
         discontinuity_censored: int,
+        forecast_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         anchors = _rows(state.get("active_anchors"))
         audit = _mapping(state.get("audit"))
@@ -1015,6 +1017,41 @@ class PathClockLiquiditySideStoreV3:
         )
         baseline_score, candidate_score, promotion_gate = (
             PathClockLiquiditySideStoreV3._promotion_evidence(state)
+        )
+        context = _mapping(forecast_context)
+        closed_candle_time_proof = _mapping(
+            public_freeze.get("closed_candle_time_proof")
+        )
+        forecast_lineage = dict(_mapping(context.get("lineage")))
+        if closed_candle_time_proof:
+            forecast_lineage["anchor_close_epoch_seconds"] = (
+                closed_candle_time_proof.get("close_epoch_seconds")
+            )
+        forward_timing_forecast = build_hierarchical_forward_timing_forecast_v3(
+            candidate_direction=(
+                context.get("candidate_direction")
+                or public_freeze.get("studied_direction")
+            ),
+            duration_contract=duration,
+            source_cadence_seconds=state.get("source_cadence_seconds", 300),
+            directional_confidence=context.get("directional_confidence", 0.0),
+            current_regime=context.get("current_regime", "UNKNOWN"),
+            current_behavior=_mapping(context.get("current_behavior")),
+            pair_profile=_mapping(context.get("pair_profile")),
+            motif_lattice=_mapping(context.get("motif_lattice")),
+            survival_network=_mapping(context.get("survival_network")),
+            motif_trajectory_library=_mapping(
+                context.get("motif_trajectory_library")
+            ),
+            exact_jpclf_estimate=selected,
+            exact_time_proven=bool(
+                public_freeze and closed_candle_time_proof
+            ),
+            exact_promotion_passed=promotion_gate.get("passed") is True,
+            lineage=forecast_lineage,
+        )
+        forecast_available = (
+            forward_timing_forecast.get("status") == "FORECAST_AVAILABLE"
         )
         hard_duration_veto = not eligible
         survival_probability = (
@@ -1083,8 +1120,13 @@ class PathClockLiquiditySideStoreV3:
             )
         else:
             timing_reason = (
-                "Timing history remains shadow-only until all four replay axes "
-                "improve with sufficient support."
+                "A closed-candle-relative forward timing estimate is available "
+                "while exact JPCLF survival calibration continues in shadow."
+                if forecast_available
+                else (
+                    "Timing history remains shadow-only until all four replay "
+                    "axes improve with sufficient support."
+                )
             )
         timing_read = {
             "status": (
@@ -1094,6 +1136,8 @@ class PathClockLiquiditySideStoreV3:
                 if timing_supports_entry
                 else "TIMING_VETO"
                 if empirical_timing_veto
+                else "FORWARD_ESTIMATE_ONLY"
+                if forecast_available
                 else "BUILDING_REPLAY_CALIBRATION"
             ),
             "state": (
@@ -1109,12 +1153,14 @@ class PathClockLiquiditySideStoreV3:
                 )
                 else "SWEEP_RISK"
                 if empirical_timing_veto
+                else "FORECAST_AVAILABLE"
+                if forecast_available
                 else "SHADOW_STUDY"
             ),
             "reason": timing_reason,
             "side": public_freeze.get("studied_direction") or "",
             "studied_direction": public_freeze.get("studied_direction") or "",
-            "eligible": bool(selected),
+            "eligible": eligible,
             "contract_admitted": bool(public_freeze),
             "contract_duration_seconds": field_duration,
             "candidate_horizon_seconds": field_duration,
@@ -1133,6 +1179,7 @@ class PathClockLiquiditySideStoreV3:
             "observed_at": observed_seconds,
             "valid_until": valid_until,
             "promotion_gate": promotion_gate,
+            "forward_timing_forecast": deepcopy(forward_timing_forecast),
             **_safety_contract(),
         }
         latest_field_state = {
@@ -1191,6 +1238,7 @@ class PathClockLiquiditySideStoreV3:
             "scenario_estimates": estimates,
             "best_supported_scenario": deepcopy(selected),
             "timing_read": timing_read,
+            "forward_timing_forecast": forward_timing_forecast,
             "promotion_gate": promotion_gate,
             "baseline_replay_score": baseline_score,
             "candidate_replay_score": candidate_score,
@@ -1245,6 +1293,7 @@ class PathClockLiquiditySideStoreV3:
         studied_direction: object,
         contract_duration_seconds: object | None,
         liquidity_state: Mapping[str, Any],
+        forecast_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Advance every admitted anchor using one exact closed-candle event."""
 
@@ -1342,6 +1391,9 @@ class PathClockLiquiditySideStoreV3:
             "studied_direction": current_direction,
             "duration_contract": duration,
             "liquidity_state": features,
+            "forecast_context_digest": _canonical_digest(
+                _mapping(forecast_context)
+            ),
         }
         observation_digest = _canonical_digest(observation_body)
         path = self._path(canonical_symbol, canonical_timeframe)
@@ -1757,6 +1809,7 @@ class PathClockLiquiditySideStoreV3:
                 duration=duration,
                 latest_freeze=latest_freeze,
                 discontinuity_censored=discontinuity_censored,
+                forecast_context=forecast_context,
             )
             state["latest_public_study"] = public
             state["state_digest"] = _canonical_digest(state)
@@ -1768,19 +1821,77 @@ def pending_path_clock_liquidity_v3(
     reason: object,
     *,
     contract_duration_seconds: object | None = None,
+    candidate_direction: object = "",
+    source_cadence_seconds: object = 300,
+    forecast_context: Mapping[str, Any] | None = None,
+    symbol: object = "",
+    timeframe: object = "",
+    closed_candle_key: object = "",
+    closed_candle_sequence: object = 0,
 ) -> dict[str, Any]:
+    cadence = _strict_nonnegative_integer(
+        source_cadence_seconds,
+        field="source_cadence_seconds",
+    )
+    if cadence < 30 or cadence > MAX_STUDIED_DURATION_SECONDS:
+        raise PathClockLiquidityStoreValidationError(
+            "source cadence must be between 30 and 7200 seconds"
+        )
     duration = _duration_contract(
         contract_duration_seconds,
-        source_cadence_seconds=300,
+        source_cadence_seconds=cadence,
+    )
+    context = _mapping(forecast_context)
+    lineage = {
+        "symbol": symbol or _mapping(context.get("lineage")).get("symbol"),
+        "timeframe": timeframe
+        or _mapping(context.get("lineage")).get("timeframe"),
+        "closed_candle_key": closed_candle_key
+        or _mapping(context.get("lineage")).get("closed_candle_key"),
+        "closed_candle_sequence": closed_candle_sequence,
+    }
+    forward_timing_forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction=(
+            candidate_direction or context.get("candidate_direction")
+        ),
+        duration_contract=duration,
+        source_cadence_seconds=cadence,
+        directional_confidence=context.get("directional_confidence", 0.0),
+        current_regime=context.get("current_regime", "UNKNOWN"),
+        current_behavior=_mapping(context.get("current_behavior")),
+        pair_profile=_mapping(context.get("pair_profile")),
+        motif_lattice=_mapping(context.get("motif_lattice")),
+        survival_network=_mapping(context.get("survival_network")),
+        motif_trajectory_library=_mapping(
+            context.get("motif_trajectory_library")
+        ),
+        exact_time_proven=False,
+        exact_promotion_passed=False,
+        lineage=lineage,
+    )
+    duration_eligible = duration.get("new_entry_eligible") is True
+    forecast_available = (
+        forward_timing_forecast.get("status") == "FORECAST_AVAILABLE"
     )
     result: dict[str, Any] = {
         "schema_version": PATH_CLOCK_LIQUIDITY_PUBLIC_SCHEMA_VERSION,
+        "symbol": " ".join(str(lineage["symbol"] or "").strip().upper().split()),
+        "timeframe": " ".join(
+            str(lineage["timeframe"] or "").strip().upper().split()
+        ),
+        "closed_candle_key": str(lineage["closed_candle_key"] or "").strip(),
+        "closed_candle_sequence": _integer_value(
+            lineage["closed_candle_sequence"]
+        ),
+        "freshness_state": _mapping(
+            forward_timing_forecast.get("lineage")
+        ).get("freshness_state", "UNBOUND"),
         "status": "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE",
         "reason": str(reason or "Exact closed-candle timing evidence is not ready.")[
             :320
         ],
         "duration_policy": duration,
-        "new_entry_eligible": False,
+        "new_entry_eligible": duration_eligible,
         "active_tracking_continues_below_floor": False,
         "active_anchor_count": 0,
         "active_anchor_count_below_900_seconds_remaining": 0,
@@ -1789,11 +1900,38 @@ def pending_path_clock_liquidity_v3(
         "latest_field_state": {},
         "scenario_estimates": [],
         "best_supported_scenario": {},
+        "forward_timing_forecast": forward_timing_forecast,
         "timing_read": {
-            "status": "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE",
-            "state": "INELIGIBLE",
-            "side": "",
-            "studied_direction": "",
+            "status": (
+                "FORWARD_ESTIMATE_ONLY"
+                if forecast_available
+                else "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE"
+            ),
+            "state": (
+                "FORECAST_AVAILABLE"
+                if forecast_available
+                else "INELIGIBLE"
+                if not duration_eligible
+                else "DIRECTION_UNRESOLVED"
+            ),
+            "reason": (
+                "Exact wall-clock survival is unavailable; a separate "
+                "closed-candle-relative forecast remains available."
+                if forecast_available
+                else str(reason or "Exact timing evidence is not ready.")[:320]
+            ),
+            "side": (
+                forward_timing_forecast.get("candidate_direction")
+                if forward_timing_forecast.get("candidate_direction")
+                in {"UP", "DOWN"}
+                else ""
+            ),
+            "studied_direction": (
+                forward_timing_forecast.get("candidate_direction")
+                if forward_timing_forecast.get("candidate_direction")
+                in {"UP", "DOWN"}
+                else ""
+            ),
             "contract_duration_seconds": duration.get(
                 "requested_duration_seconds"
             ),
@@ -1804,9 +1942,9 @@ def pending_path_clock_liquidity_v3(
             "support_count": 0,
             "survival_probability": None,
             "probability_worst_drawdown_still_ahead": None,
-            "new_entry_eligible": False,
+            "new_entry_eligible": duration_eligible,
             "timing_supports_entry": False,
-            "timing_veto": duration.get("new_entry_eligible") is not True,
+            "timing_veto": not duration_eligible,
             "closed_candle_key": "",
             "observed_at": None,
             "valid_until": None,
@@ -1817,6 +1955,7 @@ def pending_path_clock_liquidity_v3(
                 "support": {"baseline": 0, "candidate": 0, "passed": False},
                 "all_axes_improved": False,
             },
+            "forward_timing_forecast": deepcopy(forward_timing_forecast),
             **_safety_contract(),
         },
         "promotion_gate": {

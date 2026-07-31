@@ -8,6 +8,7 @@ import pytest
 from phoenixguard.study.path_clock_liquidity_store_v3 import (
     PathClockLiquiditySideStoreV3,
     PathClockLiquidityStoreValidationError,
+    pending_path_clock_liquidity_v3,
 )
 
 
@@ -472,6 +473,92 @@ def test_duration_must_have_an_exact_closed_candle_endpoint(tmp_path: Path) -> N
     assert result["status"] == "NOT_ALIGNED_TO_CLOSED_CANDLE_GRID"
     assert result["new_entry_eligible"] is False
     assert result["active_anchor_count"] == 0
+
+
+def test_missing_exact_time_proof_keeps_pair_behavior_forecast_without_veto() -> None:
+    pending = pending_path_clock_liquidity_v3(
+        "PG_PROVEN_CLOSED_CANDLE_TIME_V3 proof is unavailable.",
+        contract_duration_seconds=3_000,
+        candidate_direction="SELL",
+        source_cadence_seconds=300,
+        symbol="EUR/NZD",
+        timeframe="M5",
+        closed_candle_key="eur-nzd-close-49",
+        closed_candle_sequence=49,
+        forecast_context={
+            "candidate_direction": "SELL",
+            "directional_confidence": 0.72,
+            "current_regime": "DOWNTREND",
+            "current_behavior": {
+                "status": "STUDIED",
+                "candle_count": 28,
+                "current_state": {"state": "REST", "candle_count": 1},
+                "swing_summary": {
+                    "up": {"average_candles": 1.0},
+                    "down": {"average_candles": 1.6667},
+                },
+                "rest_summary": {"average_candles": 1.0},
+            },
+            "pair_profile": {
+                "observation_count": 14,
+                "candle_count": 22,
+                "behavior": {
+                    "segment_counts": {
+                        "PIXEL_PRICE_PROXY|DOWN_SWING": 3,
+                        "PIXEL_PRICE_PROXY|REST": 3,
+                    },
+                    "segment_averages": {
+                        "PIXEL_PRICE_PROXY|DOWN_SWING": {
+                            "candles": 1.6667,
+                            "duration_seconds": 500.0,
+                        },
+                        "PIXEL_PRICE_PROXY|REST": {
+                            "candles": 1.0,
+                            "duration_seconds": 300.0,
+                        },
+                    },
+                    "transition_counts": {
+                        "PIXEL_PRICE_PROXY|REST->DOWN_SWING": 3,
+                        "PIXEL_PRICE_PROXY|REST->UP_SWING": 1,
+                    },
+                },
+            },
+        },
+    )
+
+    assert pending["status"] == "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE"
+    assert pending["new_entry_eligible"] is True
+    assert pending["timing_read"]["status"] == "FORWARD_ESTIMATE_ONLY"
+    assert pending["timing_read"]["state"] == "FORECAST_AVAILABLE"
+    assert pending["timing_read"]["timing_veto"] is False
+    assert pending["timing_read"]["survival_probability"] is None
+    assert pending["timing_read"]["support_count"] == 0
+    assert pending["symbol"] == "EUR/NZD"
+    assert pending["timeframe"] == "M5"
+    assert pending["closed_candle_key"] == "eur-nzd-close-49"
+    assert pending["closed_candle_sequence"] == 49
+    assert pending["freshness_state"] == "CURRENT_CLOSED_CANDLE"
+    forecast = pending["forward_timing_forecast"]
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["candidate_direction"] == "DOWN"
+    assert forecast["forecast_horizon_seconds"] == 3_000
+    assert forecast["timing_estimate"]["source_tier"] == "PAIR"
+    assert forecast["probability"]["value"] is None
+    assert forecast["probability"]["confidence"] is None
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["evidence_confidence"]["value"] is None
+    assert forecast["expected_pre_move"]["sweep_probability"] is None
+    assert forecast["stop_survival"]["value"] is None
+    assert forecast["move_window"]["exact_wall_clock_proven"] is False
+    assert forecast["move_window"]["relative_to"] == "CLOSED_CANDLE_ANCHOR"
+    assert forecast["move_window"]["rolling_wall_clock"] is False
+    assert "anchor_close_epoch_seconds" not in forecast["move_window"]
+    assert "target_window_start_epoch_seconds" not in forecast["move_window"]
+    assert "target_window_end_epoch_seconds" not in forecast["move_window"]
+    assert forecast["lineage"]["closed_candle_key"] == "eur-nzd-close-49"
+    assert forecast["lineage"]["freshness_state"] == "CURRENT_CLOSED_CANDLE"
+    assert len(forecast["lineage"]["lineage_digest"]) == 64
+    assert forecast["enter_now"]["permission"] is False
 
 
 def test_replay_gate_rejects_unpaired_sweep_outcomes_even_if_axes_improve() -> None:

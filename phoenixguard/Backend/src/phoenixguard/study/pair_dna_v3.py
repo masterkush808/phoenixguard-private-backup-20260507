@@ -324,10 +324,18 @@ def _empty_profile(symbol: str, timeframe: str, pair_id: str) -> dict[str, Any]:
         "concept_drift": _empty_concept_drift_memory(),
         "recent_sequences": [],
         "seen_sequence_ids": [],
+        "outcome_label_count": 0,
+        "recent_outcome_sequence_ids": [],
+        "outcome_dedupe_bloom": _empty_segmented_bloom(),
         "identity_ledger": {
             "algorithm": "MONOTONIC_CLOSED_BOUNDARY_V1",
             "baseline_initialized": False,
             "candle_order_domain": "",
+            "tracker_sequence_offset": 0,
+            "tracker_raw_sequence_high_watermark": None,
+            "tracker_sequence_epoch": 0,
+            "tracker_sequence_rebase_count": 0,
+            "skipped_tracker_reset_candidates": 0,
             "candle_high_watermark": None,
             "completed_boundary_high_watermark": None,
             "open_segment": None,
@@ -358,6 +366,11 @@ def _empty_identity_ledger() -> dict[str, Any]:
         "algorithm": "MONOTONIC_CLOSED_BOUNDARY_V1",
         "baseline_initialized": False,
         "candle_order_domain": "",
+        "tracker_sequence_offset": 0,
+        "tracker_raw_sequence_high_watermark": None,
+        "tracker_sequence_epoch": 0,
+        "tracker_sequence_rebase_count": 0,
+        "skipped_tracker_reset_candidates": 0,
         "candle_high_watermark": None,
         "completed_boundary_high_watermark": None,
         "open_segment": None,
@@ -423,10 +436,55 @@ def _validate_identity_ledger(value: object, *, field: str) -> dict[str, Any]:
         raise PairDNAValidationError(
             f"{field}.candle_order_domain is not supported"
         )
+    tracker_sequence_offset = _integer(
+        source.get("tracker_sequence_offset"),
+        field=f"{field}.tracker_sequence_offset",
+    )
+    raw_high_watermark_value = source.get(
+        "tracker_raw_sequence_high_watermark"
+    )
+    tracker_raw_sequence_high_watermark = (
+        None
+        if raw_high_watermark_value is None
+        else _integer(
+            raw_high_watermark_value,
+            field=f"{field}.tracker_raw_sequence_high_watermark",
+        )
+    )
+    if (
+        order_domain == _TRACKER_EVENT_ORDER_DOMAIN
+        and candle_high_watermark
+        and tracker_raw_sequence_high_watermark is None
+    ):
+        # Existing V3 profiles predate restart-safe sequence rebasing. Their
+        # resolver order was stored without an offset, so the durable order is
+        # also the best conservative raw-sequence baseline.
+        tracker_raw_sequence_high_watermark = int(
+            _order_number(
+                candle_high_watermark.get("order"),
+                field=f"{field}.candle_high_watermark.order",
+            )
+        )
     return {
         "algorithm": "MONOTONIC_CLOSED_BOUNDARY_V1",
         "baseline_initialized": source.get("baseline_initialized") is True,
         "candle_order_domain": order_domain,
+        "tracker_sequence_offset": tracker_sequence_offset,
+        "tracker_raw_sequence_high_watermark": (
+            tracker_raw_sequence_high_watermark
+        ),
+        "tracker_sequence_epoch": _integer(
+            source.get("tracker_sequence_epoch"),
+            field=f"{field}.tracker_sequence_epoch",
+        ),
+        "tracker_sequence_rebase_count": _integer(
+            source.get("tracker_sequence_rebase_count"),
+            field=f"{field}.tracker_sequence_rebase_count",
+        ),
+        "skipped_tracker_reset_candidates": _integer(
+            source.get("skipped_tracker_reset_candidates"),
+            field=f"{field}.skipped_tracker_reset_candidates",
+        ),
         "candle_high_watermark": candle_high_watermark,
         "completed_boundary_high_watermark": _validate_watermark(
             source.get("completed_boundary_high_watermark"),
@@ -504,32 +562,36 @@ def _stable_timestamp(value: object) -> tuple[str, int | float] | None:
 def _stable_candle_marker(row: Mapping[str, Any]) -> dict[str, Any] | None:
     if row.get("closed") is not True:
         return None
-    timestamp = _stable_timestamp(row.get("timestamp"))
     candle_id = str(row.get("candle_id") or "").strip()
-    if timestamp is None:
-        stable_identity = str(
-            row.get("stable_candle_identity") or ""
-        ).strip()
-        sequence = row.get("closed_candle_sequence")
-        if not (
-            row.get("identity_stable") is True
-            and row.get("identity_proof_source")
-            == "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
-            and stable_identity
-            and isinstance(sequence, int)
-            and not isinstance(sequence, bool)
-            and sequence >= 0
-        ):
-            # Positional identities restart at zero for every rolling window.
-            # Only the closed-candle resolver may replace a missing source
-            # timestamp, and it must supply both immutable key and event order.
-            return None
+    stable_identity = str(row.get("stable_candle_identity") or "").strip()
+    sequence = row.get("closed_candle_sequence")
+    resolver_proven = bool(
+        row.get("identity_stable") is True
+        and row.get("identity_proof_source")
+        == "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+        and stable_identity
+        and isinstance(sequence, int)
+        and not isinstance(sequence, bool)
+        and sequence >= 0
+    )
+    if resolver_proven:
+        # The resolver sequence remains the Pair DNA order domain even after a
+        # later exact close-time attestation enriches the same row. Timestamp
+        # proof belongs to JPCLF; it must not switch a live pair from tracker
+        # order to timestamp order midway through its lifelong profile.
         return {
             "identity": f"RESOLVER_EVENT:{stable_identity}",
-            "order": sequence,
+            "order": int(cast(int, sequence)),
+            "raw_tracker_sequence": int(cast(int, sequence)),
             "order_domain": _TRACKER_EVENT_ORDER_DOMAIN,
             "candle_id": candle_id,
         }
+    timestamp = _stable_timestamp(row.get("timestamp"))
+    if timestamp is None:
+        # Positional identities restart at zero for every rolling window.
+        # Only the closed-candle resolver may replace a missing source
+        # timestamp, and it must supply both immutable key and event order.
+        return None
     identity, order = timestamp
     return {
         "identity": identity,
@@ -1279,6 +1341,29 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
     )
     if len(seen_sequence_ids) != len(set(seen_sequence_ids)):
         raise PairDNAValidationError(f"profile {key} has duplicate seen sequence ids")
+    recent_outcome_sequence_ids = _required_strings(
+        profile.get("recent_outcome_sequence_ids", []),
+        field=f"profiles.{key}.recent_outcome_sequence_ids",
+        maximum_length=256,
+    )
+    if len(recent_outcome_sequence_ids) != len(
+        set(recent_outcome_sequence_ids)
+    ):
+        raise PairDNAValidationError(
+            f"profile {key} has duplicate recent outcome sequence ids"
+        )
+    outcome_label_count = _integer(
+        profile.get("outcome_label_count"),
+        field=f"profiles.{key}.outcome_label_count",
+    )
+    outcome_dedupe_bloom = _validate_bloom(
+        profile.get("outcome_dedupe_bloom") or _empty_segmented_bloom(),
+        field=f"profiles.{key}.outcome_dedupe_bloom",
+    )
+    if int(outcome_dedupe_bloom["insertions"]) != outcome_label_count:
+        raise PairDNAValidationError(
+            f"profile {key} outcome label count does not match its dedupe bloom"
+        )
     regime_counts = _counter(profile.get("regime_counts"), field="regime_counts")
     if len(regime_counts) > MAX_PAIR_DNA_REGIMES + 1:
         raise PairDNAValidationError(f"profile {key} exceeds the regime bound")
@@ -1346,6 +1431,9 @@ def _validate_profile(profile: Mapping[str, Any], *, key: str) -> dict[str, Any]
         "concept_drift": concept_drift,
         "recent_sequences": recent_sequences,
         "seen_sequence_ids": seen_sequence_ids,
+        "outcome_label_count": outcome_label_count,
+        "recent_outcome_sequence_ids": recent_outcome_sequence_ids,
+        "outcome_dedupe_bloom": outcome_dedupe_bloom,
         "identity_ledger": _validate_identity_ledger(
             profile.get("identity_ledger"),
             field=f"profiles.{key}.identity_ledger",
@@ -1379,6 +1467,12 @@ def _validate_state(
             raise PairDNAValidationError("pair DNA recent sequence bound was exceeded")
         if len(cast(list[str], profile["seen_sequence_ids"])) > recent_sequence_limit:
             raise PairDNAValidationError("pair DNA sequence identity bound was exceeded")
+        if len(cast(list[str], profile["recent_outcome_sequence_ids"])) > (
+            recent_sequence_limit
+        ):
+            raise PairDNAValidationError(
+                "pair DNA outcome identity bound was exceeded"
+            )
         retracement = _mapping(profile.get("retracement_confluence"))
         if len(_mapping(retracement.get("buckets"))) > max_retracement_buckets:
             raise PairDNAValidationError(
@@ -1626,6 +1720,7 @@ def _incremental_evidence(
     *,
     candles: Sequence[Mapping[str, Any]],
     segments: Sequence[Mapping[str, Any]],
+    allow_tracker_sequence_rebase: bool = False,
 ) -> tuple[
     list[dict[str, Any]],
     list[tuple[dict[str, Any], dict[str, Any]]],
@@ -1644,11 +1739,7 @@ def _incremental_evidence(
     ledger = _validate_identity_ledger(
         profile.get("identity_ledger"), field="identity_ledger"
     )
-    stable_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    marker_by_id: dict[str, dict[str, Any]] = {}
-    ambiguous_candle_ids: set[str] = set()
-    previous_window_order = -math.inf
-    order_domain = str(ledger.get("candle_order_domain") or "")
+    candidate_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for raw in candles:
         row = dict(raw)
         marker = _stable_candle_marker(row)
@@ -1657,6 +1748,84 @@ def _incremental_evidence(
                 int(ledger["skipped_unstable_candles"]) + 1
             )
             continue
+        candidate_rows.append((row, marker))
+
+    resolver_raw_sequences = [
+        int(marker["raw_tracker_sequence"])
+        for _row, marker in candidate_rows
+        if marker.get("order_domain") == _TRACKER_EVENT_ORDER_DOMAIN
+        and isinstance(marker.get("raw_tracker_sequence"), int)
+    ]
+    if resolver_raw_sequences:
+        maximum_raw_sequence = max(resolver_raw_sequences)
+        prior_raw_sequence = ledger.get(
+            "tracker_raw_sequence_high_watermark"
+        )
+        tracker_offset = int(ledger.get("tracker_sequence_offset", 0) or 0)
+        prior_candle_watermark = _mapping(ledger.get("candle_high_watermark"))
+        reset_candidate = bool(
+            prior_raw_sequence is not None
+            and maximum_raw_sequence < int(prior_raw_sequence)
+        )
+        if (
+            reset_candidate
+            and allow_tracker_sequence_rebase
+            and str(ledger.get("candle_order_domain") or "")
+            == _TRACKER_EVENT_ORDER_DOMAIN
+            and prior_candle_watermark
+        ):
+            # A service restart can reset the screenshot resolver's raw local
+            # counter even though Pair DNA is lifelong. Rebase only when the
+            # caller explicitly proves this is its first post-restart pair
+            # observation. The current baseline maps to the existing durable
+            # high-watermark and is therefore not recounted; only a later,
+            # strictly advancing resolver event can enter the aggregates.
+            durable_high_watermark = int(
+                _order_number(
+                    prior_candle_watermark.get("order"),
+                    field="candle_high_watermark.order",
+                )
+            )
+            tracker_offset = max(
+                0,
+                durable_high_watermark - maximum_raw_sequence,
+            )
+            ledger["tracker_sequence_offset"] = tracker_offset
+            ledger["tracker_raw_sequence_high_watermark"] = (
+                maximum_raw_sequence
+            )
+            ledger["tracker_sequence_epoch"] = int(
+                ledger.get("tracker_sequence_epoch", 0) or 0
+            ) + 1
+            ledger["tracker_sequence_rebase_count"] = int(
+                ledger.get("tracker_sequence_rebase_count", 0) or 0
+            ) + 1
+            # A segment that was open in the old process cannot be joined
+            # across an unobserved restart boundary.
+            ledger["open_segment"] = None
+        else:
+            if reset_candidate:
+                ledger["skipped_tracker_reset_candidates"] = int(
+                    ledger.get("skipped_tracker_reset_candidates", 0) or 0
+                ) + len(resolver_raw_sequences)
+            else:
+                ledger["tracker_raw_sequence_high_watermark"] = max(
+                    maximum_raw_sequence,
+                    int(prior_raw_sequence or 0),
+                )
+        for _row, marker in candidate_rows:
+            if marker.get("order_domain") != _TRACKER_EVENT_ORDER_DOMAIN:
+                continue
+            marker["order"] = int(marker["raw_tracker_sequence"]) + int(
+                ledger.get("tracker_sequence_offset", tracker_offset) or 0
+            )
+
+    stable_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    marker_by_id: dict[str, dict[str, Any]] = {}
+    ambiguous_candle_ids: set[str] = set()
+    previous_window_order = -math.inf
+    order_domain = str(ledger.get("candle_order_domain") or "")
+    for row, marker in candidate_rows:
         marker_domain = str(marker.get("order_domain") or "")
         if order_domain and marker_domain != order_domain:
             ledger["skipped_order_domain_conflicts"] = (
@@ -1857,11 +2026,14 @@ def _apply_study(
     ordinal: int,
     recent_sequence_limit: int,
     max_retracement_buckets: int,
-) -> None:
+    apply_outcome: bool = True,
+    allow_tracker_sequence_rebase: bool = False,
+) -> bool:
     new_candles, completed_segments, identity_ledger = _incremental_evidence(
         profile,
         candles=candles,
         segments=segments,
+        allow_tracker_sequence_rebase=allow_tracker_sequence_rebase,
     )
     has_stable_evidence = bool(new_candles or completed_segments)
     # observation_count describes unique study envelopes.  Candle/segment
@@ -1971,7 +2143,7 @@ def _apply_study(
                 )
     profile["object_type_counts"] = object_counts
     profile["identity_ledger"] = identity_ledger
-    if has_stable_evidence:
+    if has_stable_evidence and apply_outcome:
         _apply_outcome_correlation(
             profile,
             _correlation_features(candles, behavior_study, objects),
@@ -2023,6 +2195,7 @@ def _apply_study(
         _mapping(profile.get("sequence_dedupe_bloom")),
         sequence_id,
     )
+    return has_stable_evidence
 
 
 def _derived_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -2362,6 +2535,7 @@ class PairDNAStoreV3:
         objects: Sequence[Mapping[str, Any]] = (),
         outcome: Mapping[str, Any] | None = None,
         retracement_study: Mapping[str, Any] | None = None,
+        allow_tracker_sequence_rebase: bool = False,
     ) -> dict[str, Any]:
         """Atomically merge one completed sequence into its Pair DNA profile.
 
@@ -2430,7 +2604,7 @@ class PairDNAStoreV3:
                         "profile": _derived_profile(profile),
                     }
                 ordinal = int(state.get("next_ordinal", 1))
-                _apply_study(
+                has_stable_evidence = _apply_study(
                     profile,
                     candle_study=candle_study,
                     behavior_study=behavior_study,
@@ -2444,7 +2618,36 @@ class PairDNAStoreV3:
                     ordinal=ordinal,
                     recent_sequence_limit=self.recent_sequence_limit,
                     max_retracement_buckets=self.max_retracement_buckets,
+                    apply_outcome=True,
+                    allow_tracker_sequence_rebase=(
+                        allow_tracker_sequence_rebase is True
+                    ),
                 )
+                if has_stable_evidence and outcome_row:
+                    outcome_bloom = _validate_bloom(
+                        profile.get("outcome_dedupe_bloom")
+                        or _empty_segmented_bloom(),
+                        field="outcome_dedupe_bloom",
+                    )
+                    if not _bloom_contains(outcome_bloom, resolved_sequence_id):
+                        profile["outcome_label_count"] = int(
+                            profile.get("outcome_label_count", 0) or 0
+                        ) + 1
+                        recent_outcomes = [
+                            str(value)
+                            for value in cast(
+                                Sequence[object],
+                                profile.get("recent_outcome_sequence_ids", []),
+                            )
+                        ]
+                        recent_outcomes.append(resolved_sequence_id)
+                        profile["recent_outcome_sequence_ids"] = (
+                            recent_outcomes[-self.recent_sequence_limit :]
+                        )
+                        profile["outcome_dedupe_bloom"] = _bloom_add(
+                            outcome_bloom,
+                            resolved_sequence_id,
+                        )
                 profiles[pair_id] = profile
                 state["profiles"] = profiles
                 state["next_ordinal"] = ordinal + 1
@@ -2463,6 +2666,243 @@ class PairDNAStoreV3:
         return {
             "schema_version": PAIR_DNA_SCHEMA_VERSION,
             "status": "RECORDED",
+            "study_only": True,
+            "execution_authority": False,
+            "pair_id": pair_id,
+            "profile": _derived_profile(profile),
+        }
+
+    def record_observation(
+        self,
+        *,
+        symbol: object,
+        timeframe: object,
+        candle_study: Mapping[str, Any],
+        behavior_study: Mapping[str, Any],
+        sequence_id: object | None = None,
+        observed_at: object | None = None,
+        objects: Sequence[Mapping[str, Any]] = (),
+        allow_tracker_sequence_rebase: bool = False,
+    ) -> dict[str, Any]:
+        """Persist resolver-stable candle and segment timing immediately.
+
+        This path deliberately carries no outcome label.  It lets Pair DNA
+        learn descriptive duration and transition support from the current
+        proven close while the separate one-step maturation contract remains
+        responsible for all direction/outcome correlations.
+        """
+
+        return self.record_study(
+            symbol=symbol,
+            timeframe=timeframe,
+            candle_study=candle_study,
+            behavior_study=behavior_study,
+            sequence_id=sequence_id,
+            observed_at=observed_at,
+            objects=objects,
+            outcome=None,
+            retracement_study=None,
+            allow_tracker_sequence_rebase=allow_tracker_sequence_rebase,
+        )
+
+    def record_outcome(
+        self,
+        *,
+        symbol: object,
+        timeframe: object,
+        candle_study: Mapping[str, Any],
+        behavior_study: Mapping[str, Any],
+        sequence_id: object | None,
+        outcome: Mapping[str, Any],
+        observed_at: object | None = None,
+        objects: Sequence[Mapping[str, Any]] = (),
+        retracement_study: Mapping[str, Any] | None = None,
+        allow_tracker_sequence_rebase: bool = False,
+    ) -> dict[str, Any]:
+        """Attach one causally matured outcome without recounting observations.
+
+        If an upgrade encounters a pending sequence created before immediate
+        observation ingestion existed, its stable observation is admitted in
+        this same transaction first.  Outcome evidence is then accepted only
+        when that exact sequence contributed stable candle or completed-
+        segment evidence.  A dedicated lifelong Bloom makes this operation
+        idempotent independently of the observation envelope.
+        """
+
+        canonical_symbol = _canonical_identity(
+            symbol, field="symbol", maximum=64
+        )
+        canonical_timeframe = _canonical_identity(
+            timeframe, field="timeframe", maximum=32
+        )
+        pair_id = pair_profile_key_v3(canonical_symbol, canonical_timeframe)
+        candles, segments = _validate_studies(candle_study, behavior_study)
+        resolved_sequence_id = str(
+            sequence_id or candle_study.get("sequence_signature") or ""
+        ).strip()
+        if not resolved_sequence_id or len(resolved_sequence_id) > 256:
+            raise PairDNAValidationError(
+                "sequence_id is required and must not exceed 256 characters"
+            )
+        outcome_row = _mapping(outcome)
+        if not outcome_row:
+            raise PairDNAValidationError("outcome must be a non-empty mapping")
+        resolved_observed_at = str(
+            observed_at or candles[-1].get("timestamp") or ""
+        ).strip()
+        if isinstance(objects, (str, bytes, bytearray)):
+            raise PairDNAValidationError("objects must be a sequence of mappings")
+        object_rows: list[dict[str, Any]] = []
+        for index, raw_row in enumerate(cast(Sequence[object], objects)):
+            if not isinstance(raw_row, Mapping):
+                raise PairDNAValidationError(
+                    f"objects[{index}] must be a mapping"
+                )
+            object_rows.append(dict(cast(Mapping[str, Any], raw_row)))
+        retracement_rows = _canonical_completed_retracement_rows(
+            retracement_study,
+            symbol=canonical_symbol,
+            timeframe=canonical_timeframe,
+        )
+
+        try:
+            with exclusive_store_lock(
+                self.path, timeout_seconds=self.lock_timeout_seconds
+            ):
+                state = self._load()
+                profiles = _mapping(state.get("profiles"))
+                if pair_id not in profiles and len(profiles) >= self.max_pairs:
+                    raise PairDNAValidationError(
+                        "Pair DNA capacity reached; shard or raise max_pairs "
+                        "without evicting lifelong profiles"
+                    )
+                profile = _mapping(profiles.get(pair_id)) or _empty_profile(
+                    canonical_symbol,
+                    canonical_timeframe,
+                    pair_id,
+                )
+                ordinal = int(state.get("next_ordinal", 1))
+                observation_bloom = _validate_bloom(
+                    profile.get("sequence_dedupe_bloom"),
+                    field="sequence_dedupe_bloom",
+                )
+                observation_added = False
+                if not _bloom_contains(
+                    observation_bloom, resolved_sequence_id
+                ):
+                    _apply_study(
+                        profile,
+                        candle_study=candle_study,
+                        behavior_study=behavior_study,
+                        candles=candles,
+                        segments=segments,
+                        objects=object_rows,
+                        outcome={},
+                        retracement_rows=(),
+                        sequence_id=resolved_sequence_id,
+                        observed_at=resolved_observed_at,
+                        ordinal=ordinal,
+                        recent_sequence_limit=self.recent_sequence_limit,
+                        max_retracement_buckets=self.max_retracement_buckets,
+                        apply_outcome=False,
+                        allow_tracker_sequence_rebase=(
+                            allow_tracker_sequence_rebase is True
+                        ),
+                    )
+                    observation_added = True
+
+                recent_row = _mapping(
+                    next(
+                        (
+                            row
+                            for row in reversed(
+                                _rows(profile.get("recent_sequences"))
+                            )
+                            if str(row.get("sequence_id") or "")
+                            == resolved_sequence_id
+                        ),
+                        None,
+                    )
+                )
+                has_stable_observation = bool(
+                    int(recent_row.get("candle_count", 0) or 0) > 0
+                    or int(
+                        recent_row.get("completed_segment_count", 0) or 0
+                    )
+                    > 0
+                )
+                outcome_bloom = _validate_bloom(
+                    profile.get("outcome_dedupe_bloom")
+                    or _empty_segmented_bloom(),
+                    field="outcome_dedupe_bloom",
+                )
+                recent_outcomes = [
+                    str(value)
+                    for value in cast(
+                        Sequence[object],
+                        profile.get("recent_outcome_sequence_ids", []),
+                    )
+                ]
+
+                if _bloom_contains(outcome_bloom, resolved_sequence_id):
+                    status = (
+                        "DUPLICATE_OUTCOME_IGNORED"
+                        if resolved_sequence_id in recent_outcomes
+                        else "POSSIBLE_DUPLICATE_OUTCOME_IGNORED"
+                    )
+                elif not has_stable_observation:
+                    status = "SKIPPED_UNPROVEN_STABLE_OBSERVATION"
+                else:
+                    _apply_outcome_correlation(
+                        profile,
+                        _correlation_features(
+                            candles,
+                            behavior_study,
+                            object_rows,
+                        ),
+                        outcome_row,
+                    )
+                    _apply_retracement_confluence(
+                        profile,
+                        retracement_rows,
+                        outcome=outcome_row,
+                        recent_study_limit=self.recent_sequence_limit,
+                        max_buckets=self.max_retracement_buckets,
+                    )
+                    profile["outcome_label_count"] = int(
+                        profile.get("outcome_label_count", 0) or 0
+                    ) + 1
+                    recent_outcomes.append(resolved_sequence_id)
+                    profile["recent_outcome_sequence_ids"] = (
+                        recent_outcomes[-self.recent_sequence_limit :]
+                    )
+                    profile["outcome_dedupe_bloom"] = _bloom_add(
+                        outcome_bloom,
+                        resolved_sequence_id,
+                    )
+                    profile["updated_ordinal"] = ordinal
+                    status = "OUTCOME_RECORDED"
+
+                if observation_added or status == "OUTCOME_RECORDED":
+                    profiles[pair_id] = profile
+                    state["profiles"] = profiles
+                    state["next_ordinal"] = ordinal + 1
+                    canonical = _validate_state(
+                        state,
+                        max_pairs=self.max_pairs,
+                        recent_sequence_limit=self.recent_sequence_limit,
+                        max_retracement_buckets=self.max_retracement_buckets,
+                        max_concept_drift_partitions=(
+                            self.max_concept_drift_partitions
+                        ),
+                    )
+                    write_json_atomic(self.path, canonical)
+                    profile = _mapping(canonical["profiles"][pair_id])
+        except StudyPersistenceError:
+            raise
+        return {
+            "schema_version": PAIR_DNA_SCHEMA_VERSION,
+            "status": status,
             "study_only": True,
             "execution_authority": False,
             "pair_id": pair_id,
@@ -2624,6 +3064,70 @@ class PairDNAStoreV3:
             "execution_authority": False,
             "pair_id": pair_id,
             "profile": _derived_profile(profile),
+        }
+
+    def get_resolver_order_state(
+        self,
+        symbol: object,
+        timeframe: object,
+    ) -> dict[str, Any]:
+        """Return the durable resolver floor needed for restart hydration.
+
+        The accessor is read-only and intentionally exposes no study outcome,
+        probability, or execution field.  A tracker can seed its next local
+        resolver sequence from ``raw_sequence_high_watermark`` when it owns
+        the same epoch, or use ``durable_high_watermark`` as the monotonic
+        floor when reconstructing state after a process restart.
+        """
+
+        canonical_symbol = _canonical_identity(
+            symbol, field="symbol", maximum=64
+        )
+        canonical_timeframe = _canonical_identity(
+            timeframe, field="timeframe", maximum=32
+        )
+        pair_id = pair_profile_key_v3(
+            canonical_symbol,
+            canonical_timeframe,
+        )
+        with exclusive_store_lock(
+            self.path, timeout_seconds=self.lock_timeout_seconds
+        ):
+            state = self._load()
+        profile = _mapping(_mapping(state.get("profiles")).get(pair_id))
+        ledger = _mapping(profile.get("identity_ledger"))
+        watermark = _mapping(ledger.get("candle_high_watermark"))
+        order_domain = str(ledger.get("candle_order_domain") or "")
+        ready = bool(
+            order_domain == _TRACKER_EVENT_ORDER_DOMAIN and watermark
+        )
+        return {
+            "schema_version": PAIR_DNA_SCHEMA_VERSION,
+            "status": "READY" if ready else "NOT_INITIALIZED",
+            "pair_id": pair_id,
+            "symbol": canonical_symbol,
+            "timeframe": canonical_timeframe,
+            "order_domain": order_domain or None,
+            "durable_high_watermark": (
+                watermark.get("order") if watermark else None
+            ),
+            "durable_high_watermark_identity": (
+                watermark.get("identity") if watermark else None
+            ),
+            "raw_sequence_high_watermark": ledger.get(
+                "tracker_raw_sequence_high_watermark"
+            ),
+            "sequence_offset": int(
+                ledger.get("tracker_sequence_offset", 0) or 0
+            ),
+            "sequence_epoch": int(
+                ledger.get("tracker_sequence_epoch", 0) or 0
+            ),
+            "rebase_count": int(
+                ledger.get("tracker_sequence_rebase_count", 0) or 0
+            ),
+            "study_only": True,
+            "execution_authority": False,
         }
 
     def list_profiles(self) -> list[dict[str, Any]]:

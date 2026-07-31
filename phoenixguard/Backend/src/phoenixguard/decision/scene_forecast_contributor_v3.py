@@ -269,6 +269,608 @@ def _source_time_step_count_v3(
     return int(steps)
 
 
+def _expected_stream_boundary_predecessor_chain_v3(
+    prior: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    x_step: float,
+    range_scale: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Prove the two closed predecessors at their exact one-bar-shift slots.
+
+    Arbitrary overlap counts are unsafe on repetitive charts: two unrelated
+    candles can resemble two historical candles at unrelated positions.  A
+    valid fixed-width rollover must instead preserve two consecutive completed
+    predecessors, in order, one slot left of their prior positions.  The two
+    volatile edge candles may legitimately be rescaled, so the proof uses the
+    stable pair immediately behind them and requires the full current edge
+    chain to remain contiguous. Each match must also be unique within visible
+    history so a repeated motif cannot stand in for identity.
+    """
+
+    prior_tail = [
+        cast(Mapping[str, Any], row)
+        for row in cast(Sequence[Any], prior.get("closed_tail") or [])
+        if isinstance(row, Mapping)
+    ]
+    current_tail = [
+        cast(Mapping[str, Any], row)
+        for row in cast(Sequence[Any], observation.get("closed_tail") or [])
+        if isinstance(row, Mapping)
+    ]
+    audit: dict[str, Any] = {
+        "stream_boundary_predecessor_chain_proven": False,
+        "stream_boundary_predecessor_chain_length": 0,
+        "stream_boundary_predecessor_chain_reason": (
+            "EXPECTED_PREDECESSOR_CHAIN_UNAVAILABLE"
+        ),
+    }
+    if len(prior_tail) < 3 or len(current_tail) < 4:
+        return False, audit
+
+    expected_pairs = (
+        (prior_tail[-3], current_tail[-4], len(current_tail) - 4),
+        (prior_tail[-2], current_tail[-3], len(current_tail) - 3),
+    )
+    match_scores: list[float] = []
+    match_margins: list[float] = []
+    x_displacements: list[float] = []
+    for prior_row, expected_row, expected_index in expected_pairs:
+        scores = [
+            _stable_visual_match_score_v3(
+                prior_row,
+                candidate,
+                x_step=x_step,
+                range_scale=range_scale,
+            )
+            for candidate in current_tail
+        ]
+        expected_score = scores[expected_index]
+        second_score = max(
+            (
+                score
+                for index, score in enumerate(scores)
+                if index != expected_index
+            ),
+            default=0.0,
+        )
+        margin = expected_score - second_score
+        prior_x = _finite(prior_row.get("x"))
+        current_x = _finite(expected_row.get("x"))
+        if prior_x is None or current_x is None:
+            audit["stream_boundary_predecessor_chain_reason"] = (
+                "EXPECTED_PREDECESSOR_X_UNAVAILABLE"
+            )
+            return False, audit
+        displacement = current_x - prior_x
+        match_scores.append(expected_score)
+        match_margins.append(margin)
+        x_displacements.append(displacement)
+        if expected_score < 0.62 or margin < 0.10:
+            audit.update(
+                {
+                    "stream_boundary_predecessor_match_scores": [
+                        round(value, 6) for value in match_scores
+                    ],
+                    "stream_boundary_predecessor_match_margins": [
+                        round(value, 6) for value in match_margins
+                    ],
+                    "stream_boundary_predecessor_chain_reason": (
+                        "EXPECTED_PREDECESSOR_MATCH_AMBIGUOUS"
+                    ),
+                }
+            )
+            return False, audit
+
+    minimum_step = max(0.5, x_step * 0.30)
+    maximum_step = max(3.0, x_step * 1.80)
+    expected_shift_proven = all(
+        -maximum_step <= displacement <= -minimum_step
+        for displacement in x_displacements
+    )
+    current_chain_x = [
+        _finite(row.get("x")) for row in current_tail[-4:]
+    ]
+    current_chain_contiguous = bool(
+        all(value is not None for value in current_chain_x)
+        and all(
+            minimum_step
+            <= cast(float, right) - cast(float, left)
+            <= maximum_step
+            for left, right in zip(current_chain_x, current_chain_x[1:])
+        )
+    )
+    audit.update(
+        {
+            "stream_boundary_predecessor_match_scores": [
+                round(value, 6) for value in match_scores
+            ],
+            "stream_boundary_predecessor_match_margins": [
+                round(value, 6) for value in match_margins
+            ],
+            "stream_boundary_predecessor_x_displacements": [
+                round(value, 6) for value in x_displacements
+            ],
+            "stream_boundary_expected_shift_proven": expected_shift_proven,
+            "stream_boundary_predecessor_chain_contiguous": (
+                current_chain_contiguous
+            ),
+        }
+    )
+    if not expected_shift_proven:
+        audit["stream_boundary_predecessor_chain_reason"] = (
+            "EXPECTED_ONE_BAR_SHIFT_NOT_PROVEN"
+        )
+        return False, audit
+    if not current_chain_contiguous:
+        audit["stream_boundary_predecessor_chain_reason"] = (
+            "EXPECTED_PREDECESSOR_CHAIN_NOT_CONTIGUOUS"
+        )
+        return False, audit
+
+    audit.update(
+        {
+            "stream_boundary_predecessor_chain_proven": True,
+            "stream_boundary_predecessor_chain_length": 2,
+            "stream_boundary_predecessor_chain_reason": (
+                "UNIQUE_CONTIGUOUS_ONE_BAR_PREDECESSOR_CHAIN"
+            ),
+        }
+    )
+    return True, audit
+
+
+def _continuous_stream_boundary_rollover_v3(
+    prior: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    timeframe: str,
+    capture_epoch: object,
+    stream_frame_id: object,
+    stream_process_token: object,
+    stream_source_token: object,
+    stream_continuity_eligible: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Prove one close from a continuously observed timeframe boundary.
+
+    Screenshot geometry remains the preferred identity proof.  This bounded
+    bridge exists for the live tracker case where detector coverage/scale
+    changes make the former forming candle visually ambiguous even though the
+    same confirmed pair and timeframe were observed immediately before and
+    after exactly one market-cadence boundary.  It never fills a multi-boundary
+    gap and it requires a distinct, contiguous closed/forming pair at the
+    current chart edge.
+    """
+
+    cadence = _timeframe_seconds_v3(timeframe)
+    previous_epoch = _finite(prior.get("latest_observed_epoch_seconds_v3"))
+    current_epoch = _finite(capture_epoch)
+    audit: dict[str, Any] = {
+        "stream_boundary_transition": False,
+        "stream_boundary_reason": "STREAM_BOUNDARY_EVIDENCE_UNAVAILABLE",
+        "stream_boundary_cadence_seconds": cadence or 0,
+        "stream_boundary_previous_epoch": previous_epoch,
+        "stream_boundary_current_epoch": current_epoch,
+    }
+    current_frame_value = _finite(stream_frame_id)
+    previous_frame_value = _finite(
+        prior.get("latest_stream_frame_id_v3")
+    )
+    current_frame = (
+        int(current_frame_value)
+        if current_frame_value is not None
+        and current_frame_value >= 0.0
+        and current_frame_value.is_integer()
+        else None
+    )
+    previous_frame = (
+        int(previous_frame_value)
+        if previous_frame_value is not None
+        and previous_frame_value >= 0.0
+        and previous_frame_value.is_integer()
+        else None
+    )
+    current_process_token = str(stream_process_token or "").strip()
+    current_source_token = str(stream_source_token or "").strip()
+    previous_process_token = str(
+        prior.get("stream_process_token_v3") or ""
+    ).strip()
+    previous_source_token = str(
+        prior.get("stream_source_token_v3") or ""
+    ).strip()
+    previous_eligible = prior.get("stream_continuity_eligible_v3") is True
+    stream_lineage_contiguous = bool(
+        stream_continuity_eligible
+        and previous_eligible
+        and current_frame is not None
+        and previous_frame is not None
+        and current_frame == previous_frame + 1
+        and current_process_token
+        and current_process_token == previous_process_token
+        and current_source_token
+        and current_source_token == previous_source_token
+    )
+    audit.update(
+        {
+            "stream_boundary_current_frame_id": current_frame,
+            "stream_boundary_previous_frame_id": previous_frame,
+            "stream_boundary_frame_step": (
+                current_frame - previous_frame
+                if current_frame is not None and previous_frame is not None
+                else None
+            ),
+            "stream_boundary_process_match": bool(
+                current_process_token
+                and current_process_token == previous_process_token
+            ),
+            "stream_boundary_source_match": bool(
+                current_source_token
+                and current_source_token == previous_source_token
+            ),
+            "stream_boundary_previous_eligible": previous_eligible,
+            "stream_boundary_current_eligible": bool(
+                stream_continuity_eligible
+            ),
+            "stream_boundary_lineage_contiguous": (
+                stream_lineage_contiguous
+            ),
+        }
+    )
+    if not stream_lineage_contiguous:
+        audit["stream_boundary_reason"] = (
+            "STREAM_CAPTURE_LINEAGE_NOT_CONTIGUOUS"
+        )
+        return False, audit
+    if (
+        cadence is None
+        or previous_epoch is None
+        or current_epoch is None
+        or previous_epoch <= 0.0
+        or current_epoch <= previous_epoch
+    ):
+        return False, audit
+
+    observation_gap = current_epoch - previous_epoch
+    continuity_budget = max(5.0, min(90.0, float(cadence) * 0.45))
+    audit.update(
+        {
+            "stream_boundary_observation_gap_seconds": round(
+                observation_gap, 6
+            ),
+            "stream_boundary_continuity_budget_seconds": round(
+                continuity_budget, 6
+            ),
+        }
+    )
+    if observation_gap > continuity_budget:
+        audit["stream_boundary_reason"] = "STREAM_CONTINUITY_GAP_TOO_LARGE"
+        return False, audit
+
+    previous_bucket = math.floor(previous_epoch / float(cadence))
+    current_bucket = math.floor(current_epoch / float(cadence))
+    bucket_steps = current_bucket - previous_bucket
+    boundary_epoch = float(current_bucket * cadence)
+    audit.update(
+        {
+            "stream_boundary_step_count": int(bucket_steps),
+            "stream_boundary_epoch": boundary_epoch,
+        }
+    )
+    if (
+        bucket_steps != 1
+        or not previous_epoch < boundary_epoch <= current_epoch
+    ):
+        audit["stream_boundary_reason"] = "EXACTLY_ONE_BOUNDARY_NOT_STRADDLED"
+        return False, audit
+
+    current_closed = cast(
+        Mapping[str, Any], observation.get("latest_closed") or {}
+    )
+    current_forming = cast(
+        Mapping[str, Any], observation.get("forming") or {}
+    )
+    prior_closed = cast(
+        Mapping[str, Any], prior.get("latest_closed") or {}
+    )
+    prior_forming = cast(
+        Mapping[str, Any], prior.get("forming") or {}
+    )
+    if (
+        not current_closed
+        or not current_forming
+        or not prior_closed
+        or not prior_forming
+        or current_closed.get("source_time_conflict") is True
+        or current_forming.get("source_time_conflict") is True
+        or prior_closed.get("source_time_conflict") is True
+        or prior_forming.get("source_time_conflict") is True
+    ):
+        audit["stream_boundary_reason"] = "CURRENT_EDGE_CANDLES_UNPROVEN"
+        return False, audit
+
+    closed_x = _finite(current_closed.get("x"))
+    forming_x = _finite(current_forming.get("x"))
+    x_step = max(1.0, float(observation.get("median_x_step") or 0.0))
+    range_scale = max(
+        4.0,
+        float(prior.get("median_range") or 0.0),
+        float(observation.get("median_range") or 0.0),
+    )
+    closed_same = _visual_candle_match_score_v3(
+        prior_closed,
+        current_closed,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
+    forming_same = _visual_candle_match_score_v3(
+        prior_forming,
+        current_forming,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
+    source_closed_same = _same_source_candle_v3(
+        prior_closed, current_closed
+    )
+    source_forming_same = _same_source_candle_v3(
+        prior_forming, current_forming
+    )
+    source_time_steps = _source_time_step_count_v3(
+        prior_closed,
+        current_closed,
+        timeframe=timeframe,
+    )
+    edge_materially_changed = bool(
+        closed_same < 0.62 and forming_same < 0.62
+    )
+    source_evidence_compatible = bool(
+        source_closed_same is None
+        and source_forming_same is None
+        and source_time_steps is None
+    )
+    (
+        predecessor_chain_proven,
+        predecessor_chain_audit,
+    ) = _expected_stream_boundary_predecessor_chain_v3(
+        prior,
+        observation,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
+    edge_step = (
+        forming_x - closed_x
+        if forming_x is not None and closed_x is not None
+        else None
+    )
+    detected_count = _observation_count_v3(observation, closed_only=False)
+    edge_is_contiguous = bool(
+        edge_step is not None
+        and max(0.5, x_step * 0.30)
+        <= edge_step
+        <= max(3.0, x_step * 1.80)
+    )
+    audit.update(
+        {
+            "stream_boundary_edge_step": (
+                round(edge_step, 6) if edge_step is not None else None
+            ),
+            "stream_boundary_latest_closed_same": round(closed_same, 6),
+            "stream_boundary_forming_same": round(forming_same, 6),
+            "stream_boundary_edge_materially_changed": (
+                edge_materially_changed
+            ),
+            "stream_boundary_source_evidence_compatible": (
+                source_evidence_compatible
+            ),
+            "stream_boundary_source_time_step_count": (
+                source_time_steps or 0
+            ),
+            **predecessor_chain_audit,
+            "stream_boundary_edge_contiguous": edge_is_contiguous,
+            "stream_boundary_detected_candle_count": detected_count,
+        }
+    )
+    if not edge_materially_changed:
+        audit["stream_boundary_reason"] = "EDGE_OBSERVATION_NOT_MATERIAL"
+        return False, audit
+    if not source_evidence_compatible:
+        audit["stream_boundary_reason"] = (
+            "SOURCE_IDENTITY_DISAGREES_WITH_ONE_BOUNDARY"
+        )
+        return False, audit
+    if not predecessor_chain_proven:
+        audit["stream_boundary_reason"] = (
+            "EXPECTED_PREDECESSOR_CHAIN_NOT_PROVEN"
+        )
+        return False, audit
+    if detected_count < 4 or not edge_is_contiguous:
+        audit["stream_boundary_reason"] = "CURRENT_EDGE_CHAIN_NOT_CONTIGUOUS"
+        return False, audit
+
+    audit.update(
+        {
+            "stream_boundary_transition": True,
+            "stream_boundary_reason": (
+                "CONTINUOUS_LOCKED_STREAM_STRADDLED_ONE_BOUNDARY"
+            ),
+        }
+    )
+    return True, audit
+
+
+def _confirm_continuous_stream_boundary_candidate_v3(
+    prior: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    timeframe: str,
+    capture_epoch: object,
+    stream_frame_id: object,
+    stream_process_token: object,
+    stream_source_token: object,
+    stream_continuity_eligible: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Confirm a boundary candidate on the next uninterrupted frame."""
+
+    candidate = cast(
+        Mapping[str, Any], prior.get("stream_boundary_candidate_v3") or {}
+    )
+    audit: dict[str, Any] = {
+        "stream_boundary_confirmation": False,
+        "stream_boundary_confirmation_reason": "NO_PENDING_BOUNDARY_CANDIDATE",
+    }
+    if candidate.get("status") != "PENDING_CONFIRMATION":
+        return False, audit
+
+    cadence = _timeframe_seconds_v3(timeframe)
+    current_epoch = _finite(capture_epoch)
+    candidate_epoch = _finite(candidate.get("candidate_capture_epoch"))
+    boundary_epoch = _finite(candidate.get("boundary_epoch"))
+    current_frame_value = _finite(stream_frame_id)
+    candidate_frame_value = _finite(candidate.get("candidate_frame_id"))
+    current_frame = (
+        int(current_frame_value)
+        if current_frame_value is not None
+        and current_frame_value >= 0.0
+        and current_frame_value.is_integer()
+        else None
+    )
+    candidate_frame = (
+        int(candidate_frame_value)
+        if candidate_frame_value is not None
+        and candidate_frame_value >= 0.0
+        and candidate_frame_value.is_integer()
+        else None
+    )
+    process_token = str(stream_process_token or "").strip()
+    source_token = str(stream_source_token or "").strip()
+    candidate_process_token = str(
+        candidate.get("stream_process_token") or ""
+    ).strip()
+    candidate_source_token = str(
+        candidate.get("stream_source_token") or ""
+    ).strip()
+    lineage_contiguous = bool(
+        stream_continuity_eligible
+        and prior.get("stream_continuity_eligible_v3") is True
+        and current_frame is not None
+        and candidate_frame is not None
+        and current_frame == candidate_frame + 1
+        and process_token
+        and process_token == candidate_process_token
+        and process_token
+        == str(prior.get("stream_process_token_v3") or "").strip()
+        and source_token
+        and source_token == candidate_source_token
+        and source_token
+        == str(prior.get("stream_source_token_v3") or "").strip()
+    )
+    time_contiguous = bool(
+        cadence is not None
+        and current_epoch is not None
+        and candidate_epoch is not None
+        and boundary_epoch is not None
+        and boundary_epoch <= candidate_epoch < current_epoch
+        and current_epoch - candidate_epoch
+        <= max(5.0, min(90.0, float(cadence) * 0.45))
+        and current_epoch < boundary_epoch + float(cadence)
+    )
+    candidate_closed = cast(
+        Mapping[str, Any], candidate.get("latest_closed") or {}
+    )
+    candidate_forming = cast(
+        Mapping[str, Any], candidate.get("forming") or {}
+    )
+    current_closed = cast(
+        Mapping[str, Any], observation.get("latest_closed") or {}
+    )
+    current_forming = cast(
+        Mapping[str, Any], observation.get("forming") or {}
+    )
+    x_step = max(
+        1.0,
+        float(prior.get("median_x_step") or 0.0),
+        float(observation.get("median_x_step") or 0.0),
+    )
+    range_scale = max(
+        4.0,
+        float(prior.get("median_range") or 0.0),
+        float(observation.get("median_range") or 0.0),
+    )
+    closed_confirmation = _visual_candle_match_score_v3(
+        candidate_closed,
+        current_closed,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
+    forming_confirmation = _visual_candle_match_score_v3(
+        candidate_forming,
+        current_forming,
+        x_step=x_step,
+        range_scale=range_scale,
+    )
+    source_absent = bool(
+        _same_source_candle_v3(candidate_closed, current_closed) is None
+        and _same_source_candle_v3(candidate_forming, current_forming) is None
+    )
+    geometry_confirmed = bool(
+        candidate_closed
+        and candidate_forming
+        and current_closed
+        and current_forming
+        and closed_confirmation >= 0.62
+        and forming_confirmation >= 0.62
+        and source_absent
+    )
+    audit.update(
+        {
+            "stream_boundary_epoch": boundary_epoch,
+            "stream_boundary_previous_epoch": _finite(
+                candidate.get("previous_capture_epoch")
+            ),
+            "stream_boundary_candidate_epoch": candidate_epoch,
+            "stream_boundary_confirmation_epoch": current_epoch,
+            "stream_boundary_candidate_frame_id": candidate_frame,
+            "stream_boundary_confirmation_frame_id": current_frame,
+            "stream_boundary_confirmation_lineage_contiguous": (
+                lineage_contiguous
+            ),
+            "stream_boundary_confirmation_time_contiguous": time_contiguous,
+            "stream_boundary_closed_confirmation_score": round(
+                closed_confirmation, 6
+            ),
+            "stream_boundary_forming_confirmation_score": round(
+                forming_confirmation, 6
+            ),
+            "stream_boundary_confirmation_geometry_stable": (
+                geometry_confirmed
+            ),
+        }
+    )
+    if not lineage_contiguous:
+        audit["stream_boundary_confirmation_reason"] = (
+            "STREAM_CAPTURE_LINEAGE_NOT_CONTIGUOUS"
+        )
+        return False, audit
+    if not time_contiguous:
+        audit["stream_boundary_confirmation_reason"] = (
+            "BOUNDARY_CONFIRMATION_TIME_NOT_CONTIGUOUS"
+        )
+        return False, audit
+    if not geometry_confirmed:
+        audit["stream_boundary_confirmation_reason"] = (
+            "BOUNDARY_EDGE_NOT_STABLE_ON_CONFIRMATION_FRAME"
+        )
+        return False, audit
+    audit.update(
+        {
+            "stream_boundary_confirmation": True,
+            "stream_boundary_confirmation_reason": (
+                "SECOND_CONTIGUOUS_FRAME_CONFIRMED_BOUNDARY_EDGE"
+            ),
+        }
+    )
+    return True, audit
+
+
 def _immutable_candle_identity_v3(candle: Mapping[str, Any]) -> tuple[str, str] | None:
     """Return broker/source candle identity when the feed supplies one.
 
@@ -1256,6 +1858,12 @@ def resolve_closed_candle_identity_v3(
     previous_state: Mapping[str, Any] | None = None,
     previous_key: str = "",
     previous_sequence: int = -1,
+    capture_epoch: object = None,
+    allow_continuous_stream_boundary: bool = False,
+    stream_frame_id: object = None,
+    stream_process_token: object = "",
+    stream_source_token: object = "",
+    stream_continuity_eligible: bool = False,
 ) -> dict[str, Any]:
     """Resolve screenshot candle events without treating detections as a clock.
 
@@ -1265,7 +1873,9 @@ def resolve_closed_candle_identity_v3(
     detector dropout, color reclassification, or geometry refinement therefore
     cannot manufacture a new market candle. A multi-candle detector coverage
     repair rebases the observation without incrementing the event sequence and
-    explicitly asks the caller to replace same-event forecast geometry.
+    explicitly asks the caller to replace same-event forecast geometry. The
+    live tracker may additionally opt into a one-boundary continuity proof;
+    this is disabled by default and cannot fill capture gaps.
     """
 
     pair_key = str(pair or "UNKNOWN").strip().upper()
@@ -1274,6 +1884,35 @@ def resolve_closed_candle_identity_v3(
     current_closed = cast(Mapping[str, Any], observation["latest_closed"])
     current_forming = cast(Mapping[str, Any], observation["forming"])
     prior = dict(previous_state or {})
+    stream_frame_value = _finite(stream_frame_id)
+    normalized_stream_frame = (
+        int(stream_frame_value)
+        if stream_frame_value is not None
+        and stream_frame_value >= 0.0
+        and stream_frame_value.is_integer()
+        else None
+    )
+    stream_observation_state: dict[str, Any] = {}
+    if normalized_stream_frame is not None:
+        stream_observation_state["latest_stream_frame_id_v3"] = (
+            normalized_stream_frame
+        )
+    normalized_process_token = str(stream_process_token or "").strip()
+    if normalized_process_token:
+        stream_observation_state["stream_process_token_v3"] = (
+            normalized_process_token
+        )
+    normalized_source_token = str(stream_source_token or "").strip()
+    if normalized_source_token:
+        stream_observation_state["stream_source_token_v3"] = (
+            normalized_source_token
+        )
+    stream_observation_state["stream_continuity_eligible_v3"] = bool(
+        stream_continuity_eligible
+        and normalized_stream_frame is not None
+        and normalized_process_token
+        and normalized_source_token
+    )
     prior_matches_context = bool(
         prior
         and str(prior.get("pair") or "").upper() == pair_key
@@ -1308,6 +1947,7 @@ def resolve_closed_candle_identity_v3(
                 "confirmed_closed_count": 0,
             },
             **observation,
+            **stream_observation_state,
             "stable_visible_candle_bindings": stable_visible_candle_bindings,
         }
         return {
@@ -1396,6 +2036,131 @@ def resolve_closed_candle_identity_v3(
         current_closed,
         timeframe=timeframe_key,
     )
+    stream_boundary_transition = False
+    stream_boundary_candidate: dict[str, Any] = {}
+    prior_stream_boundary_candidate = cast(
+        Mapping[str, Any], prior.get("stream_boundary_candidate_v3") or {}
+    )
+    stream_boundary_audit: dict[str, Any] = {
+        "stream_boundary_transition": False,
+        "stream_boundary_reason": "STREAM_BOUNDARY_PROOF_DISABLED",
+    }
+    if allow_continuous_stream_boundary and not (
+        coverage_rebase or coverage_degraded
+    ):
+        (
+            stream_boundary_transition,
+            stream_boundary_confirmation_audit,
+        ) = _confirm_continuous_stream_boundary_candidate_v3(
+            prior,
+            observation,
+            timeframe=timeframe_key,
+            capture_epoch=capture_epoch,
+            stream_frame_id=normalized_stream_frame,
+            stream_process_token=normalized_process_token,
+            stream_source_token=normalized_source_token,
+            stream_continuity_eligible=bool(
+                stream_observation_state.get(
+                    "stream_continuity_eligible_v3", False
+                )
+            ),
+        )
+        scores.update(stream_boundary_confirmation_audit)
+        if stream_boundary_transition:
+            stream_boundary_audit = {
+                **stream_boundary_confirmation_audit,
+                "stream_boundary_transition": True,
+                "stream_boundary_reason": (
+                    "SECOND_CONTIGUOUS_FRAME_CONFIRMED_BOUNDARY_EDGE"
+                ),
+            }
+        elif not prior_stream_boundary_candidate:
+            (
+                boundary_candidate_observed,
+                stream_boundary_audit,
+            ) = _continuous_stream_boundary_rollover_v3(
+                prior,
+                observation,
+                timeframe=timeframe_key,
+                capture_epoch=capture_epoch,
+                stream_frame_id=normalized_stream_frame,
+                stream_process_token=normalized_process_token,
+                stream_source_token=normalized_source_token,
+                stream_continuity_eligible=bool(
+                    stream_observation_state.get(
+                        "stream_continuity_eligible_v3", False
+                    )
+                ),
+            )
+            if boundary_candidate_observed:
+                stream_boundary_candidate = {
+                    "schema_version": (
+                        "PG_STREAM_BOUNDARY_CANDIDATE_V3"
+                    ),
+                    "status": "PENDING_CONFIRMATION",
+                    "boundary_epoch": stream_boundary_audit.get(
+                        "stream_boundary_epoch"
+                    ),
+                    "previous_capture_epoch": (
+                        stream_boundary_audit.get(
+                            "stream_boundary_previous_epoch"
+                        )
+                    ),
+                    "candidate_capture_epoch": (
+                        stream_boundary_audit.get(
+                            "stream_boundary_current_epoch"
+                        )
+                    ),
+                    "candidate_frame_id": normalized_stream_frame,
+                    "stream_process_token": normalized_process_token,
+                    "stream_source_token": normalized_source_token,
+                    "latest_closed": dict(current_closed),
+                    "forming": dict(current_forming),
+                }
+                stream_boundary_audit.update(
+                    {
+                        "stream_boundary_transition": False,
+                        "stream_boundary_candidate_pending": True,
+                        "stream_boundary_reason": (
+                            "STREAM_BOUNDARY_CANDIDATE_PENDING_CONFIRMATION"
+                        ),
+                    }
+                )
+        else:
+            candidate_frame = _finite(
+                prior_stream_boundary_candidate.get("candidate_frame_id")
+            )
+            if (
+                normalized_stream_frame is not None
+                and candidate_frame is not None
+                and normalized_stream_frame <= int(candidate_frame)
+            ):
+                stream_boundary_candidate = dict(
+                    prior_stream_boundary_candidate
+                )
+            stream_boundary_audit = {
+                **stream_boundary_confirmation_audit,
+                "stream_boundary_transition": False,
+                "stream_boundary_candidate_pending": bool(
+                    stream_boundary_candidate
+                ),
+                "stream_boundary_reason": str(
+                    stream_boundary_confirmation_audit.get(
+                        "stream_boundary_confirmation_reason"
+                    )
+                    or "STREAM_BOUNDARY_CANDIDATE_NOT_CONFIRMED"
+                ),
+            }
+    elif allow_continuous_stream_boundary:
+        stream_boundary_audit = {
+            "stream_boundary_transition": False,
+            "stream_boundary_reason": (
+                "DETECTOR_COVERAGE_CHANGE_VETOES_STREAM_BOUNDARY"
+            ),
+            "stream_boundary_coverage_rebase": coverage_rebase,
+            "stream_boundary_coverage_degraded": coverage_degraded,
+        }
+    scores.update(stream_boundary_audit)
     scores["source_time_conflict_prior"] = bool(
         prior_closed.get("source_time_conflict", False)
     )
@@ -1426,6 +2191,10 @@ def resolve_closed_candle_identity_v3(
             if transition_count > 1
             else "VISUAL_FORMING_CANDLE_BECAME_CLOSED"
         )
+    elif stream_boundary_transition:
+        transition = True
+        transition_count = 1
+        reason = "STREAM_CONTINUITY_BOUNDARY_CONFIRMED_CLOSED_CANDLE"
     elif coverage_rebase:
         # Detector history repair can expose many candles that were already on
         # the same captured chart. It changes the model context and anchor but
@@ -1444,6 +2213,8 @@ def resolve_closed_candle_identity_v3(
         reason = "FORMING_CANDLE_STILL_ACTIVE"
     elif closed_same >= 0.62:
         reason = "LATEST_CLOSED_CANDLE_UNCHANGED"
+    elif stream_boundary_candidate:
+        reason = "STREAM_BOUNDARY_CANDIDATE_PENDING_CONFIRMATION"
 
     scores["coverage_high_water_preserved"] = bool(
         coverage_degraded and not coverage_rebase and not transition
@@ -1534,6 +2305,12 @@ def resolve_closed_candle_identity_v3(
             if key != "events"
         },
         **next_observation,
+        **stream_observation_state,
+        **(
+            {"stream_boundary_candidate_v3": stream_boundary_candidate}
+            if stream_boundary_candidate and not transition
+            else {}
+        ),
         "stable_visible_candle_bindings": stable_visible_candle_bindings,
     }
     prior_close_reobservation = _prior_close_reobservation_v3(

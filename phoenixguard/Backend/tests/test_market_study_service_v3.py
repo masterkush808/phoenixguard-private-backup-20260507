@@ -361,7 +361,8 @@ def test_market_study_learns_prior_outcomes_without_execution_authority(
     assert result["directional_read"]["side"] == "BUY"  # type: ignore[index]
     assert result["historical_similarity"]["historical_continuation"]["status"] == "SUPPORTED"  # type: ignore[index]
     assert result["historical_similarity"]["historical_continuation"]["direction"] == "UP"  # type: ignore[index]
-    assert result["pair_dna"]["observation_count"] == 3  # type: ignore[index]
+    assert result["pair_dna"]["observation_count"] == 4  # type: ignore[index]
+    assert result["pair_dna"]["outcome_label_count"] == 3  # type: ignore[index]
     assert result["candle_ledger"]["unique_candle_count"] == 4  # type: ignore[index]
     graph = result["object_relationship_graph"]  # type: ignore[assignment]
     assert graph["schema_version"] == "PG_OBJECT_RELATIONSHIP_GRAPH_V3"  # type: ignore[index]
@@ -378,7 +379,7 @@ def test_market_study_learns_prior_outcomes_without_execution_authority(
         regression=_regression(),
     )
     assert repeated == result
-    assert service.pair_dna.get_profile("CAD/JPY OTC", "M5")["profile"]["observation_count"] == 3
+    assert service.pair_dna.get_profile("CAD/JPY OTC", "M5")["profile"]["observation_count"] == 4
 
 
 def test_pending_outcome_survives_service_restart(tmp_path: Path) -> None:
@@ -407,7 +408,8 @@ def test_pending_outcome_survives_service_restart(tmp_path: Path) -> None:
 
     assert result["status"] == "STUDIED"
     profile = restarted.pair_dna.get_profile("EUR/USD OTC", "M5")["profile"]
-    assert profile["observation_count"] == 1
+    assert profile["observation_count"] == 2
+    assert profile["outcome_label_count"] == 1
     entries = restarted.historical.entries()
     matured = next(
         row
@@ -458,7 +460,8 @@ def test_pixel_outcome_uses_prior_close_reobserved_on_current_frame_axis(
         "CURRENT_FRAME_REOBSERVATION"
     )
     profile = restarted.pair_dna.get_profile("GBP/USD OTC", "M5")["profile"]
-    assert profile["candle_count"] == 8
+    assert profile["candle_count"] == 9
+    assert profile["outcome_label_count"] == 1
 
 
 def test_reacquired_positional_pixel_window_cannot_false_mature(
@@ -503,8 +506,10 @@ def test_reacquired_positional_pixel_window_cannot_false_mature(
     assert latest["candle_id"] == "8"  # type: ignore[index]
     assert latest["identity_stable"] is False  # type: ignore[index]
     profile = service.pair_dna.get_profile("CAD/CHF OTC", "M5")
-    assert profile["status"] == "NOT_FOUND"
-    assert profile["profile"] is None
+    assert profile["status"] == "READY"
+    assert profile["profile"]["observation_count"] == 2
+    assert profile["profile"]["candle_count"] == 0
+    assert profile["profile"]["outcome_label_count"] == 0
     assert result["candle_ledger"]["unique_candle_count"] == 2  # type: ignore[index]
     prior = next(
         row
@@ -551,7 +556,11 @@ def test_one_step_outcome_rejects_gap_replay_and_out_of_order_sequences(
     assert maturation["required_horizon_candles"] == 1
     profile = service.pair_dna.get_profile("EUR/CHF OTC", "M5")
     assert profile["status"] == "READY"
-    assert profile["profile"]["observation_count"] == 0
+    assert profile["profile"]["observation_count"] == 2
+    assert profile["profile"]["outcome_label_count"] == 0
+    assert profile["profile"][
+        "marginal_and_pairwise_outcome_associations"
+    ] == []
     assert profile["profile"]["concept_drift"]["status"] == "READY"
 
 
@@ -592,7 +601,8 @@ def test_pixel_outcome_skips_when_prior_candle_identity_is_not_reobserved(
     )
     profile = service.pair_dna.get_profile("NZD/JPY OTC", "M5")
     assert profile["status"] == "READY"
-    assert profile["profile"]["observation_count"] == 0
+    assert profile["profile"]["observation_count"] == 2
+    assert profile["profile"]["outcome_label_count"] == 0
     assert profile["profile"]["concept_drift"]["status"] == "READY"
 
 
@@ -889,7 +899,7 @@ def test_continuous_research_publishes_shadow_counts_drift_and_claim_coverage(
             "regime_partition",
         )
     )
-    assert proofs["certificate_count"] == 13  # type: ignore[index]
+    assert proofs["certificate_count"] == 14  # type: ignore[index]
     assert all(
         certificate["execution_authority"] is False
         and certificate["causal"] is False
@@ -1254,6 +1264,33 @@ def test_same_closed_key_can_upgrade_from_missing_to_valid_time_proof(
     assert censored["path_clock_liquidity"]["status"] == (  # type: ignore[index]
         "CENSORED_INVALID_TIMING_EVIDENCE"
     )
+    censored_timing = censored["path_clock_liquidity"]  # type: ignore[index]
+    assert censored_timing["timing_read"]["status"] == "FORWARD_ESTIMATE_ONLY"
+    assert censored_timing["timing_read"]["timing_veto"] is False
+    forecast = censored_timing["forward_timing_forecast"]
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["forecast_horizon_seconds"] == 900
+    assert forecast["timing_estimate"]["source_tier"] != "POLICY_WINDOW"
+    event_support = forecast["event_likelihood"]["support_count"]
+    if event_support == 0:
+        assert forecast["probability"]["value"] is None
+        assert forecast["probability"]["confidence"] is None
+        assert forecast["event_likelihood"]["value"] is None
+        assert forecast["evidence_confidence"]["value"] is None
+    else:
+        assert forecast["event_likelihood"]["source_tier"] in {
+            "PAIR_STATE_SURVIVAL",
+            "PAIR_MOTIF",
+        }
+        assert forecast["probability"]["value"] == forecast["event_likelihood"][
+            "value"
+        ]
+    assert forecast["stop_survival"]["value"] is None
+    assert forecast["move_window"]["earliest"]["candles"] >= 3
+    assert forecast["move_window"]["exact_wall_clock_proven"] is False
+    assert forecast["lineage"]["closed_candle_key"] == "jpclf-close-7"
+    assert forecast["lineage"]["closed_candle_sequence"] == 7
+    assert forecast["enter_now"]["permission"] is False
 
     proof = _jpclf_time_proof(0)
     upgraded = service.study(

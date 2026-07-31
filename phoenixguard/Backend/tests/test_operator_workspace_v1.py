@@ -191,6 +191,13 @@ class _EntryQuestionAnswerView(_QuestionAnswerView):
     entry_permission_authorized: bool
     timing_supports_entry: bool
     timing_veto: bool
+    timing_forecast: NotRequired[dict[str, object]]
+    study_projection: NotRequired[dict[str, object]]
+    operator_action: NotRequired[dict[str, object]]
+    identity_rebind_pending: NotRequired[bool]
+    broker_expiry_v3: NotRequired[dict[str, object]]
+    broker_expiry_proven: NotRequired[bool]
+    broker_expiry_eligible: NotRequired[bool]
 
 
 class _ThreeQuestionView(TypedDict):
@@ -256,6 +263,18 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
             "valid_until_epoch": now + 20,
             "selected_side": side,
             "execution_packet_present": True,
+            "broker_expiry_contract_v3": {
+                "schema_version": "PG_BROKER_EXPIRY_PROOF_V3",
+                "proven": True,
+                "expiry_seconds": 1_800,
+                "symbol": "EUR/USD",
+                "timeframe": "M5",
+                "closed_candle_key": "3d40b65dac4324cb7bb8e288",
+                "frame_id": 14,
+                "input_frame_hash": "frame-eurusd-m5-14",
+                "valid_until_epoch": now + 20,
+                "source": "BROKER_UI_BOUND",
+            },
             "current_movement": {
                 "side": side,
                 "state": "ACTIVE",
@@ -411,14 +430,18 @@ def _attach_mature_path_clock_timing(
     timing_veto: bool,
     contract_duration_seconds: int = 1_800,
     remaining_seconds: int = 1_800,
-    closed_candle_key: str = "3d40b65dac4324cb7bb8e288",
+    closed_candle_key: str | None = None,
     valid_until: float | None = None,
 ) -> None:
     tracking = _mutable_mapping(payload["tracking_summary"])
     study = _mutable_mapping(tracking["market_study_v3"])
+    study_side = str(_mutable_mapping(study["directional_read"])["side"])
+    effective_closed_candle_key = closed_candle_key or str(
+        study["closed_candle_key"]
+    )
     timing_read: dict[str, object] = {
         "status": "TIMING_SUPPORT",
-        "side": "SELL",
+        "side": study_side,
         "eligible": True,
         "contract_admitted": True,
         "new_entry_eligible": remaining_seconds >= 900,
@@ -442,10 +465,10 @@ def _attach_mature_path_clock_timing(
         "study_only": True,
         "execution_authority": False,
         "can_grant_entry_permission": False,
-        "symbol": "EUR/USD",
-        "timeframe": "M5",
-        "closed_candle_key": closed_candle_key,
-        "closed_candle_sequence": 88,
+        "symbol": study["symbol"],
+        "timeframe": study["timeframe"],
+        "closed_candle_key": effective_closed_candle_key,
+        "closed_candle_sequence": study["closed_candle_sequence"],
         "minimum_eligible_duration_seconds": 900,
         "maximum_studied_duration_seconds": 7_200,
         "timing_read": timing_read,
@@ -472,6 +495,263 @@ def _attach_mature_path_clock_timing(
         "freezes": [{"closed_candle_key": "private-freeze"}],
         "liquidity_state": {"wick_entropy": 0.42},
     }
+
+
+def _attach_forward_timing_forecast(
+    payload: dict[str, object],
+    *,
+    side: str | None = None,
+    probability: float | None = 0.68,
+    evidence_confidence: float = 0.41,
+    calibration_grade: str = "C_SPARSE_PAIR",
+    calibrated: bool = False,
+    source_tier: str = "PAIR",
+    support_count: int = 11,
+    sweep_support_count: int = 11,
+    exact_anchor_epoch: float | None = None,
+) -> None:
+    _attach_mature_path_clock_timing(
+        payload,
+        supports_entry=False,
+        timing_veto=False,
+    )
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    study = _mutable_mapping(tracking["market_study_v3"])
+    forecast_side = side or str(
+        _mutable_mapping(study["directional_read"])["side"]
+    )
+    timing_contract = _mutable_mapping(study["path_clock_liquidity_v3"])
+    timing_read = _mutable_mapping(timing_contract["timing_read"])
+    forecast: dict[str, object] = {
+        "schema_version": "PG_JPCLF_FORWARD_TIMING_FORECAST_V3",
+        "probability_semantics_version": (
+            "PG_JPCLF_FORWARD_PROBABILITY_SEMANTICS_V3"
+        ),
+        "status": "FORECAST_AVAILABLE",
+        "candidate_direction": "UP" if forecast_side == "BUY" else "DOWN",
+        "current_regime": "TREND",
+        "forecast_horizon_seconds": 1_800,
+        "lineage": {
+            "symbol": study["symbol"],
+            "timeframe": study["timeframe"],
+            "closed_candle_key": study["closed_candle_key"],
+            "closed_candle_sequence": study["closed_candle_sequence"],
+            "source_cadence_seconds": 300,
+            "lineage_bound": True,
+            "freshness_state": "CURRENT_CLOSED_CANDLE",
+            "lineage_digest": "forecast-lineage-test",
+            **(
+                {"anchor_close_epoch_seconds": exact_anchor_epoch}
+                if exact_anchor_epoch is not None
+                else {}
+            ),
+        },
+        "move_window": {
+            "earliest": {"seconds": 900, "minutes": 15, "candles": 3},
+            "central": {"seconds": 1_200, "minutes": 20, "candles": 4},
+            "latest": {"seconds": 1_800, "minutes": 30, "candles": 6},
+            "basis": "CLOSED_CANDLE_RELATIVE_DECLARED_CADENCE",
+            "relative_to": "CLOSED_CANDLE_ANCHOR",
+            "rolling_wall_clock": False,
+            "exact_wall_clock_proven": exact_anchor_epoch is not None,
+            "anchor_time_proven": exact_anchor_epoch is not None,
+            "estimate_calibrated": calibrated,
+            **(
+                {
+                    "anchor_close_epoch_seconds": exact_anchor_epoch,
+                    "target_window_start_epoch_seconds": exact_anchor_epoch
+                    + 900.0,
+                    "target_window_central_epoch_seconds": exact_anchor_epoch
+                    + 1_200.0,
+                    "target_window_end_epoch_seconds": exact_anchor_epoch
+                    + 1_800.0,
+                }
+                if exact_anchor_epoch is not None
+                else {}
+            ),
+        },
+        "probability": {
+            "value": probability,
+            "confidence": evidence_confidence if support_count > 0 else None,
+            "metric": "MOTIF_TARGET_FOLLOW_THROUGH_WITHIN_FORECAST_HORIZON",
+            "source_tier": source_tier,
+            "calibration_grade": calibration_grade,
+            "calibrated": calibrated,
+            "support_count": support_count,
+            "shrinkage_weight": 0.22,
+            "compatibility_alias_for": "event_likelihood",
+        },
+        "directional_model": {
+            "candidate_direction": "UP" if forecast_side == "BUY" else "DOWN",
+            "score": 0.84,
+            "source": "CURRENT_DIRECTIONAL_ENSEMBLE",
+            "is_event_likelihood": False,
+        },
+        "timing_estimate": {
+            "source_tier": source_tier,
+            "basis": (
+                "CURRENT_CLOSED_CANDLE_SEQUENCE_AND_DECLARED_CADENCE"
+                if source_tier == "LIVE_M5_SEQUENCE"
+                else "PAIR_DNA_BEHAVIOR_DURATION"
+            ),
+            "empirical_timing_evidence": source_tier != "LIVE_M5_SEQUENCE",
+            "support_count": support_count if source_tier != "LIVE_M5_SEQUENCE" else 0,
+            "current_sequence_candle_count": 3,
+            "window_blend_weight": 0.22,
+        },
+        "event_likelihood": {
+            "value": probability if support_count > 0 else None,
+            "event": "MOTIF_TARGET_FOLLOW_THROUGH_WITHIN_FORECAST_HORIZON",
+            "source_tier": source_tier if support_count > 0 else "NONE",
+            "support_count": support_count,
+            "calibrated": calibrated,
+        },
+        "evidence_confidence": {
+            "value": evidence_confidence if support_count > 0 else None,
+            "basis": (
+                "EMPIRICAL_OUTCOME_SUPPORT_SATURATION"
+                if support_count > 0
+                else "NO_EMPIRICAL_OUTCOME_SUPPORT"
+            ),
+            "support_count": support_count,
+        },
+        "state_transition_estimate": {
+            "value": 0.61 if support_count > 0 else None,
+            "transition": "REST->DOWN_SWING",
+            "target_count": support_count,
+            "support_count": support_count,
+            "source_tier": "PAIR_STATE_TRANSITIONS",
+            "is_directional_likelihood": False,
+        },
+        "stop_survival": {
+            "value": None,
+            "source_tier": "NONE",
+            "support_count": 0,
+            "exact_wall_clock_proven": False,
+            "calibrated": False,
+        },
+        "adverse_excursion_risk": {
+            "worst_drawdown_still_ahead_probability": None,
+            "source_tier": "NONE",
+            "support_count": 0,
+        },
+        "expected_pre_move": {
+            "state": "REST_THEN_MOVE",
+            "rest_window_candles": {
+                "earliest": 1,
+                "central": 2,
+                "latest": 3,
+            },
+            "rest_window_minutes": {
+                "earliest": 5,
+                "central": 10,
+                "latest": 15,
+            },
+            "sweep_probability": 0.43,
+            "sweep_risk": "MEDIUM",
+            "sweep_source_tier": (
+                "PAIR_REGIME_MOTIF" if sweep_support_count > 0 else "NONE"
+            ),
+            "sweep_support_count": sweep_support_count,
+        },
+        "invalidation": {
+            "direction": "UP" if forecast_side == "SELL" else "DOWN",
+            "condition": "Invalidate after a completed candle changes direction.",
+            "adverse_distance_mru": 1.25,
+            "expires_after_seconds": 1_800,
+            "expires_after_candles": 6,
+            "closed_candles_only": True,
+        },
+        "enter_now": {
+            "permission": False,
+            "duration_eligible": True,
+            "timing_advisory": "FORWARD_WINDOW_AVAILABLE",
+            "reason": "Timing only.",
+            "permission_source": "INDEPENDENT_ENTRY_CONTRACT_REQUIRED",
+        },
+        "evidence_hierarchy": {
+            "selected_tier": source_tier,
+            "support_count": support_count,
+        },
+        "study_only": True,
+        "execution_authority": False,
+        "broker_click_authority": False,
+        "can_grant_entry_permission": False,
+    }
+    timing_contract["forward_timing_forecast"] = forecast
+    timing_read["forward_timing_forecast"] = forecast
+
+
+def _mark_active_target_next_impulse(
+    payload: dict[str, object],
+) -> None:
+    event_definition = "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    study = _mutable_mapping(tracking["market_study_v3"])
+    timing_contract = _mutable_mapping(study["path_clock_liquidity_v3"])
+    forward = _mutable_mapping(timing_contract["forward_timing_forecast"])
+    forward["status"] = "FORECAST_AVAILABLE"
+    _mutable_mapping(forward["move_window"])[
+        "event_definition"
+    ] = event_definition
+    _mutable_mapping(forward["timing_estimate"]).update(
+        {
+            "event_definition": event_definition,
+            "current_target_state": "ALREADY_ACTIVE_AT_ANCHOR",
+        }
+    )
+    _mutable_mapping(forward["event_likelihood"]).update(
+        {
+            "value": None,
+            "event": event_definition,
+            "source_tier": "NONE",
+            "support_count": 0,
+            "calibrated": False,
+        }
+    )
+    _mutable_mapping(forward["probability"]).update(
+        {
+            "value": None,
+            "confidence": None,
+            "metric": event_definition,
+            "support_count": 0,
+            "calibrated": False,
+        }
+    )
+
+
+def _retarget_m5_study_payload(
+    payload: dict[str, object],
+    *,
+    symbol: str,
+    closed_candle_key: str,
+    side: str,
+) -> None:
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking["detected_market"] = symbol
+    tracking["detected_timeframe"] = "M5"
+    study = _mutable_mapping(tracking["market_study_v3"])
+    study["symbol"] = symbol
+    study["timeframe"] = "M5"
+    study["closed_candle_key"] = closed_candle_key
+    regression = _mutable_mapping(study["regression"])
+    for key in ("major_trend", "inner_trend", "current_pressure"):
+        _mutable_mapping(regression[key])["side"] = side
+    current_state = _mutable_mapping(_mutable_mapping(study["behavior"])["current_state"])
+    current_state["direction"] = side
+    _mutable_mapping(study["directional_read"])["side"] = side
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["selected_side"] = side
+    command["execution_packet_present"] = False
+    command["sides"] = {
+        "BUY": {"score": 0.84 if side == "BUY" else 0.42, "selected": side == "BUY"},
+        "SELL": {"score": 0.84 if side == "SELL" else 0.42, "selected": side == "SELL"},
+    }
+    command["buy_score"] = 0.84 if side == "BUY" else 0.42
+    command["sell_score"] = 0.84 if side == "SELL" else 0.42
+    for key in ("current_movement", "pressure_event"):
+        _mutable_mapping(command[key])["side"] = side
+    payload["recent_studies"] = []
 
 
 def _set_current_regression_side(
@@ -1097,7 +1377,11 @@ def test_resting_stream_watches_directional_retrace_and_names_current_reference(
     assert entry["decision_state"] == "WATCHING_RETRACE"
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["enter_now"] is False
-    assert "Higher price sell area" in str(entry["answer"])
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert operator_action["state"] == "WAIT_FOR_PULLBACK"
+    assert "Higher price sell area" in str(operator_action["instruction"])
+    assert "fresh SELL pullback" in str(operator_action["instruction"])
+    assert "fresh verified entry window" in str(operator_action["instruction"])
     evidence = cast(dict[str, object], entry["evidence"])
     assert evidence["execution_authority"] is False
     assert evidence["broker_click_authority"] is False
@@ -1123,8 +1407,13 @@ def test_duplicate_stream_pixels_are_not_reported_as_market_rest() -> None:
     assert entry["decision_state"] == "OBSERVING_CAPTURE"
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["enter_now"] is False
-    assert "pixels are unchanged" in str(entry["headline"])
-    assert "do not prove a market rest" in str(entry["answer"])
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert entry["headline"] == "PREPARE"
+    assert operator_action["state"] == "PREPARE"
+    assert "unchanged pixels" in str(operator_action["instruction"]).lower()
+    assert "do not prove a market rest" in str(
+        operator_action["instruction"]
+    ).lower()
 
 
 def test_missed_stream_decision_waits_for_fresh_directional_pullback() -> None:
@@ -1143,8 +1432,11 @@ def test_missed_stream_decision_waits_for_fresh_directional_pullback() -> None:
     assert entry["timing_state"] == "MISSED"
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["enter_now"] is False
-    assert "WAIT FOR A FRESH SELL PULLBACK" in entry["headline"]
-    assert "fresh SELL pullback" in entry["next_trigger"]
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert entry["headline"] == "WAIT FOR PULLBACK"
+    assert operator_action["state"] == "WAIT_FOR_PULLBACK"
+    assert "fresh SELL pullback" in str(operator_action["instruction"])
+    assert "fresh verified entry window" in str(operator_action["instruction"])
 
 
 def test_missed_prior_thesis_yields_to_aligned_current_regression_and_major() -> None:
@@ -1171,8 +1463,55 @@ def test_missed_prior_thesis_yields_to_aligned_current_regression_and_major() ->
     assert entry["evidence"]["prior_studied_side"] == "SELL"
     assert entry["evidence"]["current_actionable_study_side"] == "BUY"
     assert entry["evidence"]["prior_thesis_superseded"] is True
-    assert "prior SELL" in entry["headline"]
-    assert "current closed-candle study now tracks BUY" in entry["answer"]
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert entry["headline"] == "WAIT FOR PULLBACK"
+    assert "prior SELL" in str(operator_action["instruction"])
+    assert "current closed-candle study now tracks BUY" in str(
+        operator_action["instruction"]
+    )
+    assert "fresh BUY pullback" in str(operator_action["instruction"])
+
+
+def test_current_lineage_buy_forecast_is_not_hidden_by_older_sell_command() -> None:
+    payload = _countertrend_study_payload()
+    _set_current_regression_side(payload, side="BUY")
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    _attach_forward_timing_forecast(
+        payload,
+        side="BUY",
+        probability=None,
+        evidence_confidence=0.0,
+        calibration_grade="D_CURRENT_SEQUENCE",
+        source_tier="LIVE_M5_SEQUENCE",
+        support_count=0,
+        sweep_support_count=0,
+    )
+    payload.update(
+        _cpu_stream_runtime_payload(now=100.0, frame_seq=46, state="rest")
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    studied = workspace["three_questions"]["studied_direction_current"]
+    entry = workspace["three_questions"]["entry_now"]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    evidence = cast(dict[str, object], entry["evidence"])
+
+    assert studied["side"] == "SELL"
+    assert studied["evidence"]["current_regression_side"] == "BUY"
+    assert entry["side"] == "BUY"
+    assert evidence["historical_studied_side"] == "SELL"
+    assert evidence["current_forecast_side"] == "BUY"
+    assert evidence["forecast_uses_current_regression"] is True
+    assert evidence["direction_source"] == "CURRENT_CLOSED_CANDLE_FORECAST"
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["side"] == "BUY"
+    assert forecast["horizon_label"] == (
+        "3–6 completed M5 candles after the anchor close"
+    )
+    assert "timing will publish" not in str(entry["headline"]).lower()
+    assert entry["decision"] == "WATCH_BUY_PULLBACK"
+    assert entry["operator_action"]["state"] == "WAIT_FOR_PULLBACK"
 
 
 def test_resting_stream_watches_current_buy_after_prior_sell_expires() -> None:
@@ -1190,8 +1529,14 @@ def test_resting_stream_watches_current_buy_after_prior_sell_expires() -> None:
     assert entry["side"] == "BUY"
     assert entry["enter_now"] is False
     assert entry["action"] == "DO_NOT_ENTER"
-    assert "prior SELL thesis remains history" in entry["answer"]
-    assert "current closed-candle study now tracks BUY" in entry["answer"]
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert operator_action["state"] == "WAIT_FOR_PULLBACK"
+    assert "prior SELL thesis remains history" in str(
+        operator_action["instruction"]
+    )
+    assert "current closed-candle study now tracks BUY" in str(
+        operator_action["instruction"]
+    )
 
 
 def test_stream_refresh_updates_cached_questions_without_rebuilding_closed_candle_study() -> None:
@@ -1225,7 +1570,7 @@ def test_stream_refresh_updates_cached_questions_without_rebuilding_closed_candl
 
 
 def test_expired_cached_enter_now_is_cleared_by_public_stream_synthesis() -> None:
-    base = _build_workspace(_fresh_payload(side="BUY"), now_epoch=100.0)
+    base = _build_workspace(_countertrend_study_payload(), now_epoch=100.0)
     assert base["three_questions"]["entry_now"]["enter_now"] is True
     expired = dict(base)
     expired["permission"] = {
@@ -1247,7 +1592,7 @@ def test_expired_cached_enter_now_is_cleared_by_public_stream_synthesis() -> Non
     assert decision["action"] == "DO_NOT_ENTER"
     assert decision["timing_state"] != "ENTER_NOW"
     assert decision["state"] != "ENTER_NOW"
-    assert decision["decision"] == "TRACK_BUY_CONTINUATION"
+    assert decision["decision"] == "TRACK_SELL_CONTINUATION"
     assert refreshed["permission"]["allowed"] is False
 
 
@@ -1281,7 +1626,8 @@ def test_three_questions_explain_countertrend_sell_without_turning_study_into_pe
     assert entry["timing_state"] == "FORMING"
     assert entry["state"] == "FORMING"
     assert entry["side"] == "SELL"
-    assert entry["headline"] == "NOT YET — SELL entry is forming"
+    assert entry["headline"] == "PREPARE"
+    assert cast(dict[str, object], entry["operator_action"])["state"] == "PREPARE"
     assert not entry["reason"].lower().startswith("wait")
 
 
@@ -1300,9 +1646,13 @@ def test_three_questions_do_not_call_missing_entry_evidence_stale_history() -> N
 
     assert entry["timing_state"] == "FORMING"
     assert entry["action"] == "DO_NOT_ENTER"
-    assert entry["headline"] == "NOT YET — no current entry study"
-    assert "No identity-proven completed study" in entry["answer"]
-    assert "last trade study" not in entry["answer"].lower()
+    assert entry["headline"] == "STAY OUT"
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert operator_action["state"] == "AVOID"
+    assert "No identity-proven completed study" in str(
+        operator_action["instruction"]
+    )
+    assert "last trade study" not in str(operator_action["instruction"]).lower()
 
 
 def test_three_questions_publish_enter_now_only_from_existing_permission_contract() -> None:
@@ -1317,6 +1667,599 @@ def test_three_questions_publish_enter_now_only_from_existing_permission_contrac
     assert entry["timing_state"] == "ENTER_NOW"
     assert entry["side"] == "SELL"
     assert entry["evidence"]["permission_allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("symbol", "closed_candle_key", "side"),
+    [
+        ("EUR/USD", "key-eurusd-m5-101", "BUY"),
+        ("GBP/JPY OTC", "key-gbpjpy-m5-202", "SELL"),
+        ("AUD/CAD OTC", "key-audcad-m5-303", "BUY"),
+        ("NZD/USD OTC", "key-nzdusd-m5-404", "SELL"),
+        ("CHF/JPY OTC", "key-chfjpy-m5-505", "BUY"),
+    ],
+)
+def test_five_pair_m5_forecasts_are_concrete_bounded_and_stream_stable(
+    symbol: str,
+    closed_candle_key: str,
+    side: str,
+) -> None:
+    payload = _countertrend_study_payload()
+    _retarget_m5_study_payload(
+        payload,
+        symbol=symbol,
+        closed_candle_key=closed_candle_key,
+        side=side,
+    )
+    _attach_forward_timing_forecast(
+        payload,
+        probability=None,
+        evidence_confidence=0.58,
+        calibration_grade="D_CURRENT_SEQUENCE",
+        source_tier="LIVE_M5_SEQUENCE",
+        support_count=0,
+        sweep_support_count=0,
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    entry = workspace["three_questions"]["entry_now"]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    action = cast(dict[str, object], entry["operator_action"])
+
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["side"] == side
+    assert forecast["horizon_seconds_low"] >= 900
+    assert forecast["horizon_candles_low"] >= 3
+    assert forecast["horizon_candles_high"] >= forecast["horizon_candles_low"]
+    assert forecast["horizon_label"] == (
+        "3–6 completed M5 candles after the anchor close"
+    )
+    assert "next" not in str(forecast["headline"]).lower()
+    assert " min" not in str(forecast["headline"]).lower()
+    assert forecast["source"] == "LIVE_M5_SEQUENCE"
+    assert forecast["calibration_grade"] == "D_CURRENT_SEQUENCE"
+    assert forecast["estimated_likelihood"] is None
+    assert forecast["evidence_confidence"] is None
+    assert forecast["directional_model_score"] == 0.84
+    assert forecast["directional_model_score_label"] == (
+        "84% directional model score · not probability"
+    )
+    assert forecast["timing_evidence_label"] == (
+        "Current M5 closed-candle sequence · 3 current candles"
+    )
+    assert "Evidence grade D \u00b7 current sequence" in str(
+        forecast["calibration_label"]
+    )
+    scope = cast(dict[str, object], forecast["scope"])
+    assert scope == {
+        "symbol": symbol,
+        "timeframe": "M5",
+        "closed_candle_key": closed_candle_key,
+        "identity_proven": True,
+    }
+    assert side in str(forecast["headline"])
+    assert "NOT YET" not in str(entry["headline"]).upper()
+    assert "NOT YET" not in str(entry["answer"]).upper()
+    assert action["state"] == "PREPARE"
+    projection = cast(dict[str, object], entry["study_projection"])
+    assert projection["headline"] == (
+        f"{side} direction studied · timing range withheld"
+    )
+    assert projection["timing_range_publishable"] is False
+    assert "not replay-calibrated" in str(projection["summary"])
+    assert projection["study_only"] is True
+    assert projection["can_grant_entry_permission"] is False
+
+    runtime = _cpu_stream_runtime_payload(
+        now=101.0,
+        frame_seq=81,
+        state="motion",
+    )
+    runtime["tracking_summary"] = {
+        "detected_market": symbol,
+        "detected_timeframe": "M5",
+    }
+    refreshed = refresh_operator_streaming_read_v3(
+        workspace,
+        runtime,
+        now_epoch=101.0,
+    )
+    refreshed_entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    refreshed_forecast = cast(
+        dict[str, object], refreshed_entry["timing_forecast"]
+    )
+    refreshed_action = cast(dict[str, object], refreshed_entry["operator_action"])
+    assert refreshed_forecast["headline"] == forecast["headline"]
+    assert cast(dict[str, object], refreshed_forecast["scope"])["symbol"] == symbol
+    assert cast(dict[str, object], refreshed_forecast["scope"])[
+        "closed_candle_key"
+    ] == closed_candle_key
+    assert refreshed_action["state"] == "PREPARE"
+
+    later_runtime = _cpu_stream_runtime_payload(
+        now=401.0,
+        frame_seq=82,
+        state="rest",
+    )
+    later_runtime["tracking_summary"] = {
+        "detected_market": symbol,
+        "detected_timeframe": "M5",
+    }
+    later = refresh_operator_streaming_read_v3(
+        refreshed,
+        later_runtime,
+        now_epoch=401.0,
+    )
+    later_entry = cast(
+        dict[str, object],
+        cast(dict[str, object], later["three_questions"])["entry_now"],
+    )
+    later_forecast = cast(
+        dict[str, object], later_entry["timing_forecast"]
+    )
+    assert later_forecast["headline"] == forecast["headline"]
+    assert later_forecast["horizon_label"] == forecast["horizon_label"]
+
+
+def test_active_target_forecasts_next_impulse_without_inviting_a_chase() -> None:
+    payload = _countertrend_study_payload()
+    _retarget_m5_study_payload(
+        payload,
+        symbol="EUR/USD",
+        closed_candle_key="active-buy-close",
+        side="BUY",
+    )
+    _attach_forward_timing_forecast(
+        payload,
+        probability=None,
+        evidence_confidence=0.58,
+        calibration_grade="D_CURRENT_SEQUENCE",
+        source_tier="LIVE_M5_SEQUENCE",
+        support_count=0,
+        sweep_support_count=0,
+    )
+    _mark_active_target_next_impulse(payload)
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    entry = cast(
+        dict[str, object],
+        cast(dict[str, object], workspace["three_questions"])["entry_now"],
+    )
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    action = cast(dict[str, object], entry["operator_action"])
+
+    assert forecast["headline"] == (
+        "BUY is active · next BUY impulse estimated "
+        "3–6 completed M5 candles after the anchor close"
+    )
+    assert forecast["event_definition"] == (
+        "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+    )
+    assert forecast["active_target_next_impulse"] is True
+    assert forecast["target_move_already_active"] is True
+    assert forecast["estimated_likelihood"] is None
+    assert "current BUY move is mature and already active" in str(
+        forecast["summary"]
+    )
+    assert "next BUY impulse" in str(forecast["summary"])
+    assert "one rest or pullback" in str(forecast["summary"])
+    assert "not permission to chase or enter" in str(forecast["summary"])
+    assert entry["enter_now"] is False
+    assert entry["headline"] == "WAIT FOR PULLBACK"
+    projection = cast(dict[str, object], entry["study_projection"])
+    assert projection["headline"] == (
+        "BUY direction studied · timing range withheld"
+    )
+    assert projection["support_count"] == 0
+    assert projection["calibrated"] is False
+    assert projection["timing_range_publishable"] is False
+    assert action["state"] == "WAIT_FOR_PULLBACK"
+    assert "Do not chase" in str(action["instruction"])
+    assert "one completed rest or pullback" in str(action["instruction"])
+
+    runtime = _cpu_stream_runtime_payload(
+        now=101.0,
+        frame_seq=83,
+        state="motion",
+    )
+    runtime["tracking_summary"] = {
+        "detected_market": "EUR/USD",
+        "detected_timeframe": "M5",
+    }
+    refreshed = refresh_operator_streaming_read_v3(
+        workspace,
+        runtime,
+        now_epoch=101.0,
+    )
+    refreshed_entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    refreshed_forecast = cast(
+        dict[str, object], refreshed_entry["timing_forecast"]
+    )
+    refreshed_action = cast(
+        dict[str, object], refreshed_entry["operator_action"]
+    )
+    assert refreshed_forecast["headline"] == forecast["headline"]
+    assert refreshed_action["state"] == "WAIT_FOR_PULLBACK"
+    assert refreshed_entry["enter_now"] is False
+
+    enter_payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(
+        enter_payload,
+        source_tier="LIVE_M5_SEQUENCE",
+    )
+    _mark_active_target_next_impulse(enter_payload)
+    enter_entry = cast(
+        dict[str, object],
+        cast(
+            dict[str, object],
+            _build_workspace(enter_payload, now_epoch=100.0)[
+                "three_questions"
+            ],
+        )["entry_now"],
+    )
+    enter_action = cast(dict[str, object], enter_entry["operator_action"])
+    assert enter_entry["enter_now"] is True
+    assert enter_action["state"] == "ENTER_NOW"
+
+
+def test_forward_forecast_separates_estimated_likelihood_from_evidence_confidence() -> None:
+    payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(payload)
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    action = cast(dict[str, object], entry["operator_action"])
+
+    assert forecast["headline"] == (
+        "SELL leading 3–6 completed M5 candles after the anchor close"
+    )
+    assert forecast["estimated_likelihood"] == 0.68
+    assert forecast["evidence_confidence"] == 0.41
+    assert forecast["confidence"] == 0.41
+    assert forecast["estimated_likelihood_label"] == (
+        "68% estimated chance of motif target follow-through within the "
+        "forecast horizon · not replay-calibrated"
+    )
+    assert forecast["evidence_confidence_label"] == "41% evidence confidence"
+    assert forecast["directional_model_score"] == 0.84
+    assert forecast["directional_model_score_label"] == (
+        "84% directional model score · not probability"
+    )
+    assert forecast["event_likelihood_event_label"] == (
+        "motif target follow-through within the forecast horizon"
+    )
+    assert forecast["timing_evidence_label"] == (
+        "Pair behavior timing history · empirical · 11 timing observations"
+    )
+    assert forecast["calibration_grade"] == "C_SPARSE_PAIR"
+    assert "Evidence grade C · sparse pair history" in str(
+        forecast["calibration_label"]
+    )
+    assert "C_SPARSE_PAIR" not in str(forecast["calibration_label"])
+    assert "Rest may persist 1–3 candles" in str(forecast["rest_sweep_risk"])
+    assert "43%" in str(forecast["rest_sweep_risk"])
+    assert forecast["invalidation"] == (
+        "Invalidate after a completed candle changes direction."
+    )
+    assert entry["enter_now"] is True
+    assert action["state"] == "ENTER_NOW"
+
+
+def test_exact_window_uses_fixed_epochs_counts_down_and_expires_without_reset() -> None:
+    payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(
+        payload,
+        calibrated=True,
+        exact_anchor_epoch=100.0,
+    )
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    timing = _mutable_mapping(study["path_clock_liquidity_v3"])
+    forward = _mutable_mapping(timing["forward_timing_forecast"])
+    _mutable_mapping(forward["stop_survival"]).update(
+        {
+            "value": 0.72,
+            "source_tier": "EXACT_JPCLF",
+            "support_count": 40,
+            "exact_wall_clock_proven": True,
+            "calibrated": True,
+        }
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    initial_entry = cast(
+        dict[str, object], workspace["three_questions"]["entry_now"]
+    )
+    initial = cast(dict[str, object], initial_entry["timing_forecast"])
+    initial_projection = cast(
+        dict[str, object], initial_entry["study_projection"]
+    )
+    assert initial["exact_wall_clock_proven"] is True
+    assert initial["target_window_start_epoch_seconds"] == 1_000.0
+    assert initial["target_window_end_epoch_seconds"] == 1_900.0
+    assert initial["seconds_until_window_start"] == 900
+    assert initial["seconds_until_window_end"] == 1_800
+    assert "fixed window opens in 15 min" in str(initial["headline"])
+    assert initial_projection["timing_range_publishable"] is True
+    assert initial_projection["headline"] == initial["headline"]
+
+    at_400 = refresh_operator_streaming_read_v3(
+        workspace,
+        _cpu_stream_runtime_payload(now=400.0, frame_seq=91, state="motion"),
+        now_epoch=400.0,
+    )
+    at_400_forecast = cast(
+        dict[str, object],
+        cast(dict[str, object], at_400["three_questions"])["entry_now"][
+            "timing_forecast"
+        ],
+    )
+    assert at_400_forecast["target_window_end_epoch_seconds"] == 1_900.0
+    assert at_400_forecast["seconds_until_window_start"] == 600
+    assert at_400_forecast["seconds_until_window_end"] == 1_500
+    assert "opens in 10 min" in str(at_400_forecast["headline"])
+
+    at_700 = refresh_operator_streaming_read_v3(
+        at_400,
+        _cpu_stream_runtime_payload(now=700.0, frame_seq=92, state="rest"),
+        now_epoch=700.0,
+    )
+    at_700_forecast = cast(
+        dict[str, object],
+        cast(dict[str, object], at_700["three_questions"])["entry_now"][
+            "timing_forecast"
+        ],
+    )
+    assert at_700_forecast["target_window_end_epoch_seconds"] == 1_900.0
+    assert at_700_forecast["seconds_until_window_start"] == 300
+    assert at_700_forecast["seconds_until_window_end"] == 1_200
+    assert "opens in 5 min" in str(at_700_forecast["headline"])
+
+    expired = refresh_operator_streaming_read_v3(
+        at_700,
+        _cpu_stream_runtime_payload(now=1_901.0, frame_seq=93, state="motion"),
+        now_epoch=1_901.0,
+    )
+    expired_forecast = cast(
+        dict[str, object],
+        cast(dict[str, object], expired["three_questions"])["entry_now"][
+            "timing_forecast"
+        ],
+    )
+    assert expired_forecast["exact_wall_clock_proven"] is False
+    assert expired_forecast["target_window_start_epoch_seconds"] is None
+    assert expired_forecast["target_window_end_epoch_seconds"] is None
+    assert expired_forecast["estimated_likelihood"] is None
+    assert "exact timing expired" in str(expired_forecast["headline"])
+    expired_technical = cast(
+        dict[str, object], expired_forecast["technical_estimates"]
+    )
+    assert expired_technical["stop_survival"] == {}
+    assert expired_technical["adverse_excursion_risk"] == {}
+
+
+def test_stream_pair_switch_discards_prior_forecast_and_permission() -> None:
+    base_payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(base_payload)
+    base = _build_workspace(base_payload, now_epoch=100.0)
+    prior_forecast = cast(
+        dict[str, object], base["three_questions"]["entry_now"]["timing_forecast"]
+    )
+    assert cast(dict[str, object], prior_forecast["scope"])["symbol"] == "EUR/USD"
+
+    same_frame_runtime = _cpu_stream_runtime_payload(
+        now=101.0,
+        frame_seq=82,
+        state="motion",
+    )
+    same_frame_runtime["display_frame_id"] = 14
+    same_frame_runtime["tracking_summary"] = {
+        "detected_market": "AUD/CAD OTC",
+        "detected_timeframe": "M5",
+    }
+    pending = refresh_operator_streaming_read_v3(
+        base,
+        same_frame_runtime,
+        now_epoch=101.0,
+    )
+    pending_entry = cast(
+        dict[str, object],
+        cast(dict[str, object], pending["three_questions"])["entry_now"],
+    )
+    pending_forecast = cast(
+        dict[str, object], pending_entry["timing_forecast"]
+    )
+    pending_action = cast(dict[str, object], pending_entry["operator_action"])
+
+    assert pending["market"] == {"symbol": "EUR/USD", "timeframe": "M5"}
+    assert pending["permission"]["allowed"] is False
+    assert pending_entry["identity_rebind_pending"] is True
+    assert cast(dict[str, object], pending_forecast["scope"])["symbol"] == (
+        "EUR/USD"
+    )
+    assert pending_forecast["headline"] == prior_forecast["headline"]
+    assert pending_action["state"] == "AVOID"
+
+    next_pair_payload = _countertrend_study_payload()
+    _retarget_m5_study_payload(
+        next_pair_payload,
+        symbol="AUD/CAD OTC",
+        closed_candle_key="key-audcad-m5-next-frame",
+        side="BUY",
+    )
+    next_pair_tracking = _mutable_mapping(next_pair_payload["tracking_summary"])
+    next_frame_runtime = _cpu_stream_runtime_payload(
+        now=102.0,
+        frame_seq=83,
+        state="motion",
+    )
+    next_frame_runtime["display_frame_id"] = 15
+    next_frame_runtime["tracking_summary"] = {
+        "detected_market": "AUD/CAD OTC",
+        "detected_timeframe": "M5",
+        "market_study_v3": next_pair_tracking["market_study_v3"],
+    }
+    refreshed = refresh_operator_streaming_read_v3(
+        pending,
+        next_frame_runtime,
+        now_epoch=102.0,
+    )
+    entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    action = cast(dict[str, object], entry["operator_action"])
+
+    assert refreshed["market"] == {"symbol": "AUD/CAD OTC", "timeframe": "M5"}
+    assert refreshed["permission"]["allowed"] is False
+    assert forecast["side"] == "NEUTRAL"
+    assert forecast["status"] == "DIRECTION_UNRESOLVED"
+    assert "EUR/USD" not in json.dumps(forecast)
+    assert action["state"] == "AVOID"
+    assert entry["enter_now"] is False
+    assert entry["identity_rebind_pending"] is False
+
+
+def test_exact_stop_survival_calibration_never_bleeds_into_event_likelihood() -> None:
+    payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(
+        payload,
+        probability=None,
+        evidence_confidence=0.0,
+        calibration_grade="UNRATED",
+        calibrated=False,
+        source_tier="EXACT_JPCLF",
+        support_count=0,
+        sweep_support_count=0,
+    )
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    timing = _mutable_mapping(study["path_clock_liquidity_v3"])
+    forward = _mutable_mapping(timing["forward_timing_forecast"])
+    stop_survival = _mutable_mapping(forward["stop_survival"])
+    stop_survival.update(
+        {
+            "value": 0.72,
+            "source_tier": "EXACT_JPCLF",
+            "support_count": 40,
+            "exact_wall_clock_proven": True,
+            "calibrated": True,
+            "stop_distance_mru": 1.1,
+            "move_size_mru": 1.8,
+        }
+    )
+
+    forecast = cast(
+        dict[str, object],
+        _build_workspace(payload, now_epoch=100.0)["three_questions"][
+            "entry_now"
+        ]["timing_forecast"],
+    )
+    technical = cast(dict[str, object], forecast["technical_estimates"])
+    public_stop = cast(dict[str, object], technical["stop_survival"])
+
+    assert forecast["estimated_likelihood"] is None
+    assert forecast["evidence_confidence"] is None
+    assert forecast["calibration_grade"] == "UNRATED"
+    assert forecast["calibrated"] is False
+    assert forecast["event_likelihood_support_count"] == 0
+    assert "UNRATED" in str(forecast["calibration_label"])
+    assert public_stop["value"] == 0.72
+    assert public_stop["calibrated"] is True
+
+
+def test_model_horizon_never_overrides_proven_sub_15_minute_broker_expiry() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    broker_expiry = _mutable_mapping(command["broker_expiry_contract_v3"])
+    broker_expiry["expiry_seconds"] = 600
+    _attach_forward_timing_forecast(payload)
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    timing = _mutable_mapping(study["path_clock_liquidity_v3"])
+    forward = _mutable_mapping(timing["forward_timing_forecast"])
+    forward["forecast_horizon_seconds"] = 3_000
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    entry = workspace["three_questions"]["entry_now"]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    action = cast(dict[str, object], entry["operator_action"])
+    proof = cast(dict[str, object], entry["broker_expiry_v3"])
+
+    assert workspace["permission"]["allowed"] is True
+    assert forecast["forecast_horizon_seconds"] == 3_000
+    assert forecast["forecast_horizon_source"] == "MODEL_STUDY_HORIZON"
+    assert forecast["broker_expiry_seconds"] is None
+    assert proof["status"] == "VERIFIED_INELIGIBLE"
+    assert proof["expiry_seconds"] == 600
+    assert proof["model_horizon_is_broker_expiry"] is False
+    assert entry["entry_permission_authorized"] is False
+    assert entry["enter_now"] is False
+    assert entry["timing_state"] == "DURATION_INELIGIBLE"
+    assert action["state"] == "AVOID"
+    assert "requires at least 15 minutes" in str(action["instruction"])
+
+
+def test_unknown_broker_expiry_keeps_forecast_but_action_requires_verification() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command.pop("broker_expiry_contract_v3")
+    _attach_forward_timing_forecast(payload)
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    timing = _mutable_mapping(study["path_clock_liquidity_v3"])
+    _mutable_mapping(timing["forward_timing_forecast"])[
+        "forecast_horizon_seconds"
+    ] = 3_000
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+    entry = workspace["three_questions"]["entry_now"]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    action = cast(dict[str, object], entry["operator_action"])
+    proof = cast(dict[str, object], entry["broker_expiry_v3"])
+
+    assert workspace["permission"]["allowed"] is True
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["forecast_horizon_seconds"] == 3_000
+    assert proof["status"] == "UNVERIFIED"
+    assert proof["expiry_seconds"] is None
+    assert entry["entry_permission_authorized"] is False
+    assert entry["enter_now"] is False
+    assert entry["timing_state"] == "EXPIRY_UNVERIFIED"
+    assert action["state"] == "PREPARE"
+    assert "SET/VERIFY EXPIRY ≥15 MIN" in str(action["instruction"])
+    assert "Broker expiry unverified" in str(action["instruction"])
+
+    refreshed = refresh_operator_streaming_read_v3(
+        workspace,
+        _cpu_stream_runtime_payload(now=101.0, frame_seq=94, state="motion"),
+        now_epoch=101.0,
+    )
+    refreshed_entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    refreshed_action = cast(
+        dict[str, object], refreshed_entry["operator_action"]
+    )
+    assert refreshed_entry["enter_now"] is False
+    assert refreshed_action["state"] == "PREPARE"
+    assert "SET/VERIFY EXPIRY ≥15 MIN" in str(
+        refreshed_action["instruction"]
+    )
 
 
 def test_mature_path_clock_timing_supports_but_never_grants_entry_permission() -> None:
@@ -1399,7 +2342,11 @@ def test_mature_path_clock_veto_delays_permission_and_survives_stream_refresh() 
     assert refreshed_entry["timing_veto"] is True
     assert refreshed_entry["enter_now"] is False
     assert refreshed_entry["decision"] == "DELAY_FOR_TIMING"
-    assert "At least 15 minutes" in str(refreshed_entry["answer"])
+    refreshed_action = cast(
+        dict[str, object], refreshed_entry["operator_action"]
+    )
+    assert refreshed_action["state"] == "WAIT_FOR_PULLBACK"
+    assert "At least 15 minutes" in str(refreshed_action["instruction"])
 
 
 def test_stream_refresh_expires_mature_path_clock_support_fail_closed() -> None:
@@ -1429,24 +2376,38 @@ def test_stream_refresh_expires_mature_path_clock_support_fail_closed() -> None:
 
     assert entry["entry_permission_authorized"] is True
     assert entry["timing_supports_entry"] is False
-    assert entry["timing_veto"] is True
-    assert entry["enter_now"] is False
-    assert entry["decision"] == "DELAY_FOR_TIMING"
-    assert timing["state"] == "STALE"
+    assert entry["timing_veto"] is False
+    assert entry["enter_now"] is True
+    assert entry["action"] == "SELL_NOW"
+    assert entry["decision"] == "ENTER_SELL"
+    assert timing["state"] == "PROVISIONAL"
 
 
 @pytest.mark.parametrize(
-    ("contract_duration_seconds", "remaining_seconds", "closed_candle_key", "expected_state"),
+    (
+        "contract_duration_seconds",
+        "remaining_seconds",
+        "closed_candle_key",
+        "expected_state",
+        "expected_veto",
+    ),
     [
-        (899, 899, "3d40b65dac4324cb7bb8e288", "UNDER_15_MINUTES"),
-        (1_800, 1_800, "wrong-closed-candle", "INVALID_LINEAGE"),
+        (
+            899,
+            899,
+            "3d40b65dac4324cb7bb8e288",
+            "UNDER_15_MINUTES",
+            True,
+        ),
+        (1_800, 1_800, "wrong-closed-candle", "PROVISIONAL", False),
     ],
 )
-def test_path_clock_timing_fails_closed_for_under_15_minutes_or_wrong_lineage(
+def test_path_clock_timing_only_vetoes_known_under_15_minute_duration(
     contract_duration_seconds: int,
     remaining_seconds: int,
     closed_candle_key: str,
     expected_state: str,
+    expected_veto: bool,
 ) -> None:
     payload = _countertrend_study_payload()
     _attach_mature_path_clock_timing(
@@ -1467,9 +2428,11 @@ def test_path_clock_timing_fails_closed_for_under_15_minutes_or_wrong_lineage(
     )
 
     assert entry["entry_permission_authorized"] is True
-    assert entry["timing_veto"] is True
-    assert entry["enter_now"] is False
-    assert entry["action"] == "DO_NOT_ENTER"
+    assert entry["timing_veto"] is expected_veto
+    assert entry["enter_now"] is (not expected_veto)
+    assert entry["action"] == (
+        "DO_NOT_ENTER" if expected_veto else "SELL_NOW"
+    )
     assert timing["state"] == expected_state
 
 
@@ -1530,18 +2493,18 @@ def test_unproven_exact_candle_time_keeps_eligible_duration_separate() -> None:
     assert timing["duration_policy_valid"] is True
     assert timing["remaining_window_eligible"] is True
     assert timing["timing_evidence_proven"] is False
-    assert timing["state"] == "TIMING_EVIDENCE_UNAVAILABLE"
+    assert timing["state"] == "PROVISIONAL"
     assert timing["source_status"] == "CENSORED_INVALID_TIMING_EVIDENCE"
     assert timing["source_timing_status"] == (
         "INSUFFICIENT_PROVEN_CLOSED_CANDLE_EVIDENCE"
     )
-    assert timing["timing_veto"] is True
+    assert timing["timing_veto"] is False
     assert entry["entry_permission_authorized"] is True
-    assert entry["enter_now"] is False
-    assert entry["action"] == "DO_NOT_ENTER"
-    assert entry["timing_state"] == "TIMING_DELAY"
-    assert entry["decision"] == "DELAY_FOR_TIMING"
-    assert "will not invent a survival probability" in str(entry["reason"])
+    assert entry["enter_now"] is True
+    assert entry["action"] == "SELL_NOW"
+    assert entry["timing_state"] == "ENTER_NOW"
+    assert entry["decision"] == "ENTER_SELL"
+    assert "survival probability is invented" in str(timing["reason"])
 
 
 def test_unaligned_duration_is_not_mislabeled_as_under_15_minutes() -> None:
@@ -1597,10 +2560,11 @@ def test_unaligned_duration_is_not_mislabeled_as_under_15_minutes() -> None:
     assert timing["duration_policy_valid"] is True
     assert timing["remaining_window_eligible"] is True
     assert timing["timing_evidence_proven"] is False
-    assert timing["state"] == "TIMING_EVIDENCE_UNAVAILABLE"
-    assert timing["timing_veto"] is True
+    assert timing["state"] == "PROVISIONAL"
+    assert timing["timing_veto"] is False
+    assert entry["entry_permission_authorized"] is False
     assert entry["enter_now"] is False
-    assert entry["decision"] == "DELAY_FOR_TIMING"
+    assert entry["action"] == "DO_NOT_ENTER"
 
 
 def test_bounded_projection_keeps_only_public_path_clock_summary() -> None:
@@ -1857,9 +2821,13 @@ def test_three_questions_call_an_expired_studied_move_missed_instead_of_wait() -
     assert entry["enter_now"] is False
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["timing_state"] == "MISSED"
-    assert entry["headline"] == "NO — the SELL opportunity was missed"
-    assert "chasing it now is not authorized" in entry["answer"]
-    assert "fresh SELL pullback" in entry["next_trigger"]
+    assert entry["headline"] == "WAIT FOR PULLBACK"
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert operator_action["state"] == "WAIT_FOR_PULLBACK"
+    assert "chasing it now is not authorized" in str(
+        operator_action["instruction"]
+    )
+    assert "fresh SELL pullback" in str(operator_action["instruction"])
 
 
 def test_three_questions_do_not_claim_diagnostic_probe_was_definitively_missed() -> None:
@@ -1899,8 +2867,10 @@ def test_three_questions_classify_late_chase_trap_as_missed() -> None:
 
     assert entry["timing_state"] == "MISSED"
     assert entry["action"] == "DO_NOT_ENTER"
-    assert "missed" in entry["headline"].lower()
-    assert "chasing" in entry["answer"].lower()
+    assert entry["headline"] == "WAIT FOR PULLBACK"
+    operator_action = cast(dict[str, object], entry["operator_action"])
+    assert operator_action["state"] == "WAIT_FOR_PULLBACK"
+    assert "chasing" in str(operator_action["instruction"]).lower()
 
 
 def test_three_questions_recover_countertrend_study_without_command_center() -> None:

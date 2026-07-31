@@ -148,6 +148,33 @@ def _shifted_studies(offset: int) -> tuple[dict[str, Any], dict[str, Any]]:
     return _studies_from_rows(rows)
 
 
+def _resolver_bound_studies(
+    closes: list[float],
+    bindings: dict[int, int],
+    *,
+    include_timestamps: bool,
+    identity_prefix: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    candle_study, behavior_study = _studies_from_rows(
+        _raw_series(closes, include_timestamps=include_timestamps)
+    )
+    studied_rows = candle_study["candles"]
+    for row_index, resolver_sequence in bindings.items():
+        studied_rows[row_index].update(
+            {
+                "identity_stable": True,
+                "stable_candle_identity": (
+                    f"EXPLICIT:{identity_prefix}-{resolver_sequence}"
+                ),
+                "identity_proof_source": (
+                    "PG_CLOSED_CANDLE_IDENTITY_STATE_V3"
+                ),
+                "closed_candle_sequence": resolver_sequence,
+            }
+        )
+    return candle_study, behavior_study
+
+
 def test_pair_dna_persists_normalized_behavior_and_actual_market_outcome(tmp_path: Path) -> None:
     path = tmp_path / "pair_dna.json"
     store = PairDNAStoreV3(path, max_pairs=4, recent_sequence_limit=8)
@@ -444,6 +471,160 @@ def test_pair_dna_never_mixes_timestamp_and_tracker_event_order_domains(
     assert after["identity_ledger"]["candle_order_domain"] == expected_domain
     assert after["candle_count"] == before["candle_count"]
     assert after["identity_ledger"]["skipped_order_domain_conflicts"] >= 1
+
+
+def test_resolver_proof_keeps_order_domain_when_timestamp_attestation_arrives(
+    tmp_path: Path,
+) -> None:
+    store = PairDNAStoreV3(tmp_path / "pair_dna.json")
+    first_candles, first_behavior = _resolver_bound_studies(
+        [101.0, 102.0, 103.0],
+        {0: 0, 1: 1, 2: 2},
+        include_timestamps=False,
+        identity_prefix="attested",
+    )
+    upgraded_candles, upgraded_behavior = _resolver_bound_studies(
+        [101.0, 102.0, 103.0, 104.0],
+        {0: 0, 1: 1, 2: 2, 3: 3},
+        include_timestamps=True,
+        identity_prefix="attested",
+    )
+
+    store.record_observation(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=first_candles,
+        behavior_study=first_behavior,
+        sequence_id="attestation-before-time",
+    )
+    store.record_observation(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=upgraded_candles,
+        behavior_study=upgraded_behavior,
+        sequence_id="attestation-after-time",
+    )
+    profile = store.get_profile("CAD/JPY OTC", "M5")["profile"]
+
+    assert profile["candle_count"] == 4
+    assert profile["identity_ledger"]["candle_order_domain"] == (
+        "TRACKER_EVENT_SEQUENCE_V3"
+    )
+    assert profile["identity_ledger"]["skipped_order_domain_conflicts"] == 0
+
+
+def test_tracker_restart_rebases_once_then_resumes_after_durable_floor(
+    tmp_path: Path,
+) -> None:
+    store = PairDNAStoreV3(tmp_path / "pair_dna.json")
+    initial_candles, initial_behavior = _resolver_bound_studies(
+        [101.0, 102.0, 103.0, 104.0],
+        {0: 0, 1: 1, 2: 2, 3: 3},
+        include_timestamps=False,
+        identity_prefix="before-restart",
+    )
+    store.record_observation(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=initial_candles,
+        behavior_study=initial_behavior,
+        sequence_id="before-restart",
+    )
+
+    baseline_candles, baseline_behavior = _resolver_bound_studies(
+        [201.0, 202.0, 203.0, 204.0],
+        {3: 0},
+        include_timestamps=False,
+        identity_prefix="after-restart",
+    )
+    baseline = store.record_observation(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=baseline_candles,
+        behavior_study=baseline_behavior,
+        sequence_id="restart-baseline",
+        allow_tracker_sequence_rebase=True,
+    )
+    order_state = store.get_resolver_order_state("CAD/JPY OTC", "M5")
+
+    assert baseline["profile"]["candle_count"] == 4
+    assert order_state["status"] == "READY"
+    assert order_state["durable_high_watermark"] == 3
+    assert order_state["raw_sequence_high_watermark"] == 0
+    assert order_state["sequence_offset"] == 3
+    assert order_state["sequence_epoch"] == 1
+    assert order_state["rebase_count"] == 1
+
+    next_candles, next_behavior = _resolver_bound_studies(
+        [202.0, 203.0, 204.0, 205.0],
+        {2: 0, 3: 1},
+        include_timestamps=False,
+        identity_prefix="after-restart",
+    )
+    store.record_observation(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=next_candles,
+        behavior_study=next_behavior,
+        sequence_id="restart-next-close",
+    )
+    resumed = store.get_profile("CAD/JPY OTC", "M5")["profile"]
+    resumed_order = store.get_resolver_order_state("CAD/JPY OTC", "M5")
+
+    assert resumed["candle_count"] == 5
+    assert resumed_order["durable_high_watermark"] == 4
+    assert resumed_order["raw_sequence_high_watermark"] == 1
+    assert resumed_order["sequence_offset"] == 3
+
+
+def test_observation_timing_precedes_strict_outcome_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    store = PairDNAStoreV3(tmp_path / "pair_dna.json")
+    candle_study, behavior_study = _studies()
+    observed = store.record_observation(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=candle_study,
+        behavior_study=behavior_study,
+        sequence_id="strict-next-close",
+        objects=[{"object_type": "PRICE_IMBALANCE"}],
+    )
+
+    assert observed["profile"]["candle_count"] == 7
+    assert observed["profile"]["outcome_label_count"] == 0
+    assert observed["profile"][
+        "marginal_and_pairwise_outcome_associations"
+    ] == []
+
+    matured = store.record_outcome(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=candle_study,
+        behavior_study=behavior_study,
+        sequence_id="strict-next-close",
+        objects=[{"object_type": "PRICE_IMBALANCE"}],
+        outcome={"direction": "DOWN", "success": True},
+    )
+    duplicate = store.record_outcome(
+        symbol="CAD/JPY OTC",
+        timeframe="M5",
+        candle_study=candle_study,
+        behavior_study=behavior_study,
+        sequence_id="strict-next-close",
+        objects=[{"object_type": "PRICE_IMBALANCE"}],
+        outcome={"direction": "DOWN", "success": True},
+    )
+
+    assert matured["status"] == "OUTCOME_RECORDED"
+    assert matured["profile"]["observation_count"] == 1
+    assert matured["profile"]["candle_count"] == 7
+    assert matured["profile"]["outcome_label_count"] == 1
+    assert matured["profile"][
+        "marginal_and_pairwise_outcome_associations"
+    ]
+    assert duplicate["status"] == "DUPLICATE_OUTCOME_IGNORED"
+    assert duplicate["profile"]["outcome_label_count"] == 1
 
 
 def test_pair_dna_segmented_dedupe_capacity_and_probability_invariant() -> None:
@@ -877,7 +1058,20 @@ def test_pair_dna_retracement_defaults_migrate_old_v3_profiles(tmp_path: Path) -
     store = PairDNAStoreV3(path)
     _record(store, "legacy-before-retracement")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    next(iter(payload["profiles"].values())).pop("retracement_confluence")
+    legacy_profile = next(iter(payload["profiles"].values()))
+    legacy_profile.pop("retracement_confluence")
+    legacy_profile.pop("outcome_label_count")
+    legacy_profile.pop("recent_outcome_sequence_ids")
+    legacy_profile.pop("outcome_dedupe_bloom")
+    legacy_ledger = legacy_profile["identity_ledger"]
+    for field in (
+        "tracker_sequence_offset",
+        "tracker_raw_sequence_high_watermark",
+        "tracker_sequence_epoch",
+        "tracker_sequence_rebase_count",
+        "skipped_tracker_reset_candidates",
+    ):
+        legacy_ledger.pop(field)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     migrated = PairDNAStoreV3(path).get_profile("CAD/JPY OTC", "M5")["profile"]
@@ -886,6 +1080,10 @@ def test_pair_dna_retracement_defaults_migrate_old_v3_profiles(tmp_path: Path) -
     assert retracement["completed_study_count"] == 0
     assert retracement["execution_authority"] is False
     assert retracement["empirical_partitions"] == []
+    assert migrated["outcome_label_count"] == 0
+    assert migrated["recent_outcome_sequence_ids"] == []
+    assert migrated["outcome_dedupe_bloom"]["insertions"] == 0
+    assert migrated["identity_ledger"]["tracker_sequence_offset"] == 0
 
 
 def test_pair_dna_never_evicts_lifelong_pair_profile_at_capacity(tmp_path: Path) -> None:

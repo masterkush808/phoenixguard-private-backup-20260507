@@ -12,6 +12,7 @@ from phoenixguard.study.path_clock_liquidity_v3 import (
     PATH_CLOCK_REPLAY_SCORE_SCHEMA_VERSION,
     JointPathClockLiquidityFieldV3,
     PathClockLiquidityValidationError,
+    build_hierarchical_forward_timing_forecast_v3,
     evaluate_path_clock_promotion_gate_v3,
     score_path_clock_replays_v3,
 )
@@ -340,6 +341,1063 @@ def test_worst_drawdown_probability_tracks_global_event_after_live_clock() -> No
     assert result["probability_worst_drawdown_still_ahead"] == 0.0
     assert result["neighbor_evidence"][0]["global_worst_drawdown_index"] == 1
     assert result["neighbor_evidence"][0]["worst_drawdown_still_ahead"] is False
+
+
+def test_forward_forecast_normalizes_live_pair_dna_coordinate_prefixes() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="SELL",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.72,
+        current_regime="DOWNTREND",
+        current_behavior={
+            "status": "STUDIED",
+            "candle_count": 28,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "up": {"average_candles": 1.0},
+                "down": {"average_candles": 1.6667},
+            },
+            "rest_summary": {"average_candles": 1.0},
+        },
+        pair_profile={
+            "observation_count": 14,
+            "candle_count": 22,
+            "behavior": {
+                "segment_counts": {
+                    "PIXEL_PRICE_PROXY|DOWN_SWING": 3,
+                    "PIXEL_PRICE_PROXY|REST": 3,
+                    "PIXEL_PRICE_PROXY|UP_SWING": 1,
+                },
+                "segment_averages": {
+                    "PIXEL_PRICE_PROXY|DOWN_SWING": {
+                        "candles": 1.6667,
+                        "duration_seconds": 500.0,
+                    },
+                    "PIXEL_PRICE_PROXY|REST": {
+                        "candles": 1.0,
+                        "duration_seconds": 300.0,
+                    },
+                    "PIXEL_PRICE_PROXY|UP_SWING": {
+                        "candles": 1.0,
+                        "duration_seconds": 300.0,
+                    },
+                },
+                "transition_counts": {
+                    "PIXEL_PRICE_PROXY|REST->DOWN_SWING": 3,
+                    "PIXEL_PRICE_PROXY|REST->UP_SWING": 1,
+                },
+                "transition_probabilities": {
+                    "PIXEL_PRICE_PROXY|REST->DOWN_SWING": 0.75,
+                    "PIXEL_PRICE_PROXY|REST->UP_SWING": 0.25,
+                },
+            },
+        },
+    )
+
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["candidate_direction"] == "DOWN"
+    assert forecast["forecast_horizon_seconds"] == 3_000
+    assert forecast["directional_model"]["score"] == pytest.approx(0.72)
+    assert forecast["timing_estimate"]["source_tier"] == "PAIR"
+    assert forecast["timing_estimate"]["support_count"] == 3
+    assert forecast["probability"]["source_tier"] == "NONE"
+    assert forecast["probability"]["support_count"] == 0
+    assert forecast["probability"]["value"] is None
+    assert forecast["probability"]["confidence"] is None
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["evidence_confidence"]["value"] is None
+    assert forecast["state_transition_estimate"]["value"] == pytest.approx(0.75)
+    assert forecast["state_transition_estimate"]["support_count"] == 4
+    assert forecast["state_transition_estimate"]["is_directional_likelihood"] is False
+    assert forecast["expected_pre_move"]["sweep_probability"] is None
+    assert forecast["stop_survival"]["value"] is None
+    assert forecast["move_window"]["earliest"]["candles"] >= 3
+    assert forecast["move_window"]["latest"]["candles"] <= 10
+    assert forecast["move_window"]["exact_wall_clock_proven"] is False
+    assert forecast["enter_now"]["permission"] is False
+    pair_tier = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "PAIR"
+    )
+    assert pair_tier["available"] is True
+
+
+def test_forward_forecast_uses_live_m5_sequence_before_neutral_prior() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.6,
+        current_regime="UPTREND",
+        current_behavior={
+            "status": "STUDIED",
+            "candle_count": 8,
+            "current_state": {"state": "REST", "candle_count": 1},
+                "swing_summary": {
+                    "up": {"average_candles": 2.0, "segment_count": 3},
+                    "down": {"average_candles": 1.0, "segment_count": 2},
+                },
+            "rest_summary": {"average_candles": 1.0, "segment_count": 1},
+        },
+        pair_profile={},
+    )
+
+    assert forecast["timing_estimate"]["source_tier"] == "LIVE_M5_SEQUENCE"
+    assert forecast["timing_estimate"]["support_count"] == 0
+    assert forecast["timing_estimate"]["empirical_timing_evidence"] is False
+    assert forecast["directional_model"]["score"] == pytest.approx(0.6)
+    assert forecast["probability"]["value"] is None
+    assert forecast["probability"]["confidence"] is None
+    assert forecast["probability"]["support_count"] == 0
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["evidence_confidence"]["value"] is None
+    assert forecast["expected_pre_move"]["sweep_probability"] is None
+    assert forecast["stop_survival"]["value"] is None
+    assert forecast["move_window"]["earliest"]["candles"] >= 3
+    assert forecast["evidence_hierarchy"]["pooled_prior"]["calibrated"] is False
+    assert forecast["evidence_hierarchy"]["pooled_prior"]["direction_probability"] is None
+    assert forecast["evidence_hierarchy"]["pooled_prior"]["published_as_likelihood"] is False
+
+
+@pytest.mark.parametrize(
+    ("history_candles", "rest_segments", "available"),
+    [(7, 1, False), (8, 0, False), (8, 1, True)],
+)
+def test_live_timing_requires_declared_history_and_segment_floors(
+    history_candles: int,
+    rest_segments: int,
+    available: bool,
+) -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "candle_count": history_candles,
+            "current_state": {"state": "REST", "candle_count": 2},
+            "swing_summary": {
+                "up": {"average_candles": 2.0, "segment_count": 1},
+            },
+            "rest_summary": {
+                "average_candles": 5.0,
+                "segment_count": rest_segments,
+            },
+        },
+    )
+
+    live = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "LIVE_M5_SEQUENCE"
+    )
+    assert live["available"] is available
+    assert live["minimum_history_candles"] == 8
+    assert live["minimum_completed_segments"] == 2
+    assert forecast["timing_estimate"]["source_tier"] == (
+        "LIVE_M5_SEQUENCE" if available else "POLICY_WINDOW"
+    )
+
+
+def test_eur_nzd_style_62_candle_buy_read_yields_3_to_7_live_closes() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.73,
+        current_regime="UPTREND",
+        current_behavior={
+            "candle_count": 62,
+            "current_state": {"state": "REST", "candle_count": 2},
+            "swing_summary": {
+                "up": {"average_candles": 3.0, "segment_count": 5},
+                "down": {"average_candles": 2.0, "segment_count": 3},
+            },
+            "rest_summary": {"average_candles": 5.0, "segment_count": 6},
+        },
+        lineage={
+            "symbol": "EUR/NZD",
+            "timeframe": "M5",
+            "closed_candle_key": "eur-nzd-m5-62",
+            "closed_candle_sequence": 62,
+        },
+    )
+
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["candidate_direction"] == "UP"
+    assert forecast["timing_estimate"]["source_tier"] == "LIVE_M5_SEQUENCE"
+    assert forecast["timing_estimate"]["event_definition"] == (
+        "TARGET_MOVE_START_AFTER_ANCHOR"
+    )
+    assert forecast["move_window"]["earliest"]["candles"] == 3
+    assert forecast["move_window"]["latest"]["candles"] == 7
+    assert forecast["move_window"]["earliest"]["minutes"] == 15.0
+    assert forecast["move_window"]["latest"]["minutes"] == 35.0
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["evidence_confidence"]["value"] is None
+    assert forecast["move_window"]["rolling_wall_clock"] is False
+    assert "anchor_close_epoch_seconds" not in forecast["move_window"]
+
+
+def test_forward_forecast_derives_pair_averages_from_raw_pair_dna_sums() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="SELL",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "status": "STUDIED",
+            "candle_count": 28,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "up": {"average_candles": 1.0},
+                "down": {"average_candles": 1.5},
+            },
+            "rest_summary": {"average_candles": 1.0},
+        },
+        pair_profile={
+            "observation_count": 14,
+            "behavior": {
+                "segment_counts": {
+                    "PIXEL_PRICE_PROXY|DOWN_SWING": 3,
+                    "PIXEL_PRICE_PROXY|REST": 3,
+                },
+                "segment_candle_sum": {
+                    "PIXEL_PRICE_PROXY|DOWN_SWING": 5,
+                    "PIXEL_PRICE_PROXY|REST": 3,
+                },
+                "segment_duration_sum": {
+                    "PIXEL_PRICE_PROXY|DOWN_SWING": 1_500,
+                    "PIXEL_PRICE_PROXY|REST": 900,
+                },
+                "transition_counts": {
+                    "PIXEL_PRICE_PROXY|REST->DOWN_SWING": 3,
+                    "PIXEL_PRICE_PROXY|REST->UP_SWING": 1,
+                },
+            },
+        },
+        lineage={
+            "symbol": "EUR/NZD",
+            "timeframe": "M5",
+            "closed_candle_key": "eur-nzd-close-49",
+            "closed_candle_sequence": 49,
+        },
+    )
+
+    assert forecast["timing_estimate"]["source_tier"] == "PAIR"
+    assert forecast["timing_estimate"]["support_count"] == 3
+    assert forecast["probability"]["value"] is None
+    assert forecast["probability"]["confidence"] is None
+    assert forecast["state_transition_estimate"]["value"] == pytest.approx(0.75)
+    assert forecast["state_transition_estimate"]["support_count"] == 4
+    assert forecast["lineage"]["symbol"] == "EUR/NZD"
+    assert forecast["lineage"]["closed_candle_sequence"] == 49
+
+
+@pytest.mark.parametrize("support", [0, 1, 2, 3])
+def test_pair_timing_and_transition_estimates_require_minimum_support(
+    support: int,
+) -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "current_state": {"state": "REST", "candle_count": 1},
+        },
+        pair_profile={
+            "behavior": {
+                "segment_counts": {
+                    "UP_SWING": support,
+                    "REST": support,
+                },
+                "segment_averages": {
+                    "UP_SWING": {"candles": 6.0},
+                    "REST": {"candles": 4.0},
+                },
+                "transition_counts": {"REST->UP_SWING": support},
+            },
+        },
+    )
+
+    eligible = support >= 3
+    pair = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "PAIR"
+    )
+    assert pair["available"] is eligible
+    assert pair["minimum_support"] == 3
+    assert forecast["state_transition_estimate"]["eligible"] is eligible
+    assert forecast["state_transition_estimate"]["value"] == (
+        1.0 if eligible else None
+    )
+
+
+def test_pair_rest_wait_is_counted_once_and_target_duration_is_excluded() -> None:
+    def forecast(target_average: float) -> dict[str, Any]:
+        return build_hierarchical_forward_timing_forecast_v3(
+            candidate_direction="BUY",
+            duration_contract={
+                "requested_duration_seconds": 3_000,
+                "new_entry_eligible": True,
+            },
+            source_cadence_seconds=300,
+            directional_confidence=0.7,
+            current_behavior={
+                "current_state": {"state": "REST", "candle_count": 2},
+            },
+            pair_profile={
+                "behavior": {
+                    "segment_counts": {"UP_SWING": 8, "REST": 8},
+                    "segment_averages": {
+                        "UP_SWING": {"candles": target_average},
+                        "REST": {"candles": 4.0},
+                    },
+                },
+            },
+        )
+
+    short_target = forecast(2.0)
+    long_target = forecast(20.0)
+    assert short_target["move_window"] == long_target["move_window"]
+    components = short_target["timing_estimate"]["components"]
+    assert components["current_state_remaining_candles"] == 2.0
+    assert components["expected_intermediate_rest_candles"] == 0.0
+    assert components["wait_to_target_start_candles"] == 2.0
+    assert components["target_duration_included"] is False
+
+
+def test_active_target_forecasts_next_same_direction_swing_after_rest() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.83,
+        current_behavior={
+            "candle_count": 60,
+            "current_state": {"state": "UP_SWING", "candle_count": 2},
+            "swing_summary": {
+                "up": {
+                    "average_candles": 1.3,
+                    "maximum_candles": 4,
+                    "segment_count": 20,
+                },
+            },
+            "rest_summary": {
+                "average_candles": 1.5,
+                "maximum_candles": 3,
+                "segment_count": 6,
+            },
+        },
+    )
+
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["timing_estimate"]["source_tier"] == "LIVE_M5_SEQUENCE"
+    assert forecast["timing_estimate"]["event_definition"] == (
+        "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+    )
+    assert forecast["move_window"]["earliest"]["candles"] >= 3
+    assert forecast["move_window"]["earliest"]["minutes"] >= 15.0
+    assert forecast["timing_estimate"]["current_target_state"] == (
+        "ALREADY_ACTIVE_AT_ANCHOR"
+    )
+    components = forecast["timing_estimate"]["components"]
+    assert components["current_state_remaining_candles"] == 0.0
+    assert components["expected_intermediate_rest_candles"] == 1.5
+    assert components["wait_to_target_start_candles"] == 1.5
+    assert components["active_target_remaining_included"] is True
+    assert components["target_duration_included"] is False
+    assert components["target_distribution"]["segment_count"] == 20
+    assert components["rest_distribution"]["segment_count"] == 6
+    assert forecast["expected_pre_move"]["state"] == "REST_THEN_MOVE"
+    assert forecast["expected_pre_move"]["rest_source_tier"] == "LIVE_BEHAVIOR"
+    assert forecast["expected_pre_move"]["rest_support_count"] == 6
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["probability"]["value"] is None
+
+
+@pytest.mark.parametrize(
+    (
+        "history_candles",
+        "target_support",
+        "rest_support",
+        "score",
+        "available",
+    ),
+    [
+        (7, 20, 6, 0.8, False),
+        (8, 0, 6, 0.8, False),
+        (8, 1, 0, 0.8, False),
+        (8, 1, 1, 0.0, False),
+        (8, 1, 1, 0.8, True),
+    ],
+)
+def test_active_target_next_swing_live_timing_requires_all_evidence_floors(
+    history_candles: int,
+    target_support: int,
+    rest_support: int,
+    score: float,
+    available: bool,
+) -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=score,
+        current_behavior={
+            "candle_count": history_candles,
+            "current_state": {"state": "UP_SWING", "candle_count": 2},
+            "swing_summary": {
+                "up": {
+                    "average_candles": 1.3,
+                    "maximum_candles": 3,
+                    "segment_count": target_support,
+                },
+            },
+            "rest_summary": {
+                "average_candles": 1.5,
+                "maximum_candles": 2,
+                "segment_count": rest_support,
+            },
+        },
+    )
+
+    live = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "LIVE_M5_SEQUENCE"
+    )
+    assert live["available"] is available
+    assert live["target_segment_count"] == target_support
+    assert live["rest_segment_count"] == rest_support
+    assert forecast["timing_estimate"]["source_tier"] == (
+        "LIVE_M5_SEQUENCE" if available else "POLICY_WINDOW"
+    )
+    if available:
+        assert forecast["status"] == "FORECAST_AVAILABLE"
+        assert forecast["timing_estimate"]["event_definition"] == (
+            "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+        )
+        assert forecast["move_window"]["earliest"]["candles"] >= 3
+    else:
+        assert forecast["status"] == "TARGET_MOVE_ALREADY_ACTIVE"
+        assert forecast["move_window"]["earliest"] is None
+
+
+def test_opposite_swing_wait_is_remaining_opposite_plus_expected_rest() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 3_000,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "current_state": {"state": "DOWN_SWING", "candle_count": 2},
+        },
+        pair_profile={
+            "behavior": {
+                "segment_counts": {
+                    "UP_SWING": 6,
+                    "DOWN_SWING": 6,
+                    "REST": 6,
+                },
+                "segment_averages": {
+                    "UP_SWING": {"candles": 9.0},
+                    "DOWN_SWING": {"candles": 5.0},
+                    "REST": {"candles": 2.0},
+                },
+            }
+        },
+    )
+
+    components = forecast["timing_estimate"]["components"]
+    assert components["current_state_remaining_candles"] == 3.0
+    assert components["expected_intermediate_rest_candles"] == 2.0
+    assert components["wait_to_target_start_candles"] == 5.0
+    assert components["target_duration_included"] is False
+
+
+def test_forward_forecast_does_not_turn_policy_horizon_into_move_window() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.65,
+        current_behavior={},
+        pair_profile={},
+    )
+
+    assert forecast["status"] == "TIMING_UNRATED"
+    assert forecast["candidate_direction"] == "UP"
+    assert forecast["forecast_horizon_seconds"] == 1_800
+    assert forecast["move_window"]["earliest"] is None
+    assert forecast["move_window"]["central"] is None
+    assert forecast["move_window"]["latest"] is None
+    assert forecast["timing_estimate"]["source_tier"] == "POLICY_WINDOW"
+    assert forecast["directional_model"]["score"] == pytest.approx(0.65)
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["evidence_confidence"]["value"] is None
+    assert forecast["expected_pre_move"]["sweep_probability"] is None
+
+
+def test_buy_only_pair_dna_cannot_publish_sell_timing_window() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="SELL",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={},
+        pair_profile={
+            "behavior": {
+                "segment_counts": {
+                    "PIXEL_PRICE_PROXY|UP_SWING": 9,
+                    "PIXEL_PRICE_PROXY|REST": 4,
+                },
+                "segment_averages": {
+                    "PIXEL_PRICE_PROXY|UP_SWING": {
+                        "candles": 2.5,
+                        "duration_seconds": 750,
+                    },
+                    "PIXEL_PRICE_PROXY|REST": {
+                        "candles": 1.0,
+                        "duration_seconds": 300,
+                    },
+                },
+            }
+        },
+    )
+
+    assert forecast["candidate_direction"] == "DOWN"
+    assert forecast["status"] == "TIMING_UNRATED"
+    assert forecast["move_window"]["earliest"] is None
+    pair_tier = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "PAIR"
+    )
+    assert pair_tier["available"] is False
+    assert pair_tier["target_state"] == "DOWN_SWING"
+    assert pair_tier["support_count"] == 0
+
+
+def test_up_only_current_sequence_cannot_publish_sell_timing_window() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="SELL",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "candle_count": 12,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "up": {"average_candles": 2.5, "segment_count": 4},
+                "down": {"average_candles": 0.0, "segment_count": 0},
+            },
+            "rest_summary": {"average_candles": 1.0, "segment_count": 3},
+        },
+        pair_profile={},
+    )
+
+    assert forecast["candidate_direction"] == "DOWN"
+    assert forecast["status"] == "TIMING_UNRATED"
+    assert forecast["move_window"]["earliest"] is None
+    live_tier = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "LIVE_M5_SEQUENCE"
+    )
+    assert live_tier["available"] is False
+    assert live_tier["target_segment_count"] == 0
+    assert forecast["directional_model"]["score"] == pytest.approx(0.7)
+
+
+def test_survival_forecast_rejects_conditioned_and_unsupported_curves() -> None:
+    def curve(
+        *,
+        object_type: str,
+        status: str,
+        support: int,
+        minimum_support: int,
+        event_probability: float,
+    ) -> dict[str, object]:
+        return {
+            "object_type": object_type,
+            "origin_state": "REST",
+            "event_type": "REST_END",
+            "status": status,
+            "support": support,
+            "minimum_support": minimum_support,
+            "curve": [
+                {
+                    "closed_candles": 3,
+                    "cumulative_event_probability": event_probability,
+                }
+            ],
+        }
+
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "candle_count": 12,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "up": {"average_candles": 2.0, "segment_count": 3}
+            },
+            "rest_summary": {"average_candles": 1.0, "segment_count": 3},
+        },
+        survival_network={
+            "curves": [
+                curve(
+                    object_type="ORDER_BLOCK",
+                    status="SUPPORTED",
+                    support=20,
+                    minimum_support=8,
+                    event_probability=0.9,
+                ),
+                curve(
+                    object_type="",
+                    status="INSUFFICIENT_SUPPORT",
+                    support=1,
+                    minimum_support=8,
+                    event_probability=0.9,
+                ),
+                curve(
+                    object_type="PAIR_STATE",
+                    status="SUPPORTED",
+                    support=8,
+                    minimum_support=8,
+                    event_probability=0.4,
+                ),
+            ]
+        },
+    )
+
+    assert forecast["event_likelihood"]["value"] == pytest.approx(0.4)
+    assert forecast["event_likelihood"]["support_count"] == 8
+    assert forecast["event_likelihood"]["source_tier"] == "PAIR_STATE_SURVIVAL"
+    survival_tier = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "PAIR_STATE_SURVIVAL"
+    )
+    assert survival_tier["available"] is True
+    assert survival_tier["minimum_support"] == 8
+    assert survival_tier["rejected_object_conditioned_count"] == 1
+    assert survival_tier["rejected_unsupported_count"] == 1
+
+
+def test_survival_only_window_does_not_invent_rest_behavior() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "current_state": {"state": "REST", "candle_count": 1},
+        },
+        survival_network={
+            "curves": [
+                {
+                    "object_type": "PAIR_STATE",
+                    "origin_state": "REST",
+                    "event_type": "REST_END",
+                    "status": "SUPPORTED",
+                    "support": 8,
+                    "minimum_support": 8,
+                    "curve": [
+                        {
+                            "closed_candles": 3,
+                            "cumulative_event_probability": 0.6,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert forecast["timing_estimate"]["source_tier"] == "PAIR_STATE_SURVIVAL"
+    assert forecast["expected_pre_move"]["state"] == "PRE_MOVE_STATE_UNRATED"
+    assert forecast["expected_pre_move"]["rest_window_candles"] is None
+    assert forecast["expected_pre_move"]["rest_window_minutes"] is None
+    assert forecast["expected_pre_move"]["rest_source_tier"] == "NONE"
+    assert forecast["expected_pre_move"]["rest_support_count"] == 0
+    assert forecast["expected_pre_move"]["rest_zero_observed"] is False
+
+
+def test_single_motif_case_cannot_override_live_or_publish_outcomes() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "candle_count": 8,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "up": {"average_candles": 2.0, "segment_count": 3}
+            },
+            "rest_summary": {"average_candles": 1.0, "segment_count": 3},
+        },
+        motif_lattice={
+            "closed_candle_count": 5,
+            "levels": [
+                {
+                    "level": 1,
+                    "nodes": [
+                        {
+                            "motif_token": "ONE-PERFECT-MATCH",
+                            "span": {"end_index": 4, "candle_count": 3},
+                        }
+                    ],
+                }
+            ],
+        },
+        motif_trajectory_library={
+            "entries": [
+                {
+                    "motif_token": "ONE-PERFECT-MATCH",
+                    "reference_direction": "UP",
+                    "points": [
+                        {
+                            "offset_closed_candles": 3,
+                            "cumulative_favorable_excursion_in_median_ranges": 0.7,
+                            "cumulative_adverse_excursion_in_median_ranges": 0.3,
+                            "state": "REST",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["timing_estimate"]["source_tier"] == "LIVE_M5_SEQUENCE"
+    assert forecast["timing_estimate"]["support_count"] == 0
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["event_likelihood"]["support_count"] == 0
+    assert forecast["evidence_confidence"]["value"] is None
+    assert forecast["probability"]["value"] is None
+    assert forecast["probability"]["confidence"] is None
+    assert forecast["expected_pre_move"]["sweep_probability"] is None
+    assert forecast["expected_pre_move"]["sweep_support_count"] == 0
+    motif_tier = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "PAIR_MOTIF"
+    )
+    assert motif_tier["available"] is False
+    assert motif_tier["raw_match_available"] is True
+    assert motif_tier["sparse_diagnostic_only"] is True
+
+
+@pytest.mark.parametrize("support", [0, 1, 2, 3])
+def test_motif_timing_requires_minimum_independent_outcome_support(
+    support: int,
+) -> None:
+    entries = [
+        {
+            "motif_token": "BOUNDARY-MOTIF",
+            "reference_direction": "UP",
+            "points": [
+                {
+                    "offset_closed_candles": 3,
+                    "cumulative_favorable_excursion_in_median_ranges": 0.7,
+                    "cumulative_adverse_excursion_in_median_ranges": 0.1,
+                    "state": "UP_SWING",
+                }
+            ],
+        }
+        for _ in range(support)
+    ]
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "current_state": {"state": "REST", "candle_count": 1},
+        },
+        motif_lattice={
+            "closed_candle_count": 5,
+            "levels": [
+                {
+                    "level": 1,
+                    "nodes": [
+                        {
+                            "motif_token": "BOUNDARY-MOTIF",
+                            "span": {"end_index": 4, "candle_count": 3},
+                        }
+                    ],
+                }
+            ],
+        },
+        motif_trajectory_library={"entries": entries},
+    )
+
+    eligible = support >= 3
+    motif_tier = next(
+        row
+        for row in forecast["evidence_hierarchy"]["attempted_tiers"]
+        if row["tier"] == "PAIR_MOTIF"
+    )
+    assert motif_tier["available"] is eligible
+    assert motif_tier["timing_window_eligible"] is eligible
+    assert motif_tier["raw_match_available"] is (support > 0)
+    assert motif_tier["sparse_diagnostic_only"] is (0 < support < 3)
+    assert forecast["timing_estimate"]["source_tier"] == (
+        "PAIR_MOTIF" if eligible else "POLICY_WINDOW"
+    )
+    if eligible:
+        assert forecast["move_window"]["earliest"] is not None
+    else:
+        assert forecast["move_window"]["earliest"] is None
+    assert forecast["event_likelihood"]["value"] == (
+        1.0 if eligible else None
+    )
+
+
+def test_motif_outcomes_own_occurrence_likelihood_and_sweep_estimate() -> None:
+    entries = []
+    for index in range(4):
+        entries.append(
+            {
+                "motif_token": "REST-BREAKOUT",
+                "reference_direction": "UP",
+                "points": [
+                    {
+                        "offset_closed_candles": 3,
+                        "cumulative_favorable_excursion_in_median_ranges": (
+                            0.6 if index < 3 else 0.2
+                        ),
+                        "cumulative_adverse_excursion_in_median_ranges": (
+                            0.3 if index in {0, 1} else 0.1
+                        ),
+                        "state": "REST" if index in {0, 1} else "UP_SWING",
+                    }
+                ],
+            }
+        )
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "candle_count": 8,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "up": {"average_candles": 2.0, "segment_count": 3}
+            },
+            "rest_summary": {"average_candles": 1.0},
+        },
+        motif_lattice={
+            "closed_candle_count": 5,
+            "levels": [
+                {
+                    "level": 1,
+                    "nodes": [
+                        {
+                            "motif_token": "REST-BREAKOUT",
+                            "span": {"end_index": 4, "candle_count": 3},
+                        }
+                    ],
+                }
+            ],
+        },
+        motif_trajectory_library={"entries": entries},
+    )
+
+    assert forecast["event_likelihood"]["value"] == pytest.approx(0.75)
+    assert forecast["event_likelihood"]["support_count"] == 4
+    assert forecast["event_likelihood"]["source_tier"] == "PAIR_MOTIF"
+    assert forecast["probability"]["value"] == pytest.approx(0.75)
+    assert forecast["probability"]["metric"] == (
+        "MOTIF_TARGET_FOLLOW_THROUGH_WITHIN_FORECAST_HORIZON"
+    )
+    assert forecast["evidence_confidence"]["value"] is not None
+    assert forecast["expected_pre_move"]["sweep_probability"] == pytest.approx(0.5)
+    assert forecast["expected_pre_move"]["sweep_support_count"] == 4
+    assert forecast["stop_survival"]["value"] is None
+
+
+def test_exact_stop_survival_is_not_blended_into_directional_likelihood() -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="SELL",
+        duration_contract={
+            "status": "ELIGIBLE",
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "candle_count": 8,
+            "current_state": {"state": "REST", "candle_count": 1},
+            "swing_summary": {
+                "down": {"average_candles": 2.0, "segment_count": 3}
+            },
+            "rest_summary": {"average_candles": 1.0},
+        },
+        exact_jpclf_estimate={
+            "support_count": 12,
+            "survival_probability": 0.8,
+            "probability_worst_drawdown_still_ahead": 0.25,
+            "target_time_seconds": {"p10": 900, "median": 1_200, "p90": 1_500},
+            "stop_distance_mru": 0.3,
+            "move_size_mru": 0.5,
+        },
+        exact_time_proven=True,
+        exact_promotion_passed=False,
+        lineage={
+            "symbol": "EUR/NZD",
+            "timeframe": "M5",
+            "closed_candle_key": "eur-nzd-close-62",
+            "closed_candle_sequence": 62,
+            "anchor_close_epoch_seconds": 100_000.0,
+        },
+    )
+
+    assert forecast["directional_model"]["score"] == pytest.approx(0.7)
+    assert forecast["event_likelihood"]["value"] is None
+    assert forecast["probability"]["value"] is None
+    assert forecast["probability"]["confidence"] is None
+    assert forecast["stop_survival"]["value"] == pytest.approx(0.8)
+    assert forecast["stop_survival"]["support_count"] == 12
+    assert forecast["stop_survival"]["exact_wall_clock_proven"] is True
+    assert forecast["adverse_excursion_risk"][
+        "worst_drawdown_still_ahead_probability"
+    ] == pytest.approx(0.25)
+    assert forecast["timing_estimate"]["source_tier"] == "EXACT_JPCLF"
+    assert forecast["move_window"]["exact_wall_clock_proven"] is True
+    assert forecast["move_window"]["anchor_time_proven"] is True
+    assert forecast["move_window"]["estimate_calibrated"] is False
+    assert forecast["move_window"]["basis"] == "CLOCK_ANCHORED_SHRUNK_ESTIMATE"
+    assert forecast["move_window"]["anchor_close_epoch_seconds"] == 100_000.0
+    assert forecast["move_window"]["target_window_start_epoch_seconds"] == (
+        100_000.0
+        + forecast["move_window"]["earliest"]["seconds"]
+    )
+    assert forecast["move_window"]["target_window_end_epoch_seconds"] == (
+        100_000.0
+        + forecast["move_window"]["latest"]["seconds"]
+    )
+
+
+@pytest.mark.parametrize("support", [0, 1, 2, 3])
+def test_exact_timing_and_probabilities_require_minimum_support(
+    support: int,
+) -> None:
+    forecast = build_hierarchical_forward_timing_forecast_v3(
+        candidate_direction="BUY",
+        duration_contract={
+            "requested_duration_seconds": 1_800,
+            "new_entry_eligible": True,
+        },
+        source_cadence_seconds=300,
+        directional_confidence=0.7,
+        current_behavior={
+            "current_state": {"state": "REST", "candle_count": 1},
+        },
+        exact_jpclf_estimate={
+            "support_count": support,
+            "survival_probability": 0.8,
+            "probability_worst_drawdown_still_ahead": 0.3,
+            "target_time_seconds": {"p10": 900, "median": 1_200, "p90": 1_500},
+            "stop_distance_mru": 0.3,
+            "move_size_mru": 0.5,
+        },
+        exact_time_proven=True,
+        lineage={
+            "symbol": "EUR/NZD",
+            "timeframe": "M5",
+            "closed_candle_key": "eur-nzd-m5-62",
+            "closed_candle_sequence": 62,
+            "anchor_close_epoch_seconds": 100_000.0,
+        },
+    )
+
+    eligible = support >= 3
+    assert forecast["stop_survival"]["value"] == (0.8 if eligible else None)
+    assert forecast["adverse_excursion_risk"][
+        "worst_drawdown_still_ahead_probability"
+    ] == (0.3 if eligible else None)
+    assert forecast["timing_estimate"]["source_tier"] == (
+        "EXACT_JPCLF" if eligible else "POLICY_WINDOW"
+    )
+    if eligible:
+        assert forecast["move_window"]["anchor_close_epoch_seconds"] == 100_000.0
+        assert forecast["expected_pre_move"]["state"] == (
+            "PRE_MOVE_STATE_UNRATED"
+        )
+        assert forecast["expected_pre_move"]["rest_window_candles"] is None
+    else:
+        assert "anchor_close_epoch_seconds" not in forecast["move_window"]
 
 
 def test_freezes_are_closed_candle_ordered_bounded_and_restart_safe() -> None:

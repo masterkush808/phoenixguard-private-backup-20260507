@@ -30,6 +30,9 @@ from phoenixguard.decision.order_positioning_evidence_v3 import (
 OPERATOR_WORKSPACE_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1"
 
 _DIRECTIONAL_SIDES = frozenset({"BUY", "SELL"})
+_NEXT_IMPULSE_AFTER_ACTIVE_TARGET_EVENT = (
+    "NEXT_TARGET_SWING_START_AFTER_ACTIVE_TARGET_AND_REST"
+)
 _STUDY_HISTORY_LIMIT = 128
 _RETRACEMENT_LEVEL_CATALOG: dict[str, dict[str, object]] = {
     "OTE_70_5": {
@@ -941,6 +944,188 @@ def _window_label(*, is_open: bool, valid_for_seconds: float | None) -> str:
     if minutes:
         return f"Open · {minutes}m {seconds:02d}s remaining"
     return f"Open · {seconds}s remaining"
+
+
+def _broker_expiry_contract_v3(
+    payload: Mapping[str, Any],
+    command: Mapping[str, Any],
+    *,
+    market: Mapping[str, object],
+    market_study: Mapping[str, object],
+    now_epoch: float,
+) -> dict[str, object]:
+    """Admit only current, lineage-bound broker duration proof."""
+
+    current_symbol = _safe_public_text(market.get("symbol"), "", limit=64)
+    current_timeframe = _safe_public_text(
+        market.get("timeframe"), "", limit=32
+    ).upper()
+    closed_candle_key = _safe_identifier(
+        market_study.get("closed_candle_key"), ""
+    )
+    display_frame = _integer(
+        payload.get("display_frame_id"),
+        payload.get("chart_frame_id"),
+        payload.get("frame_id"),
+    )
+    current_input_hash = _first_identity_text(
+        payload.get("input_frame_hash"),
+        payload.get("frame_hash"),
+        _mapping(payload.get("tracking_summary")).get("input_frame_hash"),
+    )
+
+    def _result(
+        *,
+        expiry_seconds: int | None,
+        proven: bool,
+        source: str,
+        valid_until_epoch: float | None,
+    ) -> dict[str, object]:
+        eligible = bool(
+            proven
+            and expiry_seconds is not None
+            and expiry_seconds >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        )
+        status = (
+            "VERIFIED_ELIGIBLE"
+            if eligible
+            else "VERIFIED_INELIGIBLE"
+            if proven
+            else "UNVERIFIED"
+        )
+        if eligible:
+            instruction = (
+                f"Broker expiry verified at {math.ceil(cast(int, expiry_seconds) / 60)} "
+                "minutes."
+            )
+        elif proven and expiry_seconds is not None:
+            instruction = (
+                f"AVOID — broker expiry is {math.ceil(expiry_seconds / 60)} minutes; "
+                "this system requires at least 15 minutes."
+            )
+        else:
+            instruction = (
+                "SET/VERIFY EXPIRY ≥15 MIN — Broker expiry unverified; the model "
+                "horizon is not the broker contract duration."
+            )
+        return {
+            "schema_version": "PG_BROKER_EXPIRY_PROOF_V3",
+            "status": status,
+            "proven": proven,
+            "eligible": eligible,
+            "expiry_seconds": expiry_seconds if proven else None,
+            "minimum_required_seconds": (
+                MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+            ),
+            "source": source,
+            "valid_until_epoch": valid_until_epoch if proven else None,
+            "instruction": instruction,
+            "model_horizon_is_broker_expiry": False,
+        }
+
+    primary = _mapping(command.get("broker_expiry_contract_v3"))
+    if primary:
+        expiry = _number(primary.get("expiry_seconds"))
+        valid_until = _epoch(primary.get("valid_until_epoch"))
+        primary_proven = bool(
+            _explicit_bool(
+                primary.get("proven")
+                if "proven" in primary
+                else primary.get("broker_expiry_proven")
+            )
+            is True
+            and expiry is not None
+            and expiry > 0.0
+            and valid_until is not None
+            and valid_until > now_epoch
+            and current_symbol
+            and current_timeframe
+            and closed_candle_key
+            and _instrument_token(primary.get("symbol"))
+            == _instrument_token(current_symbol)
+            and _safe_public_text(
+                primary.get("timeframe"), "", limit=32
+            ).upper()
+            == current_timeframe
+            and _safe_identifier(primary.get("closed_candle_key"), "")
+            == closed_candle_key
+            and display_frame > 0
+            and _integer(primary.get("frame_id")) == display_frame
+            and current_input_hash
+            and _safe_identifier(primary.get("input_frame_hash"), "")
+            == _safe_identifier(current_input_hash, "")
+        )
+        if primary_proven:
+            return _result(
+                expiry_seconds=int(cast(float, expiry)),
+                proven=True,
+                source="LINEAGE_BOUND_BROKER_EXPIRY_CONTRACT",
+                valid_until_epoch=valid_until,
+            )
+
+    packet = _mapping(payload.get("execution_packet")) or _mapping(
+        payload.get("model_council_packet")
+    )
+    execution = _mapping(packet.get("execution"))
+    time_sequence = _mapping(packet.get("time_sequence")) or _mapping(
+        execution.get("time_sequence")
+    )
+    lineage = _mapping(command.get("execution_lineage")) or _mapping(
+        packet.get("lineage")
+    )
+    packet_id = _first_identity_text(packet.get("packet_id"), packet.get("id"))
+    command_packet_id = _first_identity_text(command.get("execution_packet_id"))
+    packet_expiry = _number(execution.get("expiry_seconds"))
+    sequence_expiry = _number(
+        time_sequence.get("target_expiry_seconds")
+        or time_sequence.get("expiry_seconds")
+        or time_sequence.get("target_seconds")
+    )
+    packet_valid_until = _epoch(
+        packet.get("valid_until_epoch"),
+        packet.get("valid_until_epoch_sec"),
+        lineage.get("valid_until_epoch"),
+    )
+    status_packet_id = _first_identity_text(
+        _mapping(payload.get("execution_packet_status")).get("packet_id")
+    )
+    packet_proven = bool(
+        packet
+        and packet_id
+        and command_packet_id
+        and packet_id == command_packet_id
+        and (not status_packet_id or status_packet_id == packet_id)
+        and _explicit_bool(command.get("execution_packet_present")) is True
+        and packet_valid_until is not None
+        and packet_valid_until > now_epoch
+        and packet_expiry is not None
+        and packet_expiry > 0.0
+        and sequence_expiry is not None
+        and abs(packet_expiry - sequence_expiry) <= 0.001
+        and _instrument_token(lineage.get("symbol"))
+        == _instrument_token(current_symbol)
+        and _safe_public_text(lineage.get("timeframe"), "", limit=32).upper()
+        == current_timeframe
+        and _safe_identifier(
+            lineage.get("trigger_closed_candle_key")
+            or lineage.get("closed_candle_key"),
+            "",
+        )
+        == closed_candle_key
+    )
+    if packet_proven:
+        return _result(
+            expiry_seconds=int(cast(float, packet_expiry)),
+            proven=True,
+            source="CURRENT_PERMISSION_EXECUTION_PACKET",
+            valid_until_epoch=packet_valid_until,
+        )
+    return _result(
+        expiry_seconds=None,
+        proven=False,
+        source="UNVERIFIED",
+        valid_until_epoch=None,
+    )
 
 
 def _countertrend_sniper_promotion_source(
@@ -2920,6 +3105,483 @@ def _path_clock_direction_side_v3(*values: object) -> str:
     return "NEUTRAL"
 
 
+def _forward_timing_forecast_contract_v3(value: object) -> dict[str, object]:
+    """Bound the public forward-timing forecast without importing authority."""
+
+    source = _mapping(value)
+    if not source:
+        return {}
+    status = _safe_public_text(source.get("status"), "", limit=64).upper()
+    candidate = _safe_public_text(
+        source.get("candidate_direction"), "", limit=16
+    ).upper()
+    result: dict[str, object] = {
+        "schema_version": _safe_public_text(
+            source.get("schema_version"),
+            "PG_JPCLF_FORWARD_TIMING_FORECAST_V3",
+            limit=96,
+        ),
+        "probability_semantics_version": _safe_public_text(
+            source.get("probability_semantics_version"),
+            "PG_JPCLF_FORWARD_PROBABILITY_SEMANTICS_V3",
+            limit=96,
+        ),
+        "status": status or "DIRECTION_UNRESOLVED",
+        "candidate_direction": candidate,
+        "current_regime": _safe_public_text(
+            source.get("current_regime"), "UNKNOWN", limit=64
+        ).upper(),
+        "study_only": True,
+        "execution_authority": False,
+        "broker_click_authority": False,
+        "can_grant_entry_permission": False,
+    }
+    forecast_horizon_seconds = _number(source.get("forecast_horizon_seconds"))
+    if forecast_horizon_seconds is not None and forecast_horizon_seconds > 0.0:
+        result["forecast_horizon_seconds"] = int(forecast_horizon_seconds)
+        result["forecast_horizon_source"] = "MODEL_STUDY_HORIZON"
+    recommended_duration = _number(
+        source.get("recommended_trade_duration_seconds")
+    )
+    result["recommended_trade_duration_seconds"] = (
+        int(recommended_duration)
+        if recommended_duration is not None and recommended_duration > 0.0
+        else None
+    )
+    broker_expiry = _number(source.get("broker_expiry_seconds"))
+    broker_expiry_proven = bool(
+        _explicit_bool(source.get("broker_expiry_proven")) is True
+        and broker_expiry is not None
+        and broker_expiry > 0.0
+    )
+    result["broker_expiry_seconds"] = (
+        int(cast(float, broker_expiry)) if broker_expiry_proven else None
+    )
+    result["duration_provenance"] = {
+        "forecast_horizon": (
+            "MODEL_STUDY_HORIZON"
+            if result.get("forecast_horizon_seconds") is not None
+            else "UNAVAILABLE"
+        ),
+        "recommended_trade_duration": (
+            _safe_public_text(
+                source.get("recommended_trade_duration_source"),
+                "DECLARED_RECOMMENDATION",
+                limit=64,
+            ).upper()
+            if result["recommended_trade_duration_seconds"] is not None
+            else "UNAVAILABLE"
+        ),
+        "broker_expiry": (
+            _safe_public_text(
+                source.get("broker_expiry_source"),
+                "BROKER_PROVEN",
+                limit=64,
+            ).upper()
+            if broker_expiry_proven
+            else "UNPROVEN"
+        ),
+        "broker_expiry_proven": broker_expiry_proven,
+    }
+    lineage = _mapping(source.get("lineage"))
+    if lineage:
+        result["lineage"] = {
+            "symbol": _safe_public_text(lineage.get("symbol"), "", limit=64),
+            "timeframe": _safe_public_text(
+                lineage.get("timeframe"), "", limit=32
+            ).upper(),
+            "closed_candle_key": _safe_identifier(
+                lineage.get("closed_candle_key"), ""
+            ),
+            "closed_candle_sequence": _integer(
+                lineage.get("closed_candle_sequence")
+            ),
+            "source_cadence_seconds": _integer(
+                lineage.get("source_cadence_seconds")
+            ),
+            "lineage_bound": _explicit_bool(lineage.get("lineage_bound")) is True,
+            "freshness_state": _safe_public_text(
+                lineage.get("freshness_state"), "UNBOUND", limit=40
+            ).upper(),
+            "lineage_digest": _safe_identifier(
+                lineage.get("lineage_digest"), ""
+            ),
+        }
+    forecast_digest = _safe_identifier(source.get("forecast_digest"), "")
+    if forecast_digest:
+        result["forecast_digest"] = forecast_digest
+
+    move_window = _mapping(source.get("move_window"))
+    if move_window:
+        bounded_window: dict[str, object] = {
+            "basis": _safe_public_text(move_window.get("basis"), "", limit=160),
+            "relative_to": _safe_public_text(
+                move_window.get("relative_to"),
+                "CLOSED_CANDLE_ANCHOR",
+                limit=64,
+            ).upper(),
+            # A published forecast is never a rolling wall-clock window.  It is
+            # frozen to one completed-candle anchor until a new lineage is
+            # published.
+            "rolling_wall_clock": False,
+            "anchor_time_proven": (
+                _explicit_bool(move_window.get("anchor_time_proven")) is True
+            ),
+            "estimate_calibrated": (
+                _explicit_bool(move_window.get("estimate_calibrated")) is True
+            ),
+            "event_definition": _safe_public_text(
+                move_window.get("event_definition"), "UNAVAILABLE", limit=96
+            ).upper(),
+        }
+        for key in ("earliest", "central", "latest"):
+            point = _mapping(move_window.get(key))
+            bounded_point: dict[str, object] = {}
+            for unit in ("seconds", "minutes", "candles"):
+                numeric = _number(point.get(unit))
+                if numeric is not None and numeric >= 0.0:
+                    bounded_point[unit] = round(numeric, 3)
+            if bounded_point:
+                bounded_window[key] = bounded_point
+        anchor_epoch = _epoch(move_window.get("anchor_close_epoch_seconds"))
+        start_epoch = _epoch(
+            move_window.get("target_window_start_epoch_seconds")
+        )
+        central_epoch = _epoch(
+            move_window.get("target_window_central_epoch_seconds")
+        )
+        end_epoch = _epoch(
+            move_window.get("target_window_end_epoch_seconds")
+        )
+        lineage_anchor_epoch = _epoch(
+            lineage.get("anchor_close_epoch_seconds")
+        )
+        earliest_seconds = _number(
+            _mapping(bounded_window.get("earliest")).get("seconds")
+        )
+        central_seconds = _number(
+            _mapping(bounded_window.get("central")).get("seconds")
+        )
+        latest_seconds = _number(
+            _mapping(bounded_window.get("latest")).get("seconds")
+        )
+        exact_epoch_contract_valid = bool(
+            _explicit_bool(move_window.get("exact_wall_clock_proven")) is True
+            and _explicit_bool(move_window.get("anchor_time_proven")) is True
+            and _explicit_bool(move_window.get("rolling_wall_clock")) is False
+            and anchor_epoch is not None
+            and start_epoch is not None
+            and central_epoch is not None
+            and end_epoch is not None
+            and lineage_anchor_epoch is not None
+            and abs(anchor_epoch - lineage_anchor_epoch) <= 0.001
+            and anchor_epoch < start_epoch <= central_epoch <= end_epoch
+            and earliest_seconds is not None
+            and central_seconds is not None
+            and latest_seconds is not None
+            and abs((start_epoch - anchor_epoch) - earliest_seconds) <= 1.0
+            and abs((central_epoch - anchor_epoch) - central_seconds) <= 1.0
+            and abs((end_epoch - anchor_epoch) - latest_seconds) <= 1.0
+        )
+        bounded_window["exact_wall_clock_proven"] = exact_epoch_contract_valid
+        if exact_epoch_contract_valid:
+            bounded_window.update(
+                {
+                    "anchor_close_epoch_seconds": anchor_epoch,
+                    "target_window_start_epoch_seconds": start_epoch,
+                    "target_window_central_epoch_seconds": central_epoch,
+                    "target_window_end_epoch_seconds": end_epoch,
+                }
+            )
+            if isinstance(result.get("lineage"), dict):
+                cast(dict[str, object], result["lineage"])[
+                    "anchor_close_epoch_seconds"
+                ] = anchor_epoch
+        result["move_window"] = bounded_window
+
+    probability = _mapping(source.get("probability"))
+    if probability:
+        bounded_probability: dict[str, object] = {
+            "metric": _safe_public_text(
+                probability.get("metric"), "UNAVAILABLE", limit=96
+            ).upper(),
+            "source_tier": _safe_public_text(
+                probability.get("source_tier"), "", limit=64
+            ).upper(),
+            "calibration_grade": _safe_public_text(
+                probability.get("calibration_grade"), "UNRATED", limit=24
+            ).upper(),
+            "calibrated": _explicit_bool(probability.get("calibrated")) is True,
+            "support_count": _integer(probability.get("support_count")),
+            "compatibility_alias_for": _safe_public_text(
+                probability.get("compatibility_alias_for"),
+                "event_likelihood",
+                limit=48,
+            ),
+        }
+        for key in ("value", "confidence", "shrinkage_weight"):
+            numeric = _number(probability.get(key))
+            if numeric is not None:
+                bounded_probability[key] = round(
+                    max(0.0, min(1.0, numeric)), 6
+                )
+        result["probability"] = bounded_probability
+
+    directional_model = _mapping(source.get("directional_model"))
+    if directional_model:
+        directional_score = _number(directional_model.get("score"))
+        result["directional_model"] = {
+            "candidate_direction": _safe_public_text(
+                directional_model.get("candidate_direction"), candidate, limit=16
+            ).upper(),
+            "score": (
+                round(max(0.0, min(1.0, directional_score)), 6)
+                if directional_score is not None
+                else None
+            ),
+            "source": _safe_public_text(
+                directional_model.get("source"),
+                "CURRENT_DIRECTIONAL_ENSEMBLE",
+                limit=64,
+            ).upper(),
+            "is_event_likelihood": False,
+        }
+
+    timing_estimate = _mapping(source.get("timing_estimate"))
+    if timing_estimate:
+        window_blend_weight = _number(
+            timing_estimate.get("window_blend_weight")
+        )
+        result["timing_estimate"] = {
+            "source_tier": _safe_public_text(
+                timing_estimate.get("source_tier"), "NONE", limit=64
+            ).upper(),
+            "basis": _safe_public_text(
+                timing_estimate.get("basis"), "UNAVAILABLE", limit=128
+            ).upper(),
+            "event_definition": _safe_public_text(
+                timing_estimate.get("event_definition"),
+                "UNAVAILABLE",
+                limit=96,
+            ).upper(),
+            "current_target_state": _safe_public_text(
+                timing_estimate.get("current_target_state"),
+                "UNKNOWN",
+                limit=64,
+            ).upper(),
+            "empirical_timing_evidence": (
+                _explicit_bool(timing_estimate.get("empirical_timing_evidence"))
+                is True
+            ),
+            "support_count": _integer(timing_estimate.get("support_count")),
+            "current_sequence_candle_count": _integer(
+                timing_estimate.get("current_sequence_candle_count")
+            ),
+            "window_blend_weight": (
+                round(max(0.0, min(1.0, window_blend_weight)), 6)
+                if window_blend_weight is not None
+                else None
+            ),
+        }
+
+    event_likelihood = _mapping(source.get("event_likelihood"))
+    if event_likelihood:
+        event_support = _integer(event_likelihood.get("support_count"))
+        event_value = _number(event_likelihood.get("value"))
+        result["event_likelihood"] = {
+            "value": (
+                round(max(0.0, min(1.0, event_value)), 6)
+                if event_value is not None and event_support > 0
+                else None
+            ),
+            "event": _safe_public_text(
+                event_likelihood.get("event"), "UNAVAILABLE", limit=96
+            ).upper(),
+            "source_tier": _safe_public_text(
+                event_likelihood.get("source_tier"), "NONE", limit=64
+            ).upper(),
+            "support_count": event_support,
+            "calibrated": (
+                _explicit_bool(event_likelihood.get("calibrated")) is True
+            ),
+        }
+
+    evidence_confidence = _mapping(source.get("evidence_confidence"))
+    if evidence_confidence:
+        confidence_support = _integer(evidence_confidence.get("support_count"))
+        confidence_value = _number(evidence_confidence.get("value"))
+        result["evidence_confidence"] = {
+            "value": (
+                round(max(0.0, min(1.0, confidence_value)), 6)
+                if confidence_value is not None and confidence_support > 0
+                else None
+            ),
+            "basis": _safe_public_text(
+                evidence_confidence.get("basis"), "UNAVAILABLE", limit=96
+            ).upper(),
+            "support_count": confidence_support,
+        }
+
+    transition = _mapping(source.get("state_transition_estimate"))
+    if transition:
+        transition_support = _integer(transition.get("support_count"))
+        transition_value = _number(transition.get("value"))
+        result["state_transition_estimate"] = {
+            "value": (
+                round(max(0.0, min(1.0, transition_value)), 6)
+                if transition_value is not None and transition_support > 0
+                else None
+            ),
+            "transition": _safe_public_text(
+                transition.get("transition"), "UNAVAILABLE", limit=96
+            ).upper(),
+            "target_count": _integer(transition.get("target_count")),
+            "support_count": transition_support,
+            "source_tier": _safe_public_text(
+                transition.get("source_tier"), "NONE", limit=64
+            ).upper(),
+            "is_directional_likelihood": False,
+        }
+
+    stop_survival = _mapping(source.get("stop_survival"))
+    if stop_survival:
+        survival_support = _integer(stop_survival.get("support_count"))
+        survival_value = _number(stop_survival.get("value"))
+        bounded_survival: dict[str, object] = {
+            "value": (
+                round(max(0.0, min(1.0, survival_value)), 6)
+                if survival_value is not None and survival_support > 0
+                else None
+            ),
+            "source_tier": _safe_public_text(
+                stop_survival.get("source_tier"), "NONE", limit=64
+            ).upper(),
+            "support_count": survival_support,
+            "exact_wall_clock_proven": (
+                _explicit_bool(stop_survival.get("exact_wall_clock_proven"))
+                is True
+            ),
+            "calibrated": _explicit_bool(stop_survival.get("calibrated")) is True,
+        }
+        for key in ("stop_distance_mru", "move_size_mru"):
+            numeric = _number(stop_survival.get(key))
+            if numeric is not None and numeric >= 0.0:
+                bounded_survival[key] = round(numeric, 6)
+        result["stop_survival"] = bounded_survival
+
+    adverse_risk = _mapping(source.get("adverse_excursion_risk"))
+    if adverse_risk:
+        adverse_support = _integer(adverse_risk.get("support_count"))
+        adverse_value = _number(
+            adverse_risk.get("worst_drawdown_still_ahead_probability")
+        )
+        result["adverse_excursion_risk"] = {
+            "worst_drawdown_still_ahead_probability": (
+                round(max(0.0, min(1.0, adverse_value)), 6)
+                if adverse_value is not None and adverse_support > 0
+                else None
+            ),
+            "source_tier": _safe_public_text(
+                adverse_risk.get("source_tier"), "NONE", limit=64
+            ).upper(),
+            "support_count": adverse_support,
+        }
+
+    expected_pre_move = _mapping(source.get("expected_pre_move"))
+    if expected_pre_move:
+        bounded_pre_move: dict[str, object] = {
+            "state": _safe_public_text(
+                expected_pre_move.get("state"), "UNKNOWN", limit=40
+            ).upper(),
+            "sweep_risk": _safe_public_text(
+                expected_pre_move.get("sweep_risk"), "UNRATED", limit=40
+            ).upper(),
+            "sweep_source_tier": _safe_public_text(
+                expected_pre_move.get("sweep_source_tier"), "NONE", limit=64
+            ).upper(),
+            "sweep_support_count": _integer(
+                expected_pre_move.get("sweep_support_count")
+            ),
+        }
+        for key in ("rest_window_candles", "rest_window_minutes"):
+            raw_window = expected_pre_move.get(key)
+            interval = _mapping(raw_window)
+            if interval:
+                bounded_interval = {
+                    point: round(numeric, 3)
+                    for point in ("earliest", "central", "latest")
+                    if (numeric := _number(interval.get(point))) is not None
+                    and numeric >= 0.0
+                }
+                if bounded_interval:
+                    bounded_pre_move[key] = bounded_interval
+            else:
+                numeric = _number(raw_window)
+                if numeric is not None and numeric >= 0.0:
+                    bounded_pre_move[key] = round(numeric, 6)
+        sweep_probability = _number(
+            expected_pre_move.get("sweep_probability")
+        )
+        if (
+            sweep_probability is not None
+            and sweep_probability >= 0.0
+            and _integer(expected_pre_move.get("sweep_support_count")) > 0
+        ):
+            bounded_pre_move["sweep_probability"] = round(
+                max(0.0, min(1.0, sweep_probability)), 6
+            )
+        result["expected_pre_move"] = bounded_pre_move
+
+    invalidation = _mapping(source.get("invalidation"))
+    if invalidation:
+        bounded_invalidation: dict[str, object] = {
+            "direction": _safe_public_text(
+                invalidation.get("direction"), "", limit=16
+            ).upper(),
+            "condition": _safe_public_text(
+                invalidation.get("condition"), "", limit=240
+            ),
+            "closed_candles_only": (
+                _explicit_bool(invalidation.get("closed_candles_only")) is True
+            ),
+        }
+        for key in (
+            "adverse_distance_mru",
+            "expires_after_seconds",
+            "expires_after_candles",
+        ):
+            numeric = _number(invalidation.get(key))
+            if numeric is not None and numeric >= 0.0:
+                bounded_invalidation[key] = round(numeric, 6)
+        result["invalidation"] = bounded_invalidation
+
+    enter_now = _mapping(source.get("enter_now"))
+    if enter_now:
+        result["enter_now"] = {
+            "permission": _explicit_bool(enter_now.get("permission")) is True,
+            "duration_eligible": (
+                _explicit_bool(enter_now.get("duration_eligible")) is True
+            ),
+            "timing_advisory": _safe_public_text(
+                enter_now.get("timing_advisory"), "", limit=80
+            ).upper(),
+            "reason": _safe_public_text(enter_now.get("reason"), "", limit=240),
+            "permission_source": _safe_public_text(
+                enter_now.get("permission_source"), "", limit=80
+            ).upper(),
+        }
+
+    hierarchy = _mapping(source.get("evidence_hierarchy"))
+    if hierarchy:
+        result["evidence_hierarchy"] = {
+            "selected_tier": _safe_public_text(
+                hierarchy.get("selected_tier"), "", limit=64
+            ).upper(),
+            "support_count": _integer(hierarchy.get("support_count")),
+        }
+    return result
+
+
 def path_clock_liquidity_contract_v3(value: object) -> dict[str, object]:
     """Return the compact public JPCLF contract and discard trajectory internals.
 
@@ -3165,6 +3827,16 @@ def path_clock_liquidity_contract_v3(value: object) -> dict[str, object]:
             replay["metrics"] = safe_metrics
         if replay:
             result["replay_calibration"] = replay
+    forward_forecast = _forward_timing_forecast_contract_v3(
+        source.get("forward_timing_forecast")
+        or timing.get("forward_timing_forecast")
+    )
+    if forward_forecast:
+        result["forward_timing_forecast"] = forward_forecast
+        if isinstance(result.get("timing_read"), dict):
+            cast(dict[str, object], result["timing_read"])[
+                "forward_timing_forecast"
+            ] = forward_forecast
     return result
 
 
@@ -3309,42 +3981,34 @@ def _path_clock_timing_effect_v3(
         and not timing_evidence_unavailable
         and (explicit_support is not None or explicit_veto is not None)
     )
-    unsafe_mature_claim = bool(
-        maturity_claimed
-        and (
-            not lineage_matches
-            or not freshness_matches
-            or not duration_policy_valid
-            or not remaining_window_eligible
-            or timing_evidence_unavailable
-        )
-    )
-    hard_duration_veto = bool(
+    # Timing is an asymmetric brake only when duration is explicitly
+    # ineligible or a promoted, lineage-matched study publishes a veto.
+    # Missing calibration or an unproven clock downgrades the forecast; it
+    # must not silently cancel independently authorized entry permission.
+    explicit_mature_veto = bool(fully_mature and explicit_veto is True)
+    known_duration_veto = bool(
         timing
         and (
-            not duration_policy_valid
-            or not remaining_window_eligible
-            or duration_policy_status
+            duration_policy_status
             in {
                 "EXCLUDED_UNDER_15_MINUTES",
                 "EXCLUDED_ABOVE_BOUNDED_HORIZON",
             }
+            or (
+                contract_duration is not None
+                and contract_duration < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+            )
+            or (
+                contract_duration is not None
+                and contract_duration > MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+            )
+            or (
+                remaining_seconds is not None
+                and remaining_seconds < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+            )
         )
     )
-    timing_evidence_veto = bool(
-        timing_evidence_unavailable
-        or (
-            timing
-            and timing.get("new_entry_eligible") is False
-            and not hard_duration_veto
-        )
-    )
-    timing_veto = bool(
-        explicit_veto is True
-        or unsafe_mature_claim
-        or hard_duration_veto
-        or timing_evidence_veto
-    )
+    timing_veto = bool(explicit_mature_veto or known_duration_veto)
     timing_supports = bool(
         fully_mature and explicit_support is True and explicit_veto is not True
     )
@@ -3358,8 +4022,11 @@ def _path_clock_timing_effect_v3(
         or contract_duration is None
         or contract_duration > MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
     ):
-        state = "INVALID_DURATION_POLICY"
-        reason = "The timing contract does not carry the canonical 15-minute to two-hour V3 duration policy."
+        state = "PROVISIONAL"
+        reason = (
+            "Exact timing calibration is unavailable; use the completed-candle "
+            "forecast and keep entry permission separate."
+        )
     elif (
         contract_duration < MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
         or not remaining_window_eligible
@@ -3368,17 +4035,23 @@ def _path_clock_timing_effect_v3(
         state = "UNDER_15_MINUTES"
         reason = "Do not start this move with less than 15 minutes of room."
     elif timing_evidence_unavailable:
-        state = "TIMING_EVIDENCE_UNAVAILABLE"
+        state = "PROVISIONAL"
         reason = (
             "Exact contiguous closed-candle timing is not proven for this chart yet; "
-            "the system will not invent a survival probability."
+            "the forecast remains provisional and no survival probability is invented."
         )
     elif maturity_claimed and not lineage_matches:
-        state = "INVALID_LINEAGE"
-        reason = "Timing evidence does not match this pair, timeframe, candle, and direction."
+        state = "PROVISIONAL"
+        reason = (
+            "The prior timing study does not match this pair, timeframe, candle, and "
+            "direction, so only the current completed-candle forecast is shown."
+        )
     elif maturity_claimed and not freshness_matches:
-        state = "STALE"
-        reason = "The mature timing read is not fresh for the current completed-candle study."
+        state = "PROVISIONAL"
+        reason = (
+            "The prior timing read is stale; the current completed-candle forecast "
+            "remains visible without calibrated timing claims."
+        )
     elif fully_mature and timing_veto:
         state = "DELAY"
         reason = _safe_public_text(
@@ -3397,6 +4070,13 @@ def _path_clock_timing_effect_v3(
         state = "BUILDING"
         reason = "Timing history is still building and cannot grant entry permission."
 
+    target_time = _mapping(timing.get("target_time_seconds"))
+    replay = _mapping(timing_contract.get("replay_calibration"))
+    replay_metrics = _mapping(replay.get("metrics"))
+    forward_forecast = _forward_timing_forecast_contract_v3(
+        timing_contract.get("forward_timing_forecast")
+        or timing.get("forward_timing_forecast")
+    )
     return {
         "present": True,
         "mature": fully_mature,
@@ -3419,8 +4099,898 @@ def _path_clock_timing_effect_v3(
         "side": timing_side,
         "timing_supports_entry": timing_supports,
         "timing_veto": timing_veto,
+        "timing_veto_basis": (
+            "EXPLICIT_MATURE_VETO"
+            if explicit_mature_veto
+            else "DURATION_INELIGIBLE"
+            if known_duration_veto
+            else "NONE"
+        ),
+        "survival_probability": (
+            round(value, 6)
+            if (value := _number(timing.get("survival_probability"))) is not None
+            else None
+        ),
+        "probability_worst_drawdown_still_ahead": (
+            round(value, 6)
+            if (
+                value := _number(
+                    timing.get("probability_worst_drawdown_still_ahead")
+                )
+            )
+            is not None
+            else None
+        ),
+        "support_count": _integer(timing.get("support_count")),
+        "target_time_seconds": {
+            key: round(value, 3)
+            for key in ("p10", "median", "p90")
+            if (value := _number(target_time.get(key))) is not None
+        },
+        "replay_calibration": {
+            "audited_replay_count": _integer(replay.get("audited_replay_count")),
+            "eligible_replay_count": _integer(replay.get("eligible_replay_count")),
+            "metrics": {
+                key: round(value, 6)
+                for key in (
+                    "directional_accuracy",
+                    "timing_accuracy",
+                    "sweep_survival_rate",
+                    "calibration_score",
+                    "expected_calibration_error",
+                    "brier_score",
+                )
+                if (value := _number(replay_metrics.get(key))) is not None
+            },
+        },
+        "forward_timing_forecast": forward_forecast,
         "state": state,
         "reason": reason,
+    }
+
+
+def _timeframe_seconds_v3(value: object) -> int | None:
+    token = _safe_public_text(value, "", limit=16).upper().replace(" ", "")
+    match = re.fullmatch(r"([MHD])(\d{1,3})", token)
+    if not match:
+        return None
+    amount = int(match.group(2))
+    if amount <= 0:
+        return None
+    multiplier = {"M": 60, "H": 3_600, "D": 86_400}[match.group(1)]
+    return amount * multiplier
+
+
+def _calibration_grade_v3(
+    probability: Mapping[str, object],
+    _timing_effect: Mapping[str, object],
+) -> tuple[str, bool, int]:
+    source_grade = _safe_public_text(
+        probability.get("calibration_grade"), "", limit=24
+    ).upper()
+    calibrated = probability.get("calibrated") is True
+    support_count = _integer(probability.get("support_count"))
+    if source_grade and source_grade not in {"UNRATED", "UNKNOWN"}:
+        return source_grade, calibrated, support_count
+    # Exact JPCLF replay calibration belongs to stop-survival telemetry.  It
+    # must never leak into the distinct event-likelihood grade.
+    return "UNRATED", False, support_count
+
+
+def _calibration_grade_label_v3(grade: str) -> str:
+    labels = {
+        "A_PROMOTED_PAIRED_REPLAY": "A \u00b7 promoted paired replay",
+        "B_SHRUNK_MOTIF_OR_JPCLF": "B \u00b7 shrunk motif and timing history",
+        "C_SHRUNK_PAIR_REGIME": "C \u00b7 shrunk pair-regime history",
+        "C_SPARSE_PAIR": "C \u00b7 sparse pair history",
+        "D_CURRENT_SEQUENCE": "D \u00b7 current sequence",
+        "D_UNCALIBRATED_POOLED_PRIOR": "D \u00b7 uncalibrated pooled prior",
+    }
+    if grade in labels:
+        return labels[grade]
+    if re.fullmatch(r"[A-E]", grade):
+        return grade
+    return grade.replace("_", " ").title() if grade else "UNRATED"
+
+
+def _timing_source_label_v3(source_tier: str, *, empirical: bool) -> str:
+    labels = {
+        "EXACT_JPCLF": "Exact pair path-clock timing",
+        "PAIR_MOTIF_JPCLF": "Matched pair motif and path-clock history",
+        "PAIR_JPCLF": "Pair path-clock history",
+        "PAIR_REGIME_MOTIF_JPCLF": "Pair regime, motif, and path-clock history",
+        "PAIR_REGIME_JPCLF": "Pair regime and path-clock history",
+        "PAIR_MOTIF": "Matched pair motif history",
+        "PAIR_REGIME_MOTIF": "Matched pair-regime motif history",
+        "PAIR_STATE_SURVIVAL": "Pair state-survival timing history",
+        "PAIR_REGIME": "Pair regime timing history",
+        "PAIR": "Pair behavior timing history",
+        "LIVE_M5_SEQUENCE": "Current M5 closed-candle sequence",
+        "POLICY_WINDOW": "Timing unrated · model horizon only",
+        "NONE": "No timing source",
+    }
+    label = labels.get(
+        source_tier,
+        source_tier.replace("_", " ").title() if source_tier else "No timing source",
+    )
+    if source_tier not in {"", "NONE", "POLICY_WINDOW", "LIVE_M5_SEQUENCE"}:
+        label += " · empirical" if empirical else " · not empirical"
+    return label
+
+
+def _event_metric_label_v3(metric: str) -> str:
+    labels = {
+        "MOTIF_TARGET_FOLLOW_THROUGH_WITHIN_FORECAST_HORIZON": (
+            "motif target follow-through within the forecast horizon"
+        ),
+        "DIRECTION_CHANGE_BY_FORECAST_HORIZON": (
+            "direction change by the forecast horizon"
+        ),
+        "SWING_BY_FORECAST_HORIZON": "swing completion by the forecast horizon",
+        "UNAVAILABLE": "the named event",
+    }
+    return labels.get(
+        metric,
+        metric.replace("_", " ").lower() if metric else "the named event",
+    )
+
+
+def _forecast_window_point_v3(
+    value: object,
+    *,
+    timeframe_seconds: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    point = _mapping(value)
+    seconds = _number(point.get("seconds"))
+    minutes = _number(point.get("minutes"))
+    candles = _number(point.get("candles"))
+    if seconds is None and minutes is not None:
+        seconds = minutes * 60.0
+    if seconds is None and candles is not None and timeframe_seconds is not None:
+        seconds = candles * timeframe_seconds
+    if minutes is None and seconds is not None:
+        minutes = seconds / 60.0
+    if candles is None and seconds is not None and timeframe_seconds:
+        candles = seconds / timeframe_seconds
+    return (
+        max(0, int(round(seconds))) if seconds is not None else None,
+        max(0, int(round(minutes))) if minutes is not None else None,
+        max(0, int(round(candles))) if candles is not None else None,
+    )
+
+
+def _fixed_exact_window_read_v3(
+    *,
+    side: str,
+    start_epoch: float,
+    end_epoch: float,
+    now_epoch: float,
+) -> dict[str, object]:
+    """Render a countdown from fixed epochs without creating a rolling window."""
+
+    seconds_until_start = max(0, int(math.ceil(start_epoch - now_epoch)))
+    seconds_until_end = max(0, int(math.ceil(end_epoch - now_epoch)))
+    expired = now_epoch >= end_epoch
+    if expired:
+        countdown_label = "Exact anchor-bound window expired"
+        headline = (
+            f"{side} remains the studied path · exact timing expired"
+            if side in _DIRECTIONAL_SIDES
+            else "Direction unresolved · exact timing expired"
+        )
+    elif now_epoch < start_epoch:
+        open_minutes = max(1, int(math.ceil(seconds_until_start / 60.0)))
+        close_minutes = max(1, int(math.ceil(seconds_until_end / 60.0)))
+        countdown_label = (
+            f"Fixed window opens in {open_minutes} min · closes in "
+            f"{close_minutes} min"
+        )
+        headline = f"{side} leading path · {countdown_label.lower()}"
+    else:
+        close_minutes = max(1, int(math.ceil(seconds_until_end / 60.0)))
+        countdown_label = f"Fixed window active · closes in {close_minutes} min"
+        headline = f"{side} leading path · {countdown_label.lower()}"
+    return {
+        "expired": expired,
+        "headline": headline,
+        "countdown_label": countdown_label,
+        "seconds_until_window_start": seconds_until_start,
+        "seconds_until_window_end": seconds_until_end,
+    }
+
+
+def _operator_timing_forecast_v3(
+    *,
+    studied_side: str,
+    current_symbol: str,
+    current_timeframe: str,
+    closed_candle_key: str,
+    identity_proven: bool,
+    behavior_state: str,
+    behavior_side: str,
+    directional_confidence: float,
+    timing_effect: Mapping[str, object],
+    now_epoch: float,
+) -> dict[str, object]:
+    """Build one bounded forecast headline without implying entry authority."""
+
+    timeframe_seconds = _timeframe_seconds_v3(current_timeframe)
+    forward = _mapping(timing_effect.get("forward_timing_forecast"))
+    forward_status = _text(forward.get("status"), "", limit=64).upper()
+    forward_side = _path_clock_direction_side_v3(
+        forward.get("candidate_direction")
+    )
+    move_window = _mapping(forward.get("move_window"))
+    earliest = _forecast_window_point_v3(
+        move_window.get("earliest"), timeframe_seconds=timeframe_seconds
+    )
+    latest = _forecast_window_point_v3(
+        move_window.get("latest"), timeframe_seconds=timeframe_seconds
+    )
+    anchor_close_epoch = _epoch(
+        move_window.get("anchor_close_epoch_seconds")
+    )
+    target_window_start_epoch = _epoch(
+        move_window.get("target_window_start_epoch_seconds")
+    )
+    target_window_central_epoch = _epoch(
+        move_window.get("target_window_central_epoch_seconds")
+    )
+    target_window_end_epoch = _epoch(
+        move_window.get("target_window_end_epoch_seconds")
+    )
+    exact_wall_clock = bool(
+        move_window.get("exact_wall_clock_proven") is True
+        and anchor_close_epoch is not None
+        and target_window_start_epoch is not None
+        and target_window_central_epoch is not None
+        and target_window_end_epoch is not None
+        and anchor_close_epoch
+        < target_window_start_epoch
+        <= target_window_central_epoch
+        <= target_window_end_epoch
+    )
+    exact_window_read = (
+        _fixed_exact_window_read_v3(
+            side=forward_side,
+            start_epoch=cast(float, target_window_start_epoch),
+            end_epoch=cast(float, target_window_end_epoch),
+            now_epoch=now_epoch,
+        )
+        if exact_wall_clock
+        else {}
+    )
+    exact_window_expired = exact_window_read.get("expired") is True
+    forecast_lineage = _mapping(forward.get("lineage"))
+    forecast_lineage_freshness = _safe_public_text(
+        forecast_lineage.get("freshness_state"), "UNBOUND", limit=40
+    ).upper()
+    forecast_lineage_matches = bool(
+        forecast_lineage.get("lineage_bound") is True
+        and _instrument_token(forecast_lineage.get("symbol"))
+        == _instrument_token(current_symbol)
+        and _safe_public_text(
+            forecast_lineage.get("timeframe"), "", limit=32
+        ).upper()
+        == current_timeframe.upper()
+        and _safe_identifier(
+            forecast_lineage.get("closed_candle_key"), ""
+        )
+        == closed_candle_key
+        and forecast_lineage_freshness
+        in {"CURRENT", "FRESH", "CURRENT_CLOSED_CANDLE"}
+    )
+    # A JPCLF forward field is current only when its full completed-candle
+    # identity still matches.  This prevents a prior pair's probability,
+    # timing, risk, or invalidation from surviving an A -> B chart switch.
+    forward_window_eligible = bool(
+        earliest[0] is not None
+        and latest[0] is not None
+        and earliest[0] >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        and latest[0] <= MAXIMUM_STUDIED_TRADE_DURATION_SECONDS
+        and latest[0] >= earliest[0]
+    )
+    forward_identity_valid = bool(
+        identity_proven
+        and forecast_lineage_matches
+        and forward_side in _DIRECTIONAL_SIDES
+        and forward_side == studied_side
+        and forward_status
+        in {
+            "FORECAST_AVAILABLE",
+            "TIMING_UNRATED",
+            "TARGET_MOVE_ALREADY_ACTIVE",
+        }
+    )
+    use_forward = bool(
+        forward_identity_valid
+        and forward_status == "FORECAST_AVAILABLE"
+        and forward_window_eligible
+        and not exact_window_expired
+    )
+    side = (
+        forward_side
+        if forward_identity_valid
+        else studied_side
+        if identity_proven and studied_side in _DIRECTIONAL_SIDES
+        else "NEUTRAL"
+    )
+    probability: Mapping[str, object] = (
+        _mapping(forward.get("probability")) if forward_identity_valid else {}
+    )
+    event_likelihood: Mapping[str, object] = (
+        _mapping(forward.get("event_likelihood"))
+        if forward_identity_valid
+        else {}
+    )
+    evidence_contract: Mapping[str, object] = (
+        _mapping(forward.get("evidence_confidence"))
+        if forward_identity_valid
+        else {}
+    )
+    directional_model: Mapping[str, object] = (
+        _mapping(forward.get("directional_model"))
+        if forward_identity_valid
+        else {}
+    )
+    timing_estimate: Mapping[str, object] = (
+        _mapping(forward.get("timing_estimate"))
+        if forward_identity_valid
+        else {}
+    )
+    timing_event_definition = _safe_public_text(
+        timing_estimate.get("event_definition")
+        or move_window.get("event_definition"),
+        "UNAVAILABLE",
+        limit=96,
+    ).upper()
+    active_target_next_impulse = bool(
+        timing_event_definition == _NEXT_IMPULSE_AFTER_ACTIVE_TARGET_EVENT
+    )
+    target_move_already_active = bool(
+        active_target_next_impulse
+        or forward_status == "TARGET_MOVE_ALREADY_ACTIVE"
+        or _safe_public_text(
+            timing_estimate.get("current_target_state"), "", limit=64
+        ).upper()
+        == "ALREADY_ACTIVE_AT_ANCHOR"
+    )
+    if exact_window_expired:
+        probability = {}
+        event_likelihood = {}
+        evidence_contract = {}
+    calibration_grade, calibrated, support_count = _calibration_grade_v3(
+        probability,
+        timing_effect if forward_identity_valid else {},
+    )
+    event_support_count = max(
+        _integer(event_likelihood.get("support_count")),
+        _integer(probability.get("support_count")),
+    )
+    # These are intentionally separate quantities.  Event likelihood and
+    # evidence confidence require empirical outcome support.  Directional model
+    # score is preserved independently and is never promoted into probability.
+    estimated_likelihood = (
+        _confidence(
+            event_likelihood.get("value"), probability.get("value")
+        )
+        if event_support_count > 0
+        else None
+    )
+    evidence_confidence = (
+        _confidence(
+            evidence_contract.get("value"), probability.get("confidence")
+        )
+        if event_support_count > 0
+        else None
+    )
+    directional_model_score = _confidence(
+        directional_model.get("score"),
+        directional_confidence if identity_proven else None,
+    )
+    event_metric = _safe_public_text(
+        event_likelihood.get("event") or probability.get("metric"),
+        "UNAVAILABLE",
+        limit=96,
+    ).upper()
+    source_tier = _safe_public_text(
+        timing_estimate.get("source_tier"), "", limit=64
+    ).upper()
+    timing_support_count = _integer(timing_estimate.get("support_count"))
+    current_sequence_candle_count = _integer(
+        timing_estimate.get("current_sequence_candle_count")
+    )
+    timing_empirical = (
+        _explicit_bool(timing_estimate.get("empirical_timing_evidence")) is True
+    )
+    pullback_like = bool(
+        behavior_side in _DIRECTIONAL_SIDES
+        and side in _DIRECTIONAL_SIDES
+        and behavior_side != side
+    ) or any(
+        token in behavior_state
+        for token in ("REST", "PULLBACK", "RANGE", "PAUSE", "COMPRESSION")
+    )
+
+    low_seconds: int | None = None
+    high_seconds: int | None = None
+    low_candles: int | None = None
+    high_candles: int | None = None
+    source = "NO_VERIFIED_DIRECTION"
+    source_label = "No verified forecast source"
+    provisional = True
+
+    if use_forward:
+        low_seconds, _, low_candles = earliest
+        high_seconds, _, high_candles = latest
+        # Do not clip or invent a policy-compliant window.  The complete field
+        # is accepted only when its own earliest/latest bounds are already
+        # inside the declared 15-minute to two-hour study policy.
+        low_seconds = cast(int, low_seconds)
+        high_seconds = cast(int, high_seconds)
+        if timeframe_seconds:
+            low_candles = int(math.ceil(low_seconds / timeframe_seconds))
+            high_candles = int(math.ceil(high_seconds / timeframe_seconds))
+        source = source_tier or "JPCLF_FORWARD_TIMING"
+        source_label = _timing_source_label_v3(
+            source_tier,
+            empirical=timing_empirical,
+        )
+        provisional = not calibrated or not exact_wall_clock
+    elif forward_identity_valid:
+        source = source_tier or "TIMING_UNRATED"
+        source_label = _timing_source_label_v3(
+            source_tier,
+            empirical=timing_empirical,
+        )
+        provisional = True
+    elif identity_proven and side in _DIRECTIONAL_SIDES:
+        source = "CURRENT_CLOSED_CANDLE_DIRECTION"
+        source_label = "Current completed-candle direction · timing unrated"
+        calibration_grade = "UNRATED"
+        calibrated = False
+        support_count = 0
+        estimated_likelihood = None
+        provisional = True
+
+    candle_anchor_label = (
+        f"completed {current_timeframe} candles after the anchor close"
+        if current_timeframe != "UNKNOWN"
+        else "completed candles after the anchor close"
+    )
+    if exact_window_expired:
+        headline = _safe_public_text(
+            exact_window_read.get("headline"),
+            f"{side} remains the studied path · exact timing expired",
+            limit=180,
+        )
+    elif (
+        side in _DIRECTIONAL_SIDES
+        and exact_wall_clock
+        and use_forward
+        and active_target_next_impulse
+    ):
+        countdown = _safe_public_text(
+            exact_window_read.get("countdown_label"),
+            "fixed anchor-bound window",
+            limit=120,
+        ).lower()
+        headline = f"{side} is active · next {side} impulse {countdown}"
+    elif side in _DIRECTIONAL_SIDES and exact_wall_clock and use_forward:
+        headline = _safe_public_text(
+            exact_window_read.get("headline"),
+            f"{side} has a fixed anchor-bound timing window",
+            limit=180,
+        )
+    elif (
+        side in _DIRECTIONAL_SIDES
+        and low_candles is not None
+        and high_candles is not None
+        and active_target_next_impulse
+    ):
+        headline = (
+            f"{side} is active · next {side} impulse estimated "
+            f"{low_candles}\u2013{high_candles} {candle_anchor_label}"
+        )
+    elif side in _DIRECTIONAL_SIDES and low_candles is not None and high_candles is not None:
+        headline = (
+            f"{side} leading {low_candles}\u2013{high_candles} "
+            f"{candle_anchor_label}"
+        )
+    elif side in _DIRECTIONAL_SIDES and target_move_already_active:
+        headline = (
+            f"{side} is active · wait for a completed rest before estimating "
+            f"the next {side} impulse"
+        )
+    elif side in _DIRECTIONAL_SIDES:
+        headline = f"{side} remains the studied path \u00b7 timing is unrated"
+    else:
+        next_close = current_timeframe if current_timeframe != "UNKNOWN" else "chart"
+        headline = f"Direction unresolved \u00b7 reassess after the next {next_close} close"
+
+    expected_pre_move: Mapping[str, Any] = (
+        _mapping(forward.get("expected_pre_move"))
+        if use_forward
+        else _mapping(None)
+    )
+    sweep_probability = _number(expected_pre_move.get("sweep_probability"))
+    sweep_risk = _safe_public_text(
+        expected_pre_move.get("sweep_risk"), "", limit=40
+    ).upper()
+    adverse_excursion: Mapping[str, Any] = (
+        _mapping(forward.get("adverse_excursion_risk"))
+        if use_forward
+        else _mapping(None)
+    )
+    adverse_support_count = _integer(adverse_excursion.get("support_count"))
+    worst_drawdown = (
+        _number(
+            adverse_excursion.get(
+                "worst_drawdown_still_ahead_probability"
+            )
+        )
+        if adverse_support_count > 0
+        else None
+    )
+    rest_window_candles = _mapping(
+        expected_pre_move.get("rest_window_candles")
+    )
+    rest_window_minutes = _mapping(
+        expected_pre_move.get("rest_window_minutes")
+    )
+
+    def _interval_text(interval: Mapping[str, object], unit: str) -> str:
+        low = _number(interval.get("earliest"))
+        high = _number(interval.get("latest"))
+        if low is None and high is None:
+            return ""
+        low = max(0.0, low if low is not None else cast(float, high))
+        high = max(low, high if high is not None else low)
+        low_text = str(int(round(low))) if low.is_integer() else f"{low:.1f}"
+        high_text = str(int(round(high))) if high.is_integer() else f"{high:.1f}"
+        return (
+            f"{low_text} {unit}"
+            if low_text == high_text
+            else f"{low_text}–{high_text} {unit}"
+        )
+
+    rest_window_text = _interval_text(rest_window_candles, "candles")
+    if not rest_window_text:
+        rest_window_text = _interval_text(rest_window_minutes, "minutes")
+    rest_prefix = (
+        f"Rest may persist {rest_window_text}. " if rest_window_text else ""
+    )
+    if sweep_probability is not None:
+        estimate_word = "Historical" if calibrated else "Estimated"
+        rest_sweep_risk = (
+            f"{rest_prefix}{estimate_word} sweep risk is "
+            f"{sweep_risk.lower() or 'measured'} "
+            f"({round(max(0.0, min(1.0, sweep_probability)) * 100)}%) before "
+            "the move window."
+        )
+    elif worst_drawdown is not None:
+        rest_sweep_risk = (
+            f"{rest_prefix}Similar paths put the chance that the worst adverse sweep is still "
+            f"ahead at {round(max(0.0, min(1.0, worst_drawdown)) * 100)}%."
+        )
+    elif pullback_like and side in _DIRECTIONAL_SIDES:
+        rest_sweep_risk = (
+            f"A rest or pullback is active; price may sweep against {side} before "
+            "the continuation attempt."
+        )
+    else:
+        rest_sweep_risk = (
+            "No calibrated sweep probability is available; allow at least 15 minutes "
+            "and do not use this forecast as entry permission."
+        )
+    if active_target_next_impulse and side in _DIRECTIONAL_SIDES:
+        rest_sweep_risk = (
+            f"The current {side} impulse is already active. Do not chase it; wait "
+            "for the move to mature and one completed rest or pullback before "
+            f"reassessing the next {side} impulse."
+        )
+
+    invalidation_source: Mapping[str, Any] = (
+        _mapping(forward.get("invalidation"))
+        if use_forward
+        else _mapping(None)
+    )
+    invalidation = _safe_public_text(
+        invalidation_source.get("condition"), "", limit=240
+    )
+    if not invalidation:
+        invalidation = (
+            f"Invalidate if the completed-candle regression no longer reads {side}, "
+            "the pair or timeframe changes, or the verified entry window closes."
+            if side in _DIRECTIONAL_SIDES
+            else "Reassess when a completed candle publishes a verified direction."
+        )
+
+    event_label = _event_metric_label_v3(event_metric)
+    estimated_likelihood_label = (
+        f"{round(estimated_likelihood * 100)}% estimated chance of {event_label}"
+        + (" \u00b7 replay-calibrated" if calibrated else " \u00b7 not replay-calibrated")
+        if estimated_likelihood is not None
+        else f"Event likelihood unavailable for {event_label}"
+    )
+    evidence_confidence_label = (
+        f"{round(evidence_confidence * 100)}% evidence confidence"
+        if evidence_confidence is not None
+        else "Evidence confidence unavailable"
+    )
+    directional_model_score_label = (
+        f"{round(directional_model_score * 100)}% directional model score \u00b7 not probability"
+        if directional_model_score is not None
+        else "Directional model score unavailable"
+    )
+    public_grade_label = _calibration_grade_label_v3(calibration_grade)
+    calibration_label = (
+        f"Calibration {public_grade_label} \u00b7 {support_count} audited cases"
+        if calibrated and support_count > 0
+        else (
+            f"Empirical outcomes \u00b7 {event_support_count} cases \u00b7 not replay-calibrated"
+        )
+        if calibration_grade == "EMPIRICAL_UNCALIBRATED" and event_support_count > 0
+        else (
+            f"Evidence grade {public_grade_label}"
+            + (f" \u00b7 {support_count} cases" if support_count > 0 else "")
+            + " \u00b7 not replay-calibrated"
+        )
+        if calibration_grade not in {"", "UNRATED", "UNKNOWN"}
+        else "Calibration UNRATED \u00b7 not replay-calibrated"
+    )
+    horizon_label = (
+        _safe_public_text(
+            exact_window_read.get("countdown_label"),
+            "fixed anchor-bound exact window",
+            limit=160,
+        )
+        if exact_wall_clock
+        else f"{low_candles}\u2013{high_candles} {candle_anchor_label}"
+        if low_candles is not None and high_candles is not None
+        else "timing unrated"
+    )
+    likelihood_summary = (
+        estimated_likelihood_label
+        if estimated_likelihood is not None
+        else directional_model_score_label
+    )
+    base_summary = (
+        f"The current {side} move is mature and already active. This forecast "
+        f"estimates the next {side} impulse only after the active move completes "
+        "and one rest or pullback is observed. It is not permission to chase or enter."
+        if active_target_next_impulse and side in _DIRECTIONAL_SIDES
+        else
+        f"{side} is the leading path inside one fixed window anchored to the "
+        f"completed close. {likelihood_summary}. This is a timing forecast, not "
+        "entry permission."
+        if exact_wall_clock and side in _DIRECTIONAL_SIDES
+        else f"{headline}. {likelihood_summary}. This is a timing forecast, not entry permission."
+    )
+    timing_evidence_label = (
+        f"{source_label} \u00b7 {timing_support_count} timing observations"
+        if timing_empirical and timing_support_count > 0
+        else (
+            f"{source_label} \u00b7 {current_sequence_candle_count} current candles"
+            if source_tier == "LIVE_M5_SEQUENCE"
+            and current_sequence_candle_count > 0
+            else source_label
+        )
+    )
+    duration_provenance = _mapping(forward.get("duration_provenance"))
+    forecast_horizon_seconds = _number(
+        forward.get("forecast_horizon_seconds")
+    )
+    recommended_duration = _number(
+        forward.get("recommended_trade_duration_seconds")
+    )
+    broker_expiry = _number(forward.get("broker_expiry_seconds"))
+    return {
+        "schema_version": "PG_OPERATOR_TIMING_FORECAST_V3",
+        "status": (
+            "FORECAST_AVAILABLE"
+            if use_forward
+            else "TIMING_UNRATED"
+            if side in _DIRECTIONAL_SIDES
+            else "DIRECTION_UNRESOLVED"
+        ),
+        "headline": headline,
+        "summary": base_summary,
+        "closed_candle_summary": base_summary,
+        "side": side,
+        "scope": {
+            "symbol": current_symbol if identity_proven else "",
+            "timeframe": current_timeframe if identity_proven else "",
+            "closed_candle_key": closed_candle_key if identity_proven else "",
+            "identity_proven": identity_proven,
+        },
+        "horizon_label": horizon_label,
+        "horizon_seconds_low": low_seconds,
+        "horizon_seconds_high": high_seconds,
+        "horizon_candles_low": low_candles,
+        "horizon_candles_high": high_candles,
+        "anchor_close_epoch_seconds": (
+            anchor_close_epoch if exact_wall_clock and not exact_window_expired else None
+        ),
+        "target_window_start_epoch_seconds": (
+            target_window_start_epoch
+            if exact_wall_clock and not exact_window_expired
+            else None
+        ),
+        "target_window_central_epoch_seconds": (
+            target_window_central_epoch
+            if exact_wall_clock and not exact_window_expired
+            else None
+        ),
+        "target_window_end_epoch_seconds": (
+            target_window_end_epoch
+            if exact_wall_clock and not exact_window_expired
+            else None
+        ),
+        "countdown_label": _safe_public_text(
+            exact_window_read.get("countdown_label"), "", limit=160
+        ),
+        "seconds_until_window_start": (
+            _integer(exact_window_read.get("seconds_until_window_start"))
+            if exact_wall_clock and not exact_window_expired
+            else None
+        ),
+        "seconds_until_window_end": (
+            _integer(exact_window_read.get("seconds_until_window_end"))
+            if exact_wall_clock and not exact_window_expired
+            else None
+        ),
+        "estimated_likelihood": estimated_likelihood,
+        "estimated_likelihood_label": estimated_likelihood_label,
+        "evidence_confidence": evidence_confidence,
+        "evidence_confidence_label": evidence_confidence_label,
+        "directional_model_score": directional_model_score,
+        "directional_model_score_label": directional_model_score_label,
+        "directional_model_source": _safe_public_text(
+            directional_model.get("source"),
+            "CURRENT_DIRECTIONAL_STUDY",
+            limit=64,
+        ).upper(),
+        "event_likelihood_metric": event_metric,
+        "event_likelihood_event_label": event_label,
+        "event_likelihood_support_count": event_support_count,
+        "event_definition": timing_event_definition,
+        "active_target_next_impulse": active_target_next_impulse,
+        "target_move_already_active": target_move_already_active,
+        # Compatibility alias: this is evidence confidence, never probability.
+        "confidence": evidence_confidence,
+        "confidence_label": evidence_confidence_label,
+        "calibration_grade": calibration_grade,
+        "calibration_label": calibration_label,
+        "calibrated": calibrated,
+        "support_count": support_count,
+        "source": source,
+        "source_label": source_label,
+        "timing_support_count": timing_support_count,
+        "timing_empirical": timing_empirical,
+        "timing_evidence_label": timing_evidence_label,
+        "forecast_horizon_seconds": (
+            int(forecast_horizon_seconds)
+            if forecast_horizon_seconds is not None
+            and forecast_horizon_seconds > 0.0
+            else None
+        ),
+        "forecast_horizon_source": (
+            "MODEL_STUDY_HORIZON"
+            if forecast_horizon_seconds is not None
+            and forecast_horizon_seconds > 0.0
+            else "UNAVAILABLE"
+        ),
+        "recommended_trade_duration_seconds": (
+            int(recommended_duration)
+            if recommended_duration is not None and recommended_duration > 0.0
+            else None
+        ),
+        "broker_expiry_seconds": (
+            int(broker_expiry)
+            if broker_expiry is not None
+            and broker_expiry > 0.0
+            and duration_provenance.get("broker_expiry_proven") is True
+            else None
+        ),
+        "duration_provenance": {
+            "forecast_horizon": (
+                "MODEL_STUDY_HORIZON"
+                if forecast_horizon_seconds is not None
+                and forecast_horizon_seconds > 0.0
+                else "UNAVAILABLE"
+            ),
+            "recommended_trade_duration": _safe_public_text(
+                duration_provenance.get("recommended_trade_duration"),
+                "UNAVAILABLE",
+                limit=64,
+            ).upper(),
+            "broker_expiry": _safe_public_text(
+                duration_provenance.get("broker_expiry"),
+                "UNPROVEN",
+                limit=64,
+            ).upper(),
+            "broker_expiry_proven": (
+                duration_provenance.get("broker_expiry_proven") is True
+            ),
+        },
+        "technical_estimates": {
+            "state_transition": _mapping(
+                forward.get("state_transition_estimate")
+            ),
+            "stop_survival": _mapping(forward.get("stop_survival")),
+            "adverse_excursion_risk": _mapping(
+                forward.get("adverse_excursion_risk")
+            ),
+        },
+        "provisional": provisional,
+        "exact_wall_clock_proven": bool(
+            use_forward and exact_wall_clock and not exact_window_expired
+        ),
+        "forecast_lineage_matches": forecast_lineage_matches,
+        "rest_sweep_risk": rest_sweep_risk,
+        "base_rest_sweep_risk": rest_sweep_risk,
+        "invalidation": invalidation,
+        "study_only": True,
+        "execution_authority": False,
+        "broker_click_authority": False,
+        "can_grant_entry_permission": False,
+    }
+
+
+def _operator_action_contract_v3(
+    *,
+    enter_now: bool,
+    timing_state: str,
+    timing_effect: Mapping[str, object],
+    studied_side: str,
+    behavior_state: str,
+    behavior_side: str,
+    instruction: str,
+    active_target_next_impulse: bool = False,
+) -> dict[str, object]:
+    pullback_like = bool(
+        behavior_side in _DIRECTIONAL_SIDES
+        and studied_side in _DIRECTIONAL_SIDES
+        and behavior_side != studied_side
+    ) or any(
+        token in behavior_state
+        for token in ("REST", "PULLBACK", "RANGE", "PAUSE", "COMPRESSION")
+    )
+    if enter_now:
+        state = "ENTER_NOW"
+        label = "ENTER NOW"
+    elif timing_effect.get("timing_veto_basis") == "DURATION_INELIGIBLE":
+        state = "AVOID"
+        label = "AVOID"
+    elif timing_state in {"INVALIDATED", "CONFLICT", "STALE"}:
+        state = "AVOID"
+        label = "AVOID"
+    elif active_target_next_impulse and studied_side in _DIRECTIONAL_SIDES:
+        state = "WAIT_FOR_PULLBACK"
+        label = "WAIT FOR PULLBACK"
+    elif (
+        timing_effect.get("timing_veto") is True
+        or timing_state == "MISSED"
+        or pullback_like
+    ) and studied_side in _DIRECTIONAL_SIDES:
+        state = "WAIT_FOR_PULLBACK"
+        label = "WAIT FOR PULLBACK"
+    elif studied_side in _DIRECTIONAL_SIDES:
+        state = "PREPARE"
+        label = "PREPARE"
+    else:
+        state = "AVOID"
+        label = "AVOID"
+    return {
+        "schema_version": "PG_OPERATOR_ACTION_V3",
+        "state": state,
+        "label": label,
+        "instruction": instruction,
+        "enter_now": enter_now,
+        "entry_permission_authorized": enter_now,
+        "execution_authority": False,
+        "broker_click_authority": False,
     }
 
 
@@ -3711,6 +5281,13 @@ def _three_question_brief_v3(
         freshness_state=freshness_state,
         now_epoch=now_epoch,
     )
+    broker_expiry = _broker_expiry_contract_v3(
+        payload,
+        command,
+        market=market,
+        market_study=market_study,
+        now_epoch=now_epoch,
+    )
     if identity_mismatch:
         directional_state = "MISMATCHED_EVIDENCE"
     elif freshness_state == "STALE":
@@ -3941,16 +5518,28 @@ def _three_question_brief_v3(
     permission_allowed = permission.get("allowed") is True
     permission_side = _side(permission.get("side"))
     permission_action = _text(permission.get("action"), "WAIT", limit=32).upper()
-    entry_permission_authorized = bool(
+    permission_contract_authorized = bool(
         permission_allowed
         and permission_side in _DIRECTIONAL_SIDES
         and permission_action in {permission_side, f"{permission_side}_NOW"}
     )
     timing_supports_entry = timing_effect.get("timing_supports_entry") is True
     timing_veto = timing_effect.get("timing_veto") is True
-    enter_now = bool(entry_permission_authorized and not timing_veto)
+    broker_expiry_proven = broker_expiry.get("proven") is True
+    broker_expiry_eligible = broker_expiry.get("eligible") is True
+    entry_permission_authorized = bool(
+        permission_contract_authorized and broker_expiry_eligible
+    )
+    enter_now = bool(
+        entry_permission_authorized
+        and not timing_veto
+    )
     if enter_now:
         timing_state = "ENTER_NOW"
+    elif permission_contract_authorized and broker_expiry_proven:
+        timing_state = "DURATION_INELIGIBLE"
+    elif permission_contract_authorized and not broker_expiry_proven:
+        timing_state = "EXPIRY_UNVERIFIED"
     elif identity_mismatch or countertrend_validation_state == "INVALIDATED":
         timing_state = "INVALIDATED"
     elif timing_veto:
@@ -3991,9 +5580,9 @@ def _three_question_brief_v3(
         )
     elif timing_state == "TIMING_DELAY":
         action = "DO_NOT_ENTER"
-        entry_headline = f"NOT YET — timing says delay the {side_label}"
+        entry_headline = f"{side_label} timing is delayed by mature evidence"
         entry_answer = (
-            f"Do not enter {side_label} now. {_safe_public_text(timing_effect.get('reason'), '', limit=320)}"
+            f"Timing delay for {side_label}. {_safe_public_text(timing_effect.get('reason'), '', limit=320)}"
         ).strip()
         reason = _safe_public_text(
             timing_effect.get("reason"),
@@ -4003,6 +5592,29 @@ def _three_question_brief_v3(
         next_trigger = (
             "Wait for a fresh matching timing read with at least 15 minutes of room; "
             "timing evidence can only delay permission, never create it."
+        )
+    elif timing_state == "DURATION_INELIGIBLE":
+        action = "DO_NOT_ENTER"
+        entry_headline = f"{side_label} path studied · broker duration too short"
+        entry_answer = _safe_public_text(
+            broker_expiry.get("instruction"),
+            "AVOID — the broker duration is under 15 minutes.",
+            limit=320,
+        )
+        reason = entry_answer
+        next_trigger = "Set and verify a broker expiry of at least 15 minutes."
+    elif timing_state == "EXPIRY_UNVERIFIED":
+        action = "DO_NOT_ENTER"
+        entry_headline = f"{side_label} path studied · verify broker expiry"
+        entry_answer = _safe_public_text(
+            broker_expiry.get("instruction"),
+            "SET/VERIFY EXPIRY ≥15 MIN — Broker expiry unverified.",
+            limit=320,
+        )
+        reason = entry_answer
+        next_trigger = (
+            "Bind a current broker or execution-packet expiry of at least 15 minutes "
+            "to this exact pair, timeframe, frame, and completed candle."
         )
     elif timing_state == "MISSED":
         action = "DO_NOT_ENTER"
@@ -4055,9 +5667,9 @@ def _three_question_brief_v3(
     else:
         action = "DO_NOT_ENTER"
         if no_current_entry_study:
-            entry_headline = "NOT YET — no current entry study"
+            entry_headline = "Direction unresolved · current entry study unavailable"
             entry_answer = (
-                "Not yet. No identity-proven completed study has selected a "
+                "No identity-proven completed study has selected a "
                 "directional trade on the current chart."
             )
             reason = "There is no current directional study to authorize or reject."
@@ -4066,12 +5678,12 @@ def _three_question_brief_v3(
                 "directional study."
             )
         else:
-            entry_headline = f"NOT YET — {side_label} entry is forming"
+            entry_headline = f"{side_label} timing forecast is forming"
             entry_answer = (
-                f"Not yet. {side_label} is being studied, but the system has not published "
+                f"{side_label} is being studied, but the system has not published "
                 "a complete current entry permission."
                 if studied_side in _DIRECTIONAL_SIDES
-                else "Not yet. No directional trade has reached entry readiness."
+                else "No directional trade has reached entry readiness."
             )
             reason = _safe_public_text(
                 permission.get("message"),
@@ -4098,25 +5710,159 @@ def _three_question_brief_v3(
                     "One directional ensemble study must become selected and executable."
                 )
 
+    current_closed_candle_key = _safe_identifier(
+        market_study.get("closed_candle_key"), ""
+    )
+    forward_timing = _mapping(timing_effect.get("forward_timing_forecast"))
+    forward_timing_lineage = _mapping(forward_timing.get("lineage"))
+    forward_timing_side = _path_clock_direction_side_v3(
+        forward_timing.get("candidate_direction")
+    )
+    forward_timing_freshness = _safe_public_text(
+        forward_timing_lineage.get("freshness_state"), "UNBOUND", limit=40
+    ).upper()
+    current_regression_owns_forecast = bool(
+        not permission_contract_authorized
+        and identity_proven
+        and regression_side in _DIRECTIONAL_SIDES
+        and forward_timing_side == regression_side
+        and _safe_public_text(
+            forward_timing.get("status"), "", limit=64
+        ).upper()
+        == "FORECAST_AVAILABLE"
+        and forward_timing_lineage.get("lineage_bound") is True
+        and _instrument_token(forward_timing_lineage.get("symbol"))
+        == _instrument_token(current_symbol)
+        and _safe_public_text(
+            forward_timing_lineage.get("timeframe"), "", limit=32
+        ).upper()
+        == current_timeframe.upper()
+        and _safe_identifier(
+            forward_timing_lineage.get("closed_candle_key"), ""
+        )
+        == current_closed_candle_key
+        and forward_timing_freshness
+        in {"CURRENT", "FRESH", "CURRENT_CLOSED_CANDLE"}
+    )
+    timing_forecast_side = (
+        regression_side if current_regression_owns_forecast else studied_side
+    )
+    timing_directional_confidence = selected_score
+    if current_regression_owns_forecast:
+        timing_directional_confidence = _confidence(
+            _mapping(forward_timing.get("directional_model")).get("score")
+        ) or 0.0
+
+    timing_forecast = _operator_timing_forecast_v3(
+        studied_side=timing_forecast_side,
+        current_symbol=current_symbol,
+        current_timeframe=current_timeframe,
+        closed_candle_key=current_closed_candle_key,
+        identity_proven=identity_proven,
+        behavior_state=behavior_state,
+        behavior_side=behavior_side,
+        directional_confidence=timing_directional_confidence,
+        timing_effect=timing_effect,
+        now_epoch=now_epoch,
+    )
+    active_target_next_impulse = (
+        timing_forecast.get("active_target_next_impulse") is True
+    )
+    action_instruction = entry_answer
+    if (
+        active_target_next_impulse
+        and not enter_now
+        and timing_forecast_side in _DIRECTIONAL_SIDES
+    ):
+        action_instruction = (
+            f"WAIT FOR PULLBACK — the current {timing_forecast_side} move is already "
+            f"mature and active. Do not chase it; wait for one completed rest or "
+            f"pullback before reassessing the next {timing_forecast_side} impulse."
+        )
+    operator_action = _operator_action_contract_v3(
+        enter_now=enter_now,
+        timing_state=timing_state,
+        timing_effect=timing_effect,
+        studied_side=timing_forecast_side,
+        behavior_state=behavior_state,
+        behavior_side=behavior_side,
+        instruction=action_instruction,
+        active_target_next_impulse=active_target_next_impulse,
+    )
+    if timing_state == "DURATION_INELIGIBLE":
+        operator_action.update(
+            {
+                "state": "AVOID",
+                "label": "AVOID",
+                "instruction": _safe_public_text(
+                    broker_expiry.get("instruction"), entry_answer, limit=320
+                ),
+            }
+        )
+    elif (
+        active_target_next_impulse
+        and not enter_now
+    ):
+        operator_action.update(
+            {
+                "state": "WAIT_FOR_PULLBACK",
+                "label": "WAIT FOR PULLBACK",
+                "instruction": action_instruction,
+            }
+        )
+    elif timing_state == "EXPIRY_UNVERIFIED":
+        operator_action.update(
+            {
+                "state": "PREPARE",
+                "label": "PREPARE",
+                "instruction": _safe_public_text(
+                    broker_expiry.get("instruction"), entry_answer, limit=320
+                ),
+            }
+        )
+    entry_headline = _safe_public_text(
+        timing_forecast.get("headline"), entry_headline, limit=180
+    )
+    entry_answer = _safe_public_text(
+        timing_forecast.get("summary"), entry_answer, limit=480
+    )
+    reason = _safe_public_text(
+        timing_forecast.get("rest_sweep_risk"), reason, limit=320
+    )
+    next_trigger = _safe_public_text(
+        timing_forecast.get("invalidation"), next_trigger, limit=320
+    )
+
     entry_answer_contract: dict[str, object] = {
         "question": "What is the best decision to do right now?",
         "headline": entry_headline,
         "answer": entry_answer,
         "state": timing_state,
-        "side": studied_side,
-        "confidence": selected_score,
+        "side": timing_forecast_side,
+        "confidence": timing_directional_confidence,
         "evidence": {
-            "directional_study_present": studied_side in _DIRECTIONAL_SIDES,
-            "direction_source": direction_source,
+            "directional_study_present": timing_forecast_side in _DIRECTIONAL_SIDES,
+            "direction_source": (
+                "CURRENT_CLOSED_CANDLE_FORECAST"
+                if current_regression_owns_forecast
+                else direction_source
+            ),
+            "historical_studied_side": studied_side,
+            "current_forecast_side": timing_forecast_side,
+            "forecast_uses_current_regression": current_regression_owns_forecast,
             "countertrend_classification": _safe_public_text(
                 countertrend_promotion.get("classification"), "UNAVAILABLE", limit=40
             ).upper(),
             "countertrend_validation_state": countertrend_validation_state,
             "permission_allowed": permission_allowed,
             "permission_side": permission_side,
+            "permission_contract_authorized": permission_contract_authorized,
             "entry_permission_authorized": entry_permission_authorized,
             "timing_supports_entry": timing_supports_entry,
             "timing_veto": timing_veto,
+            "broker_expiry_v3": broker_expiry,
+            "broker_expiry_proven": broker_expiry_proven,
+            "broker_expiry_eligible": broker_expiry_eligible,
             "path_clock_liquidity_v3": timing_effect,
             "freshness": freshness_state,
             "opportunity_state": opportunity_state,
@@ -4141,6 +5887,11 @@ def _three_question_brief_v3(
         "entry_permission_authorized": entry_permission_authorized,
         "timing_supports_entry": timing_supports_entry,
         "timing_veto": timing_veto,
+        "broker_expiry_v3": broker_expiry,
+        "broker_expiry_proven": broker_expiry_proven,
+        "broker_expiry_eligible": broker_expiry_eligible,
+        "timing_forecast": timing_forecast,
+        "operator_action": operator_action,
     }
     return {
         "schema_version": "PG_THREE_QUESTION_OPERATOR_BRIEF_V3",
@@ -5476,6 +7227,9 @@ def _streaming_three_question_synthesis_v3(
     permission: Mapping[str, Any],
     stream: Mapping[str, Any],
     order_reference_rows: object = (),
+    identity_matches: bool = True,
+    identity_rebind_pending: bool = False,
+    now_epoch: float,
 ) -> dict[str, object]:
     """Refresh Q2/Q3 from one bounded stream heartbeat without minting authority."""
 
@@ -5528,6 +7282,14 @@ def _streaming_three_question_synthesis_v3(
     result["studied_direction_current"] = studied
 
     entry = dict(_mapping(result.get("entry_now")))
+    timing_forecast = dict(_mapping(entry.get("timing_forecast")))
+    initial_entry_answer = _safe_public_text(
+        entry.get("answer"), "", limit=960
+    )
+    prior_operator_action = _mapping(entry.get("operator_action"))
+    prior_action_instruction = _safe_public_text(
+        prior_operator_action.get("instruction"), "", limit=960
+    )
     entry_evidence = dict(_mapping(entry.get("evidence")))
     entry_basis = _closed_candle_basis_v3(entry, entry_evidence)
     entry_evidence["closed_candle_basis"] = entry_basis
@@ -5541,10 +7303,49 @@ def _streaming_three_question_synthesis_v3(
     permission_allowed = permission.get("allowed") is True
     permission_side = _side(permission.get("side"))
     permission_action = _text(permission.get("action"), "WAIT", limit=32).upper()
-    entry_permission_authorized = bool(
-        permission_allowed
+    permission_contract_authorized = bool(
+        identity_matches
+        and permission_allowed
         and permission_side in _DIRECTIONAL_SIDES
         and permission_action in {f"{permission_side}_NOW", permission_side}
+    )
+    broker_expiry = dict(
+        _mapping(
+            entry_evidence.get("broker_expiry_v3")
+            or entry.get("broker_expiry_v3")
+        )
+    )
+    broker_expiry_valid_until = _epoch(
+        broker_expiry.get("valid_until_epoch")
+    )
+    broker_expiry_proven = bool(
+        broker_expiry.get("proven") is True
+        and broker_expiry_valid_until is not None
+        and broker_expiry_valid_until > now_epoch
+    )
+    broker_expiry_seconds = _number(broker_expiry.get("expiry_seconds"))
+    broker_expiry_eligible = bool(
+        broker_expiry_proven
+        and broker_expiry.get("eligible") is True
+        and broker_expiry_seconds is not None
+        and broker_expiry_seconds >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+    )
+    if not broker_expiry_proven:
+        broker_expiry.update(
+            {
+                "status": "UNVERIFIED",
+                "proven": False,
+                "eligible": False,
+                "expiry_seconds": None,
+                "valid_until_epoch": None,
+                "instruction": (
+                    "SET/VERIFY EXPIRY ≥15 MIN — Broker expiry unverified; the "
+                    "model horizon is not the broker contract duration."
+                ),
+            }
+        )
+    entry_permission_authorized = bool(
+        permission_contract_authorized and broker_expiry_eligible
     )
     timing_supports_entry = bool(
         entry.get("timing_supports_entry") is True
@@ -5554,28 +7355,46 @@ def _streaming_three_question_synthesis_v3(
         _mapping(entry_evidence.get("path_clock_liquidity_v3"))
     )
     timing_valid_until = _number(timing_effect.get("valid_until"))
-    timing_expired = bool(
-        timing_effect.get("maturity_claimed") is True
-        and timing_valid_until is not None
-        and heartbeat_epoch is not None
-        and timing_valid_until <= heartbeat_epoch
+    exact_forecast_end_epoch = _epoch(
+        timing_forecast.get("target_window_end_epoch_seconds")
     )
+    exact_forecast_expired = bool(
+        timing_forecast.get("exact_wall_clock_proven") is True
+        and exact_forecast_end_epoch is not None
+        and now_epoch >= exact_forecast_end_epoch
+    )
+    timing_expired = bool(
+        exact_forecast_expired
+        or (
+            timing_effect.get("maturity_claimed") is True
+            and timing_valid_until is not None
+            and timing_valid_until <= now_epoch
+        )
+    )
+    timing_veto_basis = _text(
+        timing_effect.get("timing_veto_basis"), "NONE", limit=40
+    ).upper()
     timing_veto = bool(
-        entry.get("timing_veto") is True
-        or entry_evidence.get("timing_veto") is True
-        or timing_expired
+        timing_veto_basis == "DURATION_INELIGIBLE"
+        or (
+            not timing_expired
+            and (
+                entry.get("timing_veto") is True
+                or entry_evidence.get("timing_veto") is True
+            )
+        )
     )
     if timing_expired:
         timing_supports_entry = False
         timing_effect.update(
             {
                 "fresh": False,
-                "state": "STALE",
+                "state": "PROVISIONAL",
                 "timing_supports_entry": False,
-                "timing_veto": True,
+                "timing_veto": timing_veto,
                 "reason": (
-                    "The mature timing read expired and must be replaced by a fresh "
-                    "matching completed-candle study."
+                    "The exact timing read expired. The completed-candle forecast "
+                    "remains visible, but its replay calibration is no longer current."
                 ),
             }
         )
@@ -5588,7 +7407,13 @@ def _streaming_three_question_synthesis_v3(
         "FORMING",
         limit=40,
     ).upper()
-    if timing_veto and timing_state not in {"INVALIDATED", "MISSED", "CONFLICT"}:
+    if not identity_matches:
+        timing_state = "INVALIDATED"
+    elif permission_contract_authorized and broker_expiry_proven and not broker_expiry_eligible:
+        timing_state = "DURATION_INELIGIBLE"
+    elif permission_contract_authorized and not broker_expiry_proven:
+        timing_state = "EXPIRY_UNVERIFIED"
+    elif timing_veto and timing_state not in {"INVALIDATED", "MISSED", "CONFLICT"}:
         timing_state = "TIMING_DELAY"
     elif timing_state == "ENTER_NOW" and not enter_now:
         timing_state = "FORMING" if stream_fresh else "STALE"
@@ -5599,7 +7424,11 @@ def _streaming_three_question_synthesis_v3(
         market_origin_evidence.get("major_trend_side"),
         market_origin.get("side"),
     )
-    prior_studied_side = _side(entry.get("side"), studied_side)
+    prior_studied_side = _side(
+        entry_evidence.get("historical_studied_side"),
+        entry.get("side"),
+        studied_side,
+    )
     current_regression_side = _side(
         studied_evidence.get("current_regression_side")
     )
@@ -5670,9 +7499,9 @@ def _streaming_three_question_synthesis_v3(
             limit=320,
         )
         entry["headline"] = (
-            f"NOT YET — timing says delay the {selected_side}"
+            f"{selected_side} timing is delayed by mature evidence"
             if selected_side in _DIRECTIONAL_SIDES
-            else "NOT YET — timing says delay this trade"
+            else "Trade timing is delayed by mature evidence"
         )
         entry["answer"] = " ".join(
             part
@@ -5687,6 +7516,31 @@ def _streaming_three_question_synthesis_v3(
         entry["next_trigger"] = (
             "Wait for a fresh matching timing read with at least 15 minutes of room and "
             "an independently verified entry window."
+        )
+    elif timing_state == "DURATION_INELIGIBLE":
+        best_action = "AVOID_SHORT_DURATION"
+        decision_state = "DURATION_INELIGIBLE"
+        entry["answer"] = _safe_public_text(
+            broker_expiry.get("instruction"),
+            "AVOID — the broker duration is under 15 minutes.",
+            limit=320,
+        )
+        entry["reason"] = entry["answer"]
+        entry["next_trigger"] = (
+            "Set and verify a broker expiry of at least 15 minutes."
+        )
+    elif timing_state == "EXPIRY_UNVERIFIED":
+        best_action = "SET_VERIFY_EXPIRY"
+        decision_state = "EXPIRY_UNVERIFIED"
+        entry["answer"] = _safe_public_text(
+            broker_expiry.get("instruction"),
+            "SET/VERIFY EXPIRY ≥15 MIN — Broker expiry unverified.",
+            limit=320,
+        )
+        entry["reason"] = entry["answer"]
+        entry["next_trigger"] = (
+            "Bind a current broker expiry of at least 15 minutes to this exact "
+            "pair, timeframe, frame, and completed candle."
         )
     elif timing_state == "MISSED":
         best_action = (
@@ -5752,7 +7606,7 @@ def _streaming_three_question_synthesis_v3(
                 f"Track the existing {selected_side} thesis. {stream_summary} "
                 f"{study_transition_guidance} "
                 "The stream read is intrabar observation only; closed-candle entry permission "
-                "is not open, so do not enter yet."
+                "is closed, so remain out until a fresh verified window opens."
             )
         else:
             best_action = "OBSERVE_MOVE"
@@ -5819,6 +7673,428 @@ def _streaming_three_question_synthesis_v3(
         best_action = "STAND_ASIDE" if timing_state in {"STALE", "WAITING"} else "OBSERVE"
         decision_state = timing_state
 
+    # The stream contributes current movement context, but it must not replace
+    # the completed-candle timing forecast on every heartbeat.  Keep forecast
+    # and action as separate contracts: one answers when/which path, the other
+    # says what the operator may do now.
+    current_action_instruction = _safe_public_text(
+        entry.get("answer"),
+        "Keep observing until the next completed-candle update.",
+        limit=960,
+    )
+    stream_instruction = (
+        prior_action_instruction
+        if prior_action_instruction
+        and current_action_instruction == initial_entry_answer
+        else current_action_instruction
+    )
+    if (
+        not enter_now
+        and selected_side in _DIRECTIONAL_SIDES
+        and (
+            timing_state == "MISSED"
+            or decision_state == "WATCHING_RETRACE"
+        )
+    ):
+        pullback_instruction = (
+            f"Wait for a fresh {selected_side} pullback and its own fresh verified "
+            "entry window before entry."
+        )
+        stream_instruction = " ".join(
+            part for part in (stream_instruction, pullback_instruction) if part
+        )
+    forecast_side = _side(timing_forecast.get("side"))
+    if not identity_matches or (
+        forecast_side in _DIRECTIONAL_SIDES
+        and selected_side in _DIRECTIONAL_SIDES
+        and forecast_side != selected_side
+    ):
+        # Never retarget a probability or time window across directions.  The
+        # next completed study must publish a new lineage-bound forecast.
+        timing_forecast = {
+            "schema_version": "PG_OPERATOR_TIMING_FORECAST_V3",
+            "status": "DIRECTION_UNRESOLVED",
+            "headline": (
+                "Direction unresolved on the current pair \u00b7 reassess after the "
+                "next completed close"
+                if not identity_matches
+                else f"{selected_side} timing will publish after the next completed close"
+            ),
+            "summary": (
+                "The completed direction changed, so the prior timing field was "
+                "discarded instead of being relabelled."
+            ),
+            "closed_candle_summary": (
+                "The completed direction changed, so the prior timing field was "
+                "discarded instead of being relabelled."
+            ),
+            "side": "NEUTRAL",
+            "horizon_label": "awaiting current lineage",
+            "estimated_likelihood": None,
+            "estimated_likelihood_label": "Estimated likelihood unavailable",
+            "evidence_confidence": None,
+            "evidence_confidence_label": "Evidence confidence unavailable",
+            "confidence": None,
+            "confidence_label": "Evidence confidence unavailable",
+            "calibration_grade": "UNRATED",
+            "calibration_label": (
+                "Calibration UNRATED \u00b7 not replay-calibrated"
+            ),
+            "calibrated": False,
+            "support_count": 0,
+            "source": "CURRENT_LINEAGE_REQUIRED",
+            "source_label": "Current completed-candle lineage required",
+            "provisional": True,
+            "rest_sweep_risk": (
+                "The prior direction's rest and sweep estimate was discarded."
+            ),
+            "base_rest_sweep_risk": (
+                "The prior direction's rest and sweep estimate was discarded."
+            ),
+            "invalidation": (
+                "Reassess after a completed candle binds the new direction."
+            ),
+            "study_only": True,
+            "execution_authority": False,
+            "broker_click_authority": False,
+            "can_grant_entry_permission": False,
+        }
+    elif timing_forecast:
+        exact_start_epoch = _epoch(
+            timing_forecast.get("target_window_start_epoch_seconds")
+        )
+        if (
+            timing_forecast.get("exact_wall_clock_proven") is True
+            and exact_start_epoch is not None
+            and exact_forecast_end_epoch is not None
+            and not exact_forecast_expired
+        ):
+            fixed_window = _fixed_exact_window_read_v3(
+                side=_side(timing_forecast.get("side")),
+                start_epoch=exact_start_epoch,
+                end_epoch=exact_forecast_end_epoch,
+                now_epoch=now_epoch,
+            )
+            fixed_headline = _safe_public_text(
+                fixed_window.get("headline"),
+                _safe_public_text(
+                    timing_forecast.get("headline"), "", limit=180
+                ),
+                limit=180,
+            )
+            if timing_forecast.get("active_target_next_impulse") is True:
+                fixed_side = _side(timing_forecast.get("side"))
+                fixed_countdown = _safe_public_text(
+                    fixed_window.get("countdown_label"),
+                    "fixed anchor-bound window",
+                    limit=120,
+                ).lower()
+                fixed_headline = (
+                    f"{fixed_side} is active · next {fixed_side} impulse "
+                    f"{fixed_countdown}"
+                )
+            timing_forecast["headline"] = _safe_public_text(
+                fixed_headline,
+                "Direction unresolved · exact window active",
+                limit=180,
+            )
+            timing_forecast["countdown_label"] = _safe_public_text(
+                fixed_window.get("countdown_label"), "", limit=160
+            )
+            timing_forecast["seconds_until_window_start"] = _integer(
+                fixed_window.get("seconds_until_window_start")
+            )
+            timing_forecast["seconds_until_window_end"] = _integer(
+                fixed_window.get("seconds_until_window_end")
+            )
+            timing_forecast["horizon_label"] = timing_forecast[
+                "countdown_label"
+            ]
+        if exact_forecast_expired:
+            expired_side = _side(timing_forecast.get("side"))
+            expired_headline = (
+                f"{expired_side} remains the studied path \u00b7 exact timing expired"
+                if expired_side in _DIRECTIONAL_SIDES
+                else "Direction unresolved \u00b7 exact timing expired"
+            )
+            expired_summary = (
+                f"{expired_headline}. The expired replay field was removed; a fresh "
+                "lineage-bound timing forecast is required."
+            )
+            timing_forecast.update(
+                {
+                    "headline": expired_headline,
+                    "summary": expired_summary,
+                    "closed_candle_summary": expired_summary,
+                    "horizon_label": "exact timing expired",
+                    "horizon_seconds_low": None,
+                    "horizon_seconds_high": None,
+                    "horizon_candles_low": None,
+                    "horizon_candles_high": None,
+                    "anchor_close_epoch_seconds": None,
+                    "target_window_start_epoch_seconds": None,
+                    "target_window_central_epoch_seconds": None,
+                    "target_window_end_epoch_seconds": None,
+                    "countdown_label": "Exact anchor-bound window expired",
+                    "seconds_until_window_start": None,
+                    "seconds_until_window_end": None,
+                    "estimated_likelihood": None,
+                    "estimated_likelihood_label": (
+                        "Estimated likelihood unavailable \u00b7 exact replay expired"
+                    ),
+                    "evidence_confidence": None,
+                    "evidence_confidence_label": (
+                        "Evidence confidence unavailable \u00b7 exact replay expired"
+                    ),
+                    "confidence": None,
+                    "confidence_label": (
+                        "Evidence confidence unavailable \u00b7 exact replay expired"
+                    ),
+                    "calibration_grade": "UNRATED",
+                    "calibration_label": (
+                        "Calibration UNRATED \u00b7 exact replay expired"
+                    ),
+                    "calibrated": False,
+                    "support_count": 0,
+                    "source": "CURRENT_CLOSED_CANDLE_DIRECTION",
+                    "source_label": (
+                        "Current completed-candle direction \u00b7 exact timing expired"
+                    ),
+                    "provisional": True,
+                    "exact_wall_clock_proven": False,
+                    "rest_sweep_risk": (
+                        "The exact rest and sweep estimate expired and was removed."
+                    ),
+                    "base_rest_sweep_risk": (
+                        "The exact rest and sweep estimate expired and was removed."
+                    ),
+                    "invalidation": (
+                        "Reassess after a fresh completed candle publishes current timing."
+                    ),
+                }
+            )
+            technical_estimates = dict(
+                _mapping(timing_forecast.get("technical_estimates"))
+            )
+            technical_estimates["stop_survival"] = {}
+            technical_estimates["adverse_excursion_risk"] = {}
+            timing_forecast["technical_estimates"] = technical_estimates
+        base_summary = _safe_public_text(
+            timing_forecast.get("closed_candle_summary")
+            or timing_forecast.get("summary"),
+            "The completed-candle timing forecast remains in force.",
+            limit=480,
+        )
+        timing_forecast["closed_candle_summary"] = base_summary
+        timing_forecast["summary"] = " ".join(
+            part
+            for part in (
+                base_summary,
+                stream_summary if stream_fresh else "",
+            )
+            if part
+        )
+        base_risk = _safe_public_text(
+            timing_forecast.get("base_rest_sweep_risk")
+            or timing_forecast.get("rest_sweep_risk"),
+            "No calibrated sweep probability is available.",
+            limit=320,
+        )
+        timing_forecast["base_rest_sweep_risk"] = base_risk
+        if stream_fresh and stream_state == "RESTING":
+            timing_forecast["rest_sweep_risk"] = (
+                f"{base_risk} The live stream currently sees a rest; wait for the "
+                "completed-candle continuation or invalidation."
+            )
+        elif stream_fresh and stream_state in {"MOVING", "MATERIAL_CHANGE"}:
+            timing_forecast["rest_sweep_risk"] = (
+                f"{base_risk} The live chart is moving, but intrabar motion does not "
+                "change the published timing window."
+            )
+        else:
+            timing_forecast["rest_sweep_risk"] = base_risk
+
+    forecast_headline = _safe_public_text(
+        timing_forecast.get("headline"),
+        "Direction unresolved \u00b7 reassess after the next completed close",
+        limit=180,
+    )
+    forecast_summary = _safe_public_text(
+        timing_forecast.get("summary"),
+        "No current timing forecast is available.",
+        limit=720,
+    )
+    entry["headline"] = forecast_headline
+    entry["answer"] = forecast_summary
+    entry["reason"] = _safe_public_text(
+        timing_forecast.get("rest_sweep_risk"),
+        _safe_public_text(entry.get("reason"), "", limit=480),
+        limit=480,
+    )
+    entry["next_trigger"] = _safe_public_text(
+        timing_forecast.get("invalidation"),
+        _safe_public_text(entry.get("next_trigger"), "", limit=320),
+        limit=320,
+    )
+    entry["timing_forecast"] = timing_forecast
+    active_target_next_impulse = (
+        timing_forecast.get("active_target_next_impulse") is True
+        or _safe_public_text(
+            timing_forecast.get("event_definition"), "", limit=96
+        ).upper()
+        == _NEXT_IMPULSE_AFTER_ACTIVE_TARGET_EVENT
+    )
+    if (
+        active_target_next_impulse
+        and not enter_now
+        and selected_side in _DIRECTIONAL_SIDES
+    ):
+        best_action = f"WAIT_FOR_{selected_side}_PULLBACK"
+        decision_state = "WAITING_FOR_NEXT_IMPULSE_REST"
+        stream_instruction = (
+            f"WAIT FOR PULLBACK — the current {selected_side} move is already "
+            "mature and active. Do not chase it; wait for one completed rest or "
+            f"pullback before reassessing the next {selected_side} impulse."
+        )
+    if identity_rebind_pending:
+        stream_instruction = (
+            "Avoid entry while the chart identity is rebinding. The displayed "
+            "frame and forecast remain atomic until a coherent new frame arrives."
+        )
+    operator_action = _operator_action_contract_v3(
+        enter_now=enter_now,
+        timing_state=("INVALIDATED" if identity_rebind_pending else timing_state),
+        timing_effect=timing_effect,
+        studied_side=selected_side,
+        behavior_state=stream_state,
+        behavior_side=closed_move_side,
+        instruction=stream_instruction,
+        active_target_next_impulse=active_target_next_impulse,
+    )
+    if timing_state == "DURATION_INELIGIBLE":
+        operator_action.update(
+            {
+                "state": "AVOID",
+                "label": "AVOID",
+                "instruction": _safe_public_text(
+                    broker_expiry.get("instruction"),
+                    stream_instruction,
+                    limit=320,
+                ),
+            }
+        )
+    elif (
+        active_target_next_impulse
+        and not enter_now
+        and not identity_rebind_pending
+    ):
+        operator_action.update(
+            {
+                "state": "WAIT_FOR_PULLBACK",
+                "label": "WAIT FOR PULLBACK",
+                "instruction": stream_instruction,
+            }
+        )
+    elif (
+        not broker_expiry_proven
+        and selected_side in _DIRECTIONAL_SIDES
+        and not identity_rebind_pending
+        and timing_state not in {"INVALIDATED", "CONFLICT", "STALE", "MISSED"}
+    ):
+        operator_action.update(
+            {
+                "state": "PREPARE",
+                "label": "PREPARE",
+                "instruction": _safe_public_text(
+                    broker_expiry.get("instruction"),
+                    stream_instruction,
+                    limit=320,
+                ),
+            }
+        )
+    # Q3 is an action contract, not a forecast headline.  Preserve the full
+    # direction/time study as a separate, explicitly non-authoritative object
+    # so every consumer (not only the browser) leads with what may be done now.
+    # This prevents an active/next-impulse BUY or SELL study from reading like
+    # immediate entry permission when the actual action is to wait or stay out.
+    projection_side = _side(timing_forecast.get("side"))
+    projection_support_count = max(
+        0,
+        _integer(
+            timing_forecast.get(
+                "event_likelihood_support_count",
+                timing_forecast.get("support_count", 0),
+            )
+        ),
+    )
+    projection_calibration_grade = _safe_public_text(
+        timing_forecast.get("calibration_grade"), "UNRATED", limit=48
+    ).upper()
+    projection_calibrated = timing_forecast.get("calibrated") is True
+    projection_publishable = bool(
+        projection_calibrated
+        and projection_support_count > 0
+        and projection_calibration_grade not in {"", "UNKNOWN", "UNRATED"}
+    )
+    if projection_publishable:
+        projection_headline = forecast_headline
+        projection_summary = forecast_summary
+        projection_horizon = _safe_public_text(
+            timing_forecast.get("horizon_label"),
+            "Calibrated timing range",
+            limit=180,
+        )
+    else:
+        projection_headline = (
+            f"{projection_side} direction studied · timing range withheld"
+            if projection_side in _DIRECTIONAL_SIDES
+            else "Direction study active · timing range withheld"
+        )
+        projection_summary = (
+            "The directional study remains visible, but its candle range is "
+            "not replay-calibrated for this pair and event. It is not an entry signal."
+        )
+        projection_horizon = "Not published until replay calibration passes"
+    study_projection = {
+        "schema_version": "PG_OPERATOR_STUDY_PROJECTION_V3",
+        "headline": projection_headline,
+        "summary": projection_summary,
+        "side": projection_side,
+        "status": _safe_public_text(
+            timing_forecast.get("status"), "RESEARCH_ONLY", limit=48
+        ).upper()
+        if projection_publishable
+        else "RESEARCH_ONLY_UNCALIBRATED",
+        "horizon_label": projection_horizon,
+        "support_count": projection_support_count,
+        "calibrated": projection_calibrated,
+        "calibration_grade": projection_calibration_grade,
+        "timing_range_publishable": projection_publishable,
+        "study_only": True,
+        "can_grant_entry_permission": False,
+    }
+    action_state = _safe_public_text(
+        operator_action.get("state"), "AVOID", limit=48
+    ).upper()
+    if enter_now and permission_side in _DIRECTIONAL_SIDES:
+        action_headline = f"ENTER — {permission_side} NOW"
+    elif action_state == "WAIT_FOR_PULLBACK":
+        action_headline = "WAIT FOR PULLBACK"
+    elif action_state == "PREPARE":
+        action_headline = "PREPARE"
+    else:
+        action_headline = "STAY OUT"
+        operator_action["label"] = "STAY OUT"
+    entry["study_projection"] = study_projection
+    entry["headline"] = action_headline
+    entry["answer"] = _safe_public_text(
+        operator_action.get("instruction"),
+        "Stay out until a current verified entry window opens.",
+        limit=960,
+    )
+    entry["operator_action"] = operator_action
+    entry["identity_rebind_pending"] = identity_rebind_pending
+
     entry["enter_now"] = enter_now
     entry["action"] = f"{permission_side}_NOW" if enter_now else "DO_NOT_ENTER"
     entry["decision"] = best_action
@@ -5832,11 +8108,20 @@ def _streaming_three_question_synthesis_v3(
     entry["entry_permission_authorized"] = entry_permission_authorized
     entry["timing_supports_entry"] = timing_supports_entry
     entry["timing_veto"] = timing_veto
+    entry["broker_expiry_v3"] = broker_expiry
+    entry["broker_expiry_proven"] = broker_expiry_proven
+    entry["broker_expiry_eligible"] = broker_expiry_eligible
     entry_evidence["permission_allowed"] = permission_allowed
     entry_evidence["best_action"] = best_action
     entry_evidence["entry_permission_authorized"] = entry_permission_authorized
     entry_evidence["timing_supports_entry"] = timing_supports_entry
     entry_evidence["timing_veto"] = timing_veto
+    entry_evidence["permission_contract_authorized"] = (
+        permission_contract_authorized
+    )
+    entry_evidence["broker_expiry_v3"] = broker_expiry
+    entry_evidence["broker_expiry_proven"] = broker_expiry_proven
+    entry_evidence["broker_expiry_eligible"] = broker_expiry_eligible
     entry_evidence["prior_studied_side"] = prior_studied_side
     entry_evidence["current_regression_side"] = current_regression_side
     entry_evidence["current_actionable_study_side"] = selected_side
@@ -5858,7 +8143,100 @@ def refresh_operator_streaming_read_v3(
 
     current_epoch = float(now_epoch if now_epoch is not None else time.time())
     result = dict(workspace)
+    cached_market = dict(_mapping(result.get("market")))
+    tracking_summary = _mapping(runtime_payload.get("tracking_summary"))
+    latest_signal = _mapping(runtime_payload.get("latest_signal"))
+    runtime_symbol = _safe_public_text(
+        tracking_summary.get("detected_market")
+        or latest_signal.get("symbol")
+        or latest_signal.get("pair"),
+        "",
+        limit=64,
+    )
+    runtime_timeframe = _safe_public_text(
+        tracking_summary.get("detected_timeframe")
+        or latest_signal.get("timeframe"),
+        "",
+        limit=32,
+    ).upper()
+    cached_symbol = _safe_public_text(
+        cached_market.get("symbol"), "", limit=64
+    )
+    cached_timeframe = _safe_public_text(
+        cached_market.get("timeframe"), "", limit=32
+    ).upper()
+    identity_change_detected = bool(
+        runtime_symbol
+        and runtime_timeframe
+        and cached_symbol
+        and cached_timeframe
+        and (
+            _instrument_token(runtime_symbol) != _instrument_token(cached_symbol)
+            or runtime_timeframe != cached_timeframe
+        )
+    )
+    cached_frame = _frame_id(_mapping(result.get("surface")).get("frame_id"))
+    runtime_frame = _frame_id(
+        runtime_payload.get("display_frame_id"),
+        runtime_payload.get("chart_frame_id"),
+        runtime_payload.get("frame_id"),
+        tracking_summary.get("display_frame_id"),
+        tracking_summary.get("frame_id"),
+        latest_signal.get("frame_id"),
+    )
+    runtime_study = (
+        _mapping(tracking_summary.get("market_study_v3"))
+        or _mapping(latest_signal.get("market_study_v3"))
+    )
+    runtime_study_symbol = _safe_public_text(
+        runtime_study.get("symbol"), "", limit=64
+    )
+    runtime_study_timeframe = _safe_public_text(
+        runtime_study.get("timeframe"), "", limit=32
+    ).upper()
+    runtime_study_key = _safe_identifier(
+        runtime_study.get("closed_candle_key"), ""
+    )
+    coherent_new_identity = bool(
+        identity_change_detected
+        and runtime_frame is not None
+        and runtime_frame != cached_frame
+        and _text(runtime_study.get("status"), "", limit=32).upper()
+        == "STUDIED"
+        and runtime_study_key
+        and _instrument_token(runtime_study_symbol)
+        == _instrument_token(runtime_symbol)
+        and runtime_study_timeframe == runtime_timeframe
+    )
+    identity_rebind_pending = bool(
+        identity_change_detected and not coherent_new_identity
+    )
+    identity_matches = not coherent_new_identity
+    if identity_change_detected:
+        # Compact OCR/sidecar identity can advance before the displayed frame.
+        # Revoke permission immediately, but preserve the atomic market/forecast
+        # bundle until a new display frame and completed study agree.
+        current_permission = dict(_mapping(result.get("permission")))
+        current_permission.update(
+            {
+                "allowed": False,
+                "action": "WAIT",
+                "side": "NEUTRAL",
+                "message": (
+                    "Chart identity is rebinding; a coherent new display frame and "
+                    "completed-candle study are required."
+                ),
+            }
+        )
+        result["permission"] = current_permission
+    if coherent_new_identity:
+        result["market"] = {
+            "symbol": runtime_symbol,
+            "timeframe": runtime_timeframe,
+        }
     tracking = dict(_mapping(result.get("tracking")))
+    if coherent_new_identity:
+        tracking["market_study_v3"] = _market_study_contract(runtime_study)
     stream = cpu_stream_tracking_contract_v3(
         runtime_payload,
         now_epoch=current_epoch,
@@ -5873,6 +8251,9 @@ def refresh_operator_streaming_read_v3(
         permission=_mapping(result.get("permission")),
         stream=stream,
         order_reference_rows=result.get("overlays"),
+        identity_matches=identity_matches,
+        identity_rebind_pending=identity_rebind_pending,
+        now_epoch=current_epoch,
     )
     return result
 
