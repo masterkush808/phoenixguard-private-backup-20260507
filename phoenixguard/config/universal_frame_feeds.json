@@ -34,9 +34,10 @@
       "notes": "Future iOS app should use ReplayKit/Broadcast Upload and post to the same frame-ingest endpoint."
     },
     "browser_extension_capture": {
-      "status": "planned",
-      "recommended_interval_sec": 15,
-      "notes": "Future browser extension can capture chart tab content without requiring full desktop screenshots."
+      "status": "supported_edge_mv3",
+      "recommended_interval_sec": 4,
+      "coordinate_space": "edge_tab_content_v1",
+      "notes": "The Edge MV3 tab-capture feed samples the explicitly locked broker tab without foregrounding its window. Upload cadence remains bounded by the server-advertised frame-ingest interval."
     },
     "mt4_chart_screenshot": {
       "status": "planned",

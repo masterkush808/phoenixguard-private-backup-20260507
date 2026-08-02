@@ -1271,6 +1271,7 @@ def test_windows_capture_backend_prefers_printwindow_for_pocket_option_browser_w
 
 
 def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = WindowsWindowCaptureBackend()
     calls: list[str] = []
     live_image = _synthetic_full_pocket_option_gui(width=1200, height=760)
@@ -1325,6 +1326,7 @@ def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(m
 def test_windows_capture_backend_routes_pocket_visible_fallback_through_identity_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = WindowsWindowCaptureBackend()
     calls: list[str] = []
 
@@ -1384,6 +1386,7 @@ def test_windows_capture_backend_accepts_pocket_chart_study_pixels(monkeypatch: 
 
 
 def test_windows_capture_backend_does_not_grab_wrong_foreground_for_pocket_option(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = WindowsWindowCaptureBackend()
     calls: list[str] = []
 
@@ -1413,9 +1416,79 @@ def test_windows_capture_backend_does_not_grab_wrong_foreground_for_pocket_optio
     assert calls == ["print:101"]
 
 
+def test_background_only_pocket_capture_fails_closed_on_blank_offscreen_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1")
+    backend = WindowsWindowCaptureBackend()
+    calls: list[str] = []
+
+    def capture_with_printwindow(
+        hwnd: int,
+        _descriptor: Mapping[str, Any],
+    ) -> Image.Image:
+        calls.append(f"print:{hwnd}")
+        return Image.new("RGB", (1200, 760), color=(36, 36, 36))
+
+    def unexpected_desktop_grab(_descriptor: Mapping[str, Any]) -> Image.Image:
+        calls.append("desktop-grab")
+        raise AssertionError("background-only capture must not read visible desktop pixels")
+
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        backend,
+        "_capture_window_printwindow",
+        capture_with_printwindow,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_capture_window_imagegrab",
+        unexpected_desktop_grab,
+    )
+
+    with pytest.raises(
+        CaptureSurfaceUnavailableError,
+        match="broker/chart surface",
+    ):
+        backend.capture_window(
+            {
+                "hwnd": 101,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1200, 760],
+            }
+        )
+
+    assert calls == ["print:101"]
+
+
+def test_background_only_visible_activation_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1")
+    backend = WindowsWindowCaptureBackend()
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+
+    assert backend._activate_window_for_visible_capture(101) is False  # noqa: SLF001
+
+
+def test_background_only_locked_window_restore_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    assert tracker._restore_locked_window_descriptor(101) == {}  # noqa: SLF001
+
+
 def test_windows_live_capture_rejects_dashboard_title_even_with_embedded_broker_pixels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = WindowsWindowCaptureBackend()
     capture_calls = 0
 
@@ -1462,6 +1535,7 @@ def test_windows_live_capture_rejects_dashboard_title_even_with_embedded_broker_
 def test_windows_live_capture_rejects_foreground_change_after_grab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = WindowsWindowCaptureBackend()
     foreground_handles = iter((101, 202))
     visible_descriptor = {
@@ -1498,6 +1572,8 @@ def test_display_fast_visible_capture_rejects_foreground_change_after_grab(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
+
     class _ForegroundRaceBackend(_FastVisibleOnlyCaptureBackend):
         def __init__(self) -> None:
             super().__init__(_synthetic_full_pocket_option_gui(width=1280, height=720))
@@ -1525,6 +1601,78 @@ def test_display_fast_visible_capture_rejects_foreground_change_after_grab(
         )
 
     assert backend.fast_capture_calls == 1
+
+
+def test_background_only_display_snapshot_skips_fast_visible_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1")
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+    backend = _FailingFastVisibleCaptureBackend(
+        _synthetic_full_pocket_option_gui(width=1280, height=720)
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    image = tracker._capture_display_snapshot_window(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        {
+            "hwnd": 501,
+            "title": "The Most Innovative Trading Platform - Microsoft Edge",
+            "bbox": [0, 0, 1280, 720],
+        }
+    )
+
+    assert image.size == (1280, 720)
+    assert backend.fast_capture_calls == 0
+    assert backend.capture_calls == 1
+
+
+def test_background_only_focus_selection_skips_fast_display_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1")
+    monkeypatch.setenv("PHOENIXGUARD_FAST_FOCUS_PREVIEW", "1")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    session_id = str(tracker.create_session(session_id="pocket-live")["session_id"])
+    ordinary_capture_calls: list[tuple[str, bool]] = []
+
+    def unexpected_fast_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("background-only focus selection must not publish a visible preview")
+
+    def ordinary_capture(
+        observed_session_id: str,
+        *,
+        force: bool = False,
+        **_kwargs: Any,
+    ) -> bool:
+        ordinary_capture_calls.append((observed_session_id, force))
+        return True
+
+    monkeypatch.setattr(
+        tracker,
+        "_publish_display_snapshot_only",
+        unexpected_fast_preview,
+    )
+    monkeypatch.setattr(tracker, "_capture_and_analyze", ordinary_capture)
+
+    focused = tracker.set_focus_region(
+        session_id,
+        [0.10, 0.10, 0.88, 0.86],
+        source="test",
+    )
+
+    assert focused["manual_focus_region"]["enabled"] is True
+    assert ordinary_capture_calls
+    assert all(call == (session_id, True) for call in ordinary_capture_calls)
 
 
 def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_path: Path) -> None:
@@ -7133,6 +7281,7 @@ def test_frozen_study_recovers_even_when_full_window_signature_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     frozen = _surface(width=1280, height=720)
     chrome_variants: list[Image.Image] = []
     for index in range(4):
@@ -7238,6 +7387,8 @@ def test_unsafe_frozen_study_recovery_stays_waiting_and_throttles_immediate_retr
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
+
     class _UnavailableLiveRecoveryBackend(_FakeCaptureBackend):
         def __init__(self, images: Sequence[Image.Image]) -> None:
             super().__init__(images)
@@ -7699,6 +7850,7 @@ def test_tracker_display_only_prefers_validated_fast_visible_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = _FastVisibleOnlyCaptureBackend(_synthetic_full_pocket_option_gui(width=1280, height=720))
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -7727,6 +7879,7 @@ def test_tracker_display_only_blocks_native_capture_fallback_when_fast_visible_f
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = _FailingFastVisibleCaptureBackend(_synthetic_full_pocket_option_gui(width=1280, height=720))
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -7755,6 +7908,7 @@ def test_tracker_display_only_uses_validated_native_capture_fallback_when_enable
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = _FailingFastVisibleCaptureBackend(_synthetic_full_pocket_option_gui(width=1280, height=720))
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -7784,6 +7938,7 @@ def test_tracker_display_only_rejects_invalid_native_capture_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     backend = _FailingFastVisibleCaptureBackend(Image.new("RGB", (1280, 720), color=(0, 0, 0)))
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,

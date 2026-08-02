@@ -47,6 +47,23 @@ function Write-RefreshLog {
     }
 }
 
+function Test-BackgroundCaptureOnly {
+    $configured = [string]$env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        return $true
+    }
+    return $configured.Trim().ToLowerInvariant() -notin @("0", "false", "off", "no")
+}
+
+if (Test-BackgroundCaptureOnly) {
+    Write-RefreshLog ([ordered]@{
+        at = (Get-Date).ToString("o")
+        action = "DISABLED"
+        reason = "background-only capture policy forbids broker focus and automatic refresh"
+    })
+    return
+}
+
 while ($true) {
     try {
         if (-not (Test-Path -LiteralPath $StatusPath)) {

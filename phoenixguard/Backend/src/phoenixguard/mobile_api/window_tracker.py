@@ -510,6 +510,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _background_capture_only_v3() -> bool:
+    """Keep broker observation passive unless an operator explicitly opts out.
+
+    The live tracker is an always-on observer, not an interactive desktop
+    owner. A failed offscreen capture must therefore degrade as unavailable
+    instead of restoring, raising, or foregrounding the broker window while
+    the operator is working in another application.
+    """
+
+    return _env_bool("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", True)
+
+
 def _env_int(name: str, default: int, minimum: int) -> int:
     try:
         value = int(float(os.getenv(name, str(default)) or default))
@@ -6184,7 +6196,21 @@ def _external_frame_source_lock_v3(
     sequence_id = str(source.get("sequence_id", "") or "").strip()
     symbol = str(source.get("symbol", "") or "").strip().upper()
     timeframe = str(source.get("timeframe", "") or "").strip().upper()
-    lock_basis = f"{source_id}|{source_url}|{symbol}|{timeframe}|{window_signature}"
+    source_type = str(source.get("source_type", "external_frame_feed") or "external_frame_feed").strip()
+    coordinate_space = str(source.get("coordinate_space", "external_frame_v1") or "external_frame_v1").strip()
+    metadata = _mapping_to_dict(source.get("metadata", {}))
+    extension_id = str(metadata.get("extension_id", "") or "").strip()
+    locked_tab_id = str(metadata.get("locked_tab_id", "") or "").strip()
+    lock_basis = "|".join(
+        [
+            source_id,
+            source_type,
+            extension_id,
+            locked_tab_id,
+            sequence_id,
+            coordinate_space,
+        ]
+    )
     lock_id = hashlib.sha256(lock_basis.encode("utf-8", errors="ignore")).hexdigest()[:24]
     return {
         "schema_version": "BROKER_SOURCE_LOCK_V3",
@@ -6194,7 +6220,7 @@ def _external_frame_source_lock_v3(
         "reason": "External frame feed supplied a fresh chart image through the frame-ingest contract.",
         "reason_codes": ["EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"],
         "selected_target": {
-            "browser": "external_frame_feed",
+            "browser": "edge_extension" if source_type == "browser_extension_capture" else "external_frame_feed",
             "url": source_url,
             "title": source_id,
             "window_handle": "",
@@ -6219,18 +6245,25 @@ def _external_frame_source_lock_v3(
                 "sequence_id": sequence_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
+                "source_type": source_type,
+                "coordinate_space": coordinate_space,
+                "extension_id": extension_id,
+                "locked_tab_id": locked_tab_id,
             },
         },
         "broker_pixel_fingerprint": window_signature,
         "broker_control_fingerprint": lock_id,
         "viewport_fingerprint": lock_id,
         "evidence": {
-            "source_type": "external_frame_feed",
+            "source_type": source_type,
             "source_id": source_id,
             "source_url": source_url,
             "sequence_id": sequence_id,
             "symbol": symbol,
             "timeframe": timeframe,
+            "coordinate_space": coordinate_space,
+            "extension_id": extension_id,
+            "locked_tab_id": locked_tab_id,
             "study_source_expected": True,
             "chart_source_like": True,
             "study_source_only": True,
@@ -10240,6 +10273,7 @@ class WindowsWindowCaptureBackend:
         pocket_fast_foreground_grab = (
             pocket_option_window
             and hwnd > 0
+            and not _background_capture_only_v3()
             and str(os.getenv("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "1") or "1").strip().lower()
             not in {"0", "false", "off", "no"}
         )
@@ -10273,6 +10307,10 @@ class WindowsWindowCaptureBackend:
                     return self.capture_window_live(descriptor)
                 except Exception:
                     LOGGER.debug("Pocket Option live ImageGrab fallback failed.", exc_info=True)
+            if _background_capture_only_v3() and offscreen is None:
+                raise CaptureSurfaceUnavailableError(
+                    "Background-only Pocket Option capture could not read usable offscreen pixels."
+                )
             if offscreen is not None:
                 raise CaptureSurfaceUnavailableError("Pocket Option capture did not include the broker/chart surface.")
         elif prefer_imagegrab:
@@ -10295,6 +10333,10 @@ class WindowsWindowCaptureBackend:
 
         if not self._is_windows():
             raise CaptureSurfaceUnavailableError("Visible broker-frame recovery is only available on Windows.")
+        if _background_capture_only_v3():
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery is disabled by the background-only capture policy."
+            )
         self._ensure_dpi_awareness()
         hwnd = int(descriptor.get("hwnd", 0) or 0)
         if hwnd <= 0 or not self._activate_window_for_visible_capture(hwnd):
@@ -10449,6 +10491,8 @@ class WindowsWindowCaptureBackend:
 
     def _activate_window_for_visible_capture(self, hwnd: int) -> bool:
         if hwnd <= 0 or not self._is_windows():
+            return False
+        if _background_capture_only_v3():
             return False
         enabled = str(os.getenv("PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK", "1") or "1").strip().lower()
         if enabled in {"0", "false", "off", "no"}:
@@ -29040,15 +29084,26 @@ class ContinuousWindowTrackerService:
         normalized_source_id = str(source_id or "external-frame-feed").strip() or "external-frame-feed"
         normalized_symbol = str(symbol or "").strip().upper()
         normalized_timeframe = str(timeframe or "").strip().upper()
+        metadata_payload = dict(metadata or {})
+        normalized_source_type = str(
+            metadata_payload.get("source_type", "external_frame_feed")
+            or "external_frame_feed"
+        ).strip()
+        coordinate_space = str(
+            metadata_payload.get("coordinate_space", "external_frame_v1")
+            or "external_frame_v1"
+        ).strip()
         source_payload: dict[str, Any] = {
             "source_id": normalized_source_id,
+            "source_type": normalized_source_type,
             "source_url": str(source_url or "").strip(),
             "sequence_id": str(sequence_id or "").strip(),
             "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
             "frame_id": int(frame_id or 0),
             "capture_epoch_ms": int(round(capture_epoch * 1000.0)),
-            "metadata": dict(metadata or {}),
+            "coordinate_space": coordinate_space,
+            "metadata": metadata_payload,
         }
 
         try:
@@ -29097,6 +29152,12 @@ class ContinuousWindowTrackerService:
             payload["tracking_enabled"] = False
             if normalized_symbol:
                 payload["market"] = normalized_symbol
+            elif normalized_source_type == "browser_extension_capture":
+                # A tab feed may switch pairs without changing its tab/stream
+                # identity. Blank client metadata must never preserve a prior
+                # pair as if it were verified; the visual selector must prove
+                # the current chart identity again.
+                payload["market"] = ""
             payload["manual_focus_region"] = {
                 "enabled": True,
                 "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
@@ -29106,10 +29167,25 @@ class ContinuousWindowTrackerService:
             payload["external_frame_feed"] = {
                 "schema_version": "PG_EXTERNAL_FRAME_FEED_V1",
                 "source_id": normalized_source_id,
+                "source_type": normalized_source_type,
                 "source_url": source_payload["source_url"],
                 "sequence_id": source_payload["sequence_id"],
                 "symbol": normalized_symbol,
                 "timeframe": normalized_timeframe,
+                "coordinate_space": coordinate_space,
+                "viewport": {
+                    "width": int(image.width),
+                    "height": int(image.height),
+                },
+                "source_lineage": {
+                    "extension_id": str(metadata_payload.get("extension_id", "") or "")[:128],
+                    "extension_version": str(metadata_payload.get("extension_version", "") or "")[:32],
+                    "locked_tab_id": str(metadata_payload.get("locked_tab_id", "") or "")[:32],
+                    "focus_policy": str(metadata_payload.get("focus_policy", "") or "")[:96],
+                    "browser_chrome_included": bool(
+                        metadata_payload.get("browser_chrome_included", False)
+                    ),
+                },
                 "frame_id": int(frame_id or 0),
                 "last_ingest_epoch": now_epoch,
                 "last_capture_epoch": capture_epoch,
@@ -29269,7 +29345,8 @@ class ContinuousWindowTrackerService:
         
         if worker is None:
             fast_focus_preview = (
-                str(os.getenv("PHOENIXGUARD_FAST_FOCUS_PREVIEW", "0") or "0").strip().lower()
+                not _background_capture_only_v3()
+                and str(os.getenv("PHOENIXGUARD_FAST_FOCUS_PREVIEW", "0") or "0").strip().lower()
                 not in {"0", "false", "off", "no"}
             )
             if fast_focus_preview:
@@ -29672,9 +29749,12 @@ class ContinuousWindowTrackerService:
         return stopped
 
     def _capture_display_snapshot_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
-        fast_visible_enabled = str(
-            os.getenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1") or "1"
-        ).strip().lower() not in {"0", "false", "off", "no"}
+        fast_visible_enabled = (
+            not _background_capture_only_v3()
+            and str(
+                os.getenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1") or "1"
+            ).strip().lower() not in {"0", "false", "off", "no"}
+        )
         native_fallback_enabled = str(
             os.getenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", "0") or "0"
         ).strip().lower() not in {"0", "false", "off", "no"}
@@ -31390,6 +31470,8 @@ class ContinuousWindowTrackerService:
                         "capture_window_live",
                         None,
                     )
+                    if _background_capture_only_v3():
+                        visible_recovery_capture = None
                     with control.lock:
                         recovery_study_slot_free = bool(
                             control.latest_keyframe is None
@@ -31532,6 +31614,7 @@ class ContinuousWindowTrackerService:
                             else "offscreen_stream"
                         )
                         lineage["duplicate_recovery_v3"] = {
+                            "background_capture_only": _background_capture_only_v3(),
                             "attempted": use_visible_duplicate_recovery,
                             "succeeded": recovery_produced_fresh_pixels,
                             "forced_keyframe": forced_recovery_keyframe,
@@ -36853,6 +36936,8 @@ class ContinuousWindowTrackerService:
 
     def _restore_locked_window_descriptor(self, hwnd: int) -> dict[str, Any]:
         if int(hwnd or 0) <= 0:
+            return {}
+        if _background_capture_only_v3():
             return {}
         enabled = str(os.getenv("PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW", "1") or "1").strip().lower()
         if enabled in {"0", "false", "off", "no"} or os.name != "nt":

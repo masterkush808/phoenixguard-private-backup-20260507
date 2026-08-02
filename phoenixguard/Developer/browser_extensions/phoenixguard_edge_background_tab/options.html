@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhoenixGuard Edge Background Tab</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">PHOENIXGUARD V3 · EDGE TAB SOURCE</p>
+        <h1>One tab. Always observed.<br>Never brought to the front.</h1>
+        <p class="lede">Configure the local frame feed once. Then make Pocket Option the active tab and click the pinned extension icon once to lock it. Click the icon again to stop.</p>
+      </header>
+
+      <section class="status" aria-labelledby="statusHeading">
+        <div>
+          <p class="eyebrow" id="statusHeading">CAPTURE STATUS</p>
+          <div class="phase-row">
+            <span class="phase" id="phase">IDLE</span>
+            <span class="pulse" id="pulse" aria-hidden="true"></span>
+          </div>
+          <h2 id="message">Click the extension once while the Pocket Option tab is active.</h2>
+        </div>
+        <dl>
+          <div><dt>Locked tab</dt><dd id="lockedTab">None</dd></div>
+          <div><dt>Sampling</dt><dd id="sampling">0.25 FPS</dd></div>
+          <div><dt>Upload interval</dt><dd id="uploadInterval">Server controlled</dd></div>
+          <div><dt>Accepted</dt><dd id="acceptedFrames">0 frames</dd></div>
+          <div><dt>Latest-frame replacements</dt><dd id="replacedFrames">0</dd></div>
+          <div><dt>Last accepted</dt><dd id="lastAccepted">Never</dd></div>
+        </dl>
+        <p class="error" id="lastError" hidden></p>
+        <p class="focus-proof">No tab activation, no window restore, no focus APIs. Capture runs only from Edge’s explicit <code>tabCapture</code> grant and an unfocusable offscreen document.</p>
+      </section>
+
+      <section aria-labelledby="connectionHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOCAL CONNECTION</p>
+            <h2 id="connectionHeading">PhoenixGuard frame ingest</h2>
+          </div>
+          <button class="quiet" id="testConnection" type="button">Test server</button>
+        </div>
+        <form id="configForm">
+          <label class="wide">Server URL
+            <input id="baseUrl" type="url" required autocomplete="url" placeholder="http://127.0.0.1:8793">
+          </label>
+          <label>Session ID
+            <input id="sessionId" required spellcheck="false">
+          </label>
+          <label>Source ID
+            <input id="sourceId" required spellcheck="false">
+          </label>
+          <label class="wide">Frame-ingest token
+            <input id="token" type="password" required autocomplete="off">
+          </label>
+          <label class="wide">HMAC signing secret <span>optional unless PhoenixGuard requires it</span>
+            <input id="signingSecret" type="password" autocomplete="off">
+          </label>
+          <label>Symbol hint <span>optional</span>
+            <input id="symbol" placeholder="CHF/JPY OTC" spellcheck="false">
+          </label>
+          <label>Timeframe hint
+            <input id="timeframe" placeholder="M5" spellcheck="false">
+          </label>
+          <details class="wide">
+            <summary>Capture tuning</summary>
+            <div class="tuning-grid">
+              <label>Maximum width
+                <input id="maxWidth" type="number" min="640" max="2560" step="1">
+              </label>
+              <label>JPEG quality
+                <input id="jpegQuality" type="number" min="0.55" max="0.95" step="0.01">
+              </label>
+              <label>Material delta
+                <input id="materialDeltaThreshold" type="number" min="0.001" max="0.08" step="0.001">
+              </label>
+              <label>Rest heartbeat seconds
+                <input id="heartbeatSec" type="number" min="15" max="120" step="1">
+              </label>
+            </div>
+          </details>
+          <div class="actions wide">
+            <button class="primary" type="submit">Save configuration</button>
+            <button class="danger" id="stopCapture" type="button">Stop capture</button>
+          </div>
+        </form>
+        <p class="feedback" id="feedback" aria-live="polite"></p>
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

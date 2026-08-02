@@ -196,6 +196,118 @@ def test_canonical_live_launcher_enables_validated_native_display_capture_fallba
     assert "display_native_capture_fallback_enabled = $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK" in text
 
 
+def test_canonical_live_launch_paths_default_to_background_only_capture() -> None:
+    live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+    full_local = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+    tracker = _read("Backend/launch/start_phoenixguard_24_7_tracker.py")
+
+    for fragment in (
+        "$env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY = '1'",
+        "$env:PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB = '0'",
+        "$env:PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK = '0'",
+        "$env:PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW = '0'",
+        "$env:PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE = '0'",
+        "$env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '0'",
+    ):
+        assert fragment in live_ready
+    for name, default in (
+        ("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1"),
+        ("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "0"),
+        ("PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK", "0"),
+        ("PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW", "0"),
+        ("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "0"),
+        ("PHOENIXGUARD_FAST_FOCUS_PREVIEW", "0"),
+    ):
+        matching_line = next(
+            line for line in full_local.splitlines() if f"$env:{name} =" in line
+        )
+        assert f"else {{ '{default}' }}" in matching_line
+    for name, default in (
+        ("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "1"),
+        ("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "0"),
+        ("PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK", "0"),
+        ("PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW", "0"),
+        ("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "0"),
+        ("PHOENIXGUARD_FAST_FOCUS_PREVIEW", "0"),
+    ):
+        assert f'os.environ.setdefault("{name}", "{default}")' in tracker
+    assert "background_capture_only = $env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY" in live_ready
+    assert "foreground_capture_fallback_enabled = $env:PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK" in live_ready
+    assert "locked_window_restore_enabled = $env:PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW" in live_ready
+
+
+def test_vm_monitor_does_not_reopen_broker_by_default() -> None:
+    monitor = _read("Backend/launch/deploy/windows/Start-PhoenixGuardVmMonitor.ps1")
+
+    default_fragment = (
+        "Get-EnvOrDefault -Name 'PHOENIXGUARD_MONITOR_VISIBILITY_RECOVERY_ENABLED' "
+        "-DefaultValue '0'"
+    )
+    assert default_fragment in monitor
+    assert "-DefaultValue $false" in next(
+        line
+        for line in monitor.splitlines()
+        if "PHOENIXGUARD_MONITOR_VISIBILITY_RECOVERY_ENABLED" in line
+    )
+
+
+def test_background_only_policy_guards_legacy_broker_focus_helpers() -> None:
+    freshness = _read("Backend/tools/watch_broker_freshness_refresh.ps1")
+    trade_alerts = _read("Backend/tools/watch_trade_package_ack_alerts.ps1")
+
+    for text in (freshness, trade_alerts):
+        assert "function Test-BackgroundCaptureOnly" in text
+        assert "$env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY" in text
+        assert "if ([string]::IsNullOrWhiteSpace($configured))" in text
+        assert "return $true" in text
+        assert 'notin @("0", "false", "off", "no")' in text
+
+    freshness_guard = freshness.index("if (Test-BackgroundCaptureOnly)")
+    freshness_loop = freshness.index("while ($true)")
+    freshness_focus = freshness.index(
+        "[PgBrokerFreshnessRefreshWinApi]::SetForegroundWindow"
+    )
+    freshness_refresh = freshness.index(
+        '[System.Windows.Forms.SendKeys]::SendWait("{F5}")'
+    )
+    assert freshness_guard < freshness_loop < freshness_focus < freshness_refresh
+    assert 'action = "DISABLED"' in freshness[freshness_guard:freshness_loop]
+
+    focus_function = trade_alerts.index("function Focus-BrokerWindowForCapture")
+    focus_guard = trade_alerts.index("if (Test-BackgroundCaptureOnly)", focus_function)
+    focus_query = trade_alerts.index("PHOENIXGUARD_ALERT_REFOCUS_WINDOW_QUERY", focus_function)
+    focus_call = trade_alerts.index(
+        "[PhoenixGuardAlertFocus]::SetForegroundWindow", focus_function
+    )
+    assert focus_function < focus_guard < focus_query < focus_call
+    assert "return" in trade_alerts[focus_guard:focus_query]
+
+
+def test_live_launchers_arm_loopback_edge_tab_capture_without_logging_the_token() -> None:
+    helper = _read("Backend/launch/Initialize-PhoenixGuardEdgeTabCapture.ps1")
+    live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+    full_local = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+
+    assert "RandomNumberGenerator]::Create()" in helper
+    assert "edge_tab_capture.token" in helper
+    assert "PHOENIXGUARD_FRAME_INGEST_TOKEN" in helper
+    assert "PHOENIXGUARD_FRAME_INGEST_TOKEN_LOCAL_MANAGED" in helper
+    assert "PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC" in helper
+    assert "PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH" in helper
+    assert "PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID" in helper
+    for launcher in (live_ready, full_local):
+        assert "Initialize-PhoenixGuardEdgeTabCapture.ps1" in launcher
+        assert "Initialize-PhoenixGuardEdgeTabCaptureEnvironment" in launcher
+        assert "-MinIntervalSec 4.0" in launcher
+
+    assert "edge_tab_capture_ingest_armed" in live_ready
+    assert "edge_tab_capture_token_path" in live_ready
+    assert "edge_tab_capture_min_interval_sec" in live_ready
+    summary_start = live_ready.index("$summaryPayload = [ordered]@{")
+    summary_text = live_ready[summary_start:]
+    assert "PHOENIXGUARD_FRAME_INGEST_TOKEN" not in summary_text
+
+
 def test_canonical_live_launcher_bounds_native_threads_and_avoids_codex_session_pruning() -> None:
     text = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
     resolver_index = text.index("Resolve-PhoenixGuardPythonRuntime")

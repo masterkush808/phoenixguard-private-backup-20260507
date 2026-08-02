@@ -894,10 +894,55 @@ def test_stream_capture_never_enters_focus_activating_snapshot_fallback() -> Non
     assert backend.desktop_attach_calls == 1
 
 
+def test_background_only_duplicate_streak_never_uses_visible_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", raising=False)
+    stop_evt = threading.Event()
+    backend = _DuplicateRecoveryBackend(
+        stop_evt=stop_evt,
+        stop_after_stream_calls=4,
+    )
+    observer = _SequencedStateObserver(
+        ["keyframe", "duplicate", "duplicate", "duplicate"]
+    )
+    service = _new_service(tmp_path, monkeypatch)
+    control = _control(observer, backend, stop_evt=stop_evt)
+    control.target_fps = 8.0
+    service._cpu_streams["session-a"] = control
+    payload = _locked_stream_payload()
+    monkeypatch.setenv("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_THRESHOLD", "2")
+    monkeypatch.setenv(
+        "PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_MIN_INTERVAL_SEC",
+        "1",
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_session",
+        _session_loader(payload),
+    )
+    try:
+        service._cpu_stream_producer_loop_v3("session-a", control)
+
+        assert backend.call_order == ["stream", "stream", "stream", "stream"]
+        assert backend.live_calls == 0
+        assert control.duplicate_recovery_attempts == 0
+        assert control.duplicate_recovery_successes == 0
+        assert control.duplicate_recovery_errors == 0
+        assert control.duplicate_recovery_pending is False
+        recovery = control.last_observation_lineage["duplicate_recovery_v3"]
+        assert recovery["background_capture_only"] is True
+        assert recovery["attempted"] is False
+    finally:
+        service.shutdown()
+
+
 def test_duplicate_streak_uses_one_visible_recovery_then_resumes_stream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     stop_evt = threading.Event()
     backend = _DuplicateRecoveryBackend(
         stop_evt=stop_evt,
@@ -957,6 +1002,7 @@ def test_pending_recovery_refreshes_pair_and_focus_identity_before_live_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     stop_evt = threading.Event()
     payload = _locked_stream_payload()
 
@@ -1013,6 +1059,7 @@ def test_pending_duplicate_recovery_waits_for_the_one_study_slot(
     monkeypatch: pytest.MonkeyPatch,
     occupied_slot: str,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     stop_evt = threading.Event()
     backend = _DuplicateRecoveryBackend(
         stop_evt=stop_evt,
@@ -1060,6 +1107,7 @@ def test_duplicate_recovery_failure_is_throttled_and_stream_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     stop_evt = threading.Event()
     backend = _DuplicateRecoveryBackend(
         stop_evt=stop_evt,
@@ -1114,6 +1162,7 @@ def test_post_capture_recovery_validation_error_uses_recovery_counter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     stop_evt = threading.Event()
     backend = _DuplicateRecoveryBackend(
         stop_evt=stop_evt,
@@ -1164,6 +1213,7 @@ def test_real_observer_admits_only_fresh_visible_recovery_pixels(
     monkeypatch: pytest.MonkeyPatch,
     live_pixels_changed: bool,
 ) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY", "0")
     stop_evt = threading.Event()
     backend = _DuplicateRecoveryBackend(
         stop_evt=stop_evt,

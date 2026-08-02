@@ -4980,7 +4980,15 @@ def create_app(
             allow_origins=allowed_origins,
             allow_credentials=False,
             allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["Authorization", "Content-Type", "X-PhoenixGuard-Token"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "X-PhoenixGuard-Token",
+                "X-PhoenixGuard-Timestamp",
+                "X-PhoenixGuard-Nonce",
+                "X-PhoenixGuard-Signature",
+                "X-PhoenixGuard-Signature-Alg",
+            ],
         )
     trusted_hosts = _env_csv("PHOENIXGUARD_TRUSTED_HOSTS")
     if trusted_hosts:

@@ -139,6 +139,8 @@ def test_frame_ingest_config_reports_contract(monkeypatch: Any) -> None:
     assert payload["token_required"] is True
     assert payload["scoped_tokens_supported"] is True
     assert "edge_agent_screenshot" in payload["supported_sources"]
+    assert "browser_extension_capture" in payload["supported_sources"]
+    assert payload["browser_extension_coordinate_space"] == "edge_tab_content_v1"
     assert "mobile_manual_upload" in payload["supported_sources"]
     assert payload["readiness"]["armed"] is False
 
@@ -195,12 +197,17 @@ def test_frame_ingest_accepts_authenticated_chart_frame(monkeypatch: Any) -> Non
             "sequence_id": "edge-seq-1",
             "capture_epoch_ms": "1780000000000",
             "frame_id": "42",
-            "metadata_json": '{"plane":"chart"}',
+            "metadata_json": (
+                '{"plane":"chart","source_type":"browser_extension_capture",'
+                '"coordinate_space":"edge_tab_content_v1"}'
+            ),
         },
     )
 
     assert response.status_code == 202
     payload = response.json()
+    assert payload["schema_version"] == "PG_FRAME_INGEST_ACCEPTED_V1"
+    assert payload["accepted"] is True
     assert payload["session_id"] == "external-live"
     assert payload["external_frame_feed"]["source_id"] == "edge-agent"
     assert len(tracker.calls) == 1
@@ -210,6 +217,61 @@ def test_frame_ingest_accepts_authenticated_chart_frame(monkeypatch: Any) -> Non
     assert call["timeframe"] == "M5"
     assert call["frame_id"] == 42
     assert call["metadata"]["plane"] == "chart"
+    assert call["metadata"]["source_type"] == "browser_extension_capture"
+    assert call["metadata"]["coordinate_space"] == "edge_tab_content_v1"
+    assert len(response.content) < 8_192
+
+
+def test_frame_ingest_rejects_wrong_browser_extension_coordinate_space(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    client = _client()
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            "source_id": "edge-tab",
+            "capture_epoch_ms": "1780000000000",
+            "frame_id": "1",
+            "metadata_json": (
+                '{"source_type":"browser_extension_capture",'
+                '"coordinate_space":"desktop_pixels_v1"}'
+            ),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "edge_tab_content_v1" in response.json()["detail"]
+
+
+def test_frame_ingest_overwrites_client_supplied_security_metadata(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    tracker = _FakeFrameTracker()
+    client = _client(tracker)
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            "source_id": "edge-tab",
+            "capture_epoch_ms": "1780000000000",
+            "frame_id": "1",
+            "metadata_json": (
+                '{"source_type":"browser_extension_capture",'
+                '"coordinate_space":"edge_tab_content_v1",'
+                '"feed_token_name":"spoofed","frame_bytes":1}'
+            ),
+        },
+    )
+
+    assert response.status_code == 202
+    metadata = tracker.calls[0]["metadata"]
+    assert metadata["feed_token_name"] == "global"
+    assert metadata["frame_bytes"] == len(_png_bytes())
 
 
 def test_frame_ingest_requires_hmac_signature_when_enabled(monkeypatch: Any) -> None:
@@ -318,6 +380,48 @@ def test_frame_ingest_rejects_too_fast_feed(monkeypatch: Any) -> None:
 
     assert first.status_code == 202
     assert second.status_code == 429
+    assert second.headers["Retry-After"] == "60"
+
+
+def test_frame_ingest_sequence_rollover_reuses_the_same_feed_capacity(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "60")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_PER_TOKEN", "1")
+    client = _client()
+    common = {
+        "source_id": "edge-background-tab-v3",
+        "metadata_json": (
+            '{"source_type":"browser_extension_capture",'
+            '"coordinate_space":"edge_tab_content_v1"}'
+        ),
+    }
+
+    first = client.post(
+        "/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            **common,
+            "sequence_id": "edge-tab-1-first",
+            "capture_epoch_ms": "1780000000000",
+            "frame_id": "1",
+        },
+    )
+    rollover = client.post(
+        "/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            **common,
+            "sequence_id": "edge-tab-1-second",
+            "capture_epoch_ms": "1780000001000",
+            "frame_id": "1",
+        },
+    )
+
+    assert first.status_code == 202
+    assert rollover.status_code == 202
 
 
 def test_frame_ingest_rejected_image_does_not_poison_feed_interval(monkeypatch: Any) -> None:

@@ -453,7 +453,11 @@ $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT = '0'
 $env:PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE = '0'
 $env:PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT = '0'
 $env:PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT = '0'
-$env:PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB = '1'
+$env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY = '1'
+$env:PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB = '0'
+$env:PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK = '0'
+$env:PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW = '0'
+$env:PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE = '0'
 $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK = '1'
 $env:PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE = '0'
 $env:PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = '20.0'
@@ -468,7 +472,7 @@ $env:PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS = '0'
 $env:PHOENIXGUARD_UVICORN_ACCESS_LOG = '0'
 $env:PHOENIXGUARD_PERSIST_CHILD_STDIO = '0'
 $env:PHOENIXGUARD_SHOOTER_POLL_SEC = ([string][double]$ShooterPollSec).Replace(',', '.')
-$env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '1'
+$env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '0'
 $runtimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
@@ -477,6 +481,10 @@ $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+. (Join-Path -Path $PSScriptRoot -ChildPath 'Initialize-PhoenixGuardEdgeTabCapture.ps1')
+$edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
+    -RuntimeDir $runtimeDir `
+    -MinIntervalSec 4.0
 if (-not $env:PHOENIXGUARD_DISK_GUARD_ENABLED) {
     $env:PHOENIXGUARD_DISK_GUARD_ENABLED = '1'
 }
@@ -771,7 +779,13 @@ $summaryPayload = [ordered]@{
     mt4_bridge_enabled = [bool]$launchMt4Bridge
     cpu_stream_fps = $env:PHOENIXGUARD_CPU_STREAM_FPS
     live_execution_enabled = $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED
+    background_capture_only = $env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY
+    foreground_capture_fallback_enabled = $env:PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK
+    locked_window_restore_enabled = $env:PHOENIXGUARD_TRACKER_RESTORE_LOCKED_WINDOW
     display_native_capture_fallback_enabled = $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK
+    edge_tab_capture_ingest_armed = [bool]$edgeTabCapture.Armed
+    edge_tab_capture_token_path = [string]$edgeTabCapture.TokenPath
+    edge_tab_capture_min_interval_sec = [double]$edgeTabCapture.MinIntervalSec
     disk_growth_guard_enabled = $env:PHOENIXGUARD_DISK_GUARD_ENABLED
     disk_growth_guard_max_bytes = $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES
     disk_growth_guard_low_water_bytes = $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES

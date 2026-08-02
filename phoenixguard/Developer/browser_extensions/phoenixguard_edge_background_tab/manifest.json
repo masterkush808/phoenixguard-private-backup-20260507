@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "PhoenixGuard Edge Background Tab",
+  "version": "0.1.0",
+  "description": "Streams one explicitly locked Pocket Option tab to PhoenixGuard without activating or raising Edge.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "offscreen",
+    "storage",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "https://pocketoption.com/*",
+    "https://*.pocketoption.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "PhoenixGuard: click once to lock the active Pocket Option tab"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

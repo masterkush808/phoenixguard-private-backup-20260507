@@ -29,6 +29,27 @@ DEFAULT_MAX_ACTIVE_FEEDS_TOTAL = 3
 DEFAULT_MAX_ACTIVE_FEEDS_PER_TOKEN = 1
 DEFAULT_SIGNATURE_MAX_SKEW_SEC = 300
 DEFAULT_SIGNATURE_NONCE_TTL_SEC = 600
+SUPPORTED_FRAME_SOURCE_TYPES = (
+    "windows_window_capture",
+    "edge_agent_screenshot",
+    "pc_screen_capture",
+    "mobile_manual_upload",
+    "mobile_pwa_screen_capture",
+    "android_native_capture",
+    "ios_replaykit_capture",
+    "browser_extension_capture",
+    "cloud_browser_worker",
+    "mt4_chart_screenshot",
+    "replay_upload",
+)
+_SERVER_METADATA_FIELDS = (
+    "client_host",
+    "filename",
+    "feed_token_name",
+    "feed_user_id",
+    "frame_sha256",
+    "frame_bytes",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,17 +465,28 @@ def _metadata_from_json(raw_json: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="metadata_json must be a JSON object.")
     parsed_mapping = cast(Mapping[str, Any], parsed)
-    return {str(key): value for key, value in parsed_mapping.items()}
+    metadata = {str(key): value for key, value in parsed_mapping.items()}
+    source_type = str(metadata.get("source_type", "") or "").strip()
+    if source_type and source_type not in SUPPORTED_FRAME_SOURCE_TYPES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="metadata_json source_type is not supported.")
+    coordinate_space = str(metadata.get("coordinate_space", "") or "").strip()
+    if source_type == "browser_extension_capture" and coordinate_space != "edge_tab_content_v1":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Browser extension frames must declare coordinate_space=edge_tab_content_v1.",
+        )
+    for field_name in _SERVER_METADATA_FIELDS:
+        metadata.pop(field_name, None)
+    return metadata
 
 
-def _feed_key(context: FeedAuthContext, session_id: str, source_id: str, sequence_id: str) -> str:
+def _feed_key(context: FeedAuthContext, session_id: str, source_id: str) -> str:
     token_scope = context.token_name if context.global_token else f"{context.token_name}:{context.user_id}"
     return "|".join(
         [
             token_scope,
             str(session_id or "").strip(),
             str(source_id or "").strip(),
-            str(sequence_id or "").strip(),
         ]
     )
 
@@ -483,17 +515,32 @@ def _record_or_reject_feed_runtime(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="capture_epoch_ms is required for live frame ingest.")
     if _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID", True) and int(frame_id or 0) <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frame_id is required for live frame ingest.")
-    key = _feed_key(context, session_id, source_id, sequence_id)
+    key = _feed_key(context, session_id, source_id)
     now_monotonic = time.monotonic()
     with _FEED_STATE_LOCK:
         active_states = _active_feed_states(now_monotonic)
         existing = _FEED_RUNTIME_STATE.get(key)
-        if existing is not None:
+        same_sequence = bool(
+            existing is not None
+            and existing.sequence_id == str(sequence_id or "").strip()
+        )
+        if existing is not None and same_sequence:
             elapsed = now_monotonic - float(existing.last_seen_monotonic)
             if elapsed < float(context.min_interval_sec):
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail=f"Frame feed interval is too fast. Wait at least {context.min_interval_sec} seconds between frames.",
+                    headers={"Retry-After": str(int(context.min_interval_sec))},
+                )
+            if int(capture_epoch_ms or 0) <= int(existing.last_capture_epoch_ms or 0):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Frame feed capture_epoch_ms did not advance within this sequence.",
+                )
+            if int(frame_id or 0) <= int(existing.last_frame_id or 0):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Frame feed frame_id did not advance within this sequence.",
                 )
         token_active = [
             state
@@ -615,19 +662,8 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             "min_interval_sec": readiness["min_interval_sec"],
             "max_active_feeds_total": readiness["max_active_feeds_total"],
             "max_active_feeds_per_token": readiness["max_active_feeds_per_token"],
-            "supported_sources": [
-                "windows_window_capture",
-                "edge_agent_screenshot",
-                "pc_screen_capture",
-                "mobile_manual_upload",
-                "mobile_pwa_screen_capture",
-                "android_native_capture",
-                "ios_replaykit_capture",
-                "browser_extension_capture",
-                "cloud_browser_worker",
-                "mt4_chart_screenshot",
-                "replay_upload",
-            ],
+            "supported_sources": list(SUPPORTED_FRAME_SOURCE_TYPES),
+            "browser_extension_coordinate_space": "edge_tab_content_v1",
         }
 
     def frame_ingest_readiness() -> dict[str, object]:
@@ -696,13 +732,13 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 commit=False,
             )
             metadata = _metadata_from_json(metadata_json)
-            metadata.setdefault("client_host", request.client.host if request.client else "")
-            metadata.setdefault("filename", frame.filename or "")
-            metadata.setdefault("feed_token_name", auth_context.token_name)
-            metadata.setdefault("feed_user_id", auth_context.user_id)
-            metadata.setdefault("frame_sha256", frame_sha256)
-            metadata.setdefault("frame_bytes", frame_bytes)
-            response = get_tracker().ingest_external_frame(
+            metadata["client_host"] = request.client.host if request.client else ""
+            metadata["filename"] = frame.filename or ""
+            metadata["feed_token_name"] = auth_context.token_name
+            metadata["feed_user_id"] = auth_context.user_id
+            metadata["frame_sha256"] = frame_sha256
+            metadata["frame_bytes"] = frame_bytes
+            tracker_response = get_tracker().ingest_external_frame(
                 session_id,
                 image,
                 source_id=source_id,
@@ -724,7 +760,22 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 commit=True,
             )
             _security_audit("frame_ingest_accepted", auth_context, audit_base)
-            return response
+            external_feed = tracker_response.get("external_frame_feed", {})
+            return {
+                "schema_version": "PG_FRAME_INGEST_ACCEPTED_V1",
+                "accepted": True,
+                "session_id": str(tracker_response.get("session_id", session_id) or session_id),
+                "status": str(tracker_response.get("status", "") or ""),
+                "capture_count": int(tracker_response.get("capture_count", 0) or 0),
+                "frame_index": int(tracker_response.get("frame_index", 0) or 0),
+                "state_version": int(tracker_response.get("state_version", 0) or 0),
+                "decision_version": int(tracker_response.get("decision_version", 0) or 0),
+                "external_frame_feed": (
+                    dict(cast(Mapping[str, Any], external_feed))
+                    if isinstance(external_feed, Mapping)
+                    else {}
+                ),
+            }
         except HTTPException as exc:
             _security_audit(
                 "frame_ingest_rejected",

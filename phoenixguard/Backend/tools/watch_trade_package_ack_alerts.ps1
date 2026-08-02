@@ -166,7 +166,18 @@ function Get-DateTimeFromUnixSeconds {
     }
 }
 
+function Test-BackgroundCaptureOnly {
+    $configured = [string]$env:PHOENIXGUARD_BACKGROUND_CAPTURE_ONLY
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        return $true
+    }
+    return $configured.Trim().ToLowerInvariant() -notin @("0", "false", "off", "no")
+}
+
 function Focus-BrokerWindowForCapture {
+    if (Test-BackgroundCaptureOnly) {
+        return
+    }
     $query = Get-TextValue $env:PHOENIXGUARD_ALERT_REFOCUS_WINDOW_QUERY "The Most Innovative Trading Platform"
     if (-not $query) {
         return
