@@ -2412,6 +2412,7 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
         "state_version",
         "decision_version",
         "decision_valid_until_epoch",
+        "capture_source_v3",
         "visual_observation_v3",
         "locked_window",
         "locked_title",
@@ -2501,6 +2502,7 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
         "state_version",
         "decision_version",
         "decision_valid_until_epoch",
+        "capture_source_v3",
         "visual_observation_v3",
         "locked_window",
         "locked_title",
@@ -2647,11 +2649,20 @@ def build_live_state_v3(
         _text(visual_observation.get("status")).upper() == "WAITING_FOR_NEW_FRAME"
         and not _bool(visual_observation.get("new_visual_evidence"), False)
     )
+    live_frame_unchanged = bool(
+        _text(visual_observation.get("status")).upper()
+        == "LIVE_FRAME_UNCHANGED"
+        and _bool(visual_observation.get("transport_fresh"), False)
+        and not _bool(visual_observation.get("new_visual_evidence"), False)
+    )
     # Identical pixels do not create new evidence, but they also do not make
     # geometry tied to the still-displayed frame spatially wrong. Pause the
-    # wall-clock TTL while waiting; the public projection marks these objects
-    # stale/diagnostic and execution remains independently revoked.
-    visibility_now_ms: int | None = None if waiting_for_new_frame else now_ms
+    # wall-clock TTL for both legacy waiting captures and a proven-live
+    # unchanged transport. The former remains diagnostic; the latter stays
+    # current geometry while entry permission remains independently revoked.
+    visibility_now_ms: int | None = (
+        None if waiting_for_new_frame or live_frame_unchanged else now_ms
+    )
     model_health_payload = dict(model_health or {})
     broker_source = _broker_source_summary(session)
     source_block_reason = _broker_source_block_reason(broker_source)

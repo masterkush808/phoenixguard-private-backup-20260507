@@ -2143,6 +2143,13 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
             "broker_source.status",
             "broker_source_lock.lock_id",
             "broker_source_lock.status",
+            "capture_source_v3.state",
+            "capture_source_v3.fresh",
+            "visual_observation_v3.status",
+            "visual_observation_v3.transport_state",
+            "visual_observation_v3.transport_fresh",
+            "visual_observation_v3.study_update_state",
+            "visual_observation_v3.new_visual_evidence",
         )
         context_signature = _json_field_cache_signature(
             context_path,
@@ -2194,6 +2201,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
 
 def _compact_live_state_response_cache_signature(session_id: str) -> str:
     display_path = _direct_window_tracker_display_state_path(session_id)
+    context_path = _direct_live_state_compact_session_path(session_id)
     display_signature = _json_field_cache_signature(
         display_path,
         (
@@ -2213,7 +2221,25 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
             "overlay_source_study_signature",
         ),
     )
-    return f"display={display_signature}"
+    # An advancing background transport can truthfully observe identical pixels.
+    # In that case the display/geometry signature is intentionally stable, while
+    # the operator-facing observation state changes from NEW_FRAME to
+    # LIVE_FRAME_UNCHANGED. Keep the expensive geometry cache stable across
+    # source frame IDs, but invalidate it when these bounded transport semantics
+    # change so a cached NEW_FRAME never masquerades as fresh market evidence.
+    transport_signature = _json_field_cache_signature(
+        context_path,
+        (
+            "capture_source_v3.state",
+            "capture_source_v3.fresh",
+            "visual_observation_v3.status",
+            "visual_observation_v3.transport_state",
+            "visual_observation_v3.transport_fresh",
+            "visual_observation_v3.study_update_state",
+            "visual_observation_v3.new_visual_evidence",
+        ),
+    )
+    return f"display={display_signature}|transport={transport_signature}"
 
 
 def _mapping_to_plain_dict(value: object) -> dict[str, object]:
@@ -2468,7 +2494,20 @@ def _direct_window_tracker_compact_session_snapshot(
     raw_payload = dict(cast(Mapping[str, Any], raw))
     if str(raw_payload.get("session_id", requested_session_id) or requested_session_id) != requested_session_id:
         return None
-    if not bool(raw_payload.get("tracking_enabled", False)):
+    capture_source = _as_mapping(raw_payload.get("capture_source_v3"))
+    visual_observation = _as_mapping(raw_payload.get("visual_observation_v3"))
+    external_observation_live = bool(
+        (
+            str(capture_source.get("state", "") or "").strip().upper() == "LIVE"
+            and capture_source.get("fresh") is True
+        )
+        or (
+            str(visual_observation.get("transport_state", "") or "").strip().upper()
+            == "LIVE"
+            and visual_observation.get("transport_fresh") is True
+        )
+    )
+    if not bool(raw_payload.get("tracking_enabled", False)) and not external_observation_live:
         return None
     payload = cast(dict[str, object], compact_session_payload(raw_payload))
     payload = _merge_direct_window_tracker_display_state(

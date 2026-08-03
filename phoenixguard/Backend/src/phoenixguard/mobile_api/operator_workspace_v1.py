@@ -819,7 +819,11 @@ def _freshness_contract(
         "",
     ).upper()
     waiting_for_new_frame = visual_status == "WAITING_FOR_NEW_FRAME"
-    if waiting_for_new_frame:
+    live_frame_unchanged = bool(
+        visual_status == "LIVE_FRAME_UNCHANGED"
+        and _explicit_bool(visual_observation.get("transport_fresh")) is True
+    )
+    if waiting_for_new_frame or live_frame_unchanged:
         created_at = _epoch(
             visual_observation.get("last_observed_epoch"),
             current_move.get("observed_at"),
@@ -847,6 +851,12 @@ def _freshness_contract(
     if waiting_for_new_frame:
         state = "WAITING"
         valid_until = None
+    elif live_frame_unchanged:
+        # A fresh transport heartbeat proves the selected source is still
+        # connected. Identical pixels do not renew the study or an entry
+        # window, so expose a third state instead of calling the feed stale.
+        state = "UNCHANGED"
+        valid_until = None
     elif valid_until is not None and valid_until <= now_epoch:
         state = "STALE"
     elif fresh_flag is True or fresh_status in {"PASS", "FRESH", "CURRENT"}:
@@ -864,7 +874,7 @@ def _freshness_contract(
             "Waiting for a new broker frame",
             limit=120,
         )
-        if waiting_for_new_frame
+        if waiting_for_new_frame or live_frame_unchanged
         else ""
     )
     return {
@@ -8472,6 +8482,20 @@ def refresh_operator_streaming_read_v3(
     cached_market = dict(_mapping(result.get("market")))
     tracking_summary = _mapping(runtime_payload.get("tracking_summary"))
     latest_signal = _mapping(runtime_payload.get("latest_signal"))
+    visual_observation = _mapping(runtime_payload.get("visual_observation_v3"))
+    capture_source = _mapping(runtime_payload.get("capture_source_v3"))
+    capture_source_present = bool(capture_source)
+    capture_source_live = bool(
+        _text(capture_source.get("state"), "", limit=32).upper() == "LIVE"
+        and _explicit_bool(capture_source.get("fresh")) is True
+    )
+    live_frame_unchanged = bool(
+        _text(visual_observation.get("status"), "", limit=48).upper()
+        == "LIVE_FRAME_UNCHANGED"
+        and _explicit_bool(visual_observation.get("transport_fresh")) is True
+        and _explicit_bool(visual_observation.get("new_visual_evidence")) is not True
+        and (capture_source_live or not capture_source_present)
+    )
     runtime_symbol = _safe_public_text(
         tracking_summary.get("detected_market")
         or latest_signal.get("symbol")
@@ -8571,6 +8595,54 @@ def refresh_operator_streaming_read_v3(
     heartbeat_epoch = _epoch(stream.get("heartbeat_epoch"))
     if stream.get("fresh") is True and heartbeat_epoch is not None:
         tracking["updated_at"] = heartbeat_epoch
+    if live_frame_unchanged:
+        freshness = _freshness_contract(
+            runtime_payload,
+            {},
+            _mapping(result.get("current_move")),
+            _mapping(result.get("pressure_event")),
+            now_epoch=current_epoch,
+        )
+        result["freshness"] = freshness
+        tracking.update(
+            {
+                "active": True,
+                "state": "UPDATING",
+                "updated_at": visual_observation.get("attempted_epoch")
+                or tracking.get("updated_at"),
+            }
+        )
+        permission = dict(_mapping(result.get("permission")))
+        unchanged_message = _safe_public_text(
+            visual_observation.get("message"),
+            "Chart stream live; the picture is unchanged. No new entry permission was created.",
+            limit=180,
+        )
+        permission.update(
+            {
+                "action": "WAIT",
+                "allowed": False,
+                "side": "NEUTRAL",
+                "message": unchanged_message,
+                "next_condition": "Wait for a changed chart frame and a fresh completed study.",
+                "window_open": False,
+                "valid_for_seconds": 0.0,
+                "window_label": "Closed",
+            }
+        )
+        result["permission"] = permission
+        overlay_rows = result.get("overlays")
+        if isinstance(overlay_rows, list):
+            current_rows: list[object] = []
+            for item in cast(list[object], overlay_rows):
+                if not isinstance(item, Mapping):
+                    current_rows.append(item)
+                    continue
+                row = dict(cast(Mapping[str, object], item))
+                if str(row.get("lifecycle") or "").lower() == "stale_diagnostic":
+                    row["lifecycle"] = "current"
+                current_rows.append(row)
+            result["overlays"] = current_rows
     result["tracking"] = tracking
     result["three_questions"] = _streaming_three_question_synthesis_v3(
         _mapping(result.get("three_questions")),
@@ -8643,6 +8715,19 @@ def build_operator_workspace_v1(
         now_epoch=current_epoch,
     )
     tracking_summary = _mapping(source.get("tracking_summary"))
+    capture_source = _mapping(source.get("capture_source_v3"))
+    visual_observation = _mapping(source.get("visual_observation_v3"))
+    external_capture_live = bool(
+        (
+            _text(capture_source.get("state"), "", limit=32).upper() == "LIVE"
+            and _explicit_bool(capture_source.get("fresh")) is True
+        )
+        or (
+            _text(visual_observation.get("transport_state"), "", limit=32).upper()
+            == "LIVE"
+            and _explicit_bool(visual_observation.get("transport_fresh")) is True
+        )
+    )
     stream = _cpu_stream_contract(
         source,
         tracking_summary,
@@ -8674,7 +8759,8 @@ def build_operator_workspace_v1(
         current_timeframe=str(market["timeframe"]),
     )
     tracking_flag = _explicit_bool(source.get("tracking_enabled"))
-    if tracking_flag is True:
+    observation_active = bool(tracking_flag is True or external_capture_live)
+    if observation_active:
         tracking_state = (
             "LIVE"
             if freshness["state"] == "FRESH"
@@ -8739,7 +8825,7 @@ def build_operator_workspace_v1(
         "market": market,
         "three_questions": three_questions,
         "tracking": {
-            "active": tracking_flag is True,
+            "active": observation_active,
             "state": tracking_state,
             "updated_at": observed_at,
             "history_count": len(history),

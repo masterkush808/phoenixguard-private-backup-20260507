@@ -106,6 +106,8 @@ def test_forecast_snapshot_keeps_three_complete_trajectory_scenarios() -> None:
     )
 
     lstm = snapshot["lstm_contribution"]
+    assert snapshot["transport_fresh"] is True
+    assert snapshot["new_market_evidence"] is True
     assert lstm["trajectory_modes"] == 3
     assert lstm["trajectory_decoder_status"] == "AVAILABLE"
     assert lstm["trajectory_mode"] == "BUY"
@@ -255,6 +257,7 @@ def test_stale_forecast_snapshot_retains_each_existing_study_frame() -> None:
     assert snapshot["observed_epoch"] == 700.0
     assert snapshot["status"] == "STALE_DIAGNOSTIC"
     assert snapshot["stale"] is True
+    assert snapshot["new_market_evidence"] is False
     two_candle = cast(dict[str, Any], snapshot["two_candle_study"])
     lstm = cast(dict[str, Any], snapshot["lstm_contribution"])
     scene = cast(dict[str, Any], snapshot["scene_forecast_contribution"])
@@ -263,6 +266,35 @@ def test_stale_forecast_snapshot_retains_each_existing_study_frame() -> None:
     assert (scene["frame_id"], scene["display_frame_id"]) == (301, 302)
     assert lstm["forecast_path"] == [{"step": 1, "expected_close_norm": 0.6}]
     assert all(row["diagnostic_only"] is True for row in (two_candle, lstm, scene))
+
+
+def test_live_unchanged_forecast_snapshot_is_not_stale_or_new_evidence() -> None:
+    snapshot = window_tracker_module._forecast_snapshot_v3(  # pyright: ignore[reportPrivateUsage]
+        {
+            "frame_index": 41,
+            "model_vote_frame_id": 41,
+            "model_capture_epoch": 700.0,
+            "visual_observation_v3": {
+                "status": "LIVE_FRAME_UNCHANGED",
+                "transport_fresh": True,
+                "new_visual_evidence": False,
+                "last_observed_epoch": 700.0,
+            },
+            "tracking_summary": {
+                "two_candle_study": {
+                    "frame_id": 41,
+                    "status": "READY",
+                    "primary_pressure": "BUY",
+                }
+            },
+        }
+    )
+
+    assert snapshot["status"] == "LIVE_FRAME_UNCHANGED"
+    assert snapshot["stale"] is False
+    assert snapshot["diagnostic_only"] is False
+    assert snapshot["transport_fresh"] is True
+    assert snapshot["new_market_evidence"] is False
 
 
 def test_run_memory_projection_resolves_adapter_artifacts(tmp_path: Path) -> None:

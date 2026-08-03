@@ -45,6 +45,12 @@ _WM_HOTKEY = 0x0312
 _WM_QUIT = 0x0012
 _HOTKEY_SELECT_ID = 0x8081
 _HOTKEY_KILL_ID = 0x8082
+_SW_SHOWNOACTIVATE = 4
+_HWND_BOTTOM = 1
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOACTIVATE = 0x0010
+_SWP_ASYNCWINDOWPOS = 0x4000
 
 
 class WgcRuntimeUnavailableError(RuntimeError):
@@ -279,6 +285,10 @@ class ActiveRegionSourceV3:
     last_health_status: str = "validating"
     last_identity_check_epoch: float = 0.0
     last_verified_minimized: bool = False
+    background_restore_count: int = 0
+    last_background_restore_epoch: float = 0.0
+    stream_restart_count: int = 0
+    last_stream_restart_epoch: float = 0.0
 
 
 _SELECTOR_PROCESS_LOCK = threading.Lock()
@@ -370,6 +380,85 @@ def foreground_window_identity_v3() -> WindowIdentityV3:
     if not identity.is_visible or identity.is_minimized or identity.width < 64 or identity.height < 64:
         raise ValueError("Bring a normal, non-minimized chart window into view before selecting it.")
     return identity
+
+
+def restore_window_for_background_capture_v3(
+    identity: WindowIdentityV3,
+    *,
+    user32: Any | None = None,
+    wait_timeout_sec: float = 0.75,
+) -> bool:
+    """Make an exact HWND renderable again without taking keyboard focus.
+
+    Windows Graphics Capture is independent of z-order, but Windows suspends a
+    window capture item while its target is minimized.  Restoring with
+    ``SW_SHOWNOACTIVATE`` keeps the current application in the foreground; the
+    target is then placed at the bottom of the z-order so it remains a
+    background surface instead of popping over the operator's work.
+
+    This intentionally has no desktop-pixel, title-search, or foreground
+    fallback.  The previously attested HWND remains the only capture target.
+    """
+
+    if int(identity.hwnd) <= 0:
+        return False
+    if user32 is None:
+        if os.name != "nt":
+            return False
+        user32 = ctypes.windll.user32
+    hwnd = int(identity.hwnd)
+    if not bool(user32.IsWindow(hwnd)):
+        return False
+    needs_restore = bool(user32.IsIconic(hwnd)) or not bool(user32.IsWindowVisible(hwnd))
+    if not needs_restore:
+        return True
+
+    foreground_before = int(user32.GetForegroundWindow() or 0)
+    # The return from ShowWindowAsync describes the old visibility state, not
+    # whether the asynchronous request was accepted, so verify final state.
+    user32.ShowWindowAsync(hwnd, _SW_SHOWNOACTIVATE)
+    user32.SetWindowPos(
+        hwnd,
+        _HWND_BOTTOM,
+        0,
+        0,
+        0,
+        0,
+        _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE | _SWP_ASYNCWINDOWPOS,
+    )
+    deadline = time.monotonic() + max(0.05, float(wait_timeout_sec))
+    foreground_preserved = True
+    while time.monotonic() < deadline:
+        foreground_preserved = bool(
+            foreground_preserved
+            and int(user32.GetForegroundWindow() or 0) == foreground_before
+        )
+        if not bool(user32.IsIconic(hwnd)) and bool(user32.IsWindowVisible(hwnd)):
+            break
+        time.sleep(0.025)
+    renderable = bool(
+        user32.IsWindow(hwnd)
+        and not bool(user32.IsIconic(hwnd))
+        and bool(user32.IsWindowVisible(hwnd))
+    )
+    if renderable:
+        # Repeat after the async show has completed so the recovered source
+        # cannot rise above the application the operator is actually using.
+        user32.SetWindowPos(
+            hwnd,
+            _HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE | _SWP_ASYNCWINDOWPOS,
+        )
+    foreground_after = int(user32.GetForegroundWindow() or 0)
+    return bool(
+        renderable
+        and foreground_preserved
+        and foreground_after == foreground_before
+    )
 
 
 def windows_capture_runtime_version_v3() -> str:
@@ -501,6 +590,14 @@ class WindowsGraphicsCaptureStreamV3:
             detail = self.last_error or "No WGC frame arrived before the selection timeout."
             raise WgcRuntimeUnavailableError(detail)
         return frame
+
+    def seed_frame_id(self, after_frame_id: int) -> None:
+        """Keep source-frame identity monotonic when a WGC session is rebuilt."""
+
+        with self._lock:
+            if self._started:
+                raise RuntimeError("A running WGC stream cannot be reseeded.")
+            self._frame_id = max(self._frame_id, int(after_frame_id))
 
     def stop(self) -> None:
         control: _CaptureControl | None
@@ -673,7 +770,8 @@ class PhoenixGuardRegionIngestClientV3:
         payload_value = response.json()
         if not isinstance(payload_value, Mapping):
             raise RuntimeError("Source status returned an invalid response.")
-        source_value = payload_value.get("source_control")
+        payload = cast(Mapping[str, Any], payload_value)
+        source_value = payload.get("source_control")
         if not isinstance(source_value, Mapping):
             raise RuntimeError("Source status did not include capture_source_v3.")
         return dict(cast(Mapping[str, Any], source_value))
@@ -764,6 +862,7 @@ class WindowsRegionCaptureManagerV3:
         foreground_reader: Callable[[], WindowIdentityV3] = foreground_window_identity_v3,
         selector: Callable[[WindowIdentityV3, CapturedWindowFrameV3], tuple[float, float, float, float]] = run_native_region_selector_v3,
         stream_factory: Callable[[WindowIdentityV3, int], WindowsGraphicsCaptureStreamV3] | None = None,
+        background_restorer: Callable[[WindowIdentityV3], bool] = restore_window_for_background_capture_v3,
         upload_interval_sec: float = 4.0,
         freshness_timeout_sec: float = 12.0,
         minimum_update_interval_ms: int = 1000,
@@ -774,6 +873,7 @@ class WindowsRegionCaptureManagerV3:
         self.identity_reader = identity_reader
         self.foreground_reader = foreground_reader
         self.selector = selector
+        self.background_restorer = background_restorer
         self.upload_interval_sec = max(1.0, float(upload_interval_sec))
         self.freshness_timeout_sec = max(self.upload_interval_sec * 2.0, float(freshness_timeout_sec))
         self.minimum_update_interval_ms = max(250, int(minimum_update_interval_ms))
@@ -1005,7 +1105,10 @@ class WindowsRegionCaptureManagerV3:
             raise ValueError("The saved region binding has no window identity.")
         window = cast(Mapping[str, Any], window_value)
         rect_values = window.get("window_rect")
-        if not isinstance(rect_values, Sequence) or isinstance(rect_values, (str, bytes)) or len(rect_values) < 4:
+        if not isinstance(rect_values, Sequence) or isinstance(rect_values, (str, bytes)):
+            raise ValueError("The saved window geometry is invalid.")
+        rect: list[Any] = list(cast(Sequence[Any], rect_values))
+        if len(rect) < 4:
             raise ValueError("The saved window geometry is invalid.")
         saved_identity = WindowIdentityV3(
             hwnd=int(window.get("hwnd", 0) or 0),
@@ -1014,7 +1117,7 @@ class WindowsRegionCaptureManagerV3:
             process_path=str(window.get("process_path", "") or ""),
             class_name=str(window.get("class_name", "") or ""),
             title=str(window.get("title", "") or ""),
-            rect=tuple(int(value) for value in rect_values[:4]),
+            rect=(int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])),
             is_visible=bool(window.get("is_visible", False)),
             is_minimized=bool(window.get("is_minimized", False)),
         )
@@ -1027,10 +1130,12 @@ class WindowsRegionCaptureManagerV3:
         if (
             not isinstance(reference_values, Sequence)
             or isinstance(reference_values, (str, bytes))
-            or len(reference_values) < 2
         ):
             raise ValueError("The saved reference frame size is invalid.")
-        reference_size = (int(reference_values[0]), int(reference_values[1]))
+        reference: list[Any] = list(cast(Sequence[Any], reference_values))
+        if len(reference) < 2:
+            raise ValueError("The saved reference frame size is invalid.")
+        reference_size = (int(reference[0]), int(reference[1]))
         if reference_size[0] <= 0 or reference_size[1] <= 0:
             raise ValueError("The saved reference frame size is invalid.")
         selection_id = str(row.get("selection_id", "") or "").strip()
@@ -1230,6 +1335,48 @@ class WindowsRegionCaptureManagerV3:
         with self._lock:
             return self._active
 
+    def _restart_exact_stream(
+        self,
+        active: ActiveRegionSourceV3,
+        current_identity: WindowIdentityV3,
+    ) -> bool:
+        """Rebuild only the WGC session while preserving the HWND/ROI lease."""
+
+        active.last_stream_restart_epoch = time.time()
+        candidate = self._new_stream(current_identity, active.local_generation)
+        seed_frame_id = getattr(candidate, "seed_frame_id", None)
+        if callable(seed_frame_id):
+            previous_frame = active.stream.slot.latest()
+            seed_frame_id(
+                max(
+                    active.last_uploaded_frame_id,
+                    int(previous_frame.frame_id) if previous_frame is not None else 0,
+                )
+            )
+        try:
+            candidate.start()
+            candidate.wait_first_frame(timeout=min(12.0, self.freshness_timeout_sec))
+            verified_identity = self.identity_reader(active.binding.selection.identity.hwnd)
+            if (
+                verified_identity.is_minimized
+                or not active.binding.selection.identity.same_target(verified_identity)
+            ):
+                return False
+            with self._lock:
+                if self._active is not active:
+                    return False
+                previous = active.stream
+                active.stream = candidate
+                active.stream_restart_count += 1
+                active.last_stream_restart_epoch = time.time()
+                active.last_health_status = "recovering_background"
+            candidate = None
+            previous.stop()
+            return True
+        finally:
+            if candidate is not None:
+                candidate.stop()
+
     def _uploader_loop(self) -> None:
         while not self._stop_evt.wait(0.10):
             with self._lock:
@@ -1239,6 +1386,7 @@ class WindowsRegionCaptureManagerV3:
                 continue
             try:
                 now_epoch = time.time()
+                current_identity = active.binding.selection.identity
                 if now_epoch - active.last_identity_check_epoch >= self.identity_check_interval_sec:
                     try:
                         current_identity = self.identity_reader(active.binding.selection.identity.hwnd)
@@ -1259,36 +1407,71 @@ class WindowsRegionCaptureManagerV3:
                         )
                         continue
                 if active.last_verified_minimized:
-                    if active.last_health_status != "paused":
-                        active.last_health_status = "paused"
-                        self._set_status(
-                            "paused",
-                            "The selected window is minimized; restore it yourself to resume background capture.",
-                            active=active,
-                            source_live=False,
-                        )
+                    if (
+                        now_epoch - active.last_background_restore_epoch
+                        < self.identity_check_interval_sec
+                    ):
+                        continue
+                    active.last_background_restore_epoch = now_epoch
+                    active.background_restore_count += 1
+                    restore_succeeded = bool(
+                        self.background_restorer(current_identity)
+                    )
+                    next_status = (
+                        "recovering_background" if restore_succeeded else "background_blocked"
+                    )
+                    active.last_health_status = next_status
+                    self._set_status(
+                        next_status,
+                        (
+                            "The selected window was restored behind your current application without taking focus; "
+                            "the exact WGC stream is resuming."
+                            if restore_succeeded
+                            else "The selected window is minimized and Windows has not yet accepted its no-focus background restore."
+                        ),
+                        active=active,
+                        source_live=False,
+                    )
                     continue
                 frame = active.stream.slot.latest()
                 if frame is None or int(frame.frame_id) <= int(active.last_uploaded_frame_id):
                     if active.stream.closed:
-                        self._hard_stop_active(
-                            active,
-                            "The selected window capture session closed.",
-                            release_server=True,
-                        )
+                        if (
+                            now_epoch - active.last_stream_restart_epoch
+                            >= self.freshness_timeout_sec
+                            and self._restart_exact_stream(active, current_identity)
+                        ):
+                            self._set_status(
+                                "recovering_background",
+                                "The exact HWND capture session was rebuilt without changing the selected chart or taking focus.",
+                                active=active,
+                                source_live=False,
+                            )
                     elif (
                         frame is not None
                         and now_epoch - float(frame.captured_epoch) > self.freshness_timeout_sec
                         and active.last_health_status != "stale"
                     ):
-                        active.last_health_status = "stale"
-                        self._set_status(
-                            "stale",
-                            "No fresh WGC frame is available; stale pixels were not uploaded.",
-                            active=active,
-                            last_frame=frame,
-                            source_live=False,
-                        )
+                        if (
+                            now_epoch - active.last_stream_restart_epoch
+                            >= self.freshness_timeout_sec
+                            and self._restart_exact_stream(active, current_identity)
+                        ):
+                            self._set_status(
+                                "recovering_background",
+                                "The covered-window WGC stream was refreshed without activating the selected application.",
+                                active=active,
+                                source_live=False,
+                            )
+                        else:
+                            active.last_health_status = "stale"
+                            self._set_status(
+                                "stale",
+                                "No fresh WGC frame is available; stale pixels were not uploaded.",
+                                active=active,
+                                last_frame=frame,
+                                source_live=False,
+                            )
                     continue
                 frame_age = now_epoch - float(frame.captured_epoch)
                 if frame_age > self.freshness_timeout_sec:
@@ -1410,6 +1593,10 @@ class WindowsRegionCaptureManagerV3:
             payload["last_uploaded_frame_id"] = int(active.last_uploaded_frame_id)
             payload["last_uploaded_epoch"] = float(active.last_uploaded_epoch)
             payload["geometry_generation"] = int(active.geometry_generation)
+            payload["background_capture_mode"] = "exact_hwnd_no_activation"
+            payload["background_restore_count"] = int(active.background_restore_count)
+            payload["stream_restart_count"] = int(active.stream_restart_count)
+            payload["target_minimized"] = bool(active.last_verified_minimized)
         if last_frame is not None:
             payload["last_wgc_frame_epoch"] = float(last_frame.captured_epoch)
             payload["last_wgc_frame_id"] = int(last_frame.frame_id)

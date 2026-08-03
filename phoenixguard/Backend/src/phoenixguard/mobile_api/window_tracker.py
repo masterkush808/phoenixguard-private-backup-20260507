@@ -271,10 +271,15 @@ _WINDOW_REACQUIRE_BLOCK_TOKENS = (
 _VISUAL_OBSERVATION_SCHEMA_VERSION = "PG_VISUAL_OBSERVATION_V3"
 _FX_MARKET_NORMALIZER_VERSION = "PG_FX_MARKET_NORMALIZER_V3_OTC_OCR_ENSEMBLE"
 _VISUAL_OBSERVATION_WAITING = "WAITING_FOR_NEW_FRAME"
+_VISUAL_OBSERVATION_LIVE_UNCHANGED = "LIVE_FRAME_UNCHANGED"
 _VISUAL_OBSERVATION_NEW = "NEW_FRAME"
 _VISUAL_OBSERVATION_RECOVERED = "RECOVERED_NEW_FRAME"
 _VISUAL_OBSERVATION_WAITING_MESSAGE = (
     "Waiting for a new broker frame. Identical chart pixels are not treated as new market evidence."
+)
+_VISUAL_OBSERVATION_LIVE_UNCHANGED_MESSAGE = (
+    "Chart stream live; the picture is unchanged. The last studied frame remains visible, "
+    "but no new market evidence or entry permission was created."
 )
 _MEMORY_PRECISION_MIN_SIMILARITY = 0.72
 _MEMORY_PRECISION_MIN_SCORE = 0.70
@@ -3180,7 +3185,20 @@ def _forecast_snapshot_v3(
         payload.get("frame_index"),
     )
     visual_observation = _mapping_to_dict(payload.get("visual_observation_v3"))
-    inferred_stale = str(visual_observation.get("status") or "").strip().upper() == _VISUAL_OBSERVATION_WAITING
+    visual_status = str(visual_observation.get("status") or "").strip().upper()
+    live_unchanged = visual_status == _VISUAL_OBSERVATION_LIVE_UNCHANGED
+    transport_fresh = bool(
+        visual_observation.get(
+            "transport_fresh",
+            visual_status
+            in {
+                _VISUAL_OBSERVATION_NEW,
+                _VISUAL_OBSERVATION_RECOVERED,
+                _VISUAL_OBSERVATION_LIVE_UNCHANGED,
+            },
+        )
+    )
+    inferred_stale = visual_status == _VISUAL_OBSERVATION_WAITING
     is_stale = inferred_stale if stale_diagnostic is None else bool(stale_diagnostic)
     if is_stale:
         observed_epoch = _float_or(
@@ -3252,7 +3270,13 @@ def _forecast_snapshot_v3(
     snapshot_status = (
         "MARKET_IDENTITY_PENDING"
         if identity_pending
-        else ("STALE_DIAGNOSTIC" if is_stale else "CURRENT")
+        else (
+            "STALE_DIAGNOSTIC"
+            if is_stale
+            else "LIVE_FRAME_UNCHANGED"
+            if live_unchanged
+            else "CURRENT"
+        )
     )
     return {
         "schema_version": "PG_FORECAST_SNAPSHOT_V3",
@@ -3271,6 +3295,11 @@ def _forecast_snapshot_v3(
         ),
         "stale": bool(is_stale or identity_pending),
         "diagnostic_only": bool(is_stale or identity_pending),
+        "transport_fresh": transport_fresh,
+        "new_market_evidence": bool(
+            visual_status
+            in {_VISUAL_OBSERVATION_NEW, _VISUAL_OBSERVATION_RECOVERED}
+        ),
         "status": snapshot_status,
         "two_candle_study": compact_two_candle,
         "scene_forecast_contribution": compact_scene,
@@ -29849,7 +29878,7 @@ class ContinuousWindowTrackerService:
 
         conditional_claim = expected_source_control is not None
         expected_source = (
-            dict(cast(Mapping[str, Any], expected_source_control))
+            dict(expected_source_control)
             if isinstance(expected_source_control, Mapping)
             else {}
         )
@@ -36054,7 +36083,40 @@ class ContinuousWindowTrackerService:
     ) -> None:
         """Persist a non-evidence heartbeat without advancing model freshness."""
 
-        message = _VISUAL_OBSERVATION_WAITING_MESSAGE
+        observation_status = str(
+            observation.get("status", _VISUAL_OBSERVATION_WAITING)
+            or _VISUAL_OBSERVATION_WAITING
+        ).strip().upper()
+        live_transport_unchanged = bool(
+            observation_status == _VISUAL_OBSERVATION_LIVE_UNCHANGED
+            and observation.get("transport_fresh") is True
+        )
+        message = (
+            _VISUAL_OBSERVATION_LIVE_UNCHANGED_MESSAGE
+            if live_transport_unchanged
+            else _VISUAL_OBSERVATION_WAITING_MESSAGE
+        )
+        signal_status = (
+            "live_frame_unchanged"
+            if live_transport_unchanged
+            else "waiting_for_new_frame"
+        )
+        observation_lane = (
+            "VISUAL_FRAME_UNCHANGED"
+            if live_transport_unchanged
+            else "VISUAL_FRAME_WAIT"
+        )
+        public_observation = dict(observation)
+        public_observation.update(
+            {
+                "status": observation_status,
+                "message": message,
+                "transport_state": "LIVE" if live_transport_unchanged else "WAITING",
+                "transport_fresh": live_transport_unchanged,
+                "study_update_state": "UNCHANGED" if live_transport_unchanged else "WAITING",
+                "new_visual_evidence": False,
+            }
+        )
         with self._session_commit_lock_for(session_id):
             payload = self._load_session_with_display_state(session_id) or self._require_session(session_id)
             tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
@@ -36088,15 +36150,17 @@ class ContinuousWindowTrackerService:
             )
             latest_signal.update(
                 {
-                    "status": "waiting_for_new_frame",
+                    "status": signal_status,
                     "summary": message,
-                    "visual_observation_status": _VISUAL_OBSERVATION_WAITING,
+                    "visual_observation_status": observation_status,
                     "visual_observation_message": message,
                     "new_visual_evidence": False,
+                    "transport_fresh": live_transport_unchanged,
+                    "study_update_state": "UNCHANGED" if live_transport_unchanged else "WAITING",
                     "actionable": False,
                     "execution_action": "HOLD",
                     "execution_permission": "WAIT",
-                    "execution_lane": "VISUAL_FRAME_WAIT",
+                    "execution_lane": observation_lane,
                     "execution_block_reason": message,
                     "no_trade_reason": message,
                 }
@@ -36104,10 +36168,12 @@ class ContinuousWindowTrackerService:
             latest_signal.pop("trade_intent", None)
             tracking_summary.update(
                 {
-                    "source_capture_status": _VISUAL_OBSERVATION_WAITING,
-                    "visual_observation_status": _VISUAL_OBSERVATION_WAITING,
+                    "source_capture_status": "LIVE" if live_transport_unchanged else _VISUAL_OBSERVATION_WAITING,
+                    "visual_observation_status": observation_status,
                     "visual_observation_message": message,
                     "new_visual_evidence": False,
+                    "transport_fresh": live_transport_unchanged,
+                    "study_update_state": "UNCHANGED" if live_transport_unchanged else "WAITING",
                 }
             )
             model_council_result = _mapping_to_dict(payload.get("model_council_result", {}))
@@ -36122,16 +36188,16 @@ class ContinuousWindowTrackerService:
             )
             broker_execution_state.update(
                 {
-                    "status": "waiting_for_new_frame",
+                    "status": signal_status,
                     "message": message,
                     "side": "HOLD",
-                    "lane": "VISUAL_FRAME_WAIT",
+                    "lane": observation_lane,
                     "actionable": False,
                 }
             )
             payload.update(
                 {
-                    "visual_observation_v3": dict(observation),
+                    "visual_observation_v3": public_observation,
                     "tracking_summary": tracking_summary,
                     "latest_signal": latest_signal,
                     "model_council_result": model_council_result,
@@ -36147,7 +36213,7 @@ class ContinuousWindowTrackerService:
         self._write_session_event_log(
             session_id,
             "capture_duplicate_visual_frame",
-            status="waiting_for_new_frame",
+            status=signal_status,
             message=message,
             frame_index=int(payload.get("frame_index", 0) or 0),
             capture_count=int(payload.get("capture_count", 0) or 0),
@@ -36512,7 +36578,10 @@ class ContinuousWindowTrackerService:
             and cpu_stream_runtime_present
         )
         if duplicate_study_surface:
-            prior_waiting = str(previous_observation.get("status", "") or "").upper() == _VISUAL_OBSERVATION_WAITING
+            prior_waiting = str(previous_observation.get("status", "") or "").upper() in {
+                _VISUAL_OBSERVATION_WAITING,
+                _VISUAL_OBSERVATION_LIVE_UNCHANGED,
+            }
             duplicate_study_count = (
                 int(previous_observation.get("duplicate_study_count", 0) or 0) + 1
                 if prior_waiting
@@ -36611,13 +36680,25 @@ class ContinuousWindowTrackerService:
                 # contract while the CPU stream is degraded or recovering.
                 return
             attempted_at = _now_iso()
+            observation_status = (
+                _VISUAL_OBSERVATION_LIVE_UNCHANGED
+                if using_external_frame
+                else _VISUAL_OBSERVATION_WAITING
+            )
             self._publish_duplicate_visual_wait(
                 str(payload["session_id"]),
                 observation={
                     "schema_version": _VISUAL_OBSERVATION_SCHEMA_VERSION,
-                    "status": _VISUAL_OBSERVATION_WAITING,
-                    "message": _VISUAL_OBSERVATION_WAITING_MESSAGE,
+                    "status": observation_status,
+                    "message": (
+                        _VISUAL_OBSERVATION_LIVE_UNCHANGED_MESSAGE
+                        if using_external_frame
+                        else _VISUAL_OBSERVATION_WAITING_MESSAGE
+                    ),
                     "new_visual_evidence": False,
+                    "transport_state": "LIVE" if using_external_frame else "WAITING",
+                    "transport_fresh": bool(using_external_frame),
+                    "study_update_state": "UNCHANGED" if using_external_frame else "WAITING",
                     "attempted_at": attempted_at,
                     "attempted_epoch": _now_epoch(),
                     "last_observed_at": str(previous_observation.get("last_observed_at", "") or fresh_for_index.get("last_capture_at", "") or ""),
@@ -36644,6 +36725,9 @@ class ContinuousWindowTrackerService:
                 else "A new broker frame was accepted as market evidence."
             ),
             "new_visual_evidence": True,
+            "transport_state": "LIVE",
+            "transport_fresh": True,
+            "study_update_state": "ADVANCED",
             "attempted_at": capture_started_iso,
             "attempted_epoch": capture_started_epoch,
             "last_observed_at": capture_started_iso,
@@ -39001,12 +39085,25 @@ class ContinuousWindowTrackerService:
                 str(visual_observation.get("status", "") or "").upper()
                 == _VISUAL_OBSERVATION_WAITING
             )
+            live_frame_unchanged = bool(
+                str(visual_observation.get("status", "") or "").upper()
+                == _VISUAL_OBSERVATION_LIVE_UNCHANGED
+                and visual_observation.get("transport_fresh") is True
+                and visual_observation.get("new_visual_evidence") is not True
+            )
             if waiting_for_new_frame:
                 freshness_score = 0.0
                 valid_until_epoch = 0.0
                 latest_signal["freshness_score"] = 0.0
                 latest_signal["stale"] = True
                 public["freshness_score"] = 0.0
+            elif live_frame_unchanged:
+                # Transport liveness must not mint a new study deadline. Keep
+                # the last model evidence age intact while explicitly closing
+                # decision validity until a genuinely changed frame is studied.
+                valid_until_epoch = 0.0
+                latest_signal["transport_fresh"] = True
+                latest_signal["study_update_state"] = "UNCHANGED"
             latest_signal["valid_until_epoch"] = valid_until_epoch
             public["decision_valid_until_epoch"] = valid_until_epoch
             trade_intent = (

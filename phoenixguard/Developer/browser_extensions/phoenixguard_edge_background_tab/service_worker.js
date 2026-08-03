@@ -1,6 +1,7 @@
 import {
   DEFAULT_CONFIG,
   SELECTION_TIMEOUT_MS,
+  captureDiscardPolicy,
   initialStatus,
   makeSequenceId,
   normalizeConfig,
@@ -94,6 +95,40 @@ function sendToOffscreen(message) {
   return chrome.runtime.sendMessage({target: "offscreen", ...message});
 }
 
+async function protectTabFromDiscard(tabId, status = null) {
+  const id = Number(tabId || 0);
+  if (id <= 0) return {active: false, originalAutoDiscardable: true};
+  if (status?.discardProtectionActive && Number(status.lockedTabId || 0) === id) {
+    return {
+      active: true,
+      originalAutoDiscardable: status.lockedTabOriginalAutoDiscardable !== false
+    };
+  }
+  const tab = await chrome.tabs.get(id);
+  const policy = captureDiscardPolicy(tab.autoDiscardable);
+  if (policy.protectionUpdate) {
+    await chrome.tabs.update(id, policy.protectionUpdate);
+  }
+  return {active: true, originalAutoDiscardable: policy.originalAutoDiscardable};
+}
+
+async function restoreTabDiscardPolicy(tabId, originalAutoDiscardable) {
+  const id = Number(tabId || 0);
+  const policy = captureDiscardPolicy(originalAutoDiscardable);
+  if (id <= 0 || !policy.restorationUpdate) return;
+  try {
+    await chrome.tabs.update(id, policy.restorationUpdate);
+  } catch {
+    // Closing or replacing a tab removes its discard policy with the tab.
+  }
+}
+
+async function releaseCandidateDiscardProtection(status) {
+  const candidateTabId = Number(status?.candidateTabId || 0);
+  if (candidateTabId <= 0 || candidateTabId === Number(status?.lockedTabId || 0)) return;
+  await restoreTabDiscardPolicy(candidateTabId, status?.candidateTabOriginalAutoDiscardable);
+}
+
 async function dismissSelector(status) {
   const tabId = Number(status?.candidateTabId || 0);
   if (tabId <= 0) return;
@@ -123,6 +158,10 @@ async function stopCaptureOnce(reason) {
     console.debug("Offscreen stop acknowledgement unavailable.", error);
   }
   await closeOffscreenDocument();
+  await Promise.all([
+    restoreTabDiscardPolicy(previous.lockedTabId, previous.lockedTabOriginalAutoDiscardable),
+    releaseCandidateDiscardProtection(previous)
+  ]);
   return publishStatus({
     phase: "stopped",
     message: reason,
@@ -139,6 +178,9 @@ async function stopCaptureOnce(reason) {
     region: null,
     cropPixels: null,
     sourceRenderFresh: false,
+    discardProtectionActive: false,
+    lockedTabOriginalAutoDiscardable: true,
+    candidateTabOriginalAutoDiscardable: true,
     lastError: "",
     acceptedFrames: previous.acceptedFrames || 0
   });
@@ -170,7 +212,13 @@ async function cancelCandidate(reason, statusOverride = null) {
   } catch (error) {
     console.debug("Candidate cancellation acknowledgement unavailable.", error);
   }
-  if (response?.status) return publishStatus(response.status);
+  await releaseCandidateDiscardProtection(status);
+  if (response?.status) {
+    return publishStatus({
+      ...response.status,
+      candidateTabOriginalAutoDiscardable: true
+    });
+  }
   return publishStatus({
     phase: status.lockedTabId > 0 ? status.phase === "selecting" ? "live" : status.phase : "stopped",
     message: status.lockedTabId > 0 ? "Existing chart capture preserved; region selection was cancelled." : reason,
@@ -178,7 +226,8 @@ async function cancelCandidate(reason, statusOverride = null) {
     candidateTabId: 0,
     candidateTitle: "",
     candidateUrl: "",
-    candidateOrigin: ""
+    candidateOrigin: "",
+    candidateTabOriginalAutoDiscardable: true
   });
 }
 
@@ -217,8 +266,11 @@ async function beginRegionSelectionOnce(tab) {
     url: sanitizeSourceUrl(tab.url).slice(0, 2048),
     origin: sourceOrigin(tab.url)
   };
+  let discardProtection = null;
+  let sameTabReselection = false;
 
   try {
+    discardProtection = await protectTabFromDiscard(tab.id, previous);
     const offscreenWasPresent = await offscreenDocumentExists();
     await ensureOffscreenDocument();
     let liveOffscreenStatus = null;
@@ -230,7 +282,7 @@ async function beginRegionSelectionOnce(tab) {
       }
     }
     await injectSelector(tab.id);
-    const sameTabReselection = Number(liveOffscreenStatus?.lockedTabId || 0) === tab.id &&
+    sameTabReselection = Number(liveOffscreenStatus?.lockedTabId || 0) === tab.id &&
       String(liveOffscreenStatus?.lockedOrigin || "") === candidate.origin;
     let streamId = "";
     if (!sameTabReselection) {
@@ -257,6 +309,7 @@ async function beginRegionSelectionOnce(tab) {
       candidateTitle: candidate.title,
       candidateUrl: candidate.url,
       candidateOrigin: candidate.origin,
+      candidateTabOriginalAutoDiscardable: discardProtection.originalAutoDiscardable,
       lastError: ""
     });
     const opened = await chrome.tabs.sendMessage(tab.id, {type: "OPEN_ROI_SELECTOR_V1", selectionId});
@@ -276,6 +329,9 @@ async function beginRegionSelectionOnce(tab) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const recovered = await cancelCandidate(`Chart-region selection failed: ${message}`).catch(() => null);
+    if (discardProtection?.active && !sameTabReselection && Number(previous.lockedTabId || 0) !== candidate.id) {
+      await restoreTabDiscardPolicy(candidate.id, discardProtection.originalAutoDiscardable);
+    }
     if (Number(recovered?.lockedTabId || 0) > 0) {
       await publishStatus({lastError: `New selection failed while the existing chart remained locked: ${message}`});
     } else {
@@ -326,7 +382,17 @@ async function commitSelection(message, sender) {
       region: normalized.region
     });
     if (!response?.ok) throw new Error(response?.error || "The selected chart region was not committed.");
-    if (response.status) await publishStatus(response.status);
+    if (Number(status.lockedTabId || 0) > 0 && Number(status.lockedTabId) !== Number(status.candidateTabId)) {
+      await restoreTabDiscardPolicy(status.lockedTabId, status.lockedTabOriginalAutoDiscardable);
+    }
+    if (response.status) {
+      await publishStatus({
+        ...response.status,
+        discardProtectionActive: true,
+        lockedTabOriginalAutoDiscardable: status.candidateTabOriginalAutoDiscardable !== false,
+        candidateTabOriginalAutoDiscardable: true
+      });
+    }
     return {ok: true};
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
@@ -339,13 +405,20 @@ async function syncFromOffscreen() {
   if (!(await offscreenDocumentExists())) {
     const status = await loadStatus();
     if (status.lockedTabId > 0 || status.candidateTabId > 0) {
+      await Promise.all([
+        restoreTabDiscardPolicy(status.lockedTabId, status.lockedTabOriginalAutoDiscardable),
+        releaseCandidateDiscardProtection(status)
+      ]);
       await publishStatus({
         phase: "stopped",
         message: "The previous chart stream ended while Edge was not running.",
         lockedTabId: 0,
         candidateTabId: 0,
         selectionId: "",
-        sourceRenderFresh: false
+        sourceRenderFresh: false,
+        discardProtectionActive: false,
+        lockedTabOriginalAutoDiscardable: true,
+        candidateTabOriginalAutoDiscardable: true
       });
     } else {
       await setActionStatus(status);
@@ -392,13 +465,30 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!changeInfo.url && changeInfo.status !== "loading") return;
+  if (
+    !changeInfo.url &&
+    changeInfo.status !== "loading" &&
+    changeInfo.discarded !== true &&
+    changeInfo.frozen !== true
+  ) return;
   void (async () => {
     const status = await loadStatus();
     if (status.candidateTabId === tabId) {
       await cancelCandidate("The chart tab navigated or reloaded before selection completed.", status);
     }
     if (status.lockedTabId !== tabId) return;
+    if (changeInfo.discarded === true || changeInfo.frozen === true) {
+      await publishStatus({
+        phase: "source_frozen",
+        message: changeInfo.discarded === true
+          ? "Edge discarded the locked chart tab despite capture protection; select it again after it reloads."
+          : "Edge froze the locked chart tab; capture remains attached and will resume without raising the browser.",
+        sourceRenderFresh: false,
+        lastError: changeInfo.discarded === true
+          ? "The locked chart tab was discarded by Edge."
+          : "The locked chart tab is frozen by Edge."
+      });
+    }
     const originChanged = changeInfo.url && sourceOrigin(tab.url) !== status.lockedOrigin;
     if (originChanged || changeInfo.status === "loading") {
       await stopCapture("The locked chart tab navigated or reloaded; select its chart region again.");

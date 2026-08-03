@@ -8,6 +8,7 @@ import {
   frameIngestEndpoint,
   initialStatus,
   mapNormalizedRegionToPixels,
+  mediaPlaybackAdvanced,
   meanAbsoluteDifference,
   normalizeConfig,
   normalizeRegionSelection,
@@ -57,13 +58,42 @@ function errorText(value) {
 }
 
 function currentVideoAge(session = activeSession) {
+  refreshMediaPlayback(session);
   if (!session?.lastVideoFrameAtMs) return -1;
   return Math.max(0, Date.now() - session.lastVideoFrameAtMs);
 }
 
+function refreshMediaPlayback(session, nowMs = Date.now()) {
+  if (!session || session.stopped || !session.video) return false;
+  let decodedFrames = -1;
+  try {
+    decodedFrames = Number(session.video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1);
+  } catch {
+    decodedFrames = -1;
+  }
+  const progress = mediaPlaybackAdvanced(
+    {mediaTime: session.observedMediaTime, decodedFrames: session.observedDecodedFrames},
+    {mediaTime: Number(session.video.currentTime), decodedFrames}
+  );
+  session.observedMediaTime = progress.mediaTime;
+  session.observedDecodedFrames = progress.decodedFrames;
+  if (progress.advanced) {
+    session.mediaTime = Math.max(0, progress.mediaTime);
+    session.presentedFrames = Math.max(session.presentedFrames, progress.decodedFrames, 0);
+    session.lastVideoFrameAtMs = nowMs;
+  }
+  return progress.advanced;
+}
+
 function activeFresh() {
   const age = currentVideoAge();
-  return Boolean(activeSession && age >= 0 && age <= SOURCE_FREEZE_TIMEOUT_MS);
+  const track = activeSession?.stream?.getVideoTracks?.()[0] || null;
+  return Boolean(
+    activeSession &&
+    track?.readyState === "live" &&
+    track.muted !== true &&
+    age >= 0 && age <= SOURCE_FREEZE_TIMEOUT_MS
+  );
 }
 
 function statusIdentity(update = {}) {
@@ -160,6 +190,8 @@ function watchPresentedFrames(session) {
     if (session.stopped) return;
     session.presentedFrames = Number(metadata?.presentedFrames || session.presentedFrames + 1);
     session.mediaTime = Number(metadata?.mediaTime || 0);
+    session.observedMediaTime = Math.max(session.observedMediaTime, session.mediaTime);
+    session.observedDecodedFrames = Math.max(session.observedDecodedFrames, session.presentedFrames);
     session.lastVideoFrameAtMs = Date.now();
     if (session === activeSession && status.phase === "source_frozen") {
       void notifyStatus({
@@ -230,7 +262,9 @@ async function createCapturedSession(message) {
     stopped: false,
     presentedFrames: 0,
     mediaTime: 0,
-    lastVideoFrameAtMs: Date.now(),
+    observedMediaTime: -1,
+    observedDecodedFrames: -1,
+    lastVideoFrameAtMs: 0,
     frameCallbackId: 0,
     reusesActive: false,
     sourceGeneration: 0,
@@ -250,6 +284,23 @@ async function createCapturedSession(message) {
     const [track] = session.stream.getVideoTracks();
     if (!track) throw new Error("Edge returned a tab stream without a video track.");
     track.contentHint = "detail";
+    track.addEventListener("mute", () => {
+      if (session.stopped || session !== activeSession) return;
+      void notifyStatus({
+        phase: "source_frozen",
+        message: "Edge temporarily muted the locked tab stream; PhoenixGuard is holding the source without focusing the browser.",
+        lastError: "The captured tab video track is muted."
+      });
+    });
+    track.addEventListener("unmute", () => {
+      if (session.stopped || session !== activeSession) return;
+      session.lastVideoFrameAtMs = Date.now();
+      void notifyStatus({
+        phase: serverArmed && status.acceptedFrames > 0 ? "live" : "starting",
+        message: "The selected chart tab resumed background rendering.",
+        lastError: ""
+      });
+    });
     track.addEventListener("ended", () => {
       if (session.stopped) return;
       if (session === activeSession) {
@@ -261,7 +312,7 @@ async function createCapturedSession(message) {
     video.srcObject = session.stream;
     await video.play();
     await waitForVideo(session);
-    session.lastVideoFrameAtMs = Date.now();
+    refreshMediaPlayback(session);
     watchPresentedFrames(session);
     return session;
   } catch (error) {

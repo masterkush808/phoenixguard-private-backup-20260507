@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 -->
 
-This unpacked Microsoft Edge MV3 extension streams one explicitly selected rectangle from any normal HTTP(S) chart tab to the local PhoenixGuard V3 frame-ingest service. Once the badge reads `LIVE`, the chart tab may be inactive or covered while its individual tab stream continues. PhoenixGuard never raises Edge, activates the selected tab, or clicks the chart.
+This unpacked Microsoft Edge MV3 extension streams one explicitly selected rectangle from any normal HTTP(S) chart tab to the local PhoenixGuard V3 frame-ingest service. Once the badge reads `LIVE`, the chart tab may be inactive, covered, or inside a minimized Edge window while its individual tab stream continues. PhoenixGuard never raises Edge, activates the selected tab, or clicks the chart.
 
 The extension is study-only. It does not click BUY or SELL and grants no execution permission.
 
@@ -19,6 +19,8 @@ Edge reserves `Ctrl+Shift+B` for its Favorites bar, so PhoenixGuard does not att
 
 The extension uses Edge `tabCapture`, not desktop screenshots. It consumes the explicit capture grant inside an offscreen extension document and crops every frame to the selected normalized ROI. This allows the chosen web tab to remain covered or inactive.
 
+While a chart capture is locked, the extension marks only that tab as non-discardable so Edge Memory Saver cannot unload it. The tab's original discard setting is restored when capture stops or switches. Offscreen freshness observes both video-frame callbacks and decoded media progress, so a hidden offscreen document cannot falsely report `FRZ` merely because Edge throttled one callback mechanism.
+
 An arbitrary desktop rectangle is different: once another window covers it, a desktop screenshot sees the covering application. Native applications require a separate per-window Windows Graphics Capture source.
 
 ## Security and truth boundaries
@@ -32,7 +34,7 @@ An arbitrary desktop rectangle is different: once another window covers it, a de
 - Every confirmed ROI obtains a server source generation and private lease. Superseded or killed leases stop locally on HTTP `409`/`410`; they cannot silently keep publishing.
 - No provisional frame is uploaded while the selection overlay is visible.
 - Upload heartbeats do not prove the source is rendering. The badge reports `FRZ` and uploads pause when Edge stops presenting fresh video frames.
-- No tab/window activation, restore, topmost, focus, execution, or broker-click API is present.
+- No tab/window activation, restore, topmost, focus, execution, or broker-click API is present. The only tab mutation is the temporary `autoDiscardable: false` capture guard described above.
 
 ## Read-only readiness check
 
@@ -68,7 +70,7 @@ Do not install or reload while readiness reports `FAIL`.
 3. Drag over the exact chart viewport. Include the candles and price geometry needed by PhoenixGuard; the minimum is 320 × 180 CSS pixels.
 4. Confirm the rectangle. The selector disappears before the first candidate frame is eligible for ingest.
 5. Wait for the badge to progress from `ROI` to `LIVE`.
-6. Switch tabs or applications and continue working normally.
+6. Switch tabs or applications, cover Edge, or minimize its window and continue working normally.
 7. To change the chart or site, activate the new chart and press `Ctrl+Shift+8`. The previous source remains authoritative until the candidate is confirmed. Cancelling preserves it.
 8. Press `Ctrl+Shift+9` whenever capture must stop immediately.
 
@@ -96,10 +98,11 @@ Use paper/demo study only during validation.
 1. Run Node tests and the readiness check.
 2. Select a TradingView region and wait for `LIVE`.
 3. Cover Edge with another application for at least 90 seconds. Confirm frame IDs and accepted timestamps advance without any Edge foreground event.
-4. Make another Edge tab active for at least 90 seconds. Confirm the locked tab ID, selection ID, source generation, and sequence remain unchanged.
-5. Start a switch to another chart and cancel it. Confirm the original source resumes with no candidate pixels accepted.
-6. Confirm a new chart. Confirm a new sequence, selection, source generation, and lease become authoritative.
-7. Reload the selected tab. Confirm capture stops and requires a new selection.
-8. Invoke `Ctrl+Shift+9`. Confirm the badge reads `OFF`, server source control reports killed, and no later frame is accepted.
+4. Minimize Edge for at least 90 seconds. Confirm decoded media progress, frame IDs, and accepted timestamps advance and the tab remains non-discardable.
+5. Make another Edge tab active for at least 90 seconds. Confirm the locked tab ID, selection ID, source generation, and sequence remain unchanged.
+6. Start a switch to another chart and cancel it. Confirm the original source resumes with no candidate pixels accepted.
+7. Confirm a new chart. Confirm a new sequence, selection, source generation, and lease become authoritative.
+8. Reload the selected tab. Confirm capture stops and requires a new selection.
+9. Invoke `Ctrl+Shift+9`. Confirm the badge reads `OFF`, server source control reports killed, the original tab discard setting is restored, and no later frame is accepted.
 
 Pass requires zero focus-changing events, no selector pixels in ingest, monotonic frames under one source lease, honest `FRZ` reporting, and hard stop after kill or lease loss.

@@ -254,6 +254,35 @@ export function meanAbsoluteDifference(previous, current) {
   return total / (current.length * 255);
 }
 
+export function mediaPlaybackAdvanced(previous = {}, current = {}) {
+  const previousMediaTime = Number(previous.mediaTime);
+  const currentMediaTime = Number(current.mediaTime);
+  const previousDecodedFrames = Number(previous.decodedFrames);
+  const currentDecodedFrames = Number(current.decodedFrames);
+  const mediaTimeAdvanced = Number.isFinite(currentMediaTime) && currentMediaTime >= 0 &&
+    (!Number.isFinite(previousMediaTime) || currentMediaTime > previousMediaTime + 1e-6);
+  const decodedFramesAdvanced = Number.isFinite(currentDecodedFrames) && currentDecodedFrames >= 0 &&
+    (!Number.isFinite(previousDecodedFrames) || currentDecodedFrames > previousDecodedFrames);
+  return {
+    advanced: mediaTimeAdvanced || decodedFramesAdvanced,
+    mediaTime: Number.isFinite(currentMediaTime) && currentMediaTime >= 0
+      ? currentMediaTime
+      : Number.isFinite(previousMediaTime) ? previousMediaTime : -1,
+    decodedFrames: Number.isFinite(currentDecodedFrames) && currentDecodedFrames >= 0
+      ? currentDecodedFrames
+      : Number.isFinite(previousDecodedFrames) ? previousDecodedFrames : -1
+  };
+}
+
+export function captureDiscardPolicy(autoDiscardable) {
+  const originalAutoDiscardable = autoDiscardable !== false;
+  return {
+    originalAutoDiscardable,
+    protectionUpdate: originalAutoDiscardable ? {autoDiscardable: false} : null,
+    restorationUpdate: originalAutoDiscardable ? {autoDiscardable: true} : null
+  };
+}
+
 export function makeSequenceId(tabId, nowMs = Date.now()) {
   const epoch = Math.max(0, Number(nowMs) || 0).toString(36);
   return `edge-roi-${Number(tabId) || 0}-${epoch}`;
@@ -261,7 +290,7 @@ export function makeSequenceId(tabId, nowMs = Date.now()) {
 
 export function initialStatus(overrides = {}) {
   return {
-    schemaVersion: "PG_EDGE_REGION_CAPTURE_STATUS_V2",
+    schemaVersion: "PG_EDGE_REGION_CAPTURE_STATUS_V3",
     phase: "idle",
     message: "Press Ctrl+Shift+8 on any HTTP(S) chart tab to select a region.",
     captureMode: "tab_region",
@@ -293,6 +322,9 @@ export function initialStatus(overrides = {}) {
     sourceRenderFresh: false,
     sourceGeneration: 0,
     sourceLeaseActive: false,
+    discardProtectionActive: false,
+    lockedTabOriginalAutoDiscardable: true,
+    candidateTabOriginalAutoDiscardable: true,
     lastError: "",
     focusPolicy: "never_activate_raise_or_focus_tabs",
     updatedAt: new Date().toISOString(),

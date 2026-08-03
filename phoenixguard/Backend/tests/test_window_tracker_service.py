@@ -4048,6 +4048,110 @@ def test_wgc_non_otc_identity_survives_derived_chart_plane_and_publishes_operato
     )
 
 
+def test_wgc_transport_heartbeat_with_identical_pixels_is_live_unchanged_not_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from phoenixguard.mobile_api.live_state_v3 import (
+        build_live_state_v3_from_tracker_service,
+    )
+    from phoenixguard.mobile_api.operator_workspace_v1 import (
+        build_operator_workspace_v1,
+    )
+
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "wgc-live-unchanged",
+        tracking_adapter=adapter,
+    )
+    session_id = "wgc-live-unchanged"
+    tracker.create_session(session_id=session_id)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="windows-region-capture-v3",
+        sequence_id="wgc-sequence-unchanged-1",
+        source_type="windows_graphics_capture_roi",
+        selection_id="selection-unchanged-1",
+        display_name="TradingView EURUSD M15",
+        coordinate_space="wgc_hwnd_roi_v1",
+    )
+    surface = _synthetic_chart_surface("buy", width=1280, height=720)
+    capture_epoch = time.time()
+    metadata = {
+        "source_type": "windows_graphics_capture_roi",
+        "coordinate_space": "wgc_hwnd_roi_v1",
+        "source_generation": int(claim["source_generation"]),
+        "source_lease_id": str(claim["source_lease_id"]),
+        "source_render_fresh": True,
+        "selection_id": "selection-unchanged-1",
+        "window": {"title": "EURUSD · M15 · Advanced chart — TradingView"},
+    }
+    first = tracker.ingest_external_frame(
+        session_id,
+        surface,
+        source_id="windows-region-capture-v3",
+        sequence_id="wgc-sequence-unchanged-1",
+        capture_epoch_ms=int(capture_epoch * 1000.0),
+        frame_id=1,
+        metadata=metadata,
+    )
+    baseline_model_frame = int(first["model_vote_frame_id"])
+    baseline_capture_count = int(first["capture_count"])
+    # The first full model pass may take longer than the source cadence. Use
+    # the actual next transport time so the duplicate reaches the no-evidence
+    # branch instead of being correctly discarded as an out-of-order frame.
+    second_capture_epoch = time.time()
+
+    second = tracker.ingest_external_frame(
+        session_id,
+        surface.copy(),
+        source_id="windows-region-capture-v3",
+        sequence_id="wgc-sequence-unchanged-1",
+        capture_epoch_ms=int(second_capture_epoch * 1000.0),
+        frame_id=2,
+        metadata=metadata,
+    )
+
+    assert second["frame_ingest"]["accepted"] is True
+    assert int(second["model_vote_frame_id"]) == baseline_model_frame
+    assert int(second["capture_count"]) == baseline_capture_count
+    assert second["capture_source_v3"]["state"] == "LIVE"
+    assert second["capture_source_v3"]["fresh"] is True
+    assert int(second["capture_source_v3"]["last_frame_id"]) == 2
+    observation = cast(dict[str, Any], second["visual_observation_v3"])
+    assert observation["status"] == "LIVE_FRAME_UNCHANGED"
+    assert observation["transport_state"] == "LIVE"
+    assert observation["transport_fresh"] is True
+    assert observation["study_update_state"] == "UNCHANGED"
+    assert observation["new_visual_evidence"] is False
+    assert second["latest_signal"]["status"] == "live_frame_unchanged"
+    assert second["latest_signal"]["execution_permission"] == "WAIT"
+    assert second["decision_valid_until_epoch"] == 0.0
+
+    live_state = build_live_state_v3_from_tracker_service(
+        tracker,
+        session_id,
+        now_epoch=second_capture_epoch + 0.1,
+        overlay_mode="INSPECTOR",
+    )
+    workspace = build_operator_workspace_v1(
+        live_state,
+        now_epoch=second_capture_epoch + 0.1,
+    )
+    assert workspace["freshness"]["state"] == "UNCHANGED"
+    assert "Chart stream live" in str(workspace["freshness"]["label"])
+    assert workspace["permission"]["allowed"] is False
+    assert workspace["overlays"]
+    overlay_lifecycles = {
+        str(row["lifecycle"])
+        for row in cast(Sequence[Mapping[str, Any]], workspace["overlays"])
+    }
+    assert "current" in overlay_lifecycles
+    assert "stale_diagnostic" not in overlay_lifecycles
+
+
 def test_same_frame_wgc_identity_attestation_fails_closed_on_selector_conflict() -> None:
     surface = _synthetic_chart_surface("buy", width=900, height=520)
     capture_epoch = time.time()

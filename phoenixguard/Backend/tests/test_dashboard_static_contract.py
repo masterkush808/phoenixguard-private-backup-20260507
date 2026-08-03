@@ -155,6 +155,10 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert 'id="overlay-inspector" aria-live="polite"' in text
     assert 'id="inspector-explanation"' in text
     assert "function updateVisualStatus(source, freshness, label)" in text
+    assert "function visualObservationView(payload)" in text
+    assert 'status === "LIVE_FRAME_UNCHANGED"' in text
+    assert '"Chart stream live · picture unchanged"' in text
+    assert '"Interactive overlays · Live picture unchanged"' in text
     assert "function selectOverlay(overlay)" in text
     assert 'button.setAttribute("aria-pressed", active ? "true" : "false");' in text
     assert '+ (points.length >= 2 ? " line-hit" : "")' in text

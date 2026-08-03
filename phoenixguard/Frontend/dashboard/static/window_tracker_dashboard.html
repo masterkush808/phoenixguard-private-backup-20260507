@@ -3531,6 +3531,33 @@
       return {present: false, source: {}};
     }
 
+    function visualObservationView(payload) {
+      const liveSession = safeObject(state.liveSession);
+      const operatorState = safeObject(payload);
+      const tracking = safeObject(operatorState.tracking);
+      const observation = safeObject(
+        liveSession.visual_observation_v3
+        || operatorState.visual_observation_v3
+        || tracking.visual_observation_v3
+      );
+      const status = safeText(observation.status, "UNKNOWN")
+        .toUpperCase()
+        .replace(/[ -]+/g, "_");
+      const liveUnchanged = status === "LIVE_FRAME_UNCHANGED"
+        && observation.transport_fresh === true
+        && observation.new_visual_evidence !== true;
+      return {
+        status: status,
+        liveUnchanged: liveUnchanged,
+        message: safeText(
+          observation.message,
+          liveUnchanged
+            ? "Chart stream live; the picture is unchanged and no new market evidence was created."
+            : "",
+        ),
+      };
+    }
+
     function captureSourceView(payload) {
       const contract = captureSourceContract(payload);
       const source = contract.source;
@@ -3625,7 +3652,9 @@
         els.sourceMessage,
         guideActive
           ? "1. Focus the chart window you want. 2. Press Ctrl+Shift+B. 3. Drag over the chart and release to lock it. The locked window keeps streaming in the background; press Esc to cancel selection."
-          : view.message,
+          : view.state === "LIVE" && visualObservationView(payload).liveUnchanged
+            ? visualObservationView(payload).message
+            : view.message,
       );
       els.sourceSelect.textContent = guideActive ? "Use Ctrl+Shift+B" : "Select / change chart";
       els.sourceKill.disabled = state.sourceKillBusy || !view.killEnabled;
@@ -5124,9 +5153,15 @@
       const active = tracking.active !== false && trackingState !== "paused";
       const liveRead = liveFormingRead(payload);
       const sourceView = renderCaptureSource(payload);
+      const visualObservation = visualObservationView(payload);
       if (sourceView.present) {
         const sourceConnection = {
-          LIVE: ["live", "Chart stream live"],
+          LIVE: [
+            "live",
+            visualObservation.liveUnchanged
+              ? "Chart stream live · picture unchanged"
+              : "Chart stream live",
+          ],
           SELECTING: ["updating", "Selecting chart"],
           CLAIMING: ["updating", "Locking chart"],
           VALIDATING: ["updating", "Checking chart"],
@@ -5152,6 +5187,7 @@
       setText(
         els.surfaceMeta,
         [
+          visualObservation.liveUnchanged ? "Live picture unchanged" : "",
           liveRead.available ? "Forming candle " + liveRead.label : "",
           liveRead.observedAt ? formatAge(liveRead.observedAt) : "",
           "Last completed study " + (formatAge(observed) || "time unavailable"),
@@ -6876,10 +6912,28 @@
 
       const freshnessPayload = safeObject(state.payload.freshness);
       const freshness = freshnessPayload.state || freshnessPayload.status;
+      const sourceView = captureSourceView(state.payload);
+      const visualObservation = visualObservationView(state.payload);
+      const liveUnchanged = visualObservation.liveUnchanged
+        && sourceView.state === "LIVE"
+        && sourceView.fresh;
+      const displayFreshness = liveUnchanged ? "LIVE" : freshness;
       if (renderedOverlayCount > 0) {
-        updateVisualStatus("interactive", freshness, "Interactive overlays · " + (normalizeFreshness(freshness) === "live" ? "Live" : titleCase(normalizeFreshness(freshness))));
+        updateVisualStatus(
+          "interactive",
+          displayFreshness,
+          liveUnchanged
+            ? "Interactive overlays · Live picture unchanged"
+            : "Interactive overlays · " + (normalizeFreshness(freshness) === "live" ? "Live" : titleCase(normalizeFreshness(freshness))),
+        );
       } else {
-        updateVisualStatus("chart", freshness, "Broker view · No current marks in this view");
+        updateVisualStatus(
+          "chart",
+          displayFreshness,
+          liveUnchanged
+            ? "Broker view live · Picture unchanged · No current marks in this view"
+            : "Broker view · No current marks in this view",
+        );
       }
       updateOverlayLibraryStatus(renderedOverlayCount);
       window.requestAnimationFrame(function () {

@@ -7,10 +7,12 @@ import {dirname, resolve} from "node:path";
 import {
   SAMPLE_FPS,
   canonicalFrameSignaturePayload,
+  captureDiscardPolicy,
   capturableHttpUrl,
   frameIngestEndpoint,
   initialStatus,
   mapNormalizedRegionToPixels,
+  mediaPlaybackAdvanced,
   meanAbsoluteDifference,
   normalizeConfig,
   normalizeRegionSelection,
@@ -144,10 +146,38 @@ test("material probe difference is normalized", () => {
   assert.equal(meanAbsoluteDifference(null, new Uint8Array([10])), 1);
 });
 
+test("media playback progress proves fresh transport even when video callbacks are throttled", () => {
+  assert.deepEqual(
+    mediaPlaybackAdvanced({mediaTime: 10, decodedFrames: 20}, {mediaTime: 10.25, decodedFrames: 20}),
+    {advanced: true, mediaTime: 10.25, decodedFrames: 20}
+  );
+  assert.deepEqual(
+    mediaPlaybackAdvanced({mediaTime: 10.25, decodedFrames: 20}, {mediaTime: 10.25, decodedFrames: 21}),
+    {advanced: true, mediaTime: 10.25, decodedFrames: 21}
+  );
+  assert.equal(
+    mediaPlaybackAdvanced({mediaTime: 10.25, decodedFrames: 21}, {mediaTime: 10.25, decodedFrames: 21}).advanced,
+    false
+  );
+});
+
+test("capture discard policy is temporary and preserves an existing protected tab", () => {
+  assert.deepEqual(captureDiscardPolicy(true), {
+    originalAutoDiscardable: true,
+    protectionUpdate: {autoDiscardable: false},
+    restorationUpdate: {autoDiscardable: true}
+  });
+  assert.deepEqual(captureDiscardPolicy(false), {
+    originalAutoDiscardable: false,
+    protectionUpdate: null,
+    restorationUpdate: null
+  });
+});
+
 test("status contract reports ROI capture, freshness, and immutable no-focus policy", () => {
   const status = initialStatus();
   assert.equal(SAMPLE_FPS, 0.25);
-  assert.equal(status.schemaVersion, "PG_EDGE_REGION_CAPTURE_STATUS_V2");
+  assert.equal(status.schemaVersion, "PG_EDGE_REGION_CAPTURE_STATUS_V3");
   assert.equal(status.captureMode, "tab_region");
   assert.equal(status.sourceRenderFresh, false);
   assert.equal(status.focusPolicy, "never_activate_raise_or_focus_tabs");
@@ -178,11 +208,15 @@ test("runtime contains ROI lease lineage and no focus-changing API", async () =>
   assert.match(source, /form\.append\("source_generation"/);
   assert.match(source, /form\.append\("source_lease_id"/);
   assert.match(source, /source_render_fresh/);
+  assert.match(source, /getVideoPlaybackQuality/);
+  assert.match(source, /autoDiscardable: false/);
+  assert.match(source, /autoDiscardable: true/);
   assert.match(source, /PREPARE_CAPTURE_CANDIDATE_V1/);
   assert.match(source, /COMMIT_CAPTURE_REGION_V1/);
   assert.match(source, /STOP_ALL_CAPTURE_V1/);
   for (const forbidden of [
-    "chrome.tabs.update", "chrome.windows.update", "chrome.windows.create", "window.focus(", "tabs.highlight", "<all_urls>"
+    "chrome.windows.update", "chrome.windows.create", "window.focus(", "tabs.highlight", "<all_urls>",
+    "chrome.tabs.update(tabId, {active", "chrome.tabs.update(id, {active"
   ]) {
     assert.equal(source.includes(forbidden), false, `forbidden focus or broad-access primitive: ${forbidden}`);
   }

@@ -291,9 +291,44 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
         "last_full_overlay_path": "hot_latest_full_overlay.jpg",
     }
     (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
+    compact_state: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "capture_source_v3": {"state": "LIVE", "fresh": True},
+        "visual_observation_v3": {
+            "status": "NEW_FRAME",
+            "transport_state": "LIVE",
+            "transport_fresh": True,
+            "study_update_state": "ADVANCED",
+            "new_visual_evidence": True,
+        },
+    }
+    (session_dir / "compact_live_state.json").write_text(
+        json.dumps(compact_state),
+        encoding="utf-8",
+    )
 
     compact_sig_1 = _compact_live_state_response_cache_signature("pocket-live-8788")
     live_sig_1 = _live_state_cache_signature("pocket-live-8788", compact_public=True)
+
+    compact_state["visual_observation_v3"] = {
+        "status": "LIVE_FRAME_UNCHANGED",
+        "transport_state": "LIVE",
+        "transport_fresh": True,
+        "study_update_state": "UNCHANGED",
+        "new_visual_evidence": False,
+    }
+    (session_dir / "compact_live_state.json").write_text(
+        json.dumps(compact_state),
+        encoding="utf-8",
+    )
+    compact_sig_unchanged = _compact_live_state_response_cache_signature("pocket-live-8788")
+    live_sig_unchanged = _live_state_cache_signature("pocket-live-8788", compact_public=True)
+
+    assert compact_sig_unchanged != compact_sig_1
+    assert live_sig_unchanged != live_sig_1
+
+    compact_sig_1 = compact_sig_unchanged
+    live_sig_1 = live_sig_unchanged
 
     display_state["state_version"] = 101
     (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")

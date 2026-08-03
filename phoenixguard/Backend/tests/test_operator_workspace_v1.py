@@ -4474,6 +4474,93 @@ def test_duplicate_visual_wait_is_publicly_waiting_and_never_fresh() -> None:
     assert "duplicate_study_count" not in serialized
 
 
+def test_advancing_transport_with_unchanged_pixels_is_live_but_does_not_refresh_entry() -> None:
+    payload = _fresh_payload(side="BUY")
+    payload["visual_observation_v3"] = {
+        "status": "LIVE_FRAME_UNCHANGED",
+        "message": (
+            "Chart stream live; the picture is unchanged. The last studied frame remains "
+            "visible, but no new market evidence or entry permission was created."
+        ),
+        "transport_state": "LIVE",
+        "transport_fresh": True,
+        "study_update_state": "UNCHANGED",
+        "new_visual_evidence": False,
+        "last_observed_epoch": 90.0,
+        "attempted_epoch": 100.0,
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["freshness"]["state"] == "UNCHANGED"
+    assert workspace["freshness"]["observed_at"] == 90.0
+    assert workspace["freshness"]["valid_until"] is None
+    assert "Chart stream live" in str(workspace["freshness"]["label"])
+    assert workspace["tracking"]["state"] == "UPDATING"
+    assert workspace["permission"]["action"] == "WAIT"
+    assert workspace["permission"]["allowed"] is False
+
+
+def test_cached_operator_projection_refreshes_live_unchanged_external_transport() -> None:
+    payload = _fresh_payload(side="BUY")
+    base = _build_workspace(payload, now_epoch=100.0)
+    base["freshness"] = {
+        "state": "STALE",
+        "label": "Updating on the next complete frame",
+        "observed_at": 90.0,
+        "valid_until": None,
+        "age_seconds": 10.0,
+    }
+    base["tracking"] = {
+        **cast(dict[str, object], base["tracking"]),
+        "active": False,
+        "state": "PAUSED",
+    }
+    base["overlays"] = [
+        {
+            **cast(dict[str, object], row),
+            "lifecycle": (
+                "historical"
+                if cast(dict[str, object], row).get("lifecycle") == "historical"
+                else "stale_diagnostic"
+            ),
+        }
+        for row in cast(list[object], base["overlays"])
+        if isinstance(row, Mapping)
+    ]
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        {
+            "tracking_enabled": False,
+            "capture_source_v3": {"state": "LIVE", "fresh": True},
+            "visual_observation_v3": {
+                "status": "LIVE_FRAME_UNCHANGED",
+                "message": "Chart stream live; the picture is unchanged.",
+                "transport_state": "LIVE",
+                "transport_fresh": True,
+                "study_update_state": "UNCHANGED",
+                "new_visual_evidence": False,
+                "last_observed_epoch": 90.0,
+                "attempted_epoch": 100.0,
+            },
+            "tracking_summary": {},
+            "latest_signal": {},
+        },
+        now_epoch=100.0,
+    )
+
+    assert refreshed["freshness"]["state"] == "UNCHANGED"
+    assert refreshed["tracking"]["active"] is True
+    assert refreshed["tracking"]["state"] == "UPDATING"
+    assert refreshed["permission"]["action"] == "WAIT"
+    assert refreshed["permission"]["allowed"] is False
+    assert all(
+        row["lifecycle"] in {"current", "historical"}
+        for row in cast(list[dict[str, object]], refreshed["overlays"])
+    )
+
+
 
 
 

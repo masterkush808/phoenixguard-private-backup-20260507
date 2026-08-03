@@ -31,6 +31,7 @@ from phoenixguard.mobile_api.windows_region_capture_v3 import (
     crop_normalized_region_v3,
     normalize_region_bbox_v3,
     require_windows_capture_runtime_v3,
+    restore_window_for_background_capture_v3,
 )
 import phoenixguard.mobile_api.windows_region_capture_v3 as capture_module
 
@@ -189,6 +190,86 @@ def test_wgc_stream_is_exact_hwnd_latest_frame_capture_without_fallback() -> Non
     assert result.image.getpixel((1, 0)) == (0, 255, 0)
     stream.stop()
     assert capture.control.stopped is True
+
+
+def test_wgc_stream_restart_keeps_frame_identity_monotonic() -> None:
+    created: list[_FakeWindowsCapture] = []
+
+    def factory(**kwargs: Any) -> _FakeWindowsCapture:
+        capture = _FakeWindowsCapture(kwargs)
+        created.append(capture)
+        return capture
+
+    stream = WindowsGraphicsCaptureStreamV3(
+        _identity(hwnd=777),
+        local_generation=4,
+        capture_factory=factory,
+    )
+    stream.seed_frame_id(41)
+    stream.start()
+    fake_wgc_frame = type(
+        "FakeWgcFrame",
+        (),
+        {
+            "frame_buffer": np.zeros((1, 1, 4), dtype=np.uint8),
+            "timespan": 9002,
+        },
+    )()
+    created[0].handlers["on_frame_arrived"](fake_wgc_frame, created[0].control)
+
+    assert stream.wait_first_frame(timeout=0.05).frame_id == 42
+    with pytest.raises(RuntimeError, match="cannot be reseeded"):
+        stream.seed_frame_id(99)
+    stream.stop()
+
+
+class _FakeBackgroundUser32:
+    def __init__(self) -> None:
+        self.minimized = True
+        self.visible = True
+        self.foreground = 909
+        self.show_calls: list[tuple[int, int]] = []
+        self.position_calls: list[tuple[int, ...]] = []
+
+    def IsWindow(self, hwnd: int) -> bool:  # noqa: N802 - mirrors Win32
+        return hwnd == 101
+
+    def IsIconic(self, hwnd: int) -> bool:  # noqa: N802 - mirrors Win32
+        assert hwnd == 101
+        return self.minimized
+
+    def IsWindowVisible(self, hwnd: int) -> bool:  # noqa: N802 - mirrors Win32
+        assert hwnd == 101
+        return self.visible
+
+    def GetForegroundWindow(self) -> int:  # noqa: N802 - mirrors Win32
+        return self.foreground
+
+    def ShowWindowAsync(self, hwnd: int, mode: int) -> bool:  # noqa: N802 - mirrors Win32
+        self.show_calls.append((hwnd, mode))
+        self.minimized = False
+        self.visible = True
+        return True
+
+    def SetWindowPos(self, *values: int) -> bool:  # noqa: N802 - mirrors Win32
+        self.position_calls.append(tuple(values))
+        return True
+
+
+def test_minimized_window_is_restored_to_background_without_focus_change() -> None:
+    user32 = _FakeBackgroundUser32()
+
+    restored = restore_window_for_background_capture_v3(
+        _identity(hwnd=101, minimized=True),
+        user32=user32,
+        wait_timeout_sec=0.05,
+    )
+
+    assert restored is True
+    assert user32.foreground == 909
+    assert user32.show_calls == [(101, 4)]
+    assert len(user32.position_calls) == 2
+    assert all(call[1] == 1 for call in user32.position_calls)
 
 
 @dataclass
@@ -385,6 +466,9 @@ class _FakeManagerStream:
 
     def start(self) -> None:
         self.started = True
+
+    def seed_frame_id(self, after_frame_id: int) -> None:
+        self.slot.publish(_frame(int(after_frame_id) + 1))
 
     def wait_first_frame(self, *, timeout: float = 12.0) -> CapturedWindowFrameV3:
         del timeout
@@ -584,6 +668,100 @@ def test_upload_failure_uses_backoff_instead_of_tight_retry(tmp_path: Path) -> N
     assert active.next_upload_attempt_epoch > time.time()
     status = json.loads((tmp_path / "windows_region_capture_status.json").read_text(encoding="utf-8"))
     assert status["status"] == "degraded"
+    manager.shutdown()
+
+
+def test_manager_recovers_minimized_target_without_waiting_for_operator(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    streams: list[_FakeManagerStream] = []
+    current = {"identity": _identity()}
+    restore_calls: list[int] = []
+
+    def stream_factory(identity: WindowIdentityV3, generation: int) -> Any:
+        stream = _FakeManagerStream(identity, generation)
+        streams.append(stream)
+        return stream
+
+    def restore_background(identity: WindowIdentityV3) -> bool:
+        restore_calls.append(identity.hwnd)
+        current["identity"] = _identity(minimized=False)
+        return True
+
+    manager = WindowsRegionCaptureManagerV3(
+        ingest_client=client,  # type: ignore[arg-type]
+        status_path=tmp_path / "windows_region_capture_status.json",
+        identity_reader=lambda _hwnd: current["identity"],
+        foreground_reader=lambda: current["identity"],
+        selector=lambda _identity_value, _frame_value: (0.1, 0.2, 0.9, 0.8),
+        stream_factory=stream_factory,
+        background_restorer=restore_background,
+        upload_interval_sec=1.0,
+        identity_check_interval_sec=0.25,
+    )
+    assert manager.select_foreground_source() is True
+    current["identity"] = _identity(minimized=True)
+
+    manager.start()
+    assert _wait_until(lambda: bool(restore_calls))
+    assert _wait_until(lambda: bool(client.uploads))
+
+    active = manager.active_snapshot()
+    assert active is not None
+    assert active.background_restore_count == 1
+    assert restore_calls == [101]
+    status = json.loads(
+        (tmp_path / "windows_region_capture_status.json").read_text(encoding="utf-8")
+    )
+    assert status["status"] == "live"
+    assert status["background_capture_mode"] == "exact_hwnd_no_activation"
+    assert status["background_restore_count"] == 1
+    assert status["target_minimized"] is False
+    manager.shutdown()
+
+
+def test_manager_rebuilds_closed_wgc_session_on_same_hwnd_and_lease(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    streams: list[_FakeManagerStream] = []
+    identity = _identity()
+
+    def stream_factory(value: WindowIdentityV3, generation: int) -> Any:
+        stream = _FakeManagerStream(value, generation)
+        streams.append(stream)
+        return stream
+
+    manager = WindowsRegionCaptureManagerV3(
+        ingest_client=client,  # type: ignore[arg-type]
+        status_path=tmp_path / "windows_region_capture_status.json",
+        identity_reader=lambda _hwnd: identity,
+        foreground_reader=lambda: identity,
+        selector=lambda _identity_value, _frame_value: (0.1, 0.2, 0.9, 0.8),
+        stream_factory=stream_factory,
+        upload_interval_sec=1.0,
+        freshness_timeout_sec=2.0,
+        identity_check_interval_sec=0.25,
+    )
+    assert manager.select_foreground_source() is True
+    original = manager.active_snapshot()
+    assert original is not None
+    cast(Any, original.stream).closed = True
+    original.last_stream_restart_epoch = time.time() - 3.0
+
+    manager.start()
+    assert _wait_until(lambda: len(streams) == 2)
+    assert _wait_until(lambda: len(client.uploads) >= 2, timeout=4.0)
+
+    recovered = manager.active_snapshot()
+    assert recovered is original
+    assert recovered is not None
+    assert recovered.binding.lease.source_lease_id == "lease-1"
+    assert recovered.stream_restart_count == 1
+    assert streams[0].stopped is True
+    assert streams[1].started is True
+    assert client.uploads[-1] >= 2
     manager.shutdown()
 
 

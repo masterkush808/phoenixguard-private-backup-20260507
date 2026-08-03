@@ -331,6 +331,13 @@ def testcompact_session_payload_preserves_v3_authoritypackets_and_sequence(monke
             "last_capture_epoch": 100.0,
             "capture_count": 101,
             "frame_index": 42,
+            "capture_source_v3": {
+                "schema_version": "PG_CAPTURE_SOURCE_V3",
+                "state": "LIVE",
+                "fresh": True,
+                "mode": "windows_graphics_capture",
+                "last_frame_id": 942,
+            },
             "model_council_study_packet": study_packet,
             "model_council_packet": execution_packet,
             "execution_packet": execution_packet,
@@ -351,6 +358,13 @@ def testcompact_session_payload_preserves_v3_authoritypackets_and_sequence(monke
     assert compact["model_council_study_packet"]["packet_id"] == "study-100"
     assert compact["model_council_packet"]["packet_id"] == "exec-100"
     assert compact["execution_packet"]["packet_id"] == "exec-100"
+    assert compact["capture_source_v3"] == {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state": "LIVE",
+        "fresh": True,
+        "mode": "windows_graphics_capture",
+        "last_frame_id": 942,
+    }
     compact_council = compact["model_council_result"]["model_council"]
     assert compact_council["sequence_context"]["sequence_id"] == "seq-100"
     assert compact["model_council_result"]["promotion_trace"]["next_required"] == "wait retest"
@@ -795,6 +809,102 @@ def test_live_state_keeps_locked_overlay_objects_when_surface_authority_matches(
     assert state["renderable_count"] >= 1
     assert state["overlay_objects"]
     assert state["reason_if_empty"] == ""
+
+
+def test_live_unchanged_transport_keeps_same_frame_geometry_visible_beyond_ttl(
+    tmp_path: Path,
+) -> None:
+    window = _png(tmp_path / "12_live_unchanged_window.png", (640, 360))
+    chart = _png(tmp_path / "12_live_unchanged_chart.png", (560, 260))
+    session: dict[str, Any] = {
+        "session_id": "live-unchanged-geometry",
+        "frame_index": 12,
+        "display_frame_id": 12,
+        "capture_count": 12,
+        "state_version": 12,
+        "manual_focus_region": {
+            "enabled": True,
+            "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+        },
+        "tracking_summary": {
+            "chart_region": {
+                "pixel_bbox": [0, 0, 560, 260],
+                "width": 560,
+                "height": 260,
+            },
+        },
+        "latest_signal": {"side": "BUY", "execution_action": "HOLD"},
+        "visual_observation_v3": {
+            "status": "LIVE_FRAME_UNCHANGED",
+            "transport_state": "LIVE",
+            "transport_fresh": True,
+            "study_update_state": "UNCHANGED",
+            "new_visual_evidence": False,
+            "last_observed_epoch": 1.0,
+            "attempted_epoch": 1000.0,
+        },
+    }
+    _lock_test_instrument_identity(session)
+    active_objects: list[dict[str, Any]] = [
+        {
+            "overlay_id": "unchanged-demand-12",
+            "object_id": "unchanged-demand-12",
+            "track_id": "unchanged-demand-12",
+            "frame_id": 12,
+            "truth_score": 0.92,
+            "lifecycle_state": "ACTIVE",
+            "overlay": {
+                "overlay_id": "unchanged-demand-12",
+                    "type": "SNIPER_ENTRY_BOX",
+                    "side": "BUY",
+                    "pixel_bbox": [180, 150, 225, 205],
+                    "anchor_candles": [0],
+                    "touch_points": [[220, 180]],
+                "confidence": 0.92,
+                "created_at_ms": 1000,
+                "ttl_ms": 1000,
+                "visible_modes": ["CLEAN_LIVE", "INSPECTOR"],
+                "reason": "same displayed chart frame remains spatially valid",
+            },
+        }
+    ]
+
+    live_unchanged = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        registry_entries=active_objects,
+        now_epoch=1000.0,
+    )
+    advanced_session = dict(session)
+    advanced_session["visual_observation_v3"] = {
+        "status": "NEW_FRAME",
+        "transport_state": "LIVE",
+        "transport_fresh": True,
+        "study_update_state": "ADVANCED",
+        "new_visual_evidence": True,
+    }
+    normally_aged = build_live_state_v3(
+        advanced_session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        registry_entries=active_objects,
+        now_epoch=1000.0,
+    )
+
+    unchanged_rows = [
+        row
+        for row in live_unchanged["overlay_objects"]
+        if row.get("overlay_id") == "unchanged-demand-12"
+    ]
+    aged_rows = [
+        row
+        for row in normally_aged["overlay_objects"]
+        if row.get("overlay_id") == "unchanged-demand-12"
+    ]
+    assert len(unchanged_rows) == 1
+    assert unchanged_rows[0]["lifecycle_state"] == "ACTIVE"
+    assert aged_rows == []
 
 
 def test_live_state_keeps_current_frame_objects_when_overlay_artifact_is_stale(tmp_path: Path) -> None:
