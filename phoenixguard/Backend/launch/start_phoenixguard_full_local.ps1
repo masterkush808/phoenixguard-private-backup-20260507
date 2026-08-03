@@ -68,6 +68,7 @@ $discardStderrPath = '\\.\NUL'
 $trackerStdoutPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log' } else { $discardStdoutPath }
 $trackerStderrPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stderr.log' } else { $discardStderrPath }
 $windowsRegionCaptureStatusPath = Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_status.json'
+$windowsRegionCaptureRestoreBindingPath = Join-Path -Path $runtimeDir -ChildPath 'restore_selected_chart.json'
 $windowsRegionCaptureStdoutPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_stdout.log' } else { $discardStdoutPath }
 $windowsRegionCaptureStderrPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_stderr.log' } else { $discardStderrPath }
 $env:PHOENIXGUARD_WINDOWS_REGION_CAPTURE_STATUS_FILE = $windowsRegionCaptureStatusPath
@@ -333,6 +334,12 @@ function Start-WindowsRegionCaptureChildProcess {
         '--status-path',
         $windowsRegionCaptureStatusPath
     )
+    if (Test-Path -LiteralPath $windowsRegionCaptureRestoreBindingPath -PathType Leaf) {
+        $captureArgs += @(
+            '--restore-binding',
+            $windowsRegionCaptureRestoreBindingPath
+        )
+    }
     Start-Process `
         -FilePath $pythonPath `
         -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $captureArgs) `

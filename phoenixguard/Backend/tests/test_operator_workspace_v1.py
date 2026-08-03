@@ -112,6 +112,7 @@ class _SurfaceView(TypedDict):
     fallback_space: str
     focus_url: str
     overlay_viewport: _OverlayViewportView
+    overlay_viewports: NotRequired[dict[str, _OverlayViewportView]]
     frame_id: _FrameId
     updated_at: float | None
     semantic_identity: NotRequired[str]
@@ -124,6 +125,7 @@ class _OverlayViewportView(TypedDict):
     target_space: str
     coordinate_units: str
     bounds: list[float]
+    source_bounds: NotRequired[list[float]]
 
 
 class _OverlayView(TypedDict):
@@ -4523,6 +4525,10 @@ def test_mixed_frame_operator_snapshot_is_rejected(
         "last_study_surface_signature": "study-15",
         "overlay_source_window_signature": "window-15",
         "overlay_source_study_signature": "study-15",
+        "manual_focus_region": {
+            "enabled": True,
+            "normalized_bbox": [0.1, 0.1, 0.9, 0.9],
+        },
     }
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
     snapshot_path = (
@@ -4531,13 +4537,13 @@ def test_mixed_frame_operator_snapshot_is_rejected(
         / "window_tracker"
         / "sessions"
         / session_id
-        / "operator_overlay_snapshot_v1.json"
+        / "operator_overlay_snapshot_v2.json"
     )
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(
         json.dumps(
             {
-                "schema_version": "PG_OPERATOR_OVERLAY_SNAPSHOT_V1",
+                "schema_version": "PG_OPERATOR_OVERLAY_SNAPSHOT_V2",
                 "session_id": session_id,
                 "lineage": {
                     "frame_id": 15,
@@ -4550,6 +4556,10 @@ def test_mixed_frame_operator_snapshot_is_rejected(
                     "overlay_source_window_signature": "window-15",
                     "overlay_source_study_signature": "study-15",
                     "state_version": 15,
+                    "geometry_contract_id": getattr(
+                        mobile_app,
+                        "_operator_geometry_contract_id",
+                    )(source),
                 },
                 "overlay_viewport": {
                     "source_space": "chart",
@@ -4570,7 +4580,16 @@ def test_mixed_frame_operator_snapshot_is_rejected(
         getattr(mobile_app, "_load_operator_overlay_snapshot"),
     )
 
-    assert load_snapshot(session_id, source) is None
+    assert load_snapshot(
+        session_id,
+        source,
+        expected_viewport={
+            "source_space": "chart",
+            "target_space": "window",
+            "coordinate_units": "normalized",
+            "bounds": [0.1, 0.1, 0.9, 0.9],
+        },
+    ) is None
 
 
 @pytest.mark.parametrize("failure", ["stale", "contradictory"])
@@ -5124,6 +5143,90 @@ def test_surface_exposes_only_safe_normalized_chart_to_window_viewport() -> None
     assert "1040" not in serialized
 
 
+def test_surface_uses_exact_scene_chart_plane_for_window_and_focus_artifact() -> None:
+    payload = _fresh_payload()
+    tracking_summary = _mutable_mapping(payload["tracking_summary"])
+    tracking_summary.update(
+        {
+            "focus_region": {
+                "pixel_bbox": [60, 154, 1124, 875],
+                "normalized_bbox": [60 / 1859, 154 / 924, 1124 / 1859, 875 / 924],
+            },
+            "chart_region": {
+                "pixel_bbox": [34, 10, 1009, 711],
+                "width": 975,
+                "height": 701,
+            },
+            "artifact_integrity": {
+                "full_window": {"width": 1859, "height": 924},
+                "study_plane": {"width": 1064, "height": 721},
+                "chart": {"width": 1064, "height": 721},
+            },
+        }
+    )
+    payload["chart"] = {
+        "scene_graph": {
+            "frame_id": 14,
+            "valid": True,
+            "broker_surface_bounds": [0, 0, 1859, 924],
+            "chart_region_bounds": [94, 164, 1069, 865],
+            "chart_region_chart_bounds": [0, 0, 975, 701],
+        }
+    }
+
+    surface = _build_workspace(payload, now_epoch=100.0)["surface"]
+
+    assert surface["overlay_viewport"] == {
+        "source_space": "chart",
+        "target_space": "window",
+        "coordinate_units": "normalized",
+        "bounds": [0.050565, 0.177489, 0.57504, 0.936147],
+        "source_bounds": [0.0, 0.0, 975.0, 701.0],
+    }
+    assert surface["overlay_viewports"] == {
+        "window": surface["overlay_viewport"],
+        "chart": {
+            "source_space": "chart",
+            "target_space": "chart_artifact",
+            "coordinate_units": "normalized",
+            "bounds": [0.031955, 0.01387, 0.948308, 0.98613],
+            "source_bounds": [0.0, 0.0, 975.0, 701.0],
+        },
+    }
+
+
+def test_surface_rejects_scene_transform_when_inner_crop_lineage_disagrees() -> None:
+    payload = _fresh_payload()
+    tracking_summary = _mutable_mapping(payload["tracking_summary"])
+    tracking_summary.update(
+        {
+            "focus_region": {
+                "pixel_bbox": [60, 154, 1124, 875],
+                "normalized_bbox": [0.032275, 0.166667, 0.604626, 0.94697],
+            },
+            # Deliberately incompatible with scene chart_region_bounds.
+            "chart_region": {"pixel_bbox": [0, 0, 975, 701]},
+            "artifact_integrity": {
+                "full_window": {"width": 1859, "height": 924},
+                "chart": {"width": 1064, "height": 721},
+            },
+        }
+    )
+    payload["scene_graph"] = {
+        "frame_id": 14,
+        "valid": True,
+        "broker_surface_bounds": [0, 0, 1859, 924],
+        "chart_region_bounds": [94, 164, 1069, 865],
+        "chart_region_chart_bounds": [0, 0, 975, 701],
+    }
+
+    surface = _build_workspace(payload, now_epoch=100.0)["surface"]
+
+    # The contradictory scene is not published. The independently composed
+    # tracker crop remains deterministic and does not become a full-frame map.
+    assert surface["overlay_viewport"]["bounds"] == [0.032275, 0.166667, 0.556751, 0.925325]
+
+
 def test_studied_history_semantics_survive_frames_but_geometry_reprojects() -> None:
     def workspace(
         *,
@@ -5619,6 +5722,122 @@ def test_operator_route_returns_only_the_current_public_projection(
         assert rejected.json() == {"detail": "Unsupported operator view."}
 
 
+def test_waiting_operator_reuses_snapshot_rows_but_never_snapshot_transform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session_id = "waiting-geometry-contract"
+    live_state = _fresh_payload(side="BUY", now=200.0)
+    live_state.update(
+        {
+            "session_id": session_id,
+            "state_version": 22,
+            "display_frame_id": 22,
+            "chart_frame_id": 22,
+            "overlay_frame_id": 22,
+            "full_overlay_frame_id": 22,
+            "model_vote_frame_id": 22,
+            "last_capture_epoch": 199.0,
+            "last_display_surface_signature": "window-22",
+            "last_study_surface_signature": "study-22",
+            "overlay_source_window_signature": "window-22",
+            "overlay_source_study_signature": "study-22",
+            "visual_observation_v3": {
+                "status": "WAITING_FOR_NEW_FRAME",
+                "new_visual_evidence": False,
+            },
+        }
+    )
+    tracking = _mutable_mapping(live_state["tracking_summary"])
+    tracking.update(
+        {
+            "focus_region": {"pixel_bbox": [60, 154, 1124, 875]},
+            "chart_region": {"pixel_bbox": [34, 10, 1009, 711]},
+            "artifact_integrity": {
+                "full_window": {"width": 1859, "height": 924},
+                "chart": {"width": 1064, "height": 721},
+            },
+        }
+    )
+    live_state["scene_graph"] = {
+        "frame_id": 22,
+        "valid": True,
+        "broker_surface_bounds": [0, 0, 1859, 924],
+        "chart_region_bounds": [94, 164, 1069, 865],
+        "chart_region_chart_bounds": [0, 0, 975, 701],
+    }
+
+    class _Tracker:
+        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return cast(dict[str, object], json.loads(json.dumps(live_state)))
+
+        def latest_model_council_state(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return {}
+
+    def _build_state(
+        tracker: object,
+        requested_session_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert isinstance(tracker, _Tracker)
+        assert requested_session_id == session_id
+        return cast(dict[str, object], json.loads(json.dumps(live_state)))
+
+    def _poisoned_snapshot(
+        requested_session_id: str,
+        _source: Mapping[str, object],
+        *,
+        expected_viewport: object = None,
+    ) -> dict[str, object]:
+        assert requested_session_id == session_id
+        expected = cast(Mapping[str, object], expected_viewport)
+        assert expected["bounds"] == [0.050565, 0.177489, 0.57504, 0.936147]
+        return {
+            "overlay_viewport": {
+                "source_space": "chart",
+                "target_space": "window",
+                "coordinate_units": "normalized",
+                "bounds": [0.0, 0.0, 1.0, 1.0],
+            },
+            "overlays": [
+                {
+                    "id": "saved-zone-22",
+                    "type": "DEMAND_ZONE",
+                    "kind": "demand_zone",
+                    "family": "supply_demand",
+                    "frame_id": 22,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
+    monkeypatch.setattr(
+        mobile_app,
+        "build_live_state_v3_from_tracker_service",
+        _build_state,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "_load_operator_overlay_snapshot",
+        _poisoned_snapshot,
+    )
+    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
+        response = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
+
+    assert response.status_code == 200
+    workspace = cast(_OperatorWorkspaceView, response.json())
+    assert workspace["surface"]["overlay_viewport"]["bounds"] == [
+        0.050565,
+        0.177489,
+        0.57504,
+        0.936147,
+    ]
+    assert [row["id"] for row in workspace["overlays"]] == ["saved-zone-22"]
+    assert workspace["overlays"][0]["lifecycle"] == "stale_diagnostic"
+
+
 
 
 def test_operator_route_persists_projection_frame_when_service_snapshot_advances(
@@ -5720,7 +5939,7 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
         / "window_tracker"
         / "sessions"
         / session_id
-        / "operator_overlay_snapshot_v1.json"
+        / "operator_overlay_snapshot_v2.json"
     )
 
     with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:

@@ -19,6 +19,15 @@ SURFACE_IMAGE_BYTES = b"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" h
 </svg>"""
 
 
+def _surface_image_bytes(width: int, height: int) -> bytes:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">'
+        f'<rect width="{width}" height="{height}" fill="#090b0d"/>'
+        "</svg>"
+    ).encode()
+
+
 def _renderable_dashboard_html() -> str:
     html = DASHBOARD_PATH.read_text(encoding="utf-8")
     return (
@@ -423,6 +432,7 @@ def _dashboard_page(
     *,
     viewport: tuple[int, int] = (1440, 1000),
     delayed_artifact_frames: dict[int, float] | None = None,
+    artifact_image_bytes: dict[str, bytes] | None = None,
     with_event_source: bool = False,
     session_payload: dict[str, Any] | None = None,
 ) -> Generator[Page, None, None]:
@@ -441,8 +451,20 @@ def _dashboard_page(
                 if f"frame_id={frame_id}" in url:
                     time.sleep(delay_seconds)
                     break
+            artifact_kind = (
+                "window"
+                if "latest-window" in url
+                else "chart"
+                if "latest-chart" in url
+                else "default"
+            )
             route.fulfill(
-                status=200, content_type="image/svg+xml", body=SURFACE_IMAGE_BYTES
+                status=200,
+                content_type="image/svg+xml",
+                body=(artifact_image_bytes or {}).get(
+                    artifact_kind,
+                    SURFACE_IMAGE_BYTES,
+                ),
             )
         else:
             route.abort()
@@ -746,6 +768,8 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             "help-open",
             "experience-mode-toggle",
             "beginner-open-advanced",
+            "source-select",
+            "source-kill",
             "frame-window",
             "frame-chart",
             "mode-overlay",
@@ -2935,6 +2959,159 @@ def test_full_broker_is_default_and_chart_overlays_project_into_its_viewport(
         )
         for actual, expected in zip(focused, (0.08, 0.18, 0.38, 0.54), strict=True):
             assert abs(float(actual) - expected) <= 0.003
+
+
+def test_exact_dual_target_contract_projects_chart_pixels_on_both_artifacts(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    surface = cast(dict[str, Any], payload["surface"])
+    window_plane = [94.0, 164.0, 1069.0, 865.0]
+    chart_artifact_plane = [34.0, 10.0, 1009.0, 711.0]
+
+    def normalized_bounds(
+        bounds: list[float], width: float, height: float
+    ) -> list[float]:
+        return [
+            bounds[0] / width,
+            bounds[1] / height,
+            bounds[2] / width,
+            bounds[3] / height,
+        ]
+
+    window_viewport = {
+        "source_space": "chart",
+        "target_space": "window",
+        "coordinate_units": "normalized",
+        "bounds": normalized_bounds(window_plane, 1859.0, 924.0),
+        "source_bounds": [0.0, 0.0, 975.0, 701.0],
+    }
+    chart_viewport = {
+        "source_space": "chart",
+        "target_space": "chart_artifact",
+        "coordinate_units": "normalized",
+        "bounds": normalized_bounds(chart_artifact_plane, 1064.0, 721.0),
+        "source_bounds": [0.0, 0.0, 975.0, 701.0],
+    }
+    surface["overlay_viewport"] = copy.deepcopy(window_viewport)
+    surface["overlay_viewports"] = {
+        "window": window_viewport,
+        "chart": chart_viewport,
+    }
+    surface["overlay_geometry_revision"] = "exact-dual-target-geometry"
+
+    demand = next(
+        row for row in payload["overlays"] if row["id"] == "demand-current"
+    )
+    demand.update(
+        {
+            "bounds": [100.0, 200.0, 300.0, 400.0],
+            "coordinate_space": "chart",
+            "coordinate_units": "pixels",
+        }
+    )
+    support = next(
+        row for row in payload["overlays"] if row["id"] == "support-current"
+    )
+    support.update(
+        {
+            "bounds": [100.0, 200.0, 300.0, 400.0],
+            "points": [[100.0, 200.0], [300.0, 400.0]],
+            "line_points": [[100.0, 200.0], [300.0, 400.0]],
+            "coordinate_space": "chart",
+            "coordinate_units": "pixels",
+        }
+    )
+
+    def geometry(page: Page) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            page.evaluate(
+                """
+                () => {
+                  const image = document.querySelector('#surface-raw');
+                  const imageRect = image.getBoundingClientRect();
+                  const box = document.querySelector(
+                    '[data-overlay-id="demand-current"]'
+                  ).getBoundingClientRect();
+                  const points = document.querySelector(
+                    'polyline[data-overlay-id="support-current"]'
+                  ).getAttribute('points').split(' ').map(pair => (
+                    pair.split(',').map(Number)
+                  ));
+                  return {
+                    imageNaturalSize: [image.naturalWidth, image.naturalHeight],
+                    imageSpace: image.dataset.space,
+                    points,
+                    box: [
+                      (box.left - imageRect.left) / imageRect.width,
+                      (box.top - imageRect.top) / imageRect.height,
+                      box.width / imageRect.width,
+                      box.height / imageRect.height,
+                    ],
+                  };
+                }
+                """
+            ),
+        )
+
+    def assert_points(
+        actual: list[list[float]], expected: list[list[float]]
+    ) -> None:
+        assert len(actual) == len(expected)
+        for actual_point, expected_point in zip(actual, expected, strict=True):
+            assert actual_point == pytest.approx(expected_point, abs=1e-6)
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        viewport=(1440, 1000),
+        artifact_image_bytes={
+            "window": _surface_image_bytes(1859, 924),
+            "chart": _surface_image_bytes(1064, 721),
+        },
+    ) as page:
+        page.locator("#layers-all").click()
+        window_geometry = geometry(page)
+        assert window_geometry["imageNaturalSize"] == [1859, 924]
+        assert window_geometry["imageSpace"] == "window"
+        expected_window = (
+            (window_plane[0] + 100.0) / 1859.0,
+            (window_plane[1] + 200.0) / 924.0,
+            200.0 / 1859.0,
+            200.0 / 924.0,
+        )
+        for actual, expected in zip(
+            window_geometry["box"], expected_window, strict=True
+        ):
+            assert abs(float(actual) - expected) <= 0.003
+        assert_points(
+            window_geometry["points"], [[194.0, 364.0], [394.0, 564.0]]
+        )
+
+        page.locator("#frame-chart").click()
+        page.wait_for_function(
+            """
+            () => document.querySelector('#surface-raw').naturalWidth === 1064
+              && document.querySelector('#surface-raw').dataset.space === 'chart_artifact'
+            """
+        )
+        chart_geometry = geometry(page)
+        assert chart_geometry["imageNaturalSize"] == [1064, 721]
+        assert chart_geometry["imageSpace"] == "chart_artifact"
+        expected_chart = (
+            (chart_artifact_plane[0] + 100.0) / 1064.0,
+            (chart_artifact_plane[1] + 200.0) / 721.0,
+            200.0 / 1064.0,
+            200.0 / 721.0,
+        )
+        for actual, expected in zip(
+            chart_geometry["box"], expected_chart, strict=True
+        ):
+            assert abs(float(actual) - expected) <= 0.003
+        assert_points(
+            chart_geometry["points"], [[134.0, 210.0], [334.0, 410.0]]
+        )
 
 
 def test_mismatched_historical_overlay_is_not_drawn_on_the_current_frame(

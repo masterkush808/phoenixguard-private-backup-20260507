@@ -481,6 +481,8 @@ def test_canonical_launchers_own_and_certify_universal_source_controller() -> No
 
     assert "function Start-WindowsRegionCaptureChildProcess" in full_local
     assert "start_phoenixguard_windows_region_capture.py" in full_local
+    assert "restore_selected_chart.json" in full_local
+    assert "--restore-binding" in full_local
     assert "hotkey_registered" in full_local
     assert "--require-source-controller" in full_local
     assert "*start_phoenixguard_windows_region_capture.py*" in live_ready

@@ -1665,47 +1665,227 @@ def _pixel_rectangle_as_normalized(
     )
 
 
-def _overlay_viewport_contract(
+def _ordered_pixel_rectangle(value: object) -> list[float]:
+    bounds = _bounds(value)
+    if len(bounds) != 4:
+        return []
+    left, right = sorted((bounds[0], bounds[2]))
+    top, bottom = sorted((bounds[1], bounds[3]))
+    if right <= left or bottom <= top:
+        return []
+    return [left, top, right, bottom]
+
+
+def _rectangle_matches_dimensions(
+    rectangle: Sequence[float],
+    dimensions: tuple[float, float] | None,
+    *,
+    tolerance: float = 1.5,
+) -> bool:
+    if len(rectangle) != 4 or dimensions is None:
+        return False
+    width, height = dimensions
+    return bool(
+        width > 0.0
+        and height > 0.0
+        and abs((float(rectangle[2]) - float(rectangle[0])) - width) <= tolerance
+        and abs((float(rectangle[3]) - float(rectangle[1])) - height) <= tolerance
+    )
+
+
+def _rectangle_relative_to_plane(
+    rectangle: Sequence[float],
+    plane: Sequence[float],
+    *,
+    tolerance: float = 1.5,
+) -> list[float]:
+    if len(rectangle) != 4 or len(plane) != 4:
+        return []
+    plane_left, plane_top, plane_right, plane_bottom = map(float, plane)
+    left, top, right, bottom = map(float, rectangle)
+    plane_width = plane_right - plane_left
+    plane_height = plane_bottom - plane_top
+    if plane_width <= 0.0 or plane_height <= 0.0:
+        return []
+    if (
+        left < plane_left - tolerance
+        or top < plane_top - tolerance
+        or right > plane_right + tolerance
+        or bottom > plane_bottom + tolerance
+    ):
+        return []
+    return _strict_normalized_rectangle(
+        [
+            (left - plane_left) / plane_width,
+            (top - plane_top) / plane_height,
+            (right - plane_left) / plane_width,
+            (bottom - plane_top) / plane_height,
+        ]
+    )
+
+
+def _overlay_viewports_contract(
     payload: Mapping[str, Any],
     tracking_summary: Mapping[str, Any],
-) -> dict[str, object]:
-    """Describe where chart-image coordinates land on the full broker frame.
+) -> dict[str, dict[str, object]]:
+    """Publish exact chart-plane transforms for both operator surfaces.
 
-    Only a normalized display rectangle crosses the public boundary. Detector
-    provenance, window handles, raw image dimensions, and internal transforms
-    remain private.
+    Detector geometry is expressed on the inner chart-region plane.  That
+    plane is intentionally smaller than the study artifact (which retains
+    broker chrome) and the full broker capture.  Each target therefore needs
+    its own affine rectangle; treating either image as the detector plane
+    shifts and scales every mark.
     """
 
     artifact_integrity = _mapping(tracking_summary.get("artifact_integrity"))
     broker_source_lock = _mapping(tracking_summary.get("broker_source_lock"))
     selected_target = _mapping(broker_source_lock.get("selected_target"))
-    dimensions = _image_dimensions(
+    full_dimensions = _image_dimensions(
         artifact_integrity.get("full_window"),
         payload.get("locked_window"),
         selected_target.get("viewport"),
     )
+    study_dimensions = _image_dimensions(
+        artifact_integrity.get("chart"),
+        artifact_integrity.get("study_plane"),
+    )
+    chart = _mapping(payload.get("chart"))
+    scene_graph = _mapping(
+        payload.get("scene_graph")
+        or chart.get("scene_graph")
+        or payload.get("broker_scene_graph_v3")
+    )
+    broker_plane = _ordered_pixel_rectangle(scene_graph.get("broker_surface_bounds"))
+    chart_target = _ordered_pixel_rectangle(scene_graph.get("chart_region_bounds"))
+    chart_source = _ordered_pixel_rectangle(scene_graph.get("chart_region_chart_bounds"))
     focus_region = _mapping(tracking_summary.get("focus_region"))
-    normalized = _normalized_rectangle(focus_region.get("normalized_bbox"))
-    if not normalized:
-        normalized = _pixel_rectangle_as_normalized(
-            focus_region.get("pixel_bbox"),
-            dimensions,
+    focus_bounds = _ordered_pixel_rectangle(focus_region.get("pixel_bbox"))
+    chart_region = _mapping(
+        tracking_summary.get("chart_region")
+        or tracking_summary.get("display_region")
+    )
+    chart_region_bounds = _ordered_pixel_rectangle(
+        chart_region.get("pixel_bbox") or chart_region.get("bbox")
+    )
+
+    display_frame = _integer(
+        payload.get("display_frame_id"),
+        payload.get("frame_id"),
+        payload.get("frame_index"),
+    )
+    scene_frame = _integer(scene_graph.get("frame_id"))
+    scene_frame_aligned = not (display_frame > 0 and scene_frame > 0) or display_frame == scene_frame
+
+    exact_scene = bool(
+        _explicit_bool(scene_graph.get("valid")) is True
+        and scene_frame_aligned
+        and broker_plane
+        and chart_target
+        and chart_source
+        and _rectangle_matches_dimensions(broker_plane, full_dimensions)
+        and abs((chart_target[2] - chart_target[0]) - (chart_source[2] - chart_source[0])) <= 1.5
+        and abs((chart_target[3] - chart_target[1]) - (chart_source[3] - chart_source[1])) <= 1.5
+    )
+
+    # Prove that the scene transform and tracker crop describe the same plane.
+    # This prevents a future detector/study-artifact mix-up from crossing the
+    # public boundary merely because both rectangles happen to look valid.
+    if exact_scene and focus_bounds and chart_region_bounds:
+        composed_target = [
+            focus_bounds[0] + chart_region_bounds[0],
+            focus_bounds[1] + chart_region_bounds[1],
+            focus_bounds[0] + chart_region_bounds[2],
+            focus_bounds[1] + chart_region_bounds[3],
+        ]
+        exact_scene = all(
+            abs(composed_target[index] - chart_target[index]) <= 1.5
+            for index in range(4)
+        )
+    if exact_scene and chart_region_bounds:
+        exact_scene = bool(
+            abs((chart_region_bounds[2] - chart_region_bounds[0]) - (chart_source[2] - chart_source[0])) <= 1.5
+            and abs((chart_region_bounds[3] - chart_region_bounds[1]) - (chart_source[3] - chart_source[1])) <= 1.5
         )
 
-    # During an atomic frame hand-off the compact display state can be one
-    # frame ahead of the full study snapshot. The configured focus rectangle
-    # remains a valid display transform when the exact study focus is not yet
-    # present, provided that it is still enabled.
-    if not normalized:
+    window_bounds: list[float] = []
+    if exact_scene:
+        window_bounds = _rectangle_relative_to_plane(chart_target, broker_plane)
+
+    # If the scene graph is temporarily absent, compose the tracker-owned
+    # focus and inner-chart crops.  A plain focus rectangle is retained only
+    # as a compatibility fallback for older payloads that never declared a
+    # distinct inner chart plane.
+    if not window_bounds and focus_bounds and chart_region_bounds and full_dimensions:
+        composed_target = [
+            focus_bounds[0] + chart_region_bounds[0],
+            focus_bounds[1] + chart_region_bounds[1],
+            focus_bounds[0] + chart_region_bounds[2],
+            focus_bounds[1] + chart_region_bounds[3],
+        ]
+        window_bounds = _pixel_rectangle_as_normalized(composed_target, full_dimensions)
+    if not window_bounds:
+        normalized_focus = _strict_normalized_rectangle(
+            focus_region.get("normalized_bbox")
+        )
+        if not normalized_focus:
+            normalized_focus = _pixel_rectangle_as_normalized(
+                focus_region.get("pixel_bbox"),
+                full_dimensions,
+            )
+        window_bounds = normalized_focus
+
+    if not window_bounds:
         manual_focus = _mapping(payload.get("manual_focus_region"))
         if _explicit_bool(manual_focus.get("enabled")) is not False:
-            normalized = _normalized_rectangle(manual_focus.get("normalized_bbox"))
+            window_bounds = _strict_normalized_rectangle(
+                manual_focus.get("normalized_bbox")
+            )
 
+    focus_artifact_bounds: list[float] = []
+    if chart_region_bounds and study_dimensions:
+        source_dimensions = (
+            chart_source[2] - chart_source[0],
+            chart_source[3] - chart_source[1],
+        ) if exact_scene and chart_source else (
+            chart_region_bounds[2] - chart_region_bounds[0],
+            chart_region_bounds[3] - chart_region_bounds[1],
+        )
+        if _rectangle_matches_dimensions(chart_region_bounds, source_dimensions):
+            focus_artifact_bounds = _pixel_rectangle_as_normalized(
+                chart_region_bounds,
+                study_dimensions,
+            )
+
+    declared_source_bounds = (chart_source if exact_scene else []) or (
+        [
+            0.0,
+            0.0,
+            chart_region_bounds[2] - chart_region_bounds[0],
+            chart_region_bounds[3] - chart_region_bounds[1],
+        ]
+        if chart_region_bounds
+        else []
+    )
+    source_contract = (
+        {"source_bounds": declared_source_bounds}
+        if declared_source_bounds
+        else {}
+    )
     return {
-        "source_space": "chart",
-        "target_space": "window",
-        "coordinate_units": "normalized",
-        "bounds": normalized,
+        "window": {
+            "source_space": "chart",
+            "target_space": "window",
+            "coordinate_units": "normalized",
+            "bounds": window_bounds,
+            **source_contract,
+        },
+        "chart": {
+            "source_space": "chart",
+            "target_space": "chart_artifact",
+            "coordinate_units": "normalized",
+            "bounds": focus_artifact_bounds,
+            **source_contract,
+        },
     }
 
 
@@ -2359,13 +2539,19 @@ def _wgc_study_source_proves_identity_without_selector_v3(
     surface_guard = _mapping(source_lock.get("surface_guard"))
     guard_evidence = _mapping(surface_guard.get("evidence"))
     selected_target = _mapping(source_lock.get("selected_target"))
-    reason_codes = {
-        _text(value).upper()
-        for value in cast(Sequence[Any], source_lock.get("reason_codes", []))
-        if _text(value)
-    } if isinstance(source_lock.get("reason_codes"), Sequence) and not isinstance(
-        source_lock.get("reason_codes"), (str, bytes, bytearray)
-    ) else set()
+    reason_codes: set[str] = (
+        {
+            _text(value).upper()
+            for value in cast(Sequence[Any], source_lock.get("reason_codes", []))
+            if _text(value)
+        }
+        if isinstance(source_lock.get("reason_codes"), Sequence)
+        and not isinstance(
+            source_lock.get("reason_codes"),
+            (str, bytes, bytearray),
+        )
+        else set()
+    )
     expected_source_id = "windows-region-capture-v3"
     expected_source_type = "windows_graphics_capture_roi"
     expected_coordinate_space = "wgc_hwnd_roi_v1"
@@ -8537,12 +8723,13 @@ def build_operator_workspace_v1(
     chart_focus_url = (
         f"{surface_base}/latest-chart{surface_frame_query}" if surface_available else ""
     )
-    overlay_viewport = _overlay_viewport_contract(source, tracking_summary)
+    overlay_viewports = _overlay_viewports_contract(source, tracking_summary)
+    overlay_viewport = overlay_viewports["window"]
     surface_revisions = _surface_overlay_revision_contract(
         source,
         tracking_summary,
         market,
-        overlay_viewport,
+        overlay_viewports,
         overlays,
     )
     result: dict[str, object] = {
@@ -8570,6 +8757,7 @@ def build_operator_workspace_v1(
             "fallback_space": "chart",
             "focus_url": chart_focus_url,
             "overlay_viewport": overlay_viewport,
+            "overlay_viewports": overlay_viewports,
             "frame_id": display_frame,
             "updated_at": observed_at,
             **surface_revisions,

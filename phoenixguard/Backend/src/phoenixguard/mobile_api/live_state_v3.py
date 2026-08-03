@@ -230,10 +230,25 @@ def _chart_region_is_too_thin_for_focus(
     return bool(width < focus_width * 0.70 or height < focus_height * 0.42 or top_ratio > 0.30)
 
 
-def _plot_area(session: Mapping[str, Any], artifacts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _plot_area(
+    session: Mapping[str, Any],
+    artifacts: Mapping[str, Mapping[str, Any]],
+    *,
+    scene_graph: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     tracking = _mapping(session.get("tracking_summary"))
     chart_region = _mapping(tracking.get("chart_region") or tracking.get("display_region"))
-    pixel_bbox: object = chart_region.get("pixel_bbox") or chart_region.get("bbox")
+    scene = _mapping(scene_graph)
+    scene_plot = (
+        _bounds_list(scene.get("plot_area_chart_bounds"))
+        if _bool(scene.get("valid"), False)
+        else []
+    )
+    pixel_bbox: object = (
+        scene_plot
+        or chart_region.get("pixel_bbox")
+        or chart_region.get("bbox")
+    )
     if not isinstance(pixel_bbox, Sequence) or isinstance(pixel_bbox, (str, bytes, bytearray)):
         width = _float(artifacts.get("chart", {}).get("width"), 0.0)
         height = _float(artifacts.get("chart", {}).get("height"), 0.0)
@@ -247,25 +262,47 @@ def _plot_area(session: Mapping[str, Any], artifacts: Mapping[str, Mapping[str, 
     payload.update(
         {
             "bounds": bounds,
-            "source": _text(chart_region.get("source"), "tracker_chart_region"),
-            "confidence": _float(chart_region.get("confidence"), 0.0),
+            "source": (
+                "broker_scene_graph_v3"
+                if scene_plot
+                else _text(chart_region.get("source"), "tracker_chart_region")
+            ),
+            "confidence": (
+                1.0
+                if scene_plot and _bool(scene.get("valid"), False)
+                else _float(chart_region.get("confidence"), 0.0)
+            ),
             "coordinate_mode": "CHART_IMAGE_SPACE",
+            "coordinate_space": "chart",
             "manual_focus_region": _mapping(session.get("manual_focus_region")),
         }
     )
     return payload
 
 
-def _chart_transform(session: Mapping[str, Any], plot: Mapping[str, Any]) -> dict[str, Any]:
+def _chart_transform(
+    session: Mapping[str, Any],
+    plot: Mapping[str, Any],
+    *,
+    scene_graph: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     tracking = _mapping(session.get("tracking_summary"))
     raw = _mapping(tracking.get("chart_transform"))
+    scene = _mapping(scene_graph)
     frame_id = _int(session.get("frame_index"))
     transform_id = _text(raw.get("chart_transform_id") or raw.get("id"), f"ct_{_text(session.get('session_id'), 'session')}_{frame_id}")
     return {
         "chart_transform_id": transform_id,
         "frame_id": frame_id,
         "plot_area": dict(plot),
-        "coordinate_space": "FULL_BROKER_SURFACE_WITH_PLOT_AREA",
+        "coordinate_space": "CHART_REGION_TO_BROKER_SURFACE",
+        "chart_image_bounds": _bounds_list(
+            scene.get("chart_region_chart_bounds")
+        ),
+        "window_bounds": _bounds_list(scene.get("chart_region_bounds")),
+        "broker_surface_bounds": _bounds_list(
+            scene.get("broker_surface_bounds")
+        ),
     }
 
 
@@ -1690,29 +1727,39 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
         return _bool(value, default) if found else default
 
     capture_source = _mapping(session.get("capture_source_v3"))
-    source_claims = [
+    source_claims: list[Mapping[str, Any]] = [
         _mapping(session.get("broker_source")),
         _mapping(broker_surface.get("broker_source")),
         _mapping(tracking.get("broker_source")),
         _mapping(tracking_surface.get("broker_source")),
     ]
-    source_claim = next((source for source in source_claims if source), {})
-    source_locks = [
+    source_claim: Mapping[str, Any] = next(
+        (source for source in source_claims if source),
+        cast(Mapping[str, Any], {}),
+    )
+    source_locks: list[Mapping[str, Any]] = [
         _mapping(session.get("broker_source_lock")),
         _mapping(broker_surface.get("broker_source_lock")),
         _mapping(tracking.get("broker_source_lock")),
         _mapping(tracking_surface.get("broker_source_lock")),
     ]
-    source_lock = next((source for source in source_locks if source), {})
+    source_lock: Mapping[str, Any] = next(
+        (source for source in source_locks if source),
+        cast(Mapping[str, Any], {}),
+    )
     lock_evidence = _mapping(source_lock.get("evidence"))
     surface_guard = _mapping(source_lock.get("surface_guard"))
     reason_codes = {_text(item).upper() for item in _sequence(source_lock.get("reason_codes"))}
     source_type = _text(capture_source.get("source_type")).lower()
     coordinate_space = _text(capture_source.get("coordinate_space")).lower()
-    leased_source_contract = (source_type, coordinate_space) in {
-        ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
-        ("browser_tab_roi_capture", "edge_tab_roi_v1"),
-    }
+    # The selector-free operator identity proof currently exists only for the
+    # exact WGC lease.  Keep this title waiver on that same source contract so
+    # the live-state boundary cannot advertise browser-tab overlays that the
+    # operator/frontend boundary must subsequently reject.
+    leased_source_contract = (source_type, coordinate_space) == (
+        "windows_graphics_capture_roi",
+        "wgc_hwnd_roi_v1",
+    )
     title_optional_for_study = bool(
         leased_source_contract
         and _text(capture_source.get("state")).upper() == "LIVE"
@@ -1812,7 +1859,12 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
         "status": status_text or ("VALID" if valid else "UNKNOWN"),
         "wrong_surface": bool(wrong_surface),
         "url_valid": bool(url_valid),
-        "title_valid": title_requirement_satisfied,
+        # Preserve the raw validator result.  A study-only WGC lease may make
+        # the legacy title check optional, but that does not make an invalid
+        # title valid.  Consumers can inspect the two facts independently.
+        "title_valid": bool(title_valid),
+        "title_optional_for_study": bool(title_optional_for_study),
+        "title_requirement_satisfied": bool(title_requirement_satisfied),
         "pixel_fingerprint_valid": bool(pixel_fingerprint_valid),
     }
 
@@ -1826,12 +1878,24 @@ def _broker_source_block_reason(broker_source: Mapping[str, Any]) -> str:
         return ""
     invalid_fields = [
         label
-        for label, key in (
-            ("url", "url_valid"),
-            ("title", "title_valid"),
-            ("pixel_fingerprint", "pixel_fingerprint_valid"),
+        for label, valid in (
+            ("url", _bool(broker_source.get("url_valid"), True)),
+            (
+                "title",
+                _bool(
+                    broker_source.get(
+                        "title_requirement_satisfied",
+                        broker_source.get("title_valid"),
+                    ),
+                    True,
+                ),
+            ),
+            (
+                "pixel_fingerprint",
+                _bool(broker_source.get("pixel_fingerprint_valid"), True),
+            ),
         )
-        if not _bool(broker_source.get(key), True)
+        if not valid
     ]
     suffix = ", ".join(invalid_fields) if invalid_fields else "source lock"
     return f"broker source rejected: invalid {suffix}"
@@ -2592,10 +2656,14 @@ def build_live_state_v3(
     broker_source = _broker_source_summary(session)
     source_block_reason = _broker_source_block_reason(broker_source)
     artifact_refs = _artifact_refs(session, artifacts=artifacts, artifact_probe=artifact_probe)
-    plot = _plot_area(session, artifact_refs)
-    chart_transform = _chart_transform(session, plot)
     registry = build_market_object_registry_v3(session)
     scene_graph = build_broker_scene_graph_v3(session, artifacts=artifact_refs).as_dict()["scene_graph"]
+    plot = _plot_area(session, artifact_refs, scene_graph=scene_graph)
+    chart_transform = _chart_transform(
+        session,
+        plot,
+        scene_graph=scene_graph,
+    )
     display_overlay_artifact = artifact_refs["full-overlay"] if artifact_refs["full-overlay"]["exists"] else artifact_refs["overlay"]
     overlay_artifact_aligned, overlay_artifact_mismatch_reason, overlay_artifact_frame_id = _overlay_artifact_alignment(
         overlay_artifact=display_overlay_artifact,

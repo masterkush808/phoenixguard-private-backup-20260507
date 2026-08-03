@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -1030,6 +1031,7 @@ _PRIVATE_PROJECTION_SNAPSHOT_KEYS = frozenset(
         "memory_projection_predict",
         "micro_candle_forecast",
         "operator_overlay_snapshot_v1",
+        "operator_overlay_snapshot_v2",
         "operator_overlay_snapshot",
         "prediction_overlay",
         "scene_forecast_contribution",
@@ -1403,8 +1405,104 @@ def _strip_private_projection_snapshots(
 
 def _operator_overlay_snapshot_path(session_id: str) -> Path:
     return _direct_live_state_session_path(session_id).with_name(
-        "operator_overlay_snapshot_v1.json"
+        "operator_overlay_snapshot_v2.json"
     )
+
+
+def _operator_geometry_contract_id(payload: Mapping[str, object]) -> str:
+    """Identify the exact source and target planes behind public overlays."""
+
+    def safe_pixel_rectangle(value: object) -> list[float]:
+        if not isinstance(value, Sequence) or isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            return []
+        values = cast(Sequence[object], value)
+        if len(values) < 4:
+            return []
+        numbers: list[float] = []
+        for item in values[:4]:
+            if isinstance(item, bool) or item is None:
+                return []
+            try:
+                number = float(cast(Any, item))
+            except (TypeError, ValueError):
+                return []
+            if not math.isfinite(number):
+                return []
+            numbers.append(round(number, 6))
+        left, right = sorted((numbers[0], numbers[2]))
+        top, bottom = sorted((numbers[1], numbers[3]))
+        if right <= left or bottom <= top:
+            return []
+        return [left, top, right, bottom]
+
+    tracking = _mapping_to_plain_dict(payload.get("tracking_summary"))
+    chart = _mapping_to_plain_dict(payload.get("chart"))
+    scene = _mapping_to_plain_dict(
+        payload.get("scene_graph")
+        or chart.get("scene_graph")
+        or payload.get("broker_scene_graph_v3")
+    )
+    scene_basis = {
+        key: safe_pixel_rectangle(scene.get(key))
+        for key in (
+            "broker_surface_bounds",
+            "chart_region_bounds",
+            "chart_region_chart_bounds",
+        )
+    }
+    exact_scene = all(scene_basis.values())
+    focus = _mapping_to_plain_dict(tracking.get("focus_region"))
+    chart_region = _mapping_to_plain_dict(
+        tracking.get("chart_region") or tracking.get("display_region")
+    )
+    artifact_integrity = _mapping_to_plain_dict(
+        tracking.get("artifact_integrity")
+    )
+    manual_focus = _mapping_to_plain_dict(payload.get("manual_focus_region"))
+    focus_basis = {
+        "focus_pixel": safe_pixel_rectangle(focus.get("pixel_bbox")),
+        "focus_normalized": _safe_operator_normalized_rectangle(
+            focus.get("normalized_bbox")
+        ),
+        "chart_region_pixel": safe_pixel_rectangle(
+            chart_region.get("pixel_bbox") or chart_region.get("bbox")
+        ),
+        "manual_normalized": _safe_operator_normalized_rectangle(
+            manual_focus.get("normalized_bbox")
+        ),
+    }
+    if not exact_scene and not any(focus_basis.values()):
+        return ""
+    dimensions: dict[str, dict[str, float]] = {}
+    for key in ("full_window", "chart", "study_plane"):
+        raw = _mapping_to_plain_dict(artifact_integrity.get(key))
+        width = _epoch_float(raw.get("width"), 0.0)
+        height = _epoch_float(raw.get("height"), 0.0)
+        if width > 0.0 and height > 0.0:
+            dimensions[key] = {
+                "width": round(width, 6),
+                "height": round(height, 6),
+            }
+    basis = {
+        "frame_id": int(
+            _epoch_float(
+                payload.get("display_frame_id")
+                or payload.get("frame_id")
+                or payload.get("frame_index"),
+                0.0,
+            )
+        ),
+        "scene": scene_basis if exact_scene else {},
+        "focus": focus_basis,
+        "dimensions": dimensions,
+    }
+    digest = hashlib.sha256(
+        json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+    return f"geometry_{digest}"
 
 
 def _operator_overlay_lineage(payload: Mapping[str, object]) -> dict[str, object]:
@@ -1441,6 +1539,7 @@ def _operator_overlay_lineage(payload: Mapping[str, object]) -> dict[str, object
             payload.get("overlay_source_study_signature") or ""
         ).strip(),
         "state_version": int(_epoch_float(payload.get("state_version"), 0.0)),
+        "geometry_contract_id": _operator_geometry_contract_id(payload),
     }
 
 
@@ -1465,6 +1564,7 @@ def _operator_overlay_lineage_is_complete(lineage: Mapping[str, object]) -> bool
         == display_signature
         and str(lineage.get("overlay_source_study_signature") or "").strip()
         == study_signature
+        and str(lineage.get("geometry_contract_id") or "").strip()
     )
 
 
@@ -1486,6 +1586,7 @@ def _operator_overlay_lineage_matches(
             "study_surface_signature",
             "overlay_source_window_signature",
             "overlay_source_study_signature",
+            "geometry_contract_id",
         )
     )
 
@@ -1513,6 +1614,25 @@ def _safe_operator_normalized_rectangle(value: object) -> list[float]:
     if numbers[2] <= numbers[0] or numbers[3] <= numbers[1]:
         return []
     return numbers
+
+
+def _safe_operator_overlay_viewport(value: object) -> dict[str, object]:
+    viewport = _mapping_to_plain_dict(value)
+    bounds = _safe_operator_normalized_rectangle(viewport.get("bounds"))
+    if (
+        str(viewport.get("source_space") or "").strip().lower() != "chart"
+        or str(viewport.get("target_space") or "").strip().lower() != "window"
+        or str(viewport.get("coordinate_units") or "").strip().lower()
+        != "normalized"
+        or not bounds
+    ):
+        return {}
+    return {
+        "source_space": "chart",
+        "target_space": "window",
+        "coordinate_units": "normalized",
+        "bounds": bounds,
+    }
 
 
 def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
@@ -1698,7 +1818,7 @@ def _persist_operator_overlay_snapshot(
         all_overlays,
         lineage.get("frame_id"),
     )
-    viewport = _mapping_to_plain_dict(
+    viewport = _safe_operator_overlay_viewport(
         _mapping_to_plain_dict(operator_state.get("surface")).get("overlay_viewport")
     )
     surface = _mapping_to_plain_dict(operator_state.get("surface"))
@@ -1712,7 +1832,7 @@ def _persist_operator_overlay_snapshot(
     ):
         return None
     snapshot: dict[str, object] = {
-        "schema_version": "PG_OPERATOR_OVERLAY_SNAPSHOT_V1",
+        "schema_version": "PG_OPERATOR_OVERLAY_SNAPSHOT_V2",
         "session_id": str(session_id),
         "lineage": lineage,
         "overlay_viewport": {
@@ -1740,6 +1860,8 @@ def _persist_operator_overlay_snapshot(
 def _load_operator_overlay_snapshot(
     session_id: str,
     source: Mapping[str, object],
+    *,
+    expected_viewport: object = None,
 ) -> dict[str, object] | None:
     try:
         raw = json.loads(
@@ -1750,7 +1872,7 @@ def _load_operator_overlay_snapshot(
     if not isinstance(raw, Mapping):
         return None
     snapshot = dict(cast(Mapping[str, object], raw))
-    if snapshot.get("schema_version") != "PG_OPERATOR_OVERLAY_SNAPSHOT_V1":
+    if snapshot.get("schema_version") != "PG_OPERATOR_OVERLAY_SNAPSHOT_V2":
         return None
     if str(snapshot.get("session_id") or "") != str(session_id):
         return None
@@ -1767,6 +1889,13 @@ def _load_operator_overlay_snapshot(
     )
     if not exact_rows or len(exact_rows) != len(saved_rows):
         return None
+    saved_viewport = _safe_operator_overlay_viewport(
+        snapshot.get("overlay_viewport")
+    )
+    current_viewport = _safe_operator_overlay_viewport(expected_viewport)
+    if not saved_viewport or not current_viewport or saved_viewport != current_viewport:
+        return None
+    snapshot["overlay_viewport"] = saved_viewport
     snapshot["overlays"] = exact_rows
     return snapshot
 
@@ -5796,6 +5925,10 @@ def create_app(
                     "chart_transform_id",
                     "frame_id",
                     "plot_area",
+                    "chart_image_bounds",
+                    "window_bounds",
+                    "source_bounds",
+                    "target_bounds",
                     "broker_surface_bounds",
                     "chart_region_bounds",
                     "chart_region_chart_bounds",
@@ -7452,20 +7585,21 @@ def create_app(
             == "WAITING_FOR_NEW_FRAME"
             and visual_observation.get("new_visual_evidence") is not True
         )
+        current_surface = _mapping_to_plain_dict(operator_state.get("surface"))
         safe_snapshot = _load_operator_overlay_snapshot(
             requested_session_id,
             projection_source,
+            expected_viewport=current_surface.get("overlay_viewport"),
         )
         if waiting_for_new_frame:
             if safe_snapshot is not None:
                 operator_state["overlays"] = _stale_diagnostic_operator_overlays(
                     safe_snapshot.get("overlays")
                 )
-                surface = _mapping_to_plain_dict(operator_state.get("surface"))
-                surface["overlay_viewport"] = _mapping_to_plain_dict(
-                    safe_snapshot.get("overlay_viewport")
-                )
-                operator_state["surface"] = surface
+                # Saved geometry is recovery evidence, never transform
+                # authority.  Snapshot loading already proved it equals the
+                # current exact scene contract, so retain the freshly built
+                # surface and reuse only its same-frame diagnostic rows.
         else:
             current_lineage = _operator_overlay_lineage(
                 projection_source

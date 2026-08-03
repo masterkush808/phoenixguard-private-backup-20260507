@@ -2253,22 +2253,28 @@
       }
 
       .capture-source-control {
-        grid-template-columns: 1fr;
-        gap: 10px;
-        padding: 12px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+        padding: 8px 10px;
       }
 
       .capture-source-message {
-        grid-column: auto;
-        grid-row: auto;
+        display: none;
       }
 
       .capture-source-actions {
-        justify-content: stretch;
+        align-self: center;
+        justify-content: flex-end;
       }
 
       .capture-source-button {
-        flex: 1;
+        min-height: 32px;
+        padding: 0 8px;
+        font-size: 9px;
+      }
+
+      .capture-source-button[data-kind="kill"]:disabled {
+        display: none;
       }
 
       .decision-shell {
@@ -2278,6 +2284,10 @@
       .decision-brief-head {
         gap: 4px;
         margin-bottom: 8px;
+      }
+
+      .decision-brief-title {
+        display: none;
       }
 
       .decision-brief-title p {
@@ -3191,6 +3201,7 @@
       pendingImageFallbackSpace: "chart",
       pendingSurfaceSemanticIdentity: "",
       pendingSurfaceViewport: null,
+      pendingSurfaceFallbackViewport: null,
       pendingTriedFallback: false,
       queuedSurfacePayload: null,
       focusedOverlayId: "",
@@ -5150,6 +5161,37 @@
       renderStreamObservation(payload);
     }
 
+    function parseSurfaceViewport(value) {
+      const viewportPayload = safeObject(value);
+      const viewportBounds = safeList(viewportPayload.bounds).slice(0, 4).map(Number);
+      const sourceBoundsPayload = safeList(viewportPayload.source_bounds).slice(0, 4).map(Number);
+      const units = safeText(viewportPayload.coordinate_units, "normalized").toLowerCase();
+      if (
+        viewportBounds.length !== 4
+        || !viewportBounds.every(function (coordinate) { return Number.isFinite(coordinate); })
+        || viewportBounds[2] <= viewportBounds[0]
+        || viewportBounds[3] <= viewportBounds[1]
+        || (units === "normalized" && viewportBounds.some(function (coordinate) {
+          return coordinate < 0 || coordinate > 1;
+        }))
+      ) {
+        return null;
+      }
+      const sourceBounds = sourceBoundsPayload.length === 4
+        && sourceBoundsPayload.every(function (coordinate) { return Number.isFinite(coordinate); })
+        && sourceBoundsPayload[2] > sourceBoundsPayload[0]
+        && sourceBoundsPayload[3] > sourceBoundsPayload[1]
+        ? sourceBoundsPayload
+        : null;
+      return {
+        sourceSpace: safeText(viewportPayload.source_space, "chart").toLowerCase(),
+        targetSpace: safeText(viewportPayload.target_space, "window").toLowerCase(),
+        units: units,
+        bounds: viewportBounds,
+        sourceBounds: sourceBounds,
+      };
+    }
+
     function currentSurface(payload) {
       const surface = safeObject(payload.surface);
       const declaredPrimarySpace = safeText(surface.primary_space, "chart").toLowerCase() === "window" ? "window" : "chart";
@@ -5169,34 +5211,32 @@
           || (declaredFallbackSpace === "chart" ? declaredFallbackUrl : ""),
         ""
       );
-      const viewportPayload = safeObject(surface.overlay_viewport);
-      const viewportBounds = safeList(viewportPayload.bounds).slice(0, 4).map(Number);
-      const viewport = viewportBounds.length === 4
-        && viewportBounds.every(function (value) { return Number.isFinite(value); })
-        && viewportBounds[2] > viewportBounds[0]
-        && viewportBounds[3] > viewportBounds[1]
-        ? {
-            sourceSpace: safeText(viewportPayload.source_space, "chart").toLowerCase(),
-            targetSpace: safeText(viewportPayload.target_space, "window").toLowerCase(),
-            units: safeText(viewportPayload.coordinate_units, "normalized").toLowerCase(),
-            bounds: viewportBounds,
-          }
-        : null;
+      const exactViewports = safeObject(surface.overlay_viewports);
+      const legacyViewport = parseSurfaceViewport(surface.overlay_viewport);
+      // `overlay_viewport` is the original chart-to-window contract. Keep it
+      // as the window transform for older servers, but never reuse it for a
+      // focused chart artifact: that bitmap has its own origin and padding.
+      const windowViewport = parseSurfaceViewport(exactViewports.window) || legacyViewport;
+      const chartViewport = parseSurfaceViewport(exactViewports.chart);
+      const windowSpace = windowViewport ? windowViewport.targetSpace : "window";
+      const chartSpace = chartViewport ? chartViewport.targetSpace : "chart";
       if (state.frameMode === "chart") {
         return {
           primaryUrl: chartUrl || declaredPrimaryUrl,
           fallbackUrl: windowUrl || declaredFallbackUrl,
-          primarySpace: chartUrl ? "chart" : declaredPrimarySpace,
-          fallbackSpace: windowUrl ? "window" : declaredFallbackSpace,
-          viewport: viewport,
+          primarySpace: chartUrl ? chartSpace : declaredPrimarySpace,
+          fallbackSpace: windowUrl ? windowSpace : declaredFallbackSpace,
+          viewport: chartUrl ? chartViewport : null,
+          fallbackViewport: windowUrl ? windowViewport : null,
         };
       }
       return {
         primaryUrl: windowUrl || declaredPrimaryUrl,
         fallbackUrl: chartUrl || declaredFallbackUrl,
-        primarySpace: windowUrl ? "window" : declaredPrimarySpace,
-        fallbackSpace: chartUrl ? "chart" : declaredFallbackSpace,
-        viewport: viewport,
+        primarySpace: windowUrl ? windowSpace : declaredPrimarySpace,
+        fallbackSpace: chartUrl ? chartSpace : declaredFallbackSpace,
+        viewport: windowUrl ? windowViewport : null,
+        fallbackViewport: chartUrl ? chartViewport : null,
       };
     }
 
@@ -5291,6 +5331,7 @@
         state.pendingImageUrl = "";
         state.pendingImageFallbackUrl = "";
         state.pendingSurfaceSemanticIdentity = "";
+        state.pendingSurfaceFallbackViewport = null;
         state.imageUrl = "";
         state.imageFallbackUrl = "";
         state.imageSemanticIdentity = nextSemanticIdentity;
@@ -5345,6 +5386,7 @@
       state.pendingImageFallbackSpace = surface.fallbackSpace;
       state.pendingSurfaceSemanticIdentity = nextSemanticIdentity;
       state.pendingSurfaceViewport = surface.viewport;
+      state.pendingSurfaceFallbackViewport = surface.fallbackViewport;
       state.pendingTriedFallback = false;
       state.queuedSurfacePayload = null;
       // Keep the last committed image and its frame-matched geometry visible
@@ -5414,11 +5456,14 @@
         // The queued observation may refine the chart-to-window transform
         // without changing the already decoded bitmap. Commit its viewport
         // and the exact matched plane before projecting its geometry.
-        state.surfaceViewport = desiredSurface.viewport;
-        state.imageSpace = (
+        const queuedMatchedPrimary = (
           desiredSurface.primarySpace === state.imageSpace
           && desiredPrimaryUrl === state.imageUrl
-        )
+        );
+        state.surfaceViewport = queuedMatchedPrimary
+          ? desiredSurface.viewport
+          : desiredSurface.fallbackViewport;
+        state.imageSpace = queuedMatchedPrimary
           ? desiredSurface.primarySpace
           : desiredSurface.fallbackSpace;
       }
@@ -5437,6 +5482,7 @@
       if (!state.pendingTriedFallback && state.pendingImageFallbackUrl) {
         state.pendingTriedFallback = true;
         state.pendingImageSpace = state.pendingImageFallbackSpace;
+        state.pendingSurfaceViewport = state.pendingSurfaceFallbackViewport;
         els.surfaceImage.dataset.space = state.pendingImageSpace;
         els.surfaceImage.src = state.pendingImageFallbackUrl;
         updateVisualStatus("chart", "updating", "Loading the frame-matched fallback view");
@@ -6199,53 +6245,65 @@
       if (normalized && (inputX < 0 || inputX > 1 || inputY < 0 || inputY > 1)) {
         return null;
       }
+      const viewport = state.surfaceViewport;
+      if (viewport && viewport.units === "normalized" && Array.isArray(viewport.bounds)) {
+        const bounds = viewport.bounds;
+        const left = Number(bounds[0]);
+        const top = Number(bounds[1]);
+        const right = Number(bounds[2]);
+        const bottom = Number(bounds[3]);
+        const spanX = right - left;
+        const spanY = bottom - top;
+        if ([left, top, right, bottom, spanX, spanY].every(Number.isFinite) && spanX > 0 && spanY > 0) {
+          // An explicit source-to-artifact viewport is more precise than a
+          // coordinate-space name. This matters when an artifact contains a
+          // padded/cropped copy of a chart plane but both use a chart-like
+          // semantic name.
+          if (viewport.sourceSpace === overlaySpace && viewport.targetSpace === state.imageSpace) {
+            const sourceBounds = Array.isArray(viewport.sourceBounds) ? viewport.sourceBounds : null;
+            const sourceLeft = sourceBounds ? Number(sourceBounds[0]) : 0;
+            const sourceTop = sourceBounds ? Number(sourceBounds[1]) : 0;
+            const sourceWidth = sourceBounds
+              ? Number(sourceBounds[2]) - sourceLeft
+              : state.naturalWidth * spanX;
+            const sourceHeight = sourceBounds
+              ? Number(sourceBounds[3]) - sourceTop
+              : state.naturalHeight * spanY;
+            if (!normalized && (
+              inputX < sourceLeft || inputY < sourceTop
+              || inputX > sourceLeft + sourceWidth || inputY > sourceTop + sourceHeight
+            )) {
+              return null;
+            }
+            const sourceX = normalized ? inputX : (inputX - sourceLeft) / sourceWidth;
+            const sourceY = normalized ? inputY : (inputY - sourceTop) / sourceHeight;
+            const projected = [
+              (left + sourceX * spanX) * state.naturalWidth,
+              (top + sourceY * spanY) * state.naturalHeight,
+            ];
+            return pointIsOnSurface(projected) ? projected : null;
+          }
+          if (viewport.sourceSpace === state.imageSpace && viewport.targetSpace === overlaySpace) {
+            const targetWidth = state.naturalWidth / spanX;
+            const targetHeight = state.naturalHeight / spanY;
+            if (!normalized && (inputX < 0 || inputY < 0 || inputX > targetWidth || inputY > targetHeight)) {
+              return null;
+            }
+            const targetX = normalized ? inputX : inputX / targetWidth;
+            const targetY = normalized ? inputY : inputY / targetHeight;
+            const projected = [
+              (targetX - left) / spanX * state.naturalWidth,
+              (targetY - top) / spanY * state.naturalHeight,
+            ];
+            return pointIsOnSurface(projected) ? projected : null;
+          }
+        }
+      }
       if (overlaySpace === state.imageSpace) {
         const sameSpacePoint = normalized
           ? [inputX * state.naturalWidth, inputY * state.naturalHeight]
           : [inputX, inputY];
         return pointIsOnSurface(sameSpacePoint) ? sameSpacePoint : null;
-      }
-      const viewport = state.surfaceViewport;
-      if (!viewport || viewport.units !== "normalized" || !Array.isArray(viewport.bounds)) {
-        return null;
-      }
-      const bounds = viewport.bounds;
-      const left = Number(bounds[0]);
-      const top = Number(bounds[1]);
-      const right = Number(bounds[2]);
-      const bottom = Number(bounds[3]);
-      const spanX = right - left;
-      const spanY = bottom - top;
-      if (![left, top, right, bottom, spanX, spanY].every(Number.isFinite) || spanX <= 0 || spanY <= 0) {
-        return null;
-      }
-      if (viewport.sourceSpace === overlaySpace && viewport.targetSpace === state.imageSpace) {
-        const sourceWidth = state.naturalWidth * spanX;
-        const sourceHeight = state.naturalHeight * spanY;
-        if (!normalized && (inputX < 0 || inputY < 0 || inputX > sourceWidth || inputY > sourceHeight)) {
-          return null;
-        }
-        const sourceX = normalized ? inputX : inputX / sourceWidth;
-        const sourceY = normalized ? inputY : inputY / sourceHeight;
-        const projected = [
-          (left + sourceX * spanX) * state.naturalWidth,
-          (top + sourceY * spanY) * state.naturalHeight,
-        ];
-        return pointIsOnSurface(projected) ? projected : null;
-      }
-      if (viewport.sourceSpace === state.imageSpace && viewport.targetSpace === overlaySpace) {
-        const targetWidth = state.naturalWidth / spanX;
-        const targetHeight = state.naturalHeight / spanY;
-        if (!normalized && (inputX < 0 || inputY < 0 || inputX > targetWidth || inputY > targetHeight)) {
-          return null;
-        }
-        const targetX = normalized ? inputX : inputX / targetWidth;
-        const targetY = normalized ? inputY : inputY / targetHeight;
-        const projected = [
-          (targetX - left) / spanX * state.naturalWidth,
-          (targetY - top) / spanY * state.naturalHeight,
-        ];
-        return pointIsOnSurface(projected) ? projected : null;
       }
       return null;
     }
