@@ -6939,6 +6939,12 @@ def _public_capture_source_v3(value: Any, *, include_lease: bool = False) -> dic
     return public
 
 
+def public_capture_source_v3(value: Any) -> dict[str, Any]:
+    """Return the current public source contract without its private lease."""
+
+    return _public_capture_source_v3(value)
+
+
 def _external_evidence_lineage_v3(
     source: Mapping[str, Any] | None,
     *,

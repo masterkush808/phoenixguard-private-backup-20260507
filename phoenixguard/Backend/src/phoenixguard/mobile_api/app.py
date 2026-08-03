@@ -112,6 +112,7 @@ from .window_tracker import (
     ContinuousWindowTrackerService,
     model_council_packet_from_payload,
     model_council_study_packet_from_payload,
+    public_capture_source_v3,
 )
 
 
@@ -6497,6 +6498,37 @@ def create_app(
     def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
         public_payload = _strip_private_projection_snapshots(payload)
         public_payload.pop("live_visual_state", None)
+        # Geometry/model projections may remain cached while an external WGC
+        # or tab-capture transport advances over identical chart pixels. Merge
+        # only the bounded transport observation from the compact sidecar so
+        # the public source counter and freshness never freeze with geometry.
+        session_id = str(public_payload.get("session_id", "") or "").strip()
+        if session_id:
+            compact_path = _direct_live_state_compact_session_path(session_id)
+            try:
+                direct_value = json.loads(compact_path.read_text(encoding="utf-8"))
+            except Exception:
+                direct_value = None
+            if isinstance(direct_value, Mapping):
+                direct_payload = cast(Mapping[str, object], direct_value)
+                if str(direct_payload.get("session_id", session_id) or session_id) == session_id:
+                    direct_source = direct_payload.get("capture_source_v3")
+                    if isinstance(direct_source, Mapping):
+                        public_payload["capture_source_v3"] = public_capture_source_v3(
+                            direct_source
+                        )
+                    direct_observation = direct_payload.get("visual_observation_v3")
+                    if isinstance(direct_observation, Mapping):
+                        public_payload["visual_observation_v3"] = dict(
+                            cast(Mapping[str, object], direct_observation)
+                        )
+        capture_source = public_payload.get("capture_source_v3")
+        if isinstance(capture_source, Mapping):
+            # This also covers non-sidecar test/runtime paths and guarantees a
+            # cached private lease can never cross the compact public boundary.
+            public_payload["capture_source_v3"] = public_capture_source_v3(
+                capture_source
+            )
         # Internal projection snapshots are consumed behind narrow public DTO
         # boundaries and must never be serialized by the compact endpoint.
         existing_command_center = public_payload.get("decision_command_center")

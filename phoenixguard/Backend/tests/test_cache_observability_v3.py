@@ -2388,6 +2388,118 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
     assert payload["provider_status"]["compact_cache_previous_signature_reused_v3"] is True
 
 
+def test_compact_live_state_refreshes_transport_without_rebuilding_geometry(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(
+        mobile_app,
+        "_SHOOTER_HANDSHAKE_PATH",
+        tmp_path / "missing_shooter_handshake.json",
+    )
+    monkeypatch.setattr(mobile_app, "_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC", 300.0)
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000001_transport_window.png"
+    window.write_bytes(b"window")
+    now_epoch = time.time()
+    session_payload: dict[str, object] = {
+        "session_id": "pocket-live-8788",
+        "status": "external_frame_feed",
+        "tracking_enabled": False,
+        "capture_count": 1,
+        "frame_index": 1,
+        "display_frame_id": 1,
+        "overlay_frame_id": 1,
+        "model_vote_frame_id": 1,
+        "display_published_epoch": now_epoch,
+        "last_capture_epoch": now_epoch,
+        "last_window_path": str(window),
+        "last_display_window_path": str(window),
+        "last_display_surface_signature": "transport",
+        "overlay_source_window_signature": "transport",
+        "tracking_summary": {},
+        "latest_signal": {},
+        "capture_source_v3": {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state_revision": 1,
+            "state": "LIVE",
+            "fresh": True,
+            "decision_usable": True,
+            "source_id": "windows-region-capture-v3",
+            "source_generation": 1,
+            "source_type": "windows_graphics_capture_roi",
+            "coordinate_space": "wgc_hwnd_roi_v1",
+            "source_lease_id": "private-lease-must-not-be-public",
+            "last_frame_epoch": now_epoch,
+            "last_frame_id": 1,
+            "stream": {"last_frame_id": 1},
+        },
+        "visual_observation_v3": {
+            "status": "NEW_FRAME",
+            "transport_state": "LIVE",
+            "transport_fresh": True,
+            "study_update_state": "ADVANCED",
+            "new_visual_evidence": True,
+        },
+    }
+    (session_dir / "session.json").write_text(json.dumps(session_payload), encoding="utf-8")
+    compact_path = session_dir / "compact_live_state.json"
+    compact_path.write_text(json.dumps(session_payload), encoding="utf-8")
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 1,
+                "frame_index": 1,
+                "display_frame_id": 1,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "transport",
+                "overlay_source_window_signature": "transport",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    first = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
+    assert first.status_code == 200
+    assert first.json()["capture_source_v3"]["last_frame_id"] == 1
+    assert "source_lease_id" not in first.json()["capture_source_v3"]
+
+    for frame_id in (2, 3):
+        next_payload = json.loads(json.dumps(session_payload))
+        source = next_payload["capture_source_v3"]
+        source["state_revision"] = frame_id
+        source["last_frame_epoch"] = time.time()
+        source["last_frame_id"] = frame_id
+        source["stream"]["last_frame_id"] = frame_id
+        next_payload["visual_observation_v3"] = {
+            "status": "LIVE_FRAME_UNCHANGED",
+            "transport_state": "LIVE",
+            "transport_fresh": True,
+            "study_update_state": "UNCHANGED",
+            "new_visual_evidence": False,
+        }
+        compact_path.write_text(json.dumps(next_payload), encoding="utf-8")
+        response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["capture_source_v3"]["last_frame_id"] == frame_id
+        assert payload["capture_source_v3"]["fresh"] is True
+        assert "source_lease_id" not in payload["capture_source_v3"]
+        assert payload["visual_observation_v3"]["status"] == "LIVE_FRAME_UNCHANGED"
+
+
 def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(
     monkeypatch: Any,
     tmp_path: Path,
