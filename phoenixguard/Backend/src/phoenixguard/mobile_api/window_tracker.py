@@ -326,6 +326,63 @@ def _normalize_fx_market_candidate(text: Any) -> str:
     if not pair:
         return ""
     return f"{pair} OTC" if has_otc else pair
+
+
+def _complete_fx_market_candidate_v3(text: Any) -> str:
+    """Return only a complete FX identity, preserving an explicit OTC suffix."""
+
+    market = _normalize_fx_market_candidate(text)
+    return market if re.fullmatch(r"[A-Z]{3}/[A-Z]{3}(?: OTC)?", market) else ""
+
+
+def _identity_text_fx_candidates_v3(text: Any) -> list[str]:
+    """Extract boundary-delimited FX symbols from a window/chart identity string."""
+
+    raw = re.sub(r"\s+", " ", str(text or "").upper()).strip()
+    if not raw:
+        return []
+    codes = "|".join(sorted(_FX_CURRENCY_CODES))
+    pattern = re.compile(
+        rf"(?<![A-Z])({codes})\s*(?:[/._:\-]\s*)?({codes})(?:\s+(OTC)|\s*(OTC))?(?![A-Z])"
+    )
+    candidates: list[str] = []
+    for match in pattern.finditer(raw):
+        left, right = match.group(1), match.group(2)
+        if left == right:
+            continue
+        market = f"{left}/{right}"
+        if match.group(3) or match.group(4):
+            market += " OTC"
+        if market not in candidates:
+            candidates.append(market)
+    return candidates
+
+
+def _identity_text_timeframe_candidates_v3(text: Any) -> list[str]:
+    """Extract supported chart intervals without interpreting arbitrary numbers."""
+
+    raw = str(text or "").upper()
+    if not raw:
+        return []
+    aliases = {
+        "1M": "M1",
+        "3M": "M3",
+        "5M": "M5",
+        "15M": "M15",
+        "30M": "M30",
+        "1H": "H1",
+        "4H": "H4",
+        "1D": "D1",
+    }
+    labels: list[str] = []
+    for token in re.findall(
+        r"(?<![A-Z0-9])(?:M1|M3|M5|M15|M30|H1|H4|D1|1M|3M|5M|15M|30M|1H|4H|1D)(?![A-Z0-9])",
+        raw,
+    ):
+        label = aliases.get(token, token)
+        if label in _TIMEFRAME_LABELS and label not in labels:
+            labels.append(label)
+    return labels
 _FIXED_BROKER_AMOUNT = "5"
 _BROKER_AMOUNT_POLICY = "preserve_visible_broker_amount"
 _HIGH_FREQUENCY_LANE = "HIGH_FREQUENCY_TWO_CANDLE"
@@ -6295,6 +6352,239 @@ def _external_frame_source_lock_v3(
     }
 
 
+def _external_wgc_broker_identity_attestation_v3(
+    source: Mapping[str, Any],
+    source_lock: Mapping[str, Any],
+    identity_surface: Mapping[str, Any],
+    *,
+    window_signature: str,
+    capture_epoch: float,
+) -> dict[str, Any]:
+    """Attest chart identity read from the exact leased WGC frame.
+
+    This proof is private to the in-process study call. It lets the full selected
+    surface provide instrument identity when the derived candle plane excludes
+    the chart header. The reader is deliberately broker-agnostic; authority
+    still comes only from the exact WGC lease, lock, pixel signature, and capture
+    epoch, and the study source never becomes click-safe.
+    """
+
+    source_row = _mapping_to_dict(source)
+    metadata = _mapping_to_dict(source_row.get("metadata", {}))
+    lock_row = _mapping_to_dict(source_lock)
+    lock_evidence = _mapping_to_dict(lock_row.get("evidence", {}))
+    surface = _mapping_to_dict(identity_surface)
+    source_id = str(source_row.get("source_id", "") or "").strip()
+    sequence_id = str(source_row.get("sequence_id", "") or "").strip()
+    source_type = str(source_row.get("source_type", "") or "").strip()
+    coordinate_space = str(source_row.get("coordinate_space", "") or "").strip()
+    source_generation = int(_float_or(source_row.get("source_generation"), 0.0) or 0)
+    source_lease_id = str(metadata.get("source_lease_id", "") or "").strip()
+    reason_codes = {
+        str(item).strip()
+        for item in cast(Sequence[Any], lock_row.get("reason_codes", []))
+        if str(item).strip()
+    }
+    exact_wgc_lease = bool(
+        source_type == "windows_graphics_capture_roi"
+        and coordinate_space == "wgc_hwnd_roi_v1"
+        and source_id == "windows-region-capture-v3"
+        and sequence_id
+        and source_generation > 0
+        and source_lease_id
+        and bool(lock_row.get("valid", False))
+        and str(lock_row.get("status", "") or "").upper() == "VALID"
+        and bool(lock_row.get("broker_source_locked", False))
+        and _broker_source_lock_is_study_only(lock_row)
+        and "EXTERNAL_FRAME_FEED_LOCKED" in reason_codes
+        and "CHART_STUDY_SOURCE_LOCKED" in reason_codes
+        and str(lock_evidence.get("source_id", "") or "").strip() == source_id
+        and str(lock_evidence.get("sequence_id", "") or "").strip() == sequence_id
+        and str(lock_evidence.get("source_type", "") or "").strip() == source_type
+        and str(lock_evidence.get("coordinate_space", "") or "").strip()
+        == coordinate_space
+    )
+    normalized_signature = str(window_signature or "").strip()
+    same_frame_surface = bool(
+        normalized_signature
+        and str(lock_row.get("broker_pixel_fingerprint", "") or "").strip()
+        == normalized_signature
+        and str(surface.get("broker_surface_hash", "") or "").strip()
+        == normalized_signature
+    )
+    market = _complete_fx_market_candidate_v3(surface.get("detected_market", ""))
+    timeframe = str(surface.get("detected_timeframe", "") or "").strip().upper()
+    market_confidence = _clip01(surface.get("market_confidence", 0.0)) if market else 0.0
+    timeframe_confidence = _clip01(surface.get("timeframe_confidence", 0.0))
+    complete_pair = bool(market)
+    recognized_timeframe = timeframe in _TIMEFRAME_LABELS
+    if not (
+        exact_wgc_lease
+        and same_frame_surface
+        and not bool(surface.get("identity_conflict", False))
+        and complete_pair
+        and recognized_timeframe
+        and float(capture_epoch or 0.0) > 0.0
+    ):
+        return {}
+
+    attestation_basis = "|".join(
+        (
+            source_id,
+            sequence_id,
+            str(source_generation),
+            normalized_signature,
+            market,
+            timeframe,
+        )
+    )
+    return {
+        "schema_version": "PG_WGC_BROKER_IDENTITY_ATTESTATION_V3",
+        "attestation_id": hashlib.sha256(
+            attestation_basis.encode("utf-8", errors="ignore")
+        ).hexdigest()[:24],
+        "source_verified": True,
+        "study_source_only": True,
+        "broker_click_safe": False,
+        "source_type": source_type,
+        "coordinate_space": coordinate_space,
+        "source_id": source_id,
+        "sequence_id": sequence_id,
+        "source_generation": source_generation,
+        "source_frame_signature": normalized_signature,
+        "capture_epoch": float(capture_epoch),
+        "market": market,
+        "market_confidence": market_confidence,
+        "market_source": str(
+            surface.get("market_source", "chart_header_identity")
+            or "chart_header_identity"
+        ),
+        "timeframe": timeframe,
+        "timeframe_confidence": timeframe_confidence,
+        "timeframe_source": str(
+            surface.get("timeframe_source", "chart_header_identity")
+            or "chart_header_identity"
+        ),
+    }
+
+
+def _reconcile_wgc_broker_identity_attestation_v3(
+    market_selector: Mapping[str, Any],
+    timeframe_selector: Mapping[str, Any],
+    session_payload: Mapping[str, Any],
+    execution_controls: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Reconcile a same-frame WGC identity proof with chart-plane selectors."""
+
+    market_row = _mapping_to_dict(market_selector)
+    timeframe_row = _mapping_to_dict(timeframe_selector)
+    attestation = _mapping_to_dict(
+        session_payload.get("_broker_identity_attestation_v3", {})
+    )
+    capture_epoch = _float_or(
+        session_payload.get("_capture_started_epoch_v3"),
+        0.0,
+    )
+    attested_epoch = _float_or(attestation.get("capture_epoch"), 0.0)
+    attested_market = _complete_fx_market_candidate_v3(attestation.get("market", ""))
+    attested_timeframe = str(attestation.get("timeframe", "") or "").strip().upper()
+    min_market_confidence = _clip01(
+        execution_controls.get("min_market_confidence", 0.42)
+    )
+    min_timeframe_confidence = _clip01(
+        execution_controls.get("min_timeframe_confidence", 0.42)
+    )
+    attested_market_confidence = _clip01(attestation.get("market_confidence", 0.0))
+    attested_timeframe_confidence = _clip01(
+        attestation.get("timeframe_confidence", 0.0)
+    )
+    proof_valid = bool(
+        attestation.get("schema_version")
+        == "PG_WGC_BROKER_IDENTITY_ATTESTATION_V3"
+        and attestation.get("source_verified") is True
+        and attestation.get("study_source_only") is True
+        and attestation.get("broker_click_safe") is False
+        and str(attestation.get("source_type", "") or "")
+        == "windows_graphics_capture_roi"
+        and str(attestation.get("coordinate_space", "") or "")
+        == "wgc_hwnd_roi_v1"
+        and str(attestation.get("attestation_id", "") or "").strip()
+        and str(attestation.get("source_frame_signature", "") or "").strip()
+        and capture_epoch > 0.0
+        and abs(attested_epoch - capture_epoch) <= 0.001
+        and bool(attested_market)
+        and attested_timeframe in _TIMEFRAME_LABELS
+        and attested_market_confidence >= min_market_confidence
+        and attested_timeframe_confidence >= min_timeframe_confidence
+    )
+    if not proof_valid:
+        return market_row, timeframe_row
+
+    current_market = _complete_fx_market_candidate_v3(market_row.get("value", ""))
+    current_timeframe = str(timeframe_row.get("value", "") or "").strip().upper()
+    current_market_root = re.sub(r"\s+OTC$", "", current_market).strip()
+    attested_market_root = re.sub(r"\s+OTC$", "", attested_market).strip()
+    current_market_pending = bool(
+        market_row.get("market_selector_rebind_required", False)
+        or market_row.get("studying_new_pair", False)
+    )
+    market_conflict = bool(
+        current_market
+        and current_market_root
+        and (
+            current_market_root != attested_market_root
+            or (
+                current_market != attested_market
+                and not current_market_pending
+            )
+        )
+    )
+    timeframe_conflict = bool(
+        current_timeframe and current_timeframe != attested_timeframe
+    )
+    if market_conflict or timeframe_conflict:
+        market_row["market_selector_rebind_required"] = True
+        market_row["studying_new_pair"] = True
+        market_row["broker_identity_attestation_conflict"] = True
+        market_row["broker_identity_attestation_id"] = str(
+            attestation.get("attestation_id", "") or ""
+        )
+        timeframe_row["broker_identity_attestation_conflict"] = True
+        return market_row, timeframe_row
+
+    identity_was_pending = bool(
+        market_row.get("market_selector_rebind_required", False)
+        or market_row.get("studying_new_pair", False)
+        or not current_market
+    )
+    market_row.update(
+        {
+            "value": attested_market,
+            "source": "same_frame_wgc_broker_identity",
+            "confidence": attested_market_confidence,
+            "market_selector_rebind_required": False,
+            "studying_new_pair": False,
+            "market_selector_identity_rebound": identity_was_pending,
+            "broker_identity_attestation_conflict": False,
+            "broker_identity_attestation_id": str(
+                attestation.get("attestation_id", "") or ""
+            ),
+        }
+    )
+    timeframe_row.update(
+        {
+            "value": attested_timeframe,
+            "source": "same_frame_wgc_broker_identity",
+            "confidence": attested_timeframe_confidence,
+            "broker_identity_attestation_conflict": False,
+            "broker_identity_attestation_id": str(
+                attestation.get("attestation_id", "") or ""
+            ),
+        }
+    )
+    return market_row, timeframe_row
+
+
 def _browser_family(title: Any) -> str:
     lowered = str(title or "").strip().lower()
     compact = _compact_text(lowered)
@@ -9877,6 +10167,14 @@ class TrackingStudy:
 
 
 class WindowTrackingAdapter(Protocol):
+    def probe_chart_identity_v3(
+        self,
+        image: Image.Image,
+        *,
+        source: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ...
+
     def study(self, image: Image.Image, *, session_payload: Mapping[str, Any] | None = None) -> TrackingStudy:
         ...
 
@@ -13480,6 +13778,147 @@ class PhoenixGuardWindowTrackingAdapter:
     ) -> None:
         self._draw_regression_line(draw, candles, color, offset=offset, bounds=bounds)
 
+    def probe_chart_identity_v3(
+        self,
+        image: Image.Image,
+        *,
+        source: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Read pair/timeframe identity from any leased chart surface.
+
+        Visual selectors remain the strongest evidence. A WGC producer may also
+        supply the selected window's identity text (for example a TradingView
+        title); that lineage can fill a header excluded by the derived candle
+        plane, but any pair-root or timeframe disagreement fails closed.
+        """
+
+        surface = image.convert("RGB")
+        source_row = _mapping_to_dict(source)
+        metadata = _mapping_to_dict(source_row.get("metadata", {}))
+        window_identity = _mapping_to_dict(metadata.get("window", {}))
+        try:
+            visual_timeframe = _mapping_to_dict(
+                self._detect_timeframe_selector(surface)
+            )
+            visual_market = _mapping_to_dict(
+                self._detect_market_selector(
+                    surface,
+                    timeframe_selector=visual_timeframe,
+                )
+            )
+        except Exception:
+            LOGGER.debug("Chart identity visual probe failed.", exc_info=True)
+            visual_timeframe = {}
+            visual_market = {}
+
+        visual_market_value = _complete_fx_market_candidate_v3(
+            visual_market.get("value", "")
+        )
+        visual_timeframe_value = str(
+            visual_timeframe.get("value", "") or ""
+        ).strip().upper()
+        if visual_timeframe_value not in _TIMEFRAME_LABELS:
+            visual_timeframe_value = ""
+
+        identity_text_rows: tuple[tuple[str, Any, float], ...] = (
+            ("source_symbol", source_row.get("symbol", ""), 0.98),
+            ("metadata_symbol", metadata.get("symbol", ""), 0.94),
+            ("metadata_chart_title", metadata.get("chart_title", ""), 0.78),
+            ("window_title", window_identity.get("title", ""), 0.72),
+            ("display_name", metadata.get("display_name", ""), 0.68),
+        )
+        lineage_markets: list[tuple[str, str, float]] = []
+        for source_name, text_value, confidence in identity_text_rows:
+            for candidate in _identity_text_fx_candidates_v3(text_value):
+                if not any(row[1] == candidate for row in lineage_markets):
+                    lineage_markets.append((source_name, candidate, confidence))
+
+        timeframe_text_rows: tuple[tuple[str, Any, float], ...] = (
+            ("source_timeframe", source_row.get("timeframe", ""), 0.98),
+            ("metadata_timeframe", metadata.get("timeframe", ""), 0.94),
+            ("metadata_chart_title", metadata.get("chart_title", ""), 0.78),
+            ("window_title", window_identity.get("title", ""), 0.72),
+            ("display_name", metadata.get("display_name", ""), 0.68),
+        )
+        lineage_timeframes: list[tuple[str, str, float]] = []
+        for source_name, text_value, confidence in timeframe_text_rows:
+            for candidate in _identity_text_timeframe_candidates_v3(text_value):
+                if not any(row[1] == candidate for row in lineage_timeframes):
+                    lineage_timeframes.append((source_name, candidate, confidence))
+
+        market_roots = {
+            re.sub(r"\s+OTC$", "", candidate).strip()
+            for _source_name, candidate, _confidence in lineage_markets
+        }
+        if visual_market_value:
+            market_roots.add(
+                re.sub(r"\s+OTC$", "", visual_market_value).strip()
+            )
+        timeframe_values = {
+            candidate
+            for _source_name, candidate, _confidence in lineage_timeframes
+        }
+        if visual_timeframe_value:
+            timeframe_values.add(visual_timeframe_value)
+        identity_conflict = bool(len(market_roots) > 1 or len(timeframe_values) > 1)
+
+        market_value = visual_market_value
+        market_source = str(
+            visual_market.get("source", "visual_chart_header")
+            or "visual_chart_header"
+        )
+        market_confidence = (
+            _clip01(visual_market.get("confidence", 0.0))
+            if visual_market_value
+            else 0.0
+        )
+        if not market_value and lineage_markets:
+            market_source, market_value, market_confidence = max(
+                lineage_markets,
+                key=lambda row: float(row[2]),
+            )
+
+        timeframe_value = visual_timeframe_value
+        timeframe_source = str(
+            visual_timeframe.get("source", "visual_chart_header")
+            or "visual_chart_header"
+        )
+        timeframe_confidence = (
+            _clip01(visual_timeframe.get("confidence", 0.0))
+            if visual_timeframe_value
+            else 0.0
+        )
+        if not timeframe_value and lineage_timeframes:
+            timeframe_source, timeframe_value, timeframe_confidence = max(
+                lineage_timeframes,
+                key=lambda row: float(row[2]),
+            )
+
+        return {
+            "schema_version": "PG_CHART_IDENTITY_PROBE_V3",
+            "detected_market": market_value if not identity_conflict else "",
+            "market_source": market_source,
+            "market_confidence": market_confidence if not identity_conflict else 0.0,
+            "market_bbox": list(
+                cast(Sequence[Any], visual_market.get("bbox", []))
+            )[:4],
+            "detected_timeframe": timeframe_value if not identity_conflict else "",
+            "timeframe_source": timeframe_source,
+            "timeframe_confidence": (
+                timeframe_confidence if not identity_conflict else 0.0
+            ),
+            "timeframe_bbox": list(
+                cast(Sequence[Any], visual_timeframe.get("bbox", []))
+            )[:4],
+            "identity_ready": bool(
+                not identity_conflict and market_value and timeframe_value
+            ),
+            "identity_conflict": identity_conflict,
+            "study_source_only": True,
+            "broker_click_safe": False,
+            "broker_surface_hash": _surface_signature(surface),
+        }
+
     @cached_property
     def _timeframe_template_bank(self) -> dict[str, list[ArrayND]]:
         try:
@@ -14203,6 +14642,14 @@ class PhoenixGuardWindowTrackingAdapter:
                 market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
                 market_selector["market_selector_visual_changed"] = False
                 market_selector["market_selector_rebind_required"] = False
+        market_selector, timeframe_selector = (
+            _reconcile_wgc_broker_identity_attestation_v3(
+                market_selector,
+                timeframe_selector,
+                selector_session_payload,
+                selector_execution_controls,
+            )
+        )
         market_selector["market_normalizer_version"] = _FX_MARKET_NORMALIZER_VERSION
         mark_study_stage("detect_selectors")
         cached_chart_bbox_enabled = (
@@ -29371,6 +29818,7 @@ class ContinuousWindowTrackerService:
         selection_id: str,
         display_name: str,
         coordinate_space: str,
+        expected_source_control: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_source_id = str(source_id or "").strip()
         normalized_sequence_id = str(sequence_id or "").strip()
@@ -29399,12 +29847,93 @@ class ContinuousWindowTrackerService:
                 f"{normalized_source_type} must use coordinate_space={expected_space}."
             )
 
+        conditional_claim = expected_source_control is not None
+        expected_source = (
+            dict(cast(Mapping[str, Any], expected_source_control))
+            if isinstance(expected_source_control, Mapping)
+            else {}
+        )
+        if conditional_claim:
+            required_fence_fields = {
+                "state_revision",
+                "state",
+                "source_id",
+                "source_generation",
+                "source_type",
+                "coordinate_space",
+                "selection_id",
+                "sequence_id",
+            }
+            if not required_fence_fields.issubset(expected_source):
+                raise ValueError(
+                    "A conditional source claim requires the complete prior source-control fence."
+                )
+            try:
+                expected_state_revision = int(expected_source["state_revision"])
+                expected_source_generation = int(expected_source["source_generation"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "The conditional source-control revision and generation must be integers."
+                ) from exc
+            if expected_state_revision < 0 or expected_source_generation < 0:
+                raise ValueError(
+                    "The conditional source-control revision and generation cannot be negative."
+                )
+        else:
+            expected_state_revision = -1
+            expected_source_generation = -1
+
         normalized_session_id = _slugify(str(session_id or "").strip(), "external-frame-feed")
-        self._stop_worker(normalized_session_id)
+        # An ordinary operator-selected source intentionally supersedes the
+        # previous capture path, so preserve its existing stop-before-claim
+        # behavior. Recovery claims cannot stop anything until their compare-
+        # and-swap predicate has succeeded under the tracker lock.
+        if not conditional_claim:
+            self._stop_worker(normalized_session_id)
         now_epoch = _now_epoch()
         with self._lock:
             payload = self._require_session(normalized_session_id)
             previous = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+            if conditional_claim:
+                current_public = _public_capture_source_v3(previous)
+                expected_state = str(expected_source.get("state", "") or "").strip().upper()
+                if expected_state == "KILLED":
+                    raise ExternalSourceLeaseError(
+                        status_code=410,
+                        reason_code="SOURCE_KILLED",
+                        message=(
+                            "This chart source was stopped. Select the chart again instead of "
+                            "recovering its old binding."
+                        ),
+                    )
+                exact_prior_source = bool(
+                    expected_state in {"NO_SOURCE", "VALIDATING", "LIVE", "STALE"}
+                    and expected_state_revision
+                    == int(current_public.get("state_revision", 0) or 0)
+                    and expected_state
+                    == str(current_public.get("state", "") or "").strip().upper()
+                    and str(expected_source.get("source_id", "") or "").strip()
+                    == str(current_public.get("source_id", "") or "").strip()
+                    and expected_source_generation
+                    == int(current_public.get("source_generation", 0) or 0)
+                    and str(expected_source.get("source_type", "") or "").strip()
+                    == str(current_public.get("source_type", "") or "").strip()
+                    and str(expected_source.get("coordinate_space", "") or "").strip()
+                    == str(current_public.get("coordinate_space", "") or "").strip()
+                    and str(expected_source.get("selection_id", "") or "").strip()
+                    == str(current_public.get("selection_id", "") or "").strip()
+                    and str(expected_source.get("sequence_id", "") or "").strip()
+                    == str(current_public.get("sequence_id", "") or "").strip()
+                )
+                if not exact_prior_source:
+                    raise ExternalSourceLeaseError(
+                        status_code=409,
+                        reason_code="SOURCE_RECOVERY_RACE",
+                        message=(
+                            "The chart source changed after recovery observed it; the competing "
+                            "source remains authoritative."
+                        ),
+                    )
             source_generation = int(previous.get("source_generation", 0) or 0) + 1
             source_lease_id = secrets.token_urlsafe(32)
             source_state = {
@@ -36422,6 +36951,93 @@ class ContinuousWindowTrackerService:
             )
             self._prune_session_artifacts(artifact_dir)
             return
+        prestudy_broker_identity_attestation: dict[str, Any] = {}
+        if (
+            using_external_frame
+            and not using_local_cpu_stream_frame
+            and str(external_frame_source.get("source_type", "") or "")
+            == "windows_graphics_capture_roi"
+            and str(external_frame_source.get("coordinate_space", "") or "")
+            == "wgc_hwnd_roi_v1"
+        ):
+            previous_tracking_identity = _mapping_to_dict(
+                payload.get("tracking_summary", {})
+            )
+            previous_signal_identity = _mapping_to_dict(
+                payload.get("latest_signal", {})
+            )
+            market_confirmations = [
+                bool(row["market_identity_confirmed"])
+                for row in (
+                    previous_tracking_identity,
+                    previous_signal_identity,
+                )
+                if "market_identity_confirmed" in row
+            ]
+            timeframe_confirmations = [
+                bool(row["timeframe_identity_confirmed"])
+                for row in (
+                    previous_tracking_identity,
+                    previous_signal_identity,
+                )
+                if "timeframe_identity_confirmed" in row
+            ]
+            identity_pending = bool(
+                previous_tracking_identity.get(
+                    "market_selector_rebind_required",
+                    False,
+                )
+                or previous_signal_identity.get(
+                    "market_selector_rebind_required",
+                    False,
+                )
+                or previous_tracking_identity.get(
+                    "market_selector_studying_new_pair",
+                    False,
+                )
+                or previous_signal_identity.get(
+                    "market_selector_studying_new_pair",
+                    False,
+                )
+                or not market_confirmations
+                or not all(market_confirmations)
+                or not timeframe_confirmations
+                or not all(timeframe_confirmations)
+            )
+            if identity_pending:
+                try:
+                    identity_surface = self.tracking_adapter.probe_chart_identity_v3(
+                        window_image,
+                        source=external_frame_source,
+                    )
+                    prestudy_broker_identity_attestation = (
+                        _external_wgc_broker_identity_attestation_v3(
+                            external_frame_source,
+                            broker_source_lock,
+                            identity_surface,
+                            window_signature=window_signature,
+                            capture_epoch=capture_started_epoch,
+                        )
+                    )
+                    if prestudy_broker_identity_attestation:
+                        identity_surface["broker_source_lock"] = dict(
+                            broker_source_lock
+                        )
+                        identity_surface["broker_source"] = dict(
+                            broker_source_summary
+                        )
+                        identity_surface["state"] = "study_source_only"
+                        identity_surface["study_source_only"] = True
+                        identity_surface["broker_click_safe"] = False
+                        identity_surface["controls_ready"] = False
+                        payload["broker_surface"] = identity_surface
+                except Exception:
+                    LOGGER.debug(
+                        "Same-frame WGC broker identity probe failed for %s.",
+                        session_id,
+                        exc_info=True,
+                    )
+                mark_stage("prestudy_wgc_broker_identity")
         study: TrackingStudy | None = None
         error_message = ""
         try:
@@ -36432,6 +37048,10 @@ class ContinuousWindowTrackerService:
             # epoch used to attest a resolver-proven boundary straddle; it is
             # never persisted or relabeled directly as a candle close.
             study_payload["_capture_started_epoch_v3"] = capture_started_epoch
+            if prestudy_broker_identity_attestation:
+                study_payload["_broker_identity_attestation_v3"] = dict(
+                    prestudy_broker_identity_attestation
+                )
             study = self.tracking_adapter.study(study_surface_image, session_payload=study_payload)
             mark_stage("tracker_study")
         except Exception as exc:

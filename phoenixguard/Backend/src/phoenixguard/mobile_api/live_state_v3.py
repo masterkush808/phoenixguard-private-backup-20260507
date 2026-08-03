@@ -1689,6 +1689,56 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
         found, value = _first_present(sources, keys)
         return _bool(value, default) if found else default
 
+    capture_source = _mapping(session.get("capture_source_v3"))
+    source_claims = [
+        _mapping(session.get("broker_source")),
+        _mapping(broker_surface.get("broker_source")),
+        _mapping(tracking.get("broker_source")),
+        _mapping(tracking_surface.get("broker_source")),
+    ]
+    source_claim = next((source for source in source_claims if source), {})
+    source_locks = [
+        _mapping(session.get("broker_source_lock")),
+        _mapping(broker_surface.get("broker_source_lock")),
+        _mapping(tracking.get("broker_source_lock")),
+        _mapping(tracking_surface.get("broker_source_lock")),
+    ]
+    source_lock = next((source for source in source_locks if source), {})
+    lock_evidence = _mapping(source_lock.get("evidence"))
+    surface_guard = _mapping(source_lock.get("surface_guard"))
+    reason_codes = {_text(item).upper() for item in _sequence(source_lock.get("reason_codes"))}
+    source_type = _text(capture_source.get("source_type")).lower()
+    coordinate_space = _text(capture_source.get("coordinate_space")).lower()
+    leased_source_contract = (source_type, coordinate_space) in {
+        ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+        ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+    }
+    title_optional_for_study = bool(
+        leased_source_contract
+        and _text(capture_source.get("state")).upper() == "LIVE"
+        and _bool(capture_source.get("fresh"), False)
+        and _bool(capture_source.get("decision_usable"), False)
+        and bool(_text(capture_source.get("source_id")))
+        and bool(_text(capture_source.get("sequence_id")))
+        and _int(capture_source.get("source_generation")) > 0
+        and _bool(source_lock.get("valid"), False)
+        and _text(source_lock.get("status")).upper() == "VALID"
+        and _bool(source_lock.get("broker_source_locked"), False)
+        and {"EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"}.issubset(reason_codes)
+        and _bool(surface_guard.get("capture_safe"), False)
+        and not _bool(surface_guard.get("wrong_surface"), True)
+        and _bool(lock_evidence.get("study_source_only"), False)
+        and not _bool(lock_evidence.get("broker_click_safe"), True)
+        and _text(lock_evidence.get("source_type")).lower() == source_type
+        and _text(lock_evidence.get("coordinate_space")).lower() == coordinate_space
+        and _text(lock_evidence.get("source_id")) == _text(capture_source.get("source_id"))
+        and _text(lock_evidence.get("sequence_id")) == _text(capture_source.get("sequence_id"))
+        and _bool(source_claim.get("valid"), False)
+        and not _bool(source_claim.get("wrong_surface"), True)
+        and _bool(source_claim.get("study_source_only"), False)
+        and not _bool(source_claim.get("broker_click_safe"), True)
+    )
+
     lock_found, lock_value = _first_present(
         sources,
         ("lock_id", "source_lock_id", "surface_lock_id", "broker_lock_id", "window_lock_id", "locked_hwnd", "hwnd"),
@@ -1734,7 +1784,7 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
         title_valid = _bool(title_value, True)
     else:
         title_valid = True
-    if not title_valid:
+    if not title_valid and not title_optional_for_study:
         wrong_surface = True
 
     valid_found, valid_value = _first_present(
@@ -1742,7 +1792,14 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
         ("valid", "source_valid", "lock_valid", "surface_valid", "broker_source_valid", "is_valid"),
     )
     base_valid = _bool(valid_value, True) if valid_found else True
-    valid = bool(base_valid and not wrong_surface and url_valid and title_valid and pixel_fingerprint_valid)
+    title_requirement_satisfied = bool(title_valid or title_optional_for_study)
+    valid = bool(
+        base_valid
+        and not wrong_surface
+        and url_valid
+        and title_requirement_satisfied
+        and pixel_fingerprint_valid
+    )
     status_found, status_value = _first_present(sources, ("status", "lock_status"))
     status_text = _text(status_value).upper() if status_found else ""
     if status_text and status_text not in {"VALID", "OK", "PASS", "LOCKED"}:
@@ -1755,7 +1812,7 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
         "status": status_text or ("VALID" if valid else "UNKNOWN"),
         "wrong_surface": bool(wrong_surface),
         "url_valid": bool(url_valid),
-        "title_valid": bool(title_valid),
+        "title_valid": title_requirement_satisfied,
         "pixel_fingerprint_valid": bool(pixel_fingerprint_valid),
     }
 

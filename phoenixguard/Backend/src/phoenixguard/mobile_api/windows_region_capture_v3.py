@@ -627,18 +627,26 @@ class PhoenixGuardRegionIngestClientV3:
     def _headers(self) -> dict[str, str]:
         return {"X-PhoenixGuard-Token": self._token}
 
-    def claim_source(self, selection: RegionSelectionV3) -> SourceLeaseV3:
+    def claim_source(
+        self,
+        selection: RegionSelectionV3,
+        *,
+        expected_source_control: Mapping[str, Any] | None = None,
+    ) -> SourceLeaseV3:
+        claim_payload: dict[str, Any] = {
+            "source_id": WGC_SOURCE_ID,
+            "sequence_id": selection.sequence_id,
+            "source_type": WGC_SOURCE_TYPE,
+            "selection_id": selection.selection_id,
+            "display_name": selection.display_name,
+            "coordinate_space": WGC_COORDINATE_SPACE,
+        }
+        if expected_source_control is not None:
+            claim_payload["expected_source_control"] = dict(expected_source_control)
         response = self._http.post(
             f"{self.base_url}/v1/mobile/frame-ingest/sessions/{self.session_id}/source-control/claim",
             headers=self._headers,
-            json={
-                "source_id": WGC_SOURCE_ID,
-                "sequence_id": selection.sequence_id,
-                "source_type": WGC_SOURCE_TYPE,
-                "selection_id": selection.selection_id,
-                "display_name": selection.display_name,
-                "coordinate_space": WGC_COORDINATE_SPACE,
-            },
+            json=claim_payload,
             timeout=self.timeout_sec,
         )
         self._raise_for_lease_status(response)
@@ -652,6 +660,23 @@ class PhoenixGuardRegionIngestClientV3:
         if generation <= 0 or not lease_id:
             raise RuntimeError("Source claim did not return a generation and lease.")
         return SourceLeaseV3(source_generation=generation, source_lease_id=lease_id)
+
+    def get_source_control(self) -> Mapping[str, Any]:
+        """Read the public capture-source fence without exposing its lease."""
+
+        response = self._http.get(
+            f"{self.base_url}/v1/mobile/frame-ingest/sessions/{self.session_id}/source-control",
+            headers=self._headers,
+            timeout=self.timeout_sec,
+        )
+        response.raise_for_status()
+        payload_value = response.json()
+        if not isinstance(payload_value, Mapping):
+            raise RuntimeError("Source status returned an invalid response.")
+        source_value = payload_value.get("source_control")
+        if not isinstance(source_value, Mapping):
+            raise RuntimeError("Source status did not include capture_source_v3.")
+        return dict(cast(Mapping[str, Any], source_value))
 
     def kill_source(self, binding: RegionBindingV3, *, reason: str) -> None:
         response = self._http.post(
@@ -927,6 +952,261 @@ class WindowsRegionCaptureManagerV3:
                         LOGGER.debug("Unable to release an uncommitted source lease.", exc_info=True)
             self._selection_lock.release()
 
+    @staticmethod
+    def _server_claim_is_safe(
+        source: Mapping[str, Any],
+        selection: RegionSelectionV3,
+        *,
+        allow_same_sequence: bool,
+    ) -> bool:
+        """Fence local recovery against a killed or independently owned source."""
+
+        state = str(source.get("state", "") or "").strip().upper()
+        source_id = str(source.get("source_id", "") or "").strip()
+        sequence_id = str(source.get("sequence_id", "") or "").strip()
+        generation = int(source.get("source_generation", 0) or 0)
+        if state == "KILLED":
+            return False
+        no_owner = bool(
+            state == "NO_SOURCE"
+            and not source_id
+            and not sequence_id
+            and generation <= 0
+        )
+        if no_owner:
+            return True
+        if not allow_same_sequence:
+            return False
+        return bool(
+            state in {"VALIDATING", "LIVE", "STALE"}
+            and source_id == WGC_SOURCE_ID
+            and sequence_id == selection.sequence_id
+            and str(source.get("source_type", "") or "").strip() == WGC_SOURCE_TYPE
+            and str(source.get("coordinate_space", "") or "").strip() == WGC_COORDINATE_SPACE
+        )
+
+    @staticmethod
+    def _selection_from_public_binding(payload: Mapping[str, Any]) -> RegionSelectionV3:
+        row = dict(payload)
+        active_source = row.get("active_source")
+        if not row.get("source_id") and isinstance(active_source, Mapping):
+            row = dict(cast(Mapping[str, Any], active_source))
+        if str(row.get("schema_version", "") or "").strip() != WGC_BINDING_SCHEMA:
+            raise ValueError("The saved region binding schema is not supported.")
+        if str(row.get("source_id", "") or "").strip() != WGC_SOURCE_ID:
+            raise ValueError("The saved binding does not belong to Windows region capture.")
+        if str(row.get("source_type", "") or "").strip() != WGC_SOURCE_TYPE:
+            raise ValueError("The saved binding has the wrong source type.")
+        if str(row.get("coordinate_space", "") or "").strip() != WGC_COORDINATE_SPACE:
+            raise ValueError("The saved binding has the wrong coordinate space.")
+
+        window_value = row.get("window")
+        if not isinstance(window_value, Mapping):
+            raise ValueError("The saved region binding has no window identity.")
+        window = cast(Mapping[str, Any], window_value)
+        rect_values = window.get("window_rect")
+        if not isinstance(rect_values, Sequence) or isinstance(rect_values, (str, bytes)) or len(rect_values) < 4:
+            raise ValueError("The saved window geometry is invalid.")
+        saved_identity = WindowIdentityV3(
+            hwnd=int(window.get("hwnd", 0) or 0),
+            process_id=int(window.get("process_id", 0) or 0),
+            process_create_time=float(window.get("process_create_time", 0.0) or 0.0),
+            process_path=str(window.get("process_path", "") or ""),
+            class_name=str(window.get("class_name", "") or ""),
+            title=str(window.get("title", "") or ""),
+            rect=tuple(int(value) for value in rect_values[:4]),
+            is_visible=bool(window.get("is_visible", False)),
+            is_minimized=bool(window.get("is_minimized", False)),
+        )
+        if saved_identity.hwnd <= 0 or saved_identity.process_id <= 0:
+            raise ValueError("The saved window identity is incomplete.")
+        normalized_bbox = normalize_region_bbox_v3(
+            cast(Sequence[Any], row.get("normalized_bbox", []))
+        )
+        reference_values = row.get("reference_frame_size")
+        if (
+            not isinstance(reference_values, Sequence)
+            or isinstance(reference_values, (str, bytes))
+            or len(reference_values) < 2
+        ):
+            raise ValueError("The saved reference frame size is invalid.")
+        reference_size = (int(reference_values[0]), int(reference_values[1]))
+        if reference_size[0] <= 0 or reference_size[1] <= 0:
+            raise ValueError("The saved reference frame size is invalid.")
+        selection_id = str(row.get("selection_id", "") or "").strip()
+        sequence_id = str(row.get("sequence_id", "") or "").strip()
+        if not selection_id or not sequence_id:
+            raise ValueError("The saved region binding has no selection sequence.")
+        return RegionSelectionV3(
+            identity=saved_identity,
+            normalized_bbox=normalized_bbox,
+            selection_id=selection_id,
+            sequence_id=sequence_id,
+            reference_frame_size=reference_size,
+        )
+
+    def restore_public_binding(self, payload: Mapping[str, Any]) -> bool:
+        """Restore the exact saved HWND/ROI only when the server fence permits it."""
+
+        if not self._selection_lock.acquire(blocking=False):
+            return False
+        candidate: WindowsGraphicsCaptureStreamV3 | None = None
+        claimed_binding: RegionBindingV3 | None = None
+        operation_epoch = 0
+        try:
+            saved_selection = self._selection_from_public_binding(payload)
+            with self._lock:
+                if self._active is not None:
+                    raise RuntimeError("A Windows region source is already active.")
+                self._operation_epoch += 1
+                operation_epoch = self._operation_epoch
+                candidate_generation = self._local_generation + 1
+
+            source = self.ingest_client.get_source_control()
+            if not self._server_claim_is_safe(
+                source,
+                saved_selection,
+                allow_same_sequence=True,
+            ):
+                raise RuntimeError("The saved chart cannot be restored because another source owns the session.")
+
+            current_identity = self.identity_reader(saved_selection.identity.hwnd)
+            if not saved_selection.identity.same_target(current_identity):
+                raise RuntimeError("The saved chart window identity is no longer current.")
+            restored_selection = RegionSelectionV3(
+                identity=current_identity,
+                normalized_bbox=saved_selection.normalized_bbox,
+                selection_id=saved_selection.selection_id,
+                sequence_id=saved_selection.sequence_id,
+                reference_frame_size=saved_selection.reference_frame_size,
+            )
+            self._set_status(
+                "restoring",
+                f"Restoring the selected region from {restored_selection.display_name}.",
+                source_live=False,
+            )
+            candidate = self._new_stream(current_identity, candidate_generation)
+            candidate.start()
+            candidate.wait_first_frame()
+
+            verified_identity = self.identity_reader(saved_selection.identity.hwnd)
+            if not saved_selection.identity.same_target(verified_identity):
+                raise RuntimeError("The saved chart window identity changed during restore.")
+            # Recheck immediately before claim so an owner observed while WGC
+            # was starting is never superseded by this recovery path.
+            source = self.ingest_client.get_source_control()
+            if not self._server_claim_is_safe(
+                source,
+                restored_selection,
+                allow_same_sequence=True,
+            ):
+                raise RuntimeError("The saved chart cannot be restored because another source owns the session.")
+            with self._lock:
+                if operation_epoch != self._operation_epoch or self._active is not None:
+                    raise SourceSelectionCancelled("Saved source restore was superseded before claim.")
+                self._claim_in_progress = True
+            try:
+                lease = self.ingest_client.claim_source(
+                    restored_selection,
+                    expected_source_control=source,
+                )
+                claimed_binding = RegionBindingV3(selection=restored_selection, lease=lease)
+            finally:
+                with self._lock:
+                    self._claim_in_progress = False
+            with self._lock:
+                if operation_epoch != self._operation_epoch or self._active is not None:
+                    raise SourceSelectionCancelled("Saved source restore was superseded before commit.")
+                self._local_generation = candidate_generation
+                self._active = ActiveRegionSourceV3(
+                    local_generation=candidate_generation,
+                    binding=claimed_binding,
+                    stream=candidate,
+                )
+            candidate = None
+            self._set_status(
+                "validating",
+                f"Restored region locked for {restored_selection.display_name}; waiting for its first accepted frame.",
+                active=self._active,
+                source_live=False,
+            )
+            return True
+        except Exception as exc:
+            LOGGER.warning("Saved Windows region source was not restored: %s", exc)
+            self._set_status("ready", str(exc)[:500], source_live=False)
+            return False
+        finally:
+            if candidate is not None:
+                candidate.stop()
+            if claimed_binding is not None:
+                with self._lock:
+                    committed = bool(
+                        self._active is not None
+                        and self._active.binding.lease.source_lease_id
+                        == claimed_binding.lease.source_lease_id
+                    )
+                if not committed:
+                    try:
+                        self.ingest_client.kill_source(claimed_binding, reason="restore_not_committed")
+                    except Exception:
+                        LOGGER.debug("Unable to release an uncommitted restored source lease.", exc_info=True)
+            self._selection_lock.release()
+
+    def _reclaim_after_server_reset(self, active: ActiveRegionSourceV3) -> bool:
+        """Reclaim the existing stream only after an explicit ownerless reset."""
+
+        source = self.ingest_client.get_source_control()
+        if not self._server_claim_is_safe(
+            source,
+            active.binding.selection,
+            allow_same_sequence=False,
+        ):
+            return False
+        current_identity = self.identity_reader(active.binding.selection.identity.hwnd)
+        if not active.binding.selection.identity.same_target(current_identity):
+            return False
+        with self._lock:
+            if self._active is not active:
+                return False
+            operation_epoch = self._operation_epoch
+            self._claim_in_progress = True
+        claimed_binding: RegionBindingV3 | None = None
+        try:
+            lease = self.ingest_client.claim_source(
+                active.binding.selection,
+                expected_source_control=source,
+            )
+            claimed_binding = RegionBindingV3(selection=active.binding.selection, lease=lease)
+            with self._lock:
+                if self._active is not active or operation_epoch != self._operation_epoch:
+                    return False
+                active.binding = claimed_binding
+                active.last_uploaded_frame_id = 0
+                active.last_uploaded_epoch = 0.0
+                active.next_upload_attempt_epoch = 0.0
+                active.consecutive_upload_failures = 0
+                active.last_health_status = "validating"
+            claimed_binding = None
+            self._set_status(
+                "validating",
+                "The API worker restarted; the exact selected region was safely reclaimed.",
+                active=active,
+                source_live=False,
+            )
+            return True
+        except SourceLeaseLostError:
+            # The compare-and-swap lost to another producer. Do not retry with
+            # an ordinary claim and never release the competing server owner.
+            return False
+        finally:
+            with self._lock:
+                self._claim_in_progress = False
+            if claimed_binding is not None:
+                try:
+                    self.ingest_client.kill_source(claimed_binding, reason="reclaim_not_committed")
+                except Exception:
+                    LOGGER.debug("Unable to release an uncommitted reclaimed source lease.", exc_info=True)
+
     def kill_active_source(self, *, reason: str = "operator_hotkey") -> bool:
         cancel_native_region_selector_v3()
         with self._lock:
@@ -1046,9 +1326,30 @@ class WindowsRegionCaptureManagerV3:
                     last_frame=frame,
                 )
             except SourceLeaseLostError as exc:
-                # Never call the unscoped server kill route after a rejected
-                # lease: another source may already be the rightful owner.
-                self._hard_stop_active(active, str(exc), release_server=False)
+                # A brief API-worker restart may legitimately clear only the
+                # server lease. Reclaim the exact local HWND/ROI only through
+                # an atomic server-side compare-and-swap from ownerless state.
+                try:
+                    reclaimed = self._reclaim_after_server_reset(active)
+                except Exception as recovery_exc:
+                    active.consecutive_upload_failures += 1
+                    active.next_upload_attempt_epoch = time.time() + min(
+                        15.0,
+                        2.0 ** min(3, active.consecutive_upload_failures - 1),
+                    )
+                    active.last_health_status = "degraded"
+                    LOGGER.warning("Unable to verify WGC lease recovery: %s", recovery_exc)
+                    self._set_status(
+                        "degraded",
+                        f"The source lease changed; recovery is waiting for server verification. {recovery_exc}"[:500],
+                        active=active,
+                        source_live=False,
+                    )
+                    continue
+                if not reclaimed:
+                    # Never call the unscoped server kill route after a
+                    # rejected lease: another source may be the rightful owner.
+                    self._hard_stop_active(active, str(exc), release_server=False)
             except FrameUploadDeferredError as exc:
                 active.consecutive_upload_failures += 1
                 active.next_upload_attempt_epoch = time.time() + exc.retry_after_sec

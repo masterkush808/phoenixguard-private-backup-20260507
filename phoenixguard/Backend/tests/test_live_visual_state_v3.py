@@ -9,6 +9,7 @@ import pytest
 from phoenixguard.mobile_api.live_state_v3 import (
     LIVE_STATE_SCHEMA_VERSION,
     _bind_overlay_instrument_identity,  # pyright: ignore[reportPrivateUsage]
+    _broker_source_summary,  # pyright: ignore[reportPrivateUsage]
     _dashboard_overlay_object,  # pyright: ignore[reportPrivateUsage]
     _instrument,  # pyright: ignore[reportPrivateUsage]
     _overlay_from_active_object,  # pyright: ignore[reportPrivateUsage]
@@ -1121,6 +1122,158 @@ def test_build_live_state_v3_rejects_market_overlays_for_wrong_broker_source(tmp
     assert state["overlay_objects"] == []
     assert state["reason_if_empty"] == "broker source rejected: wrong surface"
     assert state["overlay_mode"]["reason_if_empty"] == state["reason_if_empty"]
+
+
+def test_study_only_region_source_does_not_fail_legacy_title_gate() -> None:
+    session: dict[str, Any] = {
+        "session_id": "region-study-source",
+        "capture_source_v3": {
+            "state": "LIVE",
+            "fresh": True,
+            "decision_usable": True,
+            "source_id": "windows-region-capture-v3",
+            "sequence_id": "wgc-sequence-808",
+            "source_generation": 1,
+            "source_type": "windows_graphics_capture_roi",
+            "coordinate_space": "wgc_hwnd_roi_v1",
+        },
+        "broker_source": {
+            "lock_id": "wgc-region-lock",
+            "valid": True,
+            "status": "VALID",
+            "wrong_surface": False,
+            "url_valid": True,
+            "title_valid": False,
+            "pixel_fingerprint_valid": True,
+            "study_source_only": True,
+            "broker_click_safe": False,
+        },
+        "broker_source_lock": {
+            "valid": True,
+            "status": "VALID",
+            "broker_source_locked": True,
+            "reason_codes": ["EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"],
+            "surface_guard": {
+                "wrong_surface": False,
+                "capture_safe": True,
+            },
+            "evidence": {
+                "source_id": "windows-region-capture-v3",
+                "sequence_id": "wgc-sequence-808",
+                "source_type": "windows_graphics_capture_roi",
+                "coordinate_space": "wgc_hwnd_roi_v1",
+                "study_source_only": True,
+                "broker_click_safe": False,
+            },
+        },
+    }
+
+    broker_source = _broker_source_summary(session)
+
+    assert broker_source == {
+        "lock_id": "wgc-region-lock",
+        "valid": True,
+        "status": "VALID",
+        "wrong_surface": False,
+        "url_valid": True,
+        "title_valid": True,
+        "pixel_fingerprint_valid": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("broken_case",),
+    [
+        ("stale",),
+        ("lineage_mismatch",),
+        ("invalid_lock",),
+        ("missing_external_lock_code",),
+        ("unsafe_surface",),
+        ("click_safe",),
+    ],
+)
+def test_study_only_region_title_exception_fails_closed(broken_case: str) -> None:
+    session: dict[str, Any] = {
+        "capture_source_v3": {
+            "state": "LIVE",
+            "fresh": True,
+            "decision_usable": True,
+            "source_id": "windows-region-capture-v3",
+            "sequence_id": "wgc-sequence-808",
+            "source_generation": 1,
+            "source_type": "windows_graphics_capture_roi",
+            "coordinate_space": "wgc_hwnd_roi_v1",
+        },
+        "broker_source": {
+            "valid": True,
+            "status": "VALID",
+            "wrong_surface": False,
+            "url_valid": True,
+            "title_valid": False,
+            "pixel_fingerprint_valid": True,
+            "study_source_only": True,
+            "broker_click_safe": False,
+        },
+        "broker_source_lock": {
+            "valid": True,
+            "status": "VALID",
+            "broker_source_locked": True,
+            "reason_codes": ["EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"],
+            "surface_guard": {"wrong_surface": False, "capture_safe": True},
+            "evidence": {
+                "source_id": "windows-region-capture-v3",
+                "sequence_id": "wgc-sequence-808",
+                "source_type": "windows_graphics_capture_roi",
+                "coordinate_space": "wgc_hwnd_roi_v1",
+                "study_source_only": True,
+                "broker_click_safe": False,
+            },
+        },
+    }
+    capture_source = session["capture_source_v3"]
+    source_lock = session["broker_source_lock"]
+    lock_evidence = source_lock["evidence"]
+    surface_guard = source_lock["surface_guard"]
+    if broken_case == "stale":
+        capture_source["fresh"] = False
+    elif broken_case == "lineage_mismatch":
+        lock_evidence["sequence_id"] = "different-sequence"
+    elif broken_case == "invalid_lock":
+        source_lock["valid"] = False
+    elif broken_case == "missing_external_lock_code":
+        source_lock["reason_codes"] = ["CHART_STUDY_SOURCE_LOCKED"]
+    elif broken_case == "unsafe_surface":
+        surface_guard["capture_safe"] = False
+    elif broken_case == "click_safe":
+        lock_evidence["broker_click_safe"] = True
+
+    broker_source = _broker_source_summary(session)
+
+    assert broker_source["valid"] is False
+    assert broker_source["wrong_surface"] is True
+    assert broker_source["title_valid"] is False
+
+
+def test_title_gate_still_blocks_non_study_source() -> None:
+    broker_source = _broker_source_summary(
+        {
+            "broker_source": {
+                "lock_id": "ordinary-window-lock",
+                "valid": True,
+                "status": "VALID",
+                "wrong_surface": False,
+                "url_valid": True,
+                "title_valid": False,
+                "pixel_fingerprint_valid": True,
+                "study_source_only": False,
+                "broker_click_safe": False,
+            }
+        }
+    )
+
+    assert broker_source["valid"] is False
+    assert broker_source["wrong_surface"] is True
+    assert broker_source["title_valid"] is False
 
 
 class _FakeTrackerService:

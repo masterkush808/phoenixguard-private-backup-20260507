@@ -3766,6 +3766,477 @@ def test_unsuffixed_forced_scan_gets_one_stability_rescan_before_cache_promotion
     assert third.latest_signal["market_source"] == "live_cached_selector"
 
 
+def _wgc_identity_attestation(
+    image: Image.Image,
+    *,
+    market: str = "CAD/CHF OTC",
+    timeframe: str = "M5",
+    market_confidence: float = 0.91,
+    timeframe_confidence: float = 0.93,
+    capture_epoch: float,
+) -> dict[str, Any]:
+    signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )(image)
+    source = {
+        "source_id": "windows-region-capture-v3",
+        "source_type": "windows_graphics_capture_roi",
+        "sequence_id": "wgc-sequence-7",
+        "coordinate_space": "wgc_hwnd_roi_v1",
+        "source_generation": 3,
+        "metadata": {"source_lease_id": "lease-secret-7"},
+    }
+    source_lock = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+    )(source, image, window_signature=signature)
+    return cast(
+        Callable[..., dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_external_wgc_broker_identity_attestation_v3",
+        ),
+    )(
+        source,
+        source_lock,
+        {
+            "detected_market": market,
+            "market_confidence": market_confidence,
+            "market_source": "broker_header_text",
+            "detected_timeframe": timeframe,
+            "timeframe_confidence": timeframe_confidence,
+            "timeframe_source": "broker_selector_chip",
+            "broker_surface_hash": signature,
+        },
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    )
+
+
+def test_same_frame_wgc_identity_attestation_unblocks_cropped_chart_study(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    capture_epoch = time.time()
+    attestation = _wgc_identity_attestation(
+        surface,
+        capture_epoch=capture_epoch,
+    )
+    assert attestation["source_verified"] is True
+    assert attestation["broker_click_safe"] is False
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    result = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "wgc-live",
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            },
+            "_capture_started_epoch_v3": capture_epoch,
+            "_broker_identity_attestation_v3": attestation,
+        },
+    )
+
+    assert result.latest_signal["market"] == "CAD/CHF OTC"
+    assert result.latest_signal["focus_timeframe"] == "M5"
+    assert result.latest_signal["market_source"] == "same_frame_wgc_broker_identity"
+    assert result.latest_signal["market_selector_rebind_required"] is False
+    assert result.latest_signal["market_selector_studying_new_pair"] is False
+    assert result.latest_signal["market_identity_confirmed"] is True
+    assert result.latest_signal["timeframe_identity_confirmed"] is True
+    scene = cast(
+        Mapping[str, Any],
+        result.latest_signal["scene_forecast_contribution"],
+    )
+    assert scene["provider_status"] != "MARKET_IDENTITY_PENDING"
+
+
+def test_same_frame_wgc_identity_attestation_accepts_standard_fx_chart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    capture_epoch = time.time()
+    attestation = _wgc_identity_attestation(
+        surface,
+        market="EUR/USD",
+        timeframe="M15",
+        capture_epoch=capture_epoch,
+    )
+    assert attestation["market"] == "EUR/USD"
+    assert attestation["timeframe"] == "M15"
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    result = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "wgc-tradingview",
+            "manual_focus_region": {"enabled": True},
+            "_capture_started_epoch_v3": capture_epoch,
+            "_broker_identity_attestation_v3": attestation,
+        },
+    )
+
+    assert result.latest_signal["market"] == "EUR/USD"
+    assert result.latest_signal["focus_timeframe"] == "M15"
+    assert result.latest_signal["market_selector_rebind_required"] is False
+    assert result.latest_signal["market_identity_confirmed"] is True
+    assert result.latest_signal["timeframe_identity_confirmed"] is True
+
+
+def test_source_agnostic_chart_identity_probe_reads_tradingview_window_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+
+    identity = adapter.probe_chart_identity_v3(
+        surface,
+        source={
+            "source_id": "windows-region-capture-v3",
+            "metadata": {
+                "window": {
+                    "title": "EURUSD · M15 · Advanced chart — TradingView"
+                }
+            },
+        },
+    )
+
+    assert identity["schema_version"] == "PG_CHART_IDENTITY_PROBE_V3"
+    assert identity["detected_market"] == "EUR/USD"
+    assert identity["detected_timeframe"] == "M15"
+    assert identity["identity_ready"] is True
+    assert identity["identity_conflict"] is False
+    assert identity["study_source_only"] is True
+    assert identity["broker_click_safe"] is False
+
+
+def test_source_agnostic_chart_identity_probe_fails_closed_on_incomplete_or_conflicting_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector",
+        lambda *_args, **_kwargs: {
+            "value": "EUR/USD",
+            "source": "visual_chart_header",
+            "confidence": 0.91,
+        },
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_timeframe_selector",
+        lambda *_args, **_kwargs: {
+            "value": "M5",
+            "source": "visual_chart_header",
+            "confidence": 0.91,
+        },
+    )
+
+    conflicting = adapter.probe_chart_identity_v3(
+        surface,
+        source={
+            "metadata": {
+                "window": {"title": "GBPJPY · M15 · TradingView"}
+            }
+        },
+    )
+    assert conflicting["identity_conflict"] is True
+    assert conflicting["identity_ready"] is False
+    assert conflicting["detected_market"] == ""
+    assert conflicting["detected_timeframe"] == ""
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    incomplete = adapter.probe_chart_identity_v3(
+        surface,
+        source={"metadata": {"window": {"title": "EUR · M5 · chart"}}},
+    )
+    assert incomplete["identity_ready"] is False
+    assert incomplete["detected_market"] == ""
+    assert incomplete["detected_timeframe"] == "M5"
+
+
+def test_wgc_non_otc_identity_survives_derived_chart_plane_and_publishes_operator_overlays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from phoenixguard.mobile_api.live_state_v3 import (
+        build_live_state_v3_from_tracker_service,
+    )
+    from phoenixguard.mobile_api.operator_workspace_v1 import (
+        build_operator_workspace_v1,
+    )
+
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    # The derived candle plane deliberately has no chart header. The exact WGC
+    # full-surface probe must therefore supply identity before study begins.
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "wgc-universal-identity",
+        tracking_adapter=adapter,
+    )
+    session_id = "wgc-tradingview-non-otc"
+    tracker.create_session(session_id=session_id)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="windows-region-capture-v3",
+        sequence_id="wgc-sequence-tradingview-1",
+        source_type="windows_graphics_capture_roi",
+        selection_id="selection-tradingview-1",
+        display_name="TradingView EURUSD M15",
+        coordinate_space="wgc_hwnd_roi_v1",
+    )
+    capture_epoch = time.time()
+    result = tracker.ingest_external_frame(
+        session_id,
+        _synthetic_chart_surface("buy", width=1280, height=720),
+        source_id="windows-region-capture-v3",
+        sequence_id="wgc-sequence-tradingview-1",
+        capture_epoch_ms=int(capture_epoch * 1000.0),
+        frame_id=1,
+        metadata={
+            "source_type": "windows_graphics_capture_roi",
+            "coordinate_space": "wgc_hwnd_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "selection_id": "selection-tradingview-1",
+            "window": {
+                "title": "EURUSD · M15 · Advanced chart — TradingView"
+            },
+        },
+    )
+
+    assert result["frame_ingest"]["accepted"] is True
+    session = tracker.get_session(session_id)
+    assert session["latest_signal"]["market"] == "EUR/USD"
+    assert session["latest_signal"]["focus_timeframe"] == "M15"
+    assert session["latest_signal"]["market_selector_rebind_required"] is False
+    assert session["latest_signal"]["market_identity_confirmed"] is True
+    assert session["latest_signal"]["timeframe_identity_confirmed"] is True
+
+    live_state = build_live_state_v3_from_tracker_service(
+        tracker,
+        session_id,
+        now_epoch=capture_epoch + 0.1,
+        overlay_mode="INSPECTOR",
+    )
+    assert live_state["market"] == "EUR/USD"
+    assert live_state["timeframe"] == "M15"
+    assert int(live_state["overlay_count"]) > 0
+    assert live_state["overlay_objects"]
+    workspace = build_operator_workspace_v1(
+        live_state,
+        now_epoch=capture_epoch + 0.1,
+    )
+    assert workspace["overlays"]
+    assert all(
+        int(row["frame_id"]) == int(workspace["surface"]["frame_id"])
+        for row in cast(Sequence[Mapping[str, Any]], workspace["overlays"])
+    )
+
+
+def test_same_frame_wgc_identity_attestation_fails_closed_on_selector_conflict() -> None:
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    capture_epoch = time.time()
+    attestation = _wgc_identity_attestation(
+        surface,
+        capture_epoch=capture_epoch,
+    )
+    reconcile = cast(
+        Callable[..., tuple[dict[str, Any], dict[str, Any]]],
+        getattr(
+            window_tracker_module,
+            "_reconcile_wgc_broker_identity_attestation_v3",
+        ),
+    )
+
+    market_selector, timeframe_selector = reconcile(
+        {
+            "value": "EUR/USD OTC",
+            "source": "header_text",
+            "confidence": 0.94,
+            "market_selector_rebind_required": False,
+        },
+        {"value": "M5", "source": "selector_chip", "confidence": 0.94},
+        {
+            "_capture_started_epoch_v3": capture_epoch,
+            "_broker_identity_attestation_v3": attestation,
+        },
+        {"min_market_confidence": 0.42, "min_timeframe_confidence": 0.42},
+    )
+
+    assert market_selector["value"] == "EUR/USD OTC"
+    assert market_selector["market_selector_rebind_required"] is True
+    assert market_selector["studying_new_pair"] is True
+    assert market_selector["broker_identity_attestation_conflict"] is True
+    assert timeframe_selector["broker_identity_attestation_conflict"] is True
+
+
+def test_wgc_identity_attestation_rejects_unleased_or_low_confidence_source() -> None:
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    capture_epoch = time.time()
+    low_confidence = _wgc_identity_attestation(
+        surface,
+        market_confidence=0.20,
+        capture_epoch=capture_epoch,
+    )
+    assert low_confidence["market_confidence"] == pytest.approx(0.20)
+
+    reconcile = cast(
+        Callable[..., tuple[dict[str, Any], dict[str, Any]]],
+        getattr(
+            window_tracker_module,
+            "_reconcile_wgc_broker_identity_attestation_v3",
+        ),
+    )
+    market_selector, timeframe_selector = reconcile(
+        {},
+        {},
+        {
+            "_capture_started_epoch_v3": capture_epoch,
+            "_broker_identity_attestation_v3": low_confidence,
+        },
+        {"min_market_confidence": 0.42, "min_timeframe_confidence": 0.42},
+    )
+    assert market_selector == {}
+    assert timeframe_selector == {}
+
+    signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )(surface)
+    unleased_source = {
+        "source_id": "windows-region-capture-v3",
+        "source_type": "windows_graphics_capture_roi",
+        "sequence_id": "wgc-sequence-7",
+        "coordinate_space": "wgc_hwnd_roi_v1",
+        "source_generation": 3,
+        "metadata": {},
+    }
+    source_lock = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+    )(unleased_source, surface, window_signature=signature)
+    build_attestation = cast(
+        Callable[..., dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_external_wgc_broker_identity_attestation_v3",
+        ),
+    )
+    assert build_attestation(
+        unleased_source,
+        source_lock,
+        {
+            "detected_market": "CAD/CHF OTC",
+            "market_confidence": 0.91,
+            "detected_timeframe": "M5",
+            "timeframe_confidence": 0.93,
+            "broker_surface_hash": signature,
+        },
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    ) == {}
+
+    assert _wgc_identity_attestation(
+        surface,
+        market="EUR",
+        timeframe="M5",
+        capture_epoch=capture_epoch,
+    ) == {}
+
+
+def test_wgc_identity_attestation_rejects_lock_and_frame_lineage_mismatch() -> None:
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    capture_epoch = time.time()
+    signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )(surface)
+    source = {
+        "source_id": "windows-region-capture-v3",
+        "source_type": "windows_graphics_capture_roi",
+        "sequence_id": "wgc-sequence-7",
+        "coordinate_space": "wgc_hwnd_roi_v1",
+        "source_generation": 3,
+        "metadata": {"source_lease_id": "lease-secret-7"},
+    }
+    build_lock = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+    )
+    build_attestation = cast(
+        Callable[..., dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_external_wgc_broker_identity_attestation_v3",
+        ),
+    )
+    valid_lock = build_lock(source, surface, window_signature=signature)
+    broker_surface = {
+        "detected_market": "CAD/CHF OTC",
+        "market_confidence": 0.91,
+        "detected_timeframe": "M5",
+        "timeframe_confidence": 0.93,
+        "broker_surface_hash": signature,
+    }
+
+    mismatched_lock = copy.deepcopy(valid_lock)
+    cast(dict[str, Any], mismatched_lock["evidence"])["sequence_id"] = (
+        "another-sequence"
+    )
+    assert build_attestation(
+        source,
+        mismatched_lock,
+        broker_surface,
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    ) == {}
+
+    mismatched_surface = dict(broker_surface)
+    mismatched_surface["broker_surface_hash"] = "different-frame-signature"
+    assert build_attestation(
+        source,
+        valid_lock,
+        mismatched_surface,
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    ) == {}
+
+    wrong_coordinate_source = dict(source)
+    wrong_coordinate_source["coordinate_space"] = "edge_tab_roi_v1"
+    assert build_attestation(
+        wrong_coordinate_source,
+        valid_lock,
+        broker_surface,
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    ) == {}
+
+    wrong_source_id = dict(source)
+    wrong_source_id["source_id"] = "another-wgc-producer"
+    assert build_attestation(
+        wrong_source_id,
+        valid_lock,
+        broker_surface,
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    ) == {}
+
+
 def test_pending_unsuffixed_market_survives_one_empty_read_then_accepts_otc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -142,6 +142,7 @@ class FrameIngestTracker(Protocol):
         selection_id: str,
         display_name: str,
         coordinate_space: str,
+        expected_source_control: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -917,6 +918,17 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
         selection_id = str(payload.get("selection_id", "") or "").strip()
         display_name = str(payload.get("display_name", "Selected chart") or "Selected chart").strip()
         coordinate_space = str(payload.get("coordinate_space", "") or "").strip()
+        expected_source_value = payload.get("expected_source_control")
+        if expected_source_value is not None and not isinstance(expected_source_value, Mapping):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="expected_source_control must be a source-control object.",
+            )
+        expected_source_control = (
+            dict(cast(Mapping[str, Any], expected_source_value))
+            if isinstance(expected_source_value, Mapping)
+            else None
+        )
         _require_scope_allowed(auth_context, session_id, source_id, "", "")
         if not source_id or len(source_id) > 128 or not sequence_id or len(sequence_id) > 192:
             raise HTTPException(
@@ -943,11 +955,23 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 selection_id=selection_id,
                 display_name=display_name[:180],
                 coordinate_space=coordinate_space,
+                expected_source_control=expected_source_control,
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except Exception as exc:
+            lease_status = int(getattr(exc, "status_code", 0) or 0)
+            lease_reason = str(getattr(exc, "reason_code", "") or "")
+            if lease_status in {status.HTTP_409_CONFLICT, status.HTTP_410_GONE} and lease_reason:
+                detail_factory = getattr(exc, "as_detail", None)
+                detail = detail_factory() if callable(detail_factory) else {
+                    "reason_code": lease_reason,
+                    "message": str(getattr(exc, "message", "") or str(exc)),
+                }
+                raise HTTPException(status_code=lease_status, detail=detail) from exc
+            raise
         _retire_feed_runtime_for_session(session_id)
         _security_audit(
             "frame_source_claimed",

@@ -2304,6 +2304,127 @@ def _merge_order_positioning_rows(
     return _bounded_positioning_rows(output)
 
 
+def _wgc_study_source_proves_identity_without_selector_v3(
+    payload: Mapping[str, Any],
+    tracking_summary: Mapping[str, Any],
+    *,
+    symbol: str,
+    timeframe: str,
+    selector_fingerprint: str,
+) -> bool:
+    """Accept an explicit identity lock from the exact leased WGC study source.
+
+    The normal public overlay contract requires a stable ``selector_v2``
+    fingerprint.  A Windows Graphics Capture ROI can deliberately exclude the
+    broker selector after the full selected surface has already proved the
+    pair and timeframe.  Permit the missing fingerprint only when the compact
+    frame carries explicit identity confirmations and the private source lock
+    is the exact fail-closed, study-only WGC contract.  This never makes the
+    source broker-click-safe.
+    """
+
+    if selector_fingerprint or not symbol or not timeframe:
+        return False
+    if (
+        _text(payload.get("instrument_identity_status")).upper() != "LOCKED"
+        or _explicit_bool(payload.get("market_identity_confirmed")) is not True
+        or _explicit_bool(payload.get("timeframe_identity_confirmed")) is not True
+    ):
+        return False
+
+    latest_signal = _mapping(payload.get("latest_signal"))
+    instrument = _mapping(payload.get("instrument"))
+    identity_sources = (payload, tracking_summary, latest_signal, instrument)
+    for source in identity_sources:
+        if any(
+            _explicit_bool(source.get(key)) is True
+            for key in (
+                "market_selector_rebind_required",
+                "market_selector_studying_new_pair",
+                "identity_transition_pending",
+                "identity_disagreement",
+                "market_identity_disagreement",
+                "timeframe_identity_disagreement",
+                "selector_fingerprint_disagreement",
+            )
+        ):
+            return False
+        if _text(source.get("identity_confirmation_source")).upper() == (
+            "REJECTED_TRANSITION_OR_DISAGREEMENT"
+        ):
+            return False
+
+    source_lock = _mapping(tracking_summary.get("broker_source_lock"))
+    lock_evidence = _mapping(source_lock.get("evidence"))
+    surface_guard = _mapping(source_lock.get("surface_guard"))
+    guard_evidence = _mapping(surface_guard.get("evidence"))
+    selected_target = _mapping(source_lock.get("selected_target"))
+    reason_codes = {
+        _text(value).upper()
+        for value in cast(Sequence[Any], source_lock.get("reason_codes", []))
+        if _text(value)
+    } if isinstance(source_lock.get("reason_codes"), Sequence) and not isinstance(
+        source_lock.get("reason_codes"), (str, bytes, bytearray)
+    ) else set()
+    expected_source_id = "windows-region-capture-v3"
+    expected_source_type = "windows_graphics_capture_roi"
+    expected_coordinate_space = "wgc_hwnd_roi_v1"
+    sequence_id = _text(lock_evidence.get("sequence_id"))
+    source_proven = bool(
+        source_lock.get("schema_version") == "BROKER_SOURCE_LOCK_V3"
+        and _explicit_bool(source_lock.get("valid")) is True
+        and _text(source_lock.get("status")).upper() == "VALID"
+        and _explicit_bool(source_lock.get("broker_source_locked")) is True
+        and {
+            "EXTERNAL_FRAME_FEED_LOCKED",
+            "CHART_STUDY_SOURCE_LOCKED",
+        }.issubset(reason_codes)
+        and _text(lock_evidence.get("source_id")) == expected_source_id
+        and _text(lock_evidence.get("source_type")).lower()
+        == expected_source_type
+        and _text(lock_evidence.get("coordinate_space")).lower()
+        == expected_coordinate_space
+        and sequence_id
+        and _explicit_bool(lock_evidence.get("study_source_expected")) is True
+        and _explicit_bool(lock_evidence.get("chart_source_like")) is True
+        and _explicit_bool(lock_evidence.get("study_source_only")) is True
+        and _explicit_bool(lock_evidence.get("broker_click_safe")) is False
+        and _text(selected_target.get("title")) == expected_source_id
+        and bool(_text(selected_target.get("target_id")))
+        and _text(surface_guard.get("surface_class")).upper()
+        == "BROKER_SURFACE"
+        and _explicit_bool(surface_guard.get("capture_safe")) is True
+        and _explicit_bool(surface_guard.get("wrong_surface")) is False
+        and _explicit_bool(surface_guard.get("broker_like_pixels")) is True
+        and _text(guard_evidence.get("source_id")) == expected_source_id
+        and _text(guard_evidence.get("source_type")).lower()
+        == expected_source_type
+        and _text(guard_evidence.get("coordinate_space")).lower()
+        == expected_coordinate_space
+        and _text(guard_evidence.get("sequence_id")) == sequence_id
+        and bool(_text(source_lock.get("broker_pixel_fingerprint")))
+    )
+    if not source_proven:
+        return False
+
+    # These public summaries are optional in older compact payloads.  When
+    # present, an explicit stale/invalid/wrong-surface claim must veto the
+    # otherwise valid lock rather than being ignored.
+    source_claim = _mapping(tracking_summary.get("broker_source"))
+    if source_claim:
+        if (
+            _explicit_bool(source_claim.get("valid")) is not True
+            or _text(source_claim.get("status")).upper() != "VALID"
+            or _explicit_bool(source_claim.get("wrong_surface")) is not False
+            or _explicit_bool(source_claim.get("study_source_only")) is not True
+            or _explicit_bool(source_claim.get("broker_click_safe")) is not False
+            or _explicit_bool(source_claim.get("pixel_fingerprint_valid"))
+            is not True
+        ):
+            return False
+    return True
+
+
 def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> list[dict[str, object]]:
     output: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
@@ -2330,13 +2451,25 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         or latest_signal.get("market_selector_visual_fingerprint")
         or tracking_summary.get("market_selector_visual_fingerprint")
     )
-    current_identity_locked = bool(
+    selector_identity_locked = bool(
         _text(payload.get("instrument_identity_status")).upper() == "LOCKED"
         and _explicit_bool(payload.get("market_identity_confirmed")) is True
         and _explicit_bool(payload.get("timeframe_identity_confirmed")) is True
         and bool(current_symbol)
         and bool(current_timeframe)
         and current_selector_fingerprint.startswith("selector_v2_")
+    )
+    wgc_identity_locked_without_selector = (
+        _wgc_study_source_proves_identity_without_selector_v3(
+            payload,
+            tracking_summary,
+            symbol=current_symbol,
+            timeframe=current_timeframe,
+            selector_fingerprint=current_selector_fingerprint,
+        )
+    )
+    current_identity_locked = bool(
+        selector_identity_locked or wgc_identity_locked_without_selector
     )
     enforce_instrument_identity_contract = any(
         key in payload
@@ -2440,16 +2573,23 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             overlay_timeframe = current_timeframe
             overlay_selector_fingerprint = current_selector_fingerprint
             overlay_identity_locked = True
+        selector_identity_matches = bool(
+            (
+                selector_identity_locked
+                and overlay_selector_fingerprint == current_selector_fingerprint
+            )
+            or (
+                wgc_identity_locked_without_selector
+                and not overlay_selector_fingerprint
+            )
+        )
         if enforce_instrument_identity_contract and not (
             current_identity_locked
             and overlay_identity_locked
             and canonical_instrument_token(overlay_symbol)
             == canonical_instrument_token(current_symbol)
             and overlay_timeframe == current_timeframe
-            and (
-                not current_selector_fingerprint
-                or overlay_selector_fingerprint == current_selector_fingerprint
-            )
+            and selector_identity_matches
         ):
             continue
         source_positioning_mode = _text(

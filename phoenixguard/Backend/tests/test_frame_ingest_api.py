@@ -40,7 +40,9 @@ class _FakeFrameTracker:
         selection_id: str,
         display_name: str,
         coordinate_space: str,
+        expected_source_control: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        del session_id, expected_source_control
         generation = int(self.capture_source_v3.get("source_generation", 0) or 0) + 1
         self.capture_source_v3 = {
             "schema_version": "PG_CAPTURE_SOURCE_V3",

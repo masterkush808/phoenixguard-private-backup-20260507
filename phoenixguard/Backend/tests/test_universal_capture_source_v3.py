@@ -91,6 +91,44 @@ def test_source_claim_switch_and_kill_are_generation_fenced(tmp_path: Any) -> No
         service.shutdown()
 
 
+def test_conditional_recovery_claim_atomically_rejects_interleaving_owner(
+    tmp_path: Any,
+) -> None:
+    service = _service_with_session(tmp_path)
+    try:
+        observed = service.get_session_snapshot("universal-live")["capture_source_v3"]
+        assert observed["state"] == "NO_SOURCE"
+        assert observed["state_revision"] == 0
+
+        competitor = _claim_browser_source(
+            service,
+            source_id="edge-chart-competitor",
+            sequence_id="seq-competitor",
+        )
+
+        with pytest.raises(ExternalSourceLeaseError) as exc_info:
+            service.claim_external_source(
+                "universal-live",
+                source_id="windows-region-capture-v3",
+                sequence_id="seq-recovery",
+                source_type="windows_graphics_capture_roi",
+                selection_id="selection-recovery",
+                display_name="Recovered chart",
+                coordinate_space="wgc_hwnd_roi_v1",
+                expected_source_control=observed,
+            )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.reason_code == "SOURCE_RECOVERY_RACE"
+        current = service.load_session_payload("universal-live")["capture_source_v3"]
+        assert current["source_id"] == "edge-chart-competitor"
+        assert current["sequence_id"] == "seq-competitor"
+        assert current["source_generation"] == competitor["source_generation"]
+        assert current["source_lease_id"] == competitor["source_lease_id"]
+    finally:
+        service.shutdown()
+
+
 def test_first_accepted_roi_frame_promotes_source_live_without_leaking_lease(
     tmp_path: Any,
     monkeypatch: Any,

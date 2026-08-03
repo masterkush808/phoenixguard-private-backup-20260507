@@ -299,6 +299,164 @@ def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object
     }
 
 
+def _wgc_identity_overlay_payload() -> dict[str, object]:
+    payload = _fresh_payload(side="BUY")
+    payload.update(
+        {
+            "symbol": "CAD/CHF OTC",
+            "timeframe": "M5",
+            "instrument_identity_status": "LOCKED",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        }
+    )
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking.update(
+        {
+            "detected_market": "CAD/CHF OTC",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "market_selector_rebind_required": False,
+            "market_selector_studying_new_pair": False,
+            "broker_source": {
+                "valid": True,
+                "status": "VALID",
+                "wrong_surface": False,
+                "title_valid": False,
+                "pixel_fingerprint_valid": True,
+                "study_source_only": True,
+                "broker_click_safe": False,
+            },
+            "broker_source_lock": {
+                "schema_version": "BROKER_SOURCE_LOCK_V3",
+                "status": "VALID",
+                "valid": True,
+                "broker_source_locked": True,
+                "reason_codes": [
+                    "EXTERNAL_FRAME_FEED_LOCKED",
+                    "CHART_STUDY_SOURCE_LOCKED",
+                ],
+                "selected_target": {
+                    "title": "windows-region-capture-v3",
+                    "target_id": "wgc-target-14",
+                },
+                "surface_guard": {
+                    "surface_class": "BROKER_SURFACE",
+                    "wrong_surface": False,
+                    "capture_safe": True,
+                    "broker_like_pixels": True,
+                    "evidence": {
+                        "source_id": "windows-region-capture-v3",
+                        "sequence_id": "wgc-sequence-14",
+                        "source_type": "windows_graphics_capture_roi",
+                        "coordinate_space": "wgc_hwnd_roi_v1",
+                    },
+                },
+                "broker_pixel_fingerprint": "wgc-frame-fingerprint-14",
+                "evidence": {
+                    "source_id": "windows-region-capture-v3",
+                    "sequence_id": "wgc-sequence-14",
+                    "source_type": "windows_graphics_capture_roi",
+                    "coordinate_space": "wgc_hwnd_roi_v1",
+                    "study_source_expected": True,
+                    "chart_source_like": True,
+                    "study_source_only": True,
+                    "broker_click_safe": False,
+                },
+            },
+        }
+    )
+    payload["overlays"] = {
+        "objects": [
+            {
+                "overlay_id": "wgc-demand-zone-14",
+                "type": "DEMAND_ZONE",
+                "side": "BUY",
+                "layer": "supply_demand",
+                "bounds": [0.22, 0.55, 0.48, 0.68],
+                "frame_id": 14,
+                "coordinate_mode": "CHART_NORMALIZED",
+                "symbol": "CAD/CHF OTC",
+                "timeframe": "M5",
+                "instrument_identity_status": "LOCKED",
+            }
+        ]
+    }
+    return payload
+
+
+def test_wgc_study_source_projects_identity_locked_overlays_without_selector_fingerprint() -> None:
+    workspace = _build_workspace(
+        _wgc_identity_overlay_payload(),
+        now_epoch=100.0,
+    )
+
+    assert len(workspace["overlays"]) == 1
+    overlay = workspace["overlays"][0]
+    assert overlay["id"] == "wgc-demand-zone-14"
+    assert overlay["symbol"] == "CAD/CHF OTC"
+    assert overlay["timeframe"] == "M5"
+    assert overlay["market_selector_visual_fingerprint"] == ""
+    assert overlay["instrument_identity_status"] == "LOCKED"
+
+
+@pytest.mark.parametrize(
+    "failure_case",
+    (
+        "wrong_source_id",
+        "wrong_source_type",
+        "wrong_coordinate_space",
+        "invalid_lock",
+        "stale_lock",
+        "wrong_surface",
+        "unsafe_capture",
+        "identity_pending",
+        "identity_disagreement",
+        "stale_source_claim",
+        "unexpected_overlay_fingerprint",
+    ),
+)
+def test_wgc_no_selector_identity_proof_fails_closed(
+    failure_case: str,
+) -> None:
+    payload = _wgc_identity_overlay_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    source_lock = _mutable_mapping(tracking["broker_source_lock"])
+    lock_evidence = _mutable_mapping(source_lock["evidence"])
+    surface_guard = _mutable_mapping(source_lock["surface_guard"])
+    guard_evidence = _mutable_mapping(surface_guard["evidence"])
+
+    if failure_case == "wrong_source_id":
+        lock_evidence["source_id"] = "other-capture-source"
+    elif failure_case == "wrong_source_type":
+        lock_evidence["source_type"] = "browser_tab_roi_capture"
+    elif failure_case == "wrong_coordinate_space":
+        guard_evidence["coordinate_space"] = "edge_tab_roi_v1"
+    elif failure_case == "invalid_lock":
+        source_lock["valid"] = False
+    elif failure_case == "stale_lock":
+        source_lock["status"] = "STALE"
+    elif failure_case == "wrong_surface":
+        surface_guard["wrong_surface"] = True
+    elif failure_case == "unsafe_capture":
+        surface_guard["capture_safe"] = False
+    elif failure_case == "identity_pending":
+        tracking["market_selector_rebind_required"] = True
+    elif failure_case == "identity_disagreement":
+        payload["identity_disagreement"] = True
+    elif failure_case == "stale_source_claim":
+        _mutable_mapping(tracking["broker_source"])["status"] = "STALE"
+    elif failure_case == "unexpected_overlay_fingerprint":
+        overlays = _mutable_mapping(payload["overlays"])
+        objects = cast(list[dict[str, object]], overlays["objects"])
+        objects[0]["market_selector_visual_fingerprint"] = "selector_v2_other"
+    else:
+        raise AssertionError(f"Unhandled WGC failure case: {failure_case}")
+
+    assert _build_workspace(payload, now_epoch=100.0)["overlays"] == []
+
+
 def _cpu_stream_runtime_payload(
     *,
     now: float,

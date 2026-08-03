@@ -59,6 +59,11 @@ def _default_base_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
+def _default_restore_binding_path() -> Path | None:
+    configured = str(os.getenv("PHOENIXGUARD_WINDOWS_REGION_RESTORE_BINDING_FILE", "") or "").strip()
+    return Path(configured) if configured else None
+
+
 def _write_launcher_status(path: Path, status: str, message: str, **values: Any) -> None:
     payload = {
         "schema_version": "PG_WINDOWS_REGION_CAPTURE_STATUS_V3",
@@ -157,6 +162,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("PHOENIXGUARD_WINDOWS_REGION_WGC_UPDATE_MS", "1000") or "1000"),
     )
+    parser.add_argument(
+        "--restore-binding",
+        type=Path,
+        default=_default_restore_binding_path(),
+        help="Restore a previously verified public WGC binding without reopening the region selector.",
+    )
     parser.add_argument("--readiness-check", action="store_true")
     return parser
 
@@ -202,6 +213,15 @@ def main(argv: list[str] | None = None) -> int:
     manager: WindowsRegionCaptureManagerV3 | None = None
     hotkeys: GlobalRegionHotkeyLoopV3 | None = None
     fatal_error = ""
+    restore_payload: dict[str, Any] = {}
+    if args.restore_binding is not None:
+        try:
+            parsed_restore = json.loads(Path(args.restore_binding).read_text(encoding="utf-8"))
+            if not isinstance(parsed_restore, dict):
+                raise ValueError("The restore binding must be a JSON object.")
+            restore_payload = dict(parsed_restore)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("The saved Windows region binding could not be loaded: %s", exc)
     try:
         mutex = _acquire_single_instance_mutex(str(args.session_id))
         ingest_client = PhoenixGuardRegionIngestClientV3(
@@ -217,6 +237,11 @@ def main(argv: list[str] | None = None) -> int:
             minimum_update_interval_ms=int(args.update_ms),
         )
         manager.start()
+        if restore_payload:
+            if manager.restore_public_binding(restore_payload):
+                LOGGER.info("The exact saved HWND and chart ROI were restored without reopening the selector.")
+            else:
+                LOGGER.warning("The saved chart ROI was not restored; the global selection hotkey remains ready.")
         hotkeys = GlobalRegionHotkeyLoopV3(
             on_select=manager.select_foreground_source,
             on_kill=manager.kill_active_source,

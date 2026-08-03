@@ -22,6 +22,7 @@ from phoenixguard.mobile_api.windows_region_capture_v3 import (
     SourceLeaseV3,
     SourceSelectionCancelled,
     WGC_COORDINATE_SPACE,
+    WGC_SOURCE_ID,
     WGC_SOURCE_TYPE,
     WgcRuntimeUnavailableError,
     WindowIdentityV3,
@@ -212,6 +213,7 @@ class _FakeHttpSession:
     def __init__(self, responses: list[_FakeResponse]) -> None:
         self.responses = list(responses)
         self.posts: list[dict[str, Any]] = []
+        self.gets: list[dict[str, Any]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: Any) -> _FakeResponse:
@@ -219,7 +221,8 @@ class _FakeHttpSession:
         return self.responses.pop(0)
 
     def get(self, url: str, **kwargs: Any) -> _FakeResponse:
-        raise AssertionError(f"Unexpected GET {url}: {kwargs}")
+        self.gets.append({"url": url, **kwargs})
+        return self.responses.pop(0)
 
     def close(self) -> None:
         self.closed = True
@@ -269,6 +272,64 @@ def test_ingest_client_claim_and_frame_carry_generation_and_lease() -> None:
     assert metadata["source_surface_width"] == 200
     assert metadata["source_surface_height"] == 120
     assert metadata["source_render_fresh"] is True
+
+
+def test_ingest_client_reads_public_capture_source_fence() -> None:
+    http = _FakeHttpSession(
+        [
+            _FakeResponse(
+                200,
+                {
+                    "source_control": {
+                        "state": "LIVE",
+                        "source_id": "windows-region-capture-v3",
+                        "sequence_id": "sequence-1",
+                    }
+                },
+            )
+        ]
+    )
+    client = PhoenixGuardRegionIngestClientV3(
+        base_url="http://127.0.0.1:8793",
+        session_id="live-session",
+        token="token-secret",
+        http_session=cast(Any, http),
+    )
+
+    source = client.get_source_control()
+
+    assert source["state"] == "LIVE"
+    assert source["sequence_id"] == "sequence-1"
+    assert http.gets[0]["url"].endswith("/live-session/source-control")
+    assert http.gets[0]["headers"] == {"X-PhoenixGuard-Token": "token-secret"}
+
+
+def test_ingest_client_sends_exact_observed_fence_for_conditional_recovery() -> None:
+    http = _FakeHttpSession(
+        [_FakeResponse(201, {"source_generation": 8, "source_lease_id": "lease-8"})]
+    )
+    client = PhoenixGuardRegionIngestClientV3(
+        base_url="http://127.0.0.1:8793",
+        session_id="live-session",
+        token="token-secret",
+        http_session=cast(Any, http),
+    )
+    expected = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 7,
+        "state": "STALE",
+        "source_id": WGC_SOURCE_ID,
+        "source_generation": 7,
+        "source_type": WGC_SOURCE_TYPE,
+        "coordinate_space": WGC_COORDINATE_SPACE,
+        "selection_id": "selection-1",
+        "sequence_id": "sequence-1",
+    }
+
+    lease = client.claim_source(_selection(), expected_source_control=expected)
+
+    assert lease == SourceLeaseV3(8, "lease-8")
+    assert http.posts[0]["json"]["expected_source_control"] == expected
 
 
 @pytest.mark.parametrize("status_code", (409, 410))
@@ -338,15 +399,41 @@ class _FakeManagerStream:
 class _FakeIngestClient:
     def __init__(self) -> None:
         self.claims: list[RegionSelectionV3] = []
+        self.claim_expectations: list[Mapping[str, Any] | None] = []
         self.kills: list[tuple[RegionBindingV3, str]] = []
         self.uploads: list[int] = []
         self.upload_attempts = 0
         self.upload_error: Exception | None = None
+        self.upload_errors: list[Exception] = []
+        self.source_controls: list[Mapping[str, Any]] = []
+        self.source_control: Mapping[str, Any] = {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state_revision": 0,
+            "state": "NO_SOURCE",
+            "source_id": "",
+            "sequence_id": "",
+            "source_generation": 0,
+            "source_type": "",
+            "coordinate_space": "",
+            "selection_id": "",
+        }
+        self.source_reads = 0
         self.fail_claim = False
+        self.conditional_claim_error: Exception | None = None
         self.closed = False
 
-    def claim_source(self, selection: RegionSelectionV3) -> SourceLeaseV3:
+    def claim_source(
+        self,
+        selection: RegionSelectionV3,
+        *,
+        expected_source_control: Mapping[str, Any] | None = None,
+    ) -> SourceLeaseV3:
         self.claims.append(selection)
+        self.claim_expectations.append(
+            dict(expected_source_control) if expected_source_control is not None else None
+        )
+        if expected_source_control is not None and self.conditional_claim_error is not None:
+            raise self.conditional_claim_error
         if self.fail_claim:
             raise RuntimeError("claim rejected")
         generation = len(self.claims)
@@ -354,6 +441,12 @@ class _FakeIngestClient:
 
     def kill_source(self, binding: RegionBindingV3, *, reason: str) -> None:
         self.kills.append((binding, reason))
+
+    def get_source_control(self) -> Mapping[str, Any]:
+        self.source_reads += 1
+        if self.source_controls:
+            return dict(self.source_controls.pop(0))
+        return dict(self.source_control)
 
     def upload_frame(
         self,
@@ -363,6 +456,8 @@ class _FakeIngestClient:
     ) -> Mapping[str, Any]:
         del active, roi
         self.upload_attempts += 1
+        if self.upload_errors:
+            raise self.upload_errors.pop(0)
         if self.upload_error is not None:
             raise self.upload_error
         self.uploads.append(frame.frame_id)
@@ -489,6 +584,200 @@ def test_upload_failure_uses_backoff_instead_of_tight_retry(tmp_path: Path) -> N
     assert active.next_upload_attempt_epoch > time.time()
     status = json.loads((tmp_path / "windows_region_capture_status.json").read_text(encoding="utf-8"))
     assert status["status"] == "degraded"
+    manager.shutdown()
+
+
+def _wait_until(predicate: Any, *, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return bool(predicate())
+
+
+def test_lost_lease_reclaims_exact_selection_only_after_server_reports_no_source(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    client.upload_errors = [SourceLeaseLostError("worker lease disappeared")]
+    streams: list[_FakeManagerStream] = []
+    manager = _manager(tmp_path, client=client, streams=streams)
+    assert manager.select_foreground_source() is True
+    original = manager.active_snapshot()
+    assert original is not None
+    original_selection = original.binding.selection
+
+    def reclaimed_current_selection() -> bool:
+        current = manager.active_snapshot()
+        return bool(current is not None and current.binding.lease.source_lease_id == "lease-2")
+
+    manager.start()
+    assert _wait_until(reclaimed_current_selection)
+    reclaimed = manager.active_snapshot()
+
+    assert reclaimed is original
+    assert reclaimed is not None
+    assert reclaimed.binding.selection is original_selection
+    assert reclaimed.binding.lease.source_lease_id == "lease-2"
+    assert client.source_reads == 1
+    assert client.claim_expectations == [None, client.source_control]
+    assert streams[0].stopped is False
+    manager.shutdown()
+
+
+def test_lost_lease_hard_stops_without_claim_when_another_source_owns_session(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    client.upload_errors = [SourceLeaseLostError("source superseded")]
+    client.source_control = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 9,
+        "state": "LIVE",
+        "source_id": "edge-chart-agent",
+        "sequence_id": "edge-sequence-9",
+        "source_generation": 9,
+        "source_type": "browser_tab_roi_capture",
+        "coordinate_space": "edge_tab_roi_v1",
+        "selection_id": "edge-selection-9",
+    }
+    streams: list[_FakeManagerStream] = []
+    manager = _manager(tmp_path, client=client, streams=streams)
+    assert manager.select_foreground_source() is True
+
+    manager.start()
+    assert _wait_until(lambda: manager.active_snapshot() is None)
+
+    assert len(client.claims) == 1
+    assert client.source_reads == 1
+    assert streams[0].stopped is True
+    assert client.kills == []
+    status = json.loads((tmp_path / "windows_region_capture_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "hard_stopped"
+    manager.shutdown()
+
+
+def test_lost_lease_hard_stops_when_conditional_reclaim_loses_interleaving_race(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    client.upload_error = SourceLeaseLostError("worker lease disappeared")
+    client.conditional_claim_error = SourceLeaseLostError("conditional claim lost")
+    streams: list[_FakeManagerStream] = []
+    manager = _manager(tmp_path, client=client, streams=streams)
+    assert manager.select_foreground_source() is True
+
+    manager.start()
+    assert _wait_until(lambda: manager.active_snapshot() is None)
+
+    assert len(client.claims) == 2
+    assert client.claim_expectations[0] is None
+    assert client.claim_expectations[1] == client.source_control
+    assert client.kills == []
+    assert streams[0].stopped is True
+    status = json.loads(
+        (tmp_path / "windows_region_capture_status.json").read_text(encoding="utf-8")
+    )
+    assert status["status"] == "hard_stopped"
+    manager.shutdown()
+
+
+def test_lost_lease_never_reclaims_a_killed_source(tmp_path: Path) -> None:
+    client = _FakeIngestClient()
+    client.upload_errors = [SourceLeaseLostError("source killed")]
+    client.source_control = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 4,
+        "state": "KILLED",
+        "source_id": "windows-region-capture-v3",
+        "sequence_id": "sequence-1",
+        "source_generation": 4,
+        "source_type": WGC_SOURCE_TYPE,
+        "coordinate_space": WGC_COORDINATE_SPACE,
+        "selection_id": "selection-1",
+    }
+    streams: list[_FakeManagerStream] = []
+    manager = _manager(tmp_path, client=client, streams=streams)
+    assert manager.select_foreground_source() is True
+
+    manager.start()
+    assert _wait_until(lambda: manager.active_snapshot() is None)
+
+    assert len(client.claims) == 1
+    assert streams[0].stopped is True
+    assert client.kills == []
+    manager.shutdown()
+
+
+def test_restore_public_binding_preserves_exact_roi_and_reclaims_same_wgc_sequence(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    selection = _selection()
+    client.source_control = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 7,
+        "state": "STALE",
+        "source_id": "windows-region-capture-v3",
+        "sequence_id": selection.sequence_id,
+        "source_generation": 7,
+        "source_type": WGC_SOURCE_TYPE,
+        "coordinate_space": WGC_COORDINATE_SPACE,
+        "selection_id": selection.selection_id,
+    }
+    streams: list[_FakeManagerStream] = []
+    manager = _manager(tmp_path, client=client, streams=streams)
+    saved_payload = RegionBindingV3(
+        selection=selection,
+        lease=SourceLeaseV3(7, "old-private-lease"),
+    ).public_payload()
+
+    assert manager.restore_public_binding(saved_payload) is True
+    active = manager.active_snapshot()
+
+    assert active is not None
+    assert active.binding.selection.normalized_bbox == selection.normalized_bbox
+    assert active.binding.selection.selection_id == selection.selection_id
+    assert active.binding.selection.sequence_id == selection.sequence_id
+    assert active.binding.selection.reference_frame_size == selection.reference_frame_size
+    assert active.binding.lease.source_lease_id == "lease-1"
+    assert len(client.claims) == 1
+    assert client.source_reads == 2
+    assert client.claim_expectations == [client.source_control]
+    assert streams[0].started is True
+    assert streams[0].stopped is False
+    manager.shutdown()
+
+
+def test_restore_public_binding_refuses_to_start_when_another_source_owns_session(
+    tmp_path: Path,
+) -> None:
+    client = _FakeIngestClient()
+    client.source_control = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 9,
+        "state": "LIVE",
+        "source_id": "edge-chart-agent",
+        "sequence_id": "edge-sequence-9",
+        "source_generation": 9,
+        "source_type": "browser_tab_roi_capture",
+        "coordinate_space": "edge_tab_roi_v1",
+        "selection_id": "edge-selection-9",
+    }
+    streams: list[_FakeManagerStream] = []
+    manager = _manager(tmp_path, client=client, streams=streams)
+    saved_payload = RegionBindingV3(
+        selection=_selection(),
+        lease=SourceLeaseV3(3, "old-private-lease"),
+    ).public_payload()
+
+    assert manager.restore_public_binding(saved_payload) is False
+
+    assert manager.active_snapshot() is None
+    assert client.claims == []
+    assert client.source_reads == 1
+    assert streams == []
     manager.shutdown()
 
 
