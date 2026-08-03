@@ -25,6 +25,7 @@ phoenixguard = [
 "Backend/launch/shooter.py" = ["E402"]
 "Backend/launch/start_phoenixguard_24_7_tracker.py" = ["E402"]
 "Backend/launch/start_phoenixguard_mobile_api.py" = ["E402"]
+"Backend/launch/start_phoenixguard_windows_region_capture.py" = ["E402"]
 "Backend/tests/test_adaptive_runtime.py" = ["E402"]
 "Backend/tests/test_best_play_engine.py" = ["E402"]
 "Backend/tests/test_capture_poll_outputs.py" = ["E402"]

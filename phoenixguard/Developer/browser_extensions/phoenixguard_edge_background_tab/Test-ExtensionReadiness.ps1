@@ -52,8 +52,8 @@ if ($null -ne $manifest) {
     }
 
     $permissionNames = @($manifest.permissions | ForEach-Object { [string]$_ })
-    $requiredPermissions = @('activeTab', 'offscreen', 'storage', 'tabCapture')
-    $allowedPermissions = @('activeTab', 'offscreen', 'storage', 'tabCapture')
+    $requiredPermissions = @('activeTab', 'offscreen', 'scripting', 'storage', 'tabCapture')
+    $allowedPermissions = @('activeTab', 'offscreen', 'scripting', 'storage', 'tabCapture')
     foreach ($requiredPermission in $requiredPermissions) {
         if ($requiredPermission -notin $permissionNames) {
             $issues.Add("Required MV3 permission is missing: $requiredPermission")
@@ -67,8 +67,6 @@ if ($null -ne $manifest) {
 
     $hostScopes = @($manifest.host_permissions | ForEach-Object { [string]$_ })
     $allowedHostScopes = @(
-        'https://pocketoption.com/*',
-        'https://*.pocketoption.com/*',
         'http://127.0.0.1/*',
         'http://localhost/*'
     )
@@ -76,9 +74,6 @@ if ($null -ne $manifest) {
         if ($hostScope -notin $allowedHostScopes) {
             $issues.Add("Unexpected host permission: $hostScope")
         }
-    }
-    if (-not ($hostScopes | Where-Object { $_ -like 'https://*pocketoption.com/*' })) {
-        $issues.Add('An HTTPS Pocket Option host permission is required.')
     }
     if (-not ($hostScopes | Where-Object { $_ -in @('http://127.0.0.1/*', 'http://localhost/*') })) {
         $issues.Add('A loopback-only PhoenixGuard host permission is required.')
@@ -91,6 +86,24 @@ if ($null -ne $manifest) {
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$manifest.update_url)) {
         $issues.Add('An unpacked local extension must not declare update_url.')
+    }
+
+    $commands = $manifest.commands
+    foreach ($requiredCommand in @('select-chart-region', 'stop-chart-capture')) {
+        if ($null -eq $commands -or $null -eq $commands.$requiredCommand) {
+            $issues.Add("Required extension command is missing: $requiredCommand")
+        }
+    }
+    $selectWindows = [string]$commands.'select-chart-region'.suggested_key.windows
+    $killWindows = [string]$commands.'stop-chart-capture'.suggested_key.windows
+    if ($selectWindows -ne 'Ctrl+Shift+8') {
+        $issues.Add('Select/switch must default to Ctrl+Shift+8 on Windows.')
+    }
+    if ($killWindows -ne 'Ctrl+Shift+9' -or -not [bool]$commands.'stop-chart-capture'.global) {
+        $issues.Add('The global kill command must default to Ctrl+Shift+9 on Windows.')
+    }
+    if (@($selectWindows, $killWindows) -contains 'Ctrl+Shift+B') {
+        $issues.Add('Ctrl+Shift+B is reserved by Edge and must not be assigned.')
     }
 
     if ($null -ne $manifest.background) {
@@ -126,7 +139,7 @@ if ($null -ne $manifest) {
 }
 
 if (Test-Path -LiteralPath $extensionRoot -PathType Container) {
-    foreach ($requiredRuntimeFile in @('common.js', 'service_worker.js', 'offscreen.html', 'offscreen.js', 'options.html', 'options.js')) {
+    foreach ($requiredRuntimeFile in @('common.js', 'service_worker.js', 'offscreen.html', 'offscreen.js', 'options.html', 'options.js', 'roi_selector.js', 'roi_selector.css')) {
         [void]$referencedFiles.Add($requiredRuntimeFile)
     }
 
@@ -221,7 +234,7 @@ if ($Json) {
     Write-Output "PhoenixGuard Edge extension readiness: $status"
     Write-Output "  Root: $extensionRoot"
     Write-Output "  Manifest: $extensionName $extensionVersion (MV$($result.manifest_version))"
-    Write-Output "  Scope: Pocket Option HTTPS + local PhoenixGuard loopback only"
+    Write-Output "  Scope: explicit active HTTP(S) chart tab + local PhoenixGuard loopback only"
     Write-Output "  Side effects: none; Edge was not launched and no profile or policy was changed"
     foreach ($issue in $issues) {
         Write-Output "  ERROR: $issue"

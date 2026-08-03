@@ -275,6 +275,8 @@ function Get-LiveReadinessSnapshot {
         has_chart_endpoint = $false
         has_overlay_endpoint = $false
         has_study_packet = $false
+        source_state = ""
+        source_fresh = $false
     }
 
     try {
@@ -282,8 +284,35 @@ function Get-LiveReadinessSnapshot {
         $result.tracker_status = [string]($session.status)
         $result.capture_count = [int]($session.capture_count)
         $result.has_study_packet = $null -ne $session.model_council_study_packet
+        if ($null -ne $session.capture_source_v3) {
+            $result.source_state = [string]($session.capture_source_v3.state)
+            $result.source_fresh = [bool]($session.capture_source_v3.fresh)
+        }
     } catch {
         $result.reason = "session_unavailable"
+        return [pscustomobject]$result
+    }
+
+    # Universal capture intentionally starts without opening or activating a
+    # broker window. These states prove the API/session/controller contract is
+    # operational while honestly waiting for a user-selected chart; visual
+    # artifact readiness begins only after the first leased frame arrives.
+    $sourceOperationalWithoutFrame = $result.source_state -in @(
+        'NO_SOURCE',
+        'READY',
+        'SELECTING',
+        'CLAIMING',
+        'VALIDATING',
+        'PAUSED',
+        'STALE',
+        'SWITCHING',
+        'STOPPED',
+        'KILLED',
+        'WAITING_FOR_SOURCE'
+    )
+    if ($sourceOperationalWithoutFrame) {
+        $result.ready = $true
+        $result.reason = "universal_source_$($result.source_state.ToLowerInvariant())"
         return [pscustomobject]$result
     }
 
@@ -481,6 +510,8 @@ $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+$windowsRegionCaptureStatusPath = Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_status.json'
+$env:PHOENIXGUARD_WINDOWS_REGION_CAPTURE_STATUS_FILE = $windowsRegionCaptureStatusPath
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Initialize-PhoenixGuardEdgeTabCapture.ps1')
 $edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
     -RuntimeDir $runtimeDir `
@@ -506,6 +537,7 @@ $targetPatterns = @(
     '*start_phoenixguard_mobile_api.py*',
     '*start_phoenixguard_24_7_tracker.ps1*',
     '*start_phoenixguard_24_7_tracker.py*',
+    '*start_phoenixguard_windows_region_capture.py*',
     '*shooter.py*',
     '*phoenixguard.runtime.model_council_daemon*',
     '*phoenixguard_disk_growth_guard.py*',
@@ -728,6 +760,24 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Postflight: single logical process topology"
+$windowsRegionCaptureStatus = $null
+if (Test-Path -LiteralPath $windowsRegionCaptureStatusPath -PathType Leaf) {
+    try {
+        $windowsRegionCaptureStatus = Get-Content -LiteralPath $windowsRegionCaptureStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Write-Warning "Universal chart selector status is unreadable: $($_.Exception.Message)"
+    }
+}
+$sourceControllerStatus = if ($null -ne $windowsRegionCaptureStatus) {
+    [string]$windowsRegionCaptureStatus.status
+} else {
+    'unavailable'
+}
+$sourceControllerReady = [bool](
+    $null -ne $windowsRegionCaptureStatus -and
+    [bool]$windowsRegionCaptureStatus.hotkey_registered -and
+    $sourceControllerStatus -notin @('', 'error', 'failed', 'unavailable')
+)
 $topologyArgs = @(
     'Backend\tools\certify_process_topology_v3.py',
     '--base-url',
@@ -744,6 +794,9 @@ if ($DisableShooter) {
 }
 if ($launchMt4Bridge) {
     $topologyArgs += '--require-bridge'
+}
+if ($sourceControllerReady) {
+    $topologyArgs += '--require-source-controller'
 }
 & $pythonPath @topologyArgs
 if ($LASTEXITCODE -ne 0) {
@@ -786,6 +839,10 @@ $summaryPayload = [ordered]@{
     edge_tab_capture_ingest_armed = [bool]$edgeTabCapture.Armed
     edge_tab_capture_token_path = [string]$edgeTabCapture.TokenPath
     edge_tab_capture_min_interval_sec = [double]$edgeTabCapture.MinIntervalSec
+    source_controller_ready = $sourceControllerReady
+    source_controller_status = $sourceControllerStatus
+    source_controller_hotkey_registered = if ($null -ne $windowsRegionCaptureStatus) { [bool]$windowsRegionCaptureStatus.hotkey_registered } else { $false }
+    source_controller_status_file = $windowsRegionCaptureStatusPath
     disk_growth_guard_enabled = $env:PHOENIXGUARD_DISK_GUARD_ENABLED
     disk_growth_guard_max_bytes = $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES
     disk_growth_guard_low_water_bytes = $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES

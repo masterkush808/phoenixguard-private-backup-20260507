@@ -44,6 +44,35 @@ def test_dashboard_defaults_to_simple_operator_workspace_without_technical_navig
     assert 'els.experienceModeToggle.textContent = next === "simple" ? "Explore" : "Simple view";' in text
 
 
+def test_dashboard_exposes_truthful_universal_chart_source_controls_before_decisions() -> None:
+    text = _dashboard_text()
+
+    source_index = text.index('id="source-control"')
+    questions_index = text.index('id="beginner-decision-shell"')
+    assert source_index < questions_index
+    for element_id in (
+        "source-control",
+        "source-state",
+        "source-label",
+        "source-age",
+        "source-message",
+        "source-select",
+        "source-kill",
+    ):
+        assert f'id="{element_id}"' in text
+    assert "Ctrl+Shift+B" in text
+    assert "Ctrl+Shift+K" in text
+    assert 'function captureSourceContract(payload)' in text
+    assert 'source.fresh === true' in text
+    assert 'sourceState === "LIVE" && !fresh' in text
+    assert 'Historical frame retained · selected source is not live' in text
+    assert '+ "/source-control/kill";' in text
+    assert 'method: "POST"' in text
+    assert 'function enforceCaptureSourceDecision(payload)' in text
+    assert 'sourceGuideUntilEpoch: 0' in text
+    assert 'const guideActive = state.sourceGuideUntilEpoch > Date.now() / 1000;' in text
+
+
 def test_dashboard_consumes_only_the_public_operator_workspace_contract() -> None:
     text = _dashboard_text()
 
@@ -427,3 +456,12 @@ def test_dashboard_source_contains_no_private_strategy_vocabulary() -> None:
         "fvg",
     ):
         assert private_term not in lowered
+
+
+def test_dashboard_uses_backend_capture_source_stale_threshold() -> None:
+    text = _dashboard_text()
+
+    assert "source.stale_after_sec" in text
+    assert "CAPTURE_SOURCE_STALE_FALLBACK_SECONDS" in text
+    assert "frameAge <= staleAfterSeconds" in text
+    assert "frameAge <= CAPTURE_SOURCE_STALE_AFTER_SECONDS" not in text

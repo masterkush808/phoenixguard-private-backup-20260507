@@ -45,8 +45,9 @@ def test_frame_ingest_deployment_hardening_stays_enabled() -> None:
     assert "PG_FRAME_INGEST_V1" in frame_ingest
     assert "SIGNATURE_NONCES" in frame_ingest
     assert "PG_SECURITY_AUDIT_V1" in frame_ingest
-    assert "commit=False" in frame_ingest
-    assert "commit=True" in frame_ingest
+    assert "_reserve_feed_runtime(" in frame_ingest
+    assert "feed_reservation_committed = True" in frame_ingest
+    assert "_rollback_feed_runtime_reservation(feed_reservation)" in frame_ingest
 
 
 def test_edge_agent_and_verifier_send_signed_frame_uploads() -> None:

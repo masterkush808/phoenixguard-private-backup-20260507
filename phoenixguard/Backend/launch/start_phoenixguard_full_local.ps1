@@ -67,6 +67,10 @@ $discardStdoutPath = 'NUL'
 $discardStderrPath = '\\.\NUL'
 $trackerStdoutPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log' } else { $discardStdoutPath }
 $trackerStderrPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stderr.log' } else { $discardStderrPath }
+$windowsRegionCaptureStatusPath = Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_status.json'
+$windowsRegionCaptureStdoutPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_stdout.log' } else { $discardStdoutPath }
+$windowsRegionCaptureStderrPath = if ($persistChildStdio) { Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_stderr.log' } else { $discardStderrPath }
+$env:PHOENIXGUARD_WINDOWS_REGION_CAPTURE_STATUS_FILE = $windowsRegionCaptureStatusPath
 $baseUrl = "http://$ApiHost`:$ApiPort"
 $dashboardUrl = "$baseUrl/v3/mobile/window-tracker/dashboard/$SessionId"
 $finalLaunchProfile = 'FINAL_LIVE'
@@ -312,12 +316,40 @@ function Start-TrackerChildProcess {
     Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $trackerArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
 }
 
+function Start-WindowsRegionCaptureChildProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChildBaseUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$ChildSessionId
+    )
+
+    $captureArgs = @(
+        'Backend\launch\start_phoenixguard_windows_region_capture.py',
+        '--base-url',
+        $ChildBaseUrl,
+        '--session-id',
+        $ChildSessionId,
+        '--status-path',
+        $windowsRegionCaptureStatusPath
+    )
+    Start-Process `
+        -FilePath $pythonPath `
+        -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $captureArgs) `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle Hidden `
+        -PassThru `
+        -RedirectStandardOutput $windowsRegionCaptureStdoutPath `
+        -RedirectStandardError $windowsRegionCaptureStderrPath
+}
+
 if (-not $NoKillExisting) {
     $currentPid = [int]$PID
     $targetPatterns = @(
         '*start_phoenixguard_mobile_api.py*',
         '*start_phoenixguard_24_7_tracker.ps1*',
         '*start_phoenixguard_24_7_tracker.py*',
+        '*start_phoenixguard_windows_region_capture.py*',
         '*shooter.py*',
         '*phoenixguard.runtime.model_council_daemon*',
         '*uvicorn phoenixguard.mobile_api.app*',
@@ -414,6 +446,8 @@ $trackerLaunchParameters = @{
 
 Write-Host "Starting PhoenixGuard tracker on $baseUrl"
 $trackerProcess = Start-TrackerChildProcess @trackerLaunchParameters
+$windowsRegionCaptureProcess = $null
+$windowsRegionCaptureReady = $false
 
 $deadline = (Get-Date).AddSeconds(90)
 while ((Get-Date) -lt $deadline) {
@@ -449,6 +483,45 @@ try {
     }
     if (-not $session) {
         throw "Window tracker session '$SessionId' was not available after startup wait. Last error: $lastSessionError"
+    }
+    if ($session) {
+        $windowsRegionCaptureScript = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_windows_region_capture.py'
+        if (Test-Path -LiteralPath $windowsRegionCaptureScript -PathType Leaf) {
+            $readinessOutput = & $pythonPath $windowsRegionCaptureScript --readiness-check 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $windowsRegionCaptureProcess = Start-WindowsRegionCaptureChildProcess `
+                    -ChildBaseUrl $baseUrl `
+                    -ChildSessionId $SessionId
+                $sourceReadyDeadline = (Get-Date).AddSeconds(8)
+                while ((Get-Date) -lt $sourceReadyDeadline -and -not $windowsRegionCaptureProcess.HasExited) {
+                    if (Test-Path -LiteralPath $windowsRegionCaptureStatusPath -PathType Leaf) {
+                        try {
+                            $sourceControllerStatus = Get-Content -LiteralPath $windowsRegionCaptureStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                            if ([bool]$sourceControllerStatus.hotkey_registered) {
+                                $windowsRegionCaptureReady = $true
+                                break
+                            }
+                        } catch {
+                            Write-Verbose "Universal chart selector status is not ready yet: $($_.Exception.Message)"
+                        }
+                    }
+                    Start-Sleep -Milliseconds 200
+                }
+                if ($windowsRegionCaptureProcess.HasExited) {
+                    Write-Warning "Universal Windows chart selector exited during startup. Status: $windowsRegionCaptureStatusPath"
+                } elseif ($windowsRegionCaptureReady) {
+                    Write-Host "Universal chart selector: READY (Ctrl+Shift+B select/switch, Ctrl+Shift+K stop)"
+                } else {
+                    Write-Warning "Universal Windows chart selector did not prove global hotkey registration. Status: $windowsRegionCaptureStatusPath"
+                    Stop-Process -Id $windowsRegionCaptureProcess.Id -Force -ErrorAction SilentlyContinue
+                }
+            } else {
+                Write-Warning "Universal Windows chart selector unavailable: $($readinessOutput -join ' ')"
+                Write-Warning "The Edge ROI extension remains available with Ctrl+Shift+8 / Ctrl+Shift+9."
+            }
+        } else {
+            Write-Warning "Universal Windows chart selector launcher is missing: $windowsRegionCaptureScript"
+        }
     }
     if ($session -and $launchShooter) {
         Write-Host "Starting shooter package reporter against $baseUrl"
@@ -546,6 +619,9 @@ if (-not $launchShooter) {
 if ($launchMt4Bridge) {
     $topologyArgs += '--require-bridge'
 }
+if ($windowsRegionCaptureReady) {
+    $topologyArgs += '--require-source-controller'
+}
 & $pythonPath @topologyArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Process topology certification failed after launch. Clean stack was not proven."
@@ -561,6 +637,8 @@ if (-not (Test-Path -LiteralPath $statusPath)) {
 
 Write-Host "Dashboard: $dashboardUrl"
 Write-Host "Status: $statusPath"
+Write-Host "Universal source controller: $(if ($windowsRegionCaptureReady) { 'READY' } else { 'DEGRADED' })"
+Write-Host "Universal source status: $windowsRegionCaptureStatusPath"
 if ($persistChildStdio) {
     Write-Host "Tracker launcher logs: $trackerStdoutPath"
     Write-Host "Tracker launcher errors: $trackerStderrPath"
@@ -601,6 +679,17 @@ while ($true) {
         $trackerProcess = Start-TrackerChildProcess @trackerLaunchParameters
         $healthFailureCount = 0
         Start-Sleep -Seconds 2
+    }
+
+    if ($windowsRegionCaptureReady -and ($null -eq $windowsRegionCaptureProcess -or $windowsRegionCaptureProcess.HasExited)) {
+        Write-Warning "Universal chart selector stopped; restarting it."
+        $windowsRegionCaptureProcess = Start-WindowsRegionCaptureChildProcess `
+            -ChildBaseUrl $baseUrl `
+            -ChildSessionId $SessionId
+        Start-Sleep -Milliseconds 750
+        if ($windowsRegionCaptureProcess.HasExited) {
+            Write-Warning "Universal chart selector restart failed. Status: $windowsRegionCaptureStatusPath"
+        }
     }
 
     if (Test-Path -LiteralPath $statusPath) {

@@ -5,6 +5,8 @@ uvicorn[standard]>=0.30,<1.0
 python-multipart>=0.0.9,<1.0
 psutil>=7.0,<8.0
 mss>=9.0,<11.0
+# windows-capture is intentionally not a normal live dependency. The optional
+# WGC region agent requires the constraints.in pin installed with --no-deps.
 opencv-python-headless>=4.9,<5.0
 torch>=2.5,<2.11
 torchvision>=0.20,<0.26

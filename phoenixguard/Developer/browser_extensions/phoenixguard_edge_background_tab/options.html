@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>PhoenixGuard Edge Background Tab</title>
+    <title>PhoenixGuard Universal Chart Region</title>
     <link rel="stylesheet" href="options.css">
   </head>
   <body>
     <main>
       <header>
-        <p class="eyebrow">PHOENIXGUARD V3 · EDGE TAB SOURCE</p>
-        <h1>One tab. Always observed.<br>Never brought to the front.</h1>
-        <p class="lede">Configure the local frame feed once. Then make Pocket Option the active tab and click the pinned extension icon once to lock it. Click the icon again to stop.</p>
+        <p class="eyebrow">PHOENIXGUARD V3 · UNIVERSAL EDGE CHART SOURCE</p>
+        <h1>Select the chart once.<br>Keep working anywhere.</h1>
+        <p class="lede">Show any HTTP(S) chart in Edge, press <strong>Ctrl+Shift+8</strong>, drag over the exact chart, and confirm. Press <strong>Ctrl+Shift+9</strong> at any time to kill capture.</p>
       </header>
 
       <section class="status" aria-labelledby="statusHeading">
@@ -21,18 +21,26 @@
             <span class="phase" id="phase">IDLE</span>
             <span class="pulse" id="pulse" aria-hidden="true"></span>
           </div>
-          <h2 id="message">Click the extension once while the Pocket Option tab is active.</h2>
+          <h2 id="message">Press Ctrl+Shift+8 on a chart tab to select a region.</h2>
         </div>
         <dl>
-          <div><dt>Locked tab</dt><dd id="lockedTab">None</dd></div>
+          <div><dt>Locked chart</dt><dd id="lockedTab">None</dd></div>
+          <div><dt>Selected region</dt><dd id="selectedRegion">None</dd></div>
+          <div><dt>Source lease</dt><dd id="sourceLease">Not claimed</dd></div>
+          <div><dt>Render freshness</dt><dd id="renderFreshness">Not streaming</dd></div>
+          <div><dt>Transport frame</dt><dd id="transportFrame">Never</dd></div>
+          <div><dt>Visual change</dt><dd id="visualChange">Never</dd></div>
           <div><dt>Sampling</dt><dd id="sampling">0.25 FPS</dd></div>
           <div><dt>Upload interval</dt><dd id="uploadInterval">Server controlled</dd></div>
           <div><dt>Accepted</dt><dd id="acceptedFrames">0 frames</dd></div>
           <div><dt>Latest-frame replacements</dt><dd id="replacedFrames">0</dd></div>
           <div><dt>Last accepted</dt><dd id="lastAccepted">Never</dd></div>
+          <div><dt>Select / switch</dt><dd id="selectShortcut">Ctrl+Shift+8</dd></div>
+          <div><dt>Kill capture</dt><dd id="killShortcut">Ctrl+Shift+9</dd></div>
         </dl>
+        <p class="error" id="shortcutError" hidden></p>
         <p class="error" id="lastError" hidden></p>
-        <p class="focus-proof">No tab activation, no window restore, no focus APIs. Capture runs only from Edge’s explicit <code>tabCapture</code> grant and an unfocusable offscreen document.</p>
+        <p class="focus-proof">The selected tab may be inactive or covered after <code>LIVE</code>. No tab activation, window restore, or focus API is used. A heartbeat never pretends frozen chart pixels are fresh.</p>
       </section>
 
       <section aria-labelledby="connectionHeading">
@@ -59,16 +67,16 @@
           <label class="wide">HMAC signing secret <span>optional unless PhoenixGuard requires it</span>
             <input id="signingSecret" type="password" autocomplete="off">
           </label>
-          <label>Symbol hint <span>optional</span>
+          <label>Symbol hint <span>optional; leave blank to re-prove</span>
             <input id="symbol" placeholder="CHF/JPY OTC" spellcheck="false">
           </label>
-          <label>Timeframe hint
+          <label>Timeframe hint <span>optional; leave blank to re-prove</span>
             <input id="timeframe" placeholder="M5" spellcheck="false">
           </label>
           <details class="wide">
             <summary>Capture tuning</summary>
             <div class="tuning-grid">
-              <label>Maximum width
+              <label>Maximum output width
                 <input id="maxWidth" type="number" min="640" max="2560" step="1">
               </label>
               <label>JPEG quality
@@ -84,10 +92,11 @@
           </details>
           <div class="actions wide">
             <button class="primary" type="submit">Save configuration</button>
-            <button class="danger" id="stopCapture" type="button">Stop capture</button>
+            <button class="danger" id="stopCapture" type="button">Kill capture</button>
           </div>
         </form>
         <p class="feedback" id="feedback" aria-live="polite"></p>
+        <p class="focus-proof">If a shortcut is unassigned, open <code>edge://extensions/shortcuts</code> and assign it. Edge reserves Ctrl+Shift+B for its Favorites bar.</p>
       </section>
     </main>
     <script type="module" src="options.js"></script>

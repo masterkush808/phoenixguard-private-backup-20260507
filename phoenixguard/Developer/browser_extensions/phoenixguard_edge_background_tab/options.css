@@ -73,16 +73,20 @@ section {
 .pulse { width: 8px; height: 8px; border-radius: 50%; background: currentColor; color: var(--green); box-shadow: 0 0 0 6px rgba(85, 216, 154, 0.08); }
 .status[data-phase="error"] .phase,
 .status[data-phase="configuration_required"] .phase,
+.status[data-phase="source_frozen"] .phase,
 .status[data-phase="error"] .pulse,
-.status[data-phase="configuration_required"] .pulse { color: var(--red); }
+.status[data-phase="configuration_required"] .pulse,
+.status[data-phase="source_frozen"] .pulse { color: var(--red); }
 .status[data-phase="idle"] .phase,
 .status[data-phase="stopped"] .phase,
 .status[data-phase="idle"] .pulse,
 .status[data-phase="stopped"] .pulse { color: var(--muted); }
 .status[data-phase="waiting_for_ingest"] .phase,
 .status[data-phase="degraded"] .phase,
+.status[data-phase="selecting"] .phase,
 .status[data-phase="waiting_for_ingest"] .pulse,
-.status[data-phase="degraded"] .pulse { color: var(--gold); }
+.status[data-phase="degraded"] .pulse,
+.status[data-phase="selecting"] .pulse { color: var(--gold); }
 
 dl { margin: 0; display: grid; gap: 13px; }
 dl div { display: grid; grid-template-columns: 1fr auto; gap: 20px; border-bottom: 1px solid rgba(57, 51, 35, 0.65); padding-bottom: 10px; }

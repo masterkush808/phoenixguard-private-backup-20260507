@@ -90,6 +90,41 @@ def _same_logical_process(first_pid: int, second_pid: int, processes: list[dict[
     return first_pid in ancestors(second_pid) or second_pid in ancestors(first_pid)
 
 
+def source_controller_topology_findings(
+    source_controller_processes: list[dict[str, object]],
+    *,
+    required: bool,
+    base_url: str,
+    session_id: str,
+) -> tuple[list[str], list[str]]:
+    """Return deterministic source-controller failures and operator corrections."""
+
+    failures: list[str] = []
+    corrections: list[str] = []
+    if required and not source_controller_processes:
+        failures.append("universal Windows chart source controller is not running")
+        corrections.append(
+            "Install windows-capture==2.0.0 with --no-deps in .venv-live, "
+            "then relaunch the canonical stack."
+        )
+    if len(source_controller_processes) > 1:
+        failures.append(
+            "expected at most one Windows chart source controller, "
+            f"found {len(source_controller_processes)}"
+        )
+    if len(source_controller_processes) == 1:
+        controller_cmd = command_line(source_controller_processes[0])
+        if base_url not in controller_cmd:
+            failures.append(
+                f"source controller base_url mismatch: expected {base_url}, command={controller_cmd}"
+            )
+        if session_id not in controller_cmd:
+            failures.append(
+                f"source controller session mismatch: expected {session_id}, command={controller_cmd}"
+            )
+    return failures, corrections
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 process topology.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -99,6 +134,7 @@ def main() -> int:
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR))
     parser.add_argument("--allow-missing-shooter", action="store_true")
     parser.add_argument("--require-bridge", action="store_true")
+    parser.add_argument("--require-source-controller", action="store_true")
     args = parser.parse_args()
 
     processes = python_processes()
@@ -108,6 +144,9 @@ def main() -> int:
     tracker_processes = leaf_processes(find_processes(processes, "start_phoenixguard_24_7_tracker.py"))
     shooter_processes = leaf_processes(find_processes(processes, "shooter.py"))
     bridge_processes = leaf_processes(find_processes(processes, "phoenixguard_mt4_file_bridge.py"))
+    source_controller_processes = leaf_processes(
+        find_processes(processes, "start_phoenixguard_windows_region_capture.py")
+    )
     listener_rows = [row for row in listeners if int(row.get("LocalPort") or 0) == int(args.port)]
     fallback_rows = [row for row in listeners if int(row.get("LocalPort") or 0) == int(args.fallback_port)]
     failures: list[str] = []
@@ -162,6 +201,14 @@ def main() -> int:
             failures.append(f"MT4 bridge base_url mismatch: expected {args.base_url}, command={bridge_cmd}")
         if args.session not in bridge_cmd:
             failures.append(f"MT4 bridge session mismatch: expected {args.session}, command={bridge_cmd}")
+    source_failures, source_corrections = source_controller_topology_findings(
+        source_controller_processes,
+        required=bool(args.require_source_controller),
+        base_url=str(args.base_url),
+        session_id=str(args.session),
+    )
+    failures.extend(source_failures)
+    corrections.extend(source_corrections)
     if not singleton_lock:
         failures.append(f"runtime singleton lock missing: {singleton_guard.lock_path}")
         corrections.append("Relaunch through Backend/launch/start_phoenixguard_24_7_tracker.py so PhoenixRuntimeSingletonGuardV3 owns the stack.")
@@ -251,6 +298,7 @@ def main() -> int:
                 "tracker": tracker_processes,
                 "shooter": shooter_processes,
                 "bridge": bridge_processes,
+                "source_controller": source_controller_processes,
             },
             "listeners": listeners,
             "correction_commands": corrections,

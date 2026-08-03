@@ -294,6 +294,113 @@
       padding: clamp(18px, 2.8vw, 40px);
     }
 
+    .capture-source-control {
+      display: grid;
+      grid-template-columns: minmax(240px, 0.8fr) minmax(300px, 1.6fr) auto;
+      align-items: center;
+      gap: 16px 24px;
+      margin: 0 0 clamp(16px, 2vw, 24px);
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--quiet);
+      border-radius: 12px;
+      background: linear-gradient(90deg, rgba(242, 200, 102, 0.04), rgba(255, 255, 255, 0.012));
+    }
+
+    .capture-source-control[data-state="LIVE"] {
+      border-left-color: var(--up);
+    }
+
+    .capture-source-control[data-state="SELECTING"],
+    .capture-source-control[data-state="CLAIMING"],
+    .capture-source-control[data-state="VALIDATING"],
+    .capture-source-control[data-state="SWITCHING"] {
+      border-left-color: var(--warn);
+    }
+
+    .capture-source-control[data-state="STALE"],
+    .capture-source-control[data-state="ERROR"] {
+      border-left-color: var(--down);
+    }
+
+    .capture-source-identity {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 2px 10px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .capture-source-state {
+      grid-row: 1 / span 2;
+      align-self: stretch;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--gold);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+
+    .capture-source-label {
+      overflow: hidden;
+      color: var(--text);
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .capture-source-age {
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: 9px;
+    }
+
+    .capture-source-message {
+      margin: 0;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    .capture-source-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .capture-source-button {
+      min-height: 34px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--gold-pale);
+      background: rgba(242, 200, 102, 0.035);
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 750;
+    }
+
+    .capture-source-button:hover {
+      border-color: var(--line-strong);
+      background: rgba(242, 200, 102, 0.09);
+    }
+
+    .capture-source-button[data-kind="kill"] {
+      color: var(--muted);
+      background: transparent;
+    }
+
+    .capture-source-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.38;
+    }
+
     .decision-shell {
       padding: clamp(18px, 2.4vw, 32px) 0 clamp(22px, 3vw, 40px);
       border-bottom: 1px solid var(--line);
@@ -2032,6 +2139,15 @@
     }
 
     @media (max-width: 980px) {
+      .capture-source-control {
+        grid-template-columns: 1fr auto;
+      }
+
+      .capture-source-message {
+        grid-column: 1 / -1;
+        grid-row: 2;
+      }
+
       .decision-brief-head {
         align-items: flex-start;
         flex-direction: column;
@@ -2134,6 +2250,25 @@
 
       .app-main {
         padding: 12px;
+      }
+
+      .capture-source-control {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 12px;
+      }
+
+      .capture-source-message {
+        grid-column: auto;
+        grid-row: auto;
+      }
+
+      .capture-source-actions {
+        justify-content: stretch;
+      }
+
+      .capture-source-button {
+        flex: 1;
       }
 
       .decision-shell {
@@ -2402,6 +2537,19 @@
   </header>
 
   <main class="app-main" id="main-content">
+    <section class="capture-source-control" id="source-control" data-state="NO_SOURCE" aria-label="Chart source" aria-live="polite">
+      <div class="capture-source-identity">
+        <span class="capture-source-state" id="source-state">NO CHART</span>
+        <strong class="capture-source-label" id="source-label">No chart selected</strong>
+        <span class="capture-source-age" id="source-age">Not streaming</span>
+      </div>
+      <p class="capture-source-message" id="source-message">Focus any chart window, press Ctrl+Shift+B, then drag over the chart and release to lock it. Phoenix Guard keeps that selected window streaming while you use other apps; Ctrl+Shift+K stops it.</p>
+      <div class="capture-source-actions">
+        <button class="capture-source-button" id="source-select" type="button">Select / change chart</button>
+        <button class="capture-source-button" id="source-kill" data-kind="kill" type="button" disabled>Stop tracking</button>
+      </div>
+    </section>
+
     <section class="decision-shell" id="beginner-decision-shell" data-tone="hold" aria-labelledby="beginner-story-title">
       <header class="decision-brief-head">
         <div class="decision-brief-title">
@@ -2719,6 +2867,7 @@
     // SSE is primary. This bounded visible fallback keeps the operator brief
     // responsive if an intermediary delays or drops stream data events.
     const POLL_INTERVAL_MS = 2000;
+    const CAPTURE_SOURCE_STALE_FALLBACK_SECONDS = 25;
     // Preserve a useful but bounded automatic closed-candle study history.
     const SESSION_HISTORY_ROW_LIMIT = 256;
     const OVERLAY_LAYERS_STORAGE_KEY = "phoenixguard.overlay.layers.v1";
@@ -2822,6 +2971,13 @@
       body: document.body,
       connectionState: byId("connection-state"),
       connectionLabel: byId("connection-label"),
+      sourceControl: byId("source-control"),
+      sourceState: byId("source-state"),
+      sourceLabel: byId("source-label"),
+      sourceAge: byId("source-age"),
+      sourceMessage: byId("source-message"),
+      sourceSelect: byId("source-select"),
+      sourceKill: byId("source-kill"),
       experienceModeToggle: byId("experience-mode-toggle"),
       beginnerOpenAdvanced: byId("beginner-open-advanced"),
       beginnerDecisionShell: byId("beginner-decision-shell"),
@@ -3014,6 +3170,8 @@
       eventSource: null,
       streamConnected: false,
       liveSession: null,
+      sourceKillBusy: false,
+      sourceGuideUntilEpoch: 0,
       sessionSnapshotRequest: null,
       lastSessionSnapshotEpoch: 0,
       completedStudyHistory: [],
@@ -3340,6 +3498,149 @@
       return "/v1/mobile/window-tracker/sessions/" + encodeURIComponent(SESSION_ID);
     }
 
+    function sourceKillUrl() {
+      return "/v1/mobile/window-tracker/sessions/"
+        + encodeURIComponent(SESSION_ID)
+        + "/source-control/kill";
+    }
+
+    function captureSourceContract(payload) {
+      const session = safeObject(state.liveSession);
+      if (Object.prototype.hasOwnProperty.call(session, "capture_source_v3")) {
+        return {present: true, source: safeObject(session.capture_source_v3)};
+      }
+      const operatorState = safeObject(payload);
+      if (Object.prototype.hasOwnProperty.call(operatorState, "capture_source_v3")) {
+        return {present: true, source: safeObject(operatorState.capture_source_v3)};
+      }
+      const tracking = safeObject(operatorState.tracking);
+      if (Object.prototype.hasOwnProperty.call(tracking, "capture_source_v3")) {
+        return {present: true, source: safeObject(tracking.capture_source_v3)};
+      }
+      return {present: false, source: {}};
+    }
+
+    function captureSourceView(payload) {
+      const contract = captureSourceContract(payload);
+      const source = contract.source;
+      let sourceState = safeText(source.state, "NO_SOURCE").toUpperCase().replace(/[ -]+/g, "_");
+      const allowedStates = new Set([
+        "NO_SOURCE", "READY", "SELECTING", "CLAIMING", "VALIDATING", "LIVE",
+        "PAUSED", "STALE", "SWITCHING", "STOPPED", "KILLED", "ERROR",
+      ]);
+      if (!allowedStates.has(sourceState)) {
+        sourceState = "NO_SOURCE";
+      }
+      const lastFrameEpoch = eventEpochSeconds(source.last_frame_epoch || safeObject(source.stream).last_frame_epoch);
+      const measuredAge = lastFrameEpoch > 0 ? Math.max(0, Date.now() / 1000 - lastFrameEpoch) : Infinity;
+      const declaredAge = Number(source.frame_age_sec);
+      const frameAge = Number.isFinite(declaredAge) && declaredAge >= 0
+        ? Math.max(declaredAge, Number.isFinite(measuredAge) ? measuredAge : 0)
+        : measuredAge;
+      const declaredStaleAfter = Number(source.stale_after_sec);
+      const staleAfterSeconds = Number.isFinite(declaredStaleAfter) && declaredStaleAfter >= 5
+        ? declaredStaleAfter
+        : CAPTURE_SOURCE_STALE_FALLBACK_SECONDS;
+      const fresh = source.fresh === true
+        && lastFrameEpoch > 0
+        && frameAge <= staleAfterSeconds;
+      if (sourceState === "LIVE" && !fresh) {
+        sourceState = "STALE";
+      }
+      const transport = safeText(source.transport, "")
+        .toLowerCase()
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, function (character) { return character.toUpperCase(); });
+      const labels = {
+        NO_SOURCE: "NO CHART",
+        READY: "READY",
+        SELECTING: "SELECTING",
+        CLAIMING: "LOCKING",
+        VALIDATING: "CHECKING",
+        LIVE: "LIVE",
+        PAUSED: "PAUSED",
+        STALE: "STALE",
+        SWITCHING: "SWITCHING",
+        STOPPED: "STOPPED",
+        KILLED: "STOPPED",
+        ERROR: "ERROR",
+      };
+      const defaults = {
+        NO_SOURCE: "Focus any chart window, press Ctrl+Shift+B, then drag over the chart and release to lock it.",
+        READY: "Focus any chart window, press Ctrl+Shift+B, then drag over the chart and release to lock it.",
+        SELECTING: "Drag over the chart and release to lock it, or press Esc to cancel.",
+        CLAIMING: "Locking the selected chart. Decisions remain paused until fresh frames arrive.",
+        VALIDATING: "Checking the selected chart. Decisions remain paused until its first fresh frame is studied.",
+        LIVE: "Fresh frames are streaming in the background while you use other apps.",
+        PAUSED: "The selected chart is paused. Its last picture is historical, not a live decision.",
+        STALE: "The selected chart stopped delivering fresh frames. The visible picture is historical.",
+        SWITCHING: "Changing chart source. Decisions remain paused until the new source is fresh.",
+        STOPPED: "Tracking is stopped. The visible picture is historical.",
+        KILLED: "Tracking is stopped. The visible picture is historical.",
+        ERROR: "The chart source failed. Select the chart again or choose another chart.",
+      };
+      const displayName = safeText(
+        source.display_name,
+        ["NO_SOURCE", "READY"].includes(sourceState) ? "No chart selected" : "Selected chart",
+      );
+      const age = lastFrameEpoch > 0
+        ? (formatAge(lastFrameEpoch) || "Frame time unavailable") + (transport ? " · " + transport : "")
+        : transport || (["NO_SOURCE", "READY"].includes(sourceState) ? "Not streaming" : "Waiting for first frame");
+      return {
+        present: contract.present,
+        source: source,
+        state: sourceState,
+        stateLabel: labels[sourceState],
+        label: displayName,
+        age: age,
+        message: safeText(source.message, defaults[sourceState]),
+        fresh: fresh,
+        decisionUsable: sourceState === "LIVE" && fresh && source.decision_usable === true,
+        killEnabled: !["NO_SOURCE", "READY", "STOPPED", "KILLED"].includes(sourceState),
+      };
+    }
+
+    function renderCaptureSource(payload) {
+      const view = captureSourceView(payload);
+      if (!view.present) {
+        return view;
+      }
+      els.sourceControl.dataset.state = view.state;
+      setText(els.sourceState, view.stateLabel, "NO CHART");
+      setText(els.sourceLabel, view.label, "No chart selected");
+      setText(els.sourceAge, view.age, "Not streaming");
+      const guideActive = state.sourceGuideUntilEpoch > Date.now() / 1000;
+      setText(
+        els.sourceMessage,
+        guideActive
+          ? "1. Focus the chart window you want. 2. Press Ctrl+Shift+B. 3. Drag over the chart and release to lock it. The locked window keeps streaming in the background; press Esc to cancel selection."
+          : view.message,
+      );
+      els.sourceSelect.textContent = guideActive ? "Use Ctrl+Shift+B" : "Select / change chart";
+      els.sourceKill.disabled = state.sourceKillBusy || !view.killEnabled;
+      els.sourceKill.textContent = state.sourceKillBusy ? "Stopping…" : "Stop tracking";
+      return view;
+    }
+
+    function enforceCaptureSourceDecision(payload) {
+      const view = renderCaptureSource(payload);
+      if (!view.present || view.decisionUsable) {
+        return;
+      }
+      const historical = ["PAUSED", "STALE", "STOPPED", "KILLED", "ERROR"].includes(view.state);
+      invalidateLiveEntryDecision(
+        view.message,
+        "STAY OUT",
+        ["NO_SOURCE", "READY", "STOPPED", "KILLED", "ERROR"].includes(view.state)
+          ? "Select a chart with Ctrl+Shift+B and wait for a fresh studied frame."
+          : "Wait for the selected chart to become fresh and decision-ready.",
+        historical ? "stale" : "updating",
+      );
+      if (historical && state.imageUrl) {
+        updateVisualStatus("chart", "stale", "Historical frame retained · selected source is not live");
+      }
+    }
+
     async function requestJson(url) {
       const response = await fetch(url, {
         cache: "no-store",
@@ -3353,6 +3654,53 @@
         throw new Error("Live analysis returned an unsupported workspace format.");
       }
       return payload;
+    }
+
+    function showSourceSelectionGuide() {
+      state.sourceGuideUntilEpoch = Date.now() / 1000 + 8;
+      renderCaptureSource(state.payload || {});
+      window.setTimeout(function () {
+        if (state.sourceGuideUntilEpoch > Date.now() / 1000) {
+          return;
+        }
+        state.sourceGuideUntilEpoch = 0;
+        renderCaptureSource(state.payload || {});
+      }, 8000);
+    }
+
+    async function stopSelectedCaptureSource() {
+      if (state.sourceKillBusy || els.sourceKill.disabled) {
+        return;
+      }
+      state.sourceKillBusy = true;
+      renderCaptureSource(state.payload || {});
+      try {
+        const response = await fetch(sourceKillUrl(), {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({reason: "Tracking stopped from the local dashboard. The retained frame is historical."}),
+        });
+        if (!response.ok) {
+          throw new Error("The chart source could not be stopped.");
+        }
+        const result = safeObject(await response.json());
+        state.sourceKillBusy = false;
+        applySessionStreamSnapshot({
+          session_id: safeText(result.session_id, SESSION_ID),
+          capture_source_v3: safeObject(result.capture_source_v3),
+        });
+        await refreshSessionSnapshot({force: true});
+      } catch (error) {
+        state.sourceKillBusy = false;
+        setText(els.sourceState, "ERROR");
+        setText(els.sourceMessage, safeText(error && error.message, "The chart source could not be stopped."));
+        els.sourceKill.disabled = false;
+        els.sourceKill.textContent = "Try stop again";
+      }
     }
 
     function revisionValue(payload) {
@@ -3649,6 +3997,7 @@
       setText(els.retracementEvidence, "Retracement evidence: unavailable while the live workspace is offline. Observation only; never entry permission.");
       renderStreamObservation({tracking: {stream: {enabled: false, state: "OFFLINE"}}});
       updateVisualStatus("chart", "offline", "Broker view unavailable");
+      renderCaptureSource(state.payload || {});
     }
 
     function invalidateLiveEntryDecision(reason, headline, nextCondition, stateLabel) {
@@ -4562,6 +4911,7 @@
           + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
       );
       scheduleEntryExpiry(permission, freshness, action);
+      enforceCaptureSourceDecision(payload);
     }
 
     function updateVisualStatus(source, freshness, label) {
@@ -4762,12 +5112,31 @@
       const trackingState = safeText(tracking.state || tracking.status, "WAITING").toLowerCase();
       const active = tracking.active !== false && trackingState !== "paused";
       const liveRead = liveFormingRead(payload);
-      const label = !active
-        ? "Paused"
-        : liveRead.available
-          ? normalized === "live" ? "Live" : "Live stream"
-          : normalized === "live" ? "Live" : normalized === "updating" ? "Updating" : normalized === "stale" ? "Entry checks expired" : "Offline";
-      setConnectionState(active ? (liveRead.available ? "live" : normalized) : "updating", label);
+      const sourceView = renderCaptureSource(payload);
+      if (sourceView.present) {
+        const sourceConnection = {
+          LIVE: ["live", "Chart stream live"],
+          SELECTING: ["updating", "Selecting chart"],
+          CLAIMING: ["updating", "Locking chart"],
+          VALIDATING: ["updating", "Checking chart"],
+          SWITCHING: ["updating", "Switching chart"],
+          STALE: ["stale", "Chart stream stale"],
+          PAUSED: ["stale", "Chart stream paused"],
+          ERROR: ["offline", "Chart source error"],
+          STOPPED: ["offline", "Chart tracking stopped"],
+          KILLED: ["offline", "Chart tracking stopped"],
+          NO_SOURCE: ["updating", "Waiting for chart"],
+          READY: ["updating", "Waiting for chart"],
+        }[sourceView.state] || ["updating", "Waiting for chart"];
+        setConnectionState(sourceConnection[0], sourceConnection[1]);
+      } else {
+        const label = !active
+          ? "Paused"
+          : liveRead.available
+            ? normalized === "live" ? "Live" : "Live stream"
+            : normalized === "live" ? "Live" : normalized === "updating" ? "Updating" : normalized === "stale" ? "Entry checks expired" : "Offline";
+        setConnectionState(active ? (liveRead.available ? "live" : normalized) : "updating", label);
+      }
       const observed = Number(freshness.observed_at || payload.observed_at || 0);
       setText(
         els.surfaceMeta,
@@ -7018,6 +7387,8 @@
     els.experienceModeToggle.addEventListener("click", function () {
       applyExperienceMode(state.experienceMode === "simple" ? "advanced" : "simple", true);
     });
+    els.sourceSelect.addEventListener("click", showSourceSelectionGuide);
+    els.sourceKill.addEventListener("click", stopSelectedCaptureSource);
     els.beginnerOpenAdvanced.addEventListener("click", function () {
       applyExperienceMode("advanced", true);
       byId("workspace-title").scrollIntoView({behavior: "smooth", block: "start"});

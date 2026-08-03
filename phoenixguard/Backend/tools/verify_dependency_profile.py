@@ -76,7 +76,7 @@ PROFILES: dict[str, DependencyProfile] = {
             "keyboard",
         ),
         alternatives=(AlternativeRequirement("cv2 runtime", ("opencv-python-headless", "opencv-python")),),
-        optional=("pywin32", "onnxruntime", "mapie"),
+        optional=("pywin32", "onnxruntime", "mapie", "windows-capture"),
         forbidden=LIVE_FORBIDDEN,
     ),
     "decision": DependencyProfile(

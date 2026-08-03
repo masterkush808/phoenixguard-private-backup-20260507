@@ -3870,6 +3870,16 @@ class WindowTrackerFocusRegionRequest(BaseModel):
     source: str = "dashboard_ctrl_v"
 
 
+class WindowTrackerSourceKillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        default="Capture source stopped from the local dashboard.",
+        min_length=1,
+        max_length=240,
+    )
+
+
 class WindowTrackerControlUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -9266,6 +9276,29 @@ def create_app(
                 media_type = "image/jpeg"
         return _safe_file_bytes_response(path, media_type=media_type)
 
+    @app.post("/v1/mobile/window-tracker/sessions/{session_id}/source-control/kill")
+    def kill_tracker_capture_source(
+        session_id: str,
+        request: WindowTrackerSourceKillRequest,
+    ) -> dict[str, object]:
+        """Fence the selected browser/WGC feed without stopping the stack."""
+
+        try:
+            source = get_window_tracker_service().kill_external_source(
+                session_id,
+                reason=request.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+        return {
+            "schema_version": "PG_CAPTURE_SOURCE_KILLED_V1",
+            "session_id": session_id,
+            "capture_source_v3": _sanitize_public_tracker_session(source),
+        }
+
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window")
     def get_tracker_latest_window(session_id: str, frame_id: int | None = None) -> Response:
         try:
@@ -10020,6 +10053,7 @@ def create_app(
         clear_tracker_focus_region,
         arm_tracker_focus_region,
         cancel_tracker_focus_region,
+        kill_tracker_capture_source,
         get_tracker_latest_chart,
         get_tracker_latest_window,
         get_tracker_artifact_file,

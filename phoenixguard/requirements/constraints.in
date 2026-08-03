@@ -46,6 +46,9 @@ opentelemetry-instrumentation-fastapi==0.62b0
 opentelemetry-instrumentation-requests==0.62b0
 opentelemetry-instrumentation-urllib==0.62b0
 mss==10.2.0
+# Optional Windows Graphics Capture runtime. Install this wheel with --no-deps;
+# its declared opencv-python dependency conflicts with the live headless policy.
+windows-capture==2.0.0
 pytesseract==0.3.13
 keyboard==0.13.5
 pipdeptree==3.1.0

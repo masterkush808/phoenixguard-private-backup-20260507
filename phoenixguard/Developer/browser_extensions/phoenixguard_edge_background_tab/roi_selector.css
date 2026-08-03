@@ -1,0 +1,123 @@
+#phoenixguard-roi-selector-root {
+  all: initial !important;
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important;
+  display: block !important;
+  box-sizing: border-box !important;
+  cursor: crosshair !important;
+  background: rgba(3, 6, 9, 0.34) !important;
+  color: #fff6d7 !important;
+  font: 600 14px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace !important;
+  user-select: none !important;
+  touch-action: none !important;
+}
+
+#phoenixguard-roi-selector-root *,
+#phoenixguard-roi-selector-root *::before,
+#phoenixguard-roi-selector-root *::after {
+  box-sizing: border-box !important;
+  font: inherit !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-instructions {
+  position: fixed !important;
+  top: 18px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  width: min(720px, calc(100vw - 36px)) !important;
+  display: grid !important;
+  gap: 4px !important;
+  padding: 14px 18px !important;
+  border: 1px solid #d8a83e !important;
+  border-radius: 10px !important;
+  background: rgba(8, 10, 9, 0.96) !important;
+  box-shadow: 0 14px 50px rgba(0, 0, 0, 0.55) !important;
+  text-align: center !important;
+  pointer-events: none !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-instructions strong {
+  color: #ffd46b !important;
+  font-size: 17px !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-keys {
+  color: #aeb5ad !important;
+  font-size: 12px !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-box {
+  position: fixed !important;
+  border: 2px solid #53e49b !important;
+  background: rgba(36, 158, 99, 0.08) !important;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42), inset 0 0 0 1px rgba(255, 255, 255, 0.35) !important;
+  pointer-events: none !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-size {
+  position: absolute !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  transform: translateY(100%) !important;
+  padding: 4px 8px !important;
+  border-radius: 0 0 6px 6px !important;
+  background: #168a51 !important;
+  color: white !important;
+  white-space: nowrap !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-actions {
+  position: fixed !important;
+  left: 50% !important;
+  bottom: 22px !important;
+  transform: translateX(-50%) !important;
+  display: flex !important;
+  gap: 8px !important;
+  padding: 10px !important;
+  border: 1px solid rgba(216, 168, 62, 0.55) !important;
+  border-radius: 10px !important;
+  background: rgba(8, 10, 9, 0.96) !important;
+  box-shadow: 0 14px 50px rgba(0, 0, 0, 0.55) !important;
+}
+
+#phoenixguard-roi-selector-root button {
+  all: initial !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 38px !important;
+  padding: 0 14px !important;
+  border: 1px solid #72623d !important;
+  border-radius: 7px !important;
+  background: #171712 !important;
+  color: #fff6d7 !important;
+  font: 700 13px/1 ui-monospace, "Cascadia Mono", Consolas, monospace !important;
+  cursor: pointer !important;
+}
+
+#phoenixguard-roi-selector-root button:hover {
+  border-color: #ffd46b !important;
+}
+
+#phoenixguard-roi-selector-root button.pg-roi-confirm {
+  background: #168a51 !important;
+  border-color: #53e49b !important;
+  color: white !important;
+}
+
+#phoenixguard-roi-selector-root button:disabled {
+  opacity: 0.38 !important;
+  cursor: not-allowed !important;
+}
+
+#phoenixguard-roi-selector-root .pg-roi-error {
+  position: fixed !important;
+  left: 50% !important;
+  bottom: 82px !important;
+  transform: translateX(-50%) !important;
+  min-height: 20px !important;
+  color: #ffb7a8 !important;
+  text-shadow: 0 1px 3px black !important;
+  pointer-events: none !important;
+}

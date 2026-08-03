@@ -553,7 +553,86 @@ def _write_status_file(status_path: Path, payload: dict[str, Any]) -> bool:
         return False
 
 
+_CAPTURE_SOURCE_EXTERNAL_OWNERSHIP_STATES = frozenset(
+    {
+        "SELECTING",
+        "CLAIMING",
+        "VALIDATING",
+        "LIVE",
+        "PAUSED",
+        "STALE",
+        "SWITCHING",
+    }
+)
+_CAPTURE_SOURCE_WAITING_STATES = frozenset(
+    {"NO_SOURCE", "READY", "STOPPED", "KILLED", "WAITING_FOR_SOURCE"}
+)
+
+
+def _capture_source_v3(session: dict[str, Any]) -> dict[str, Any]:
+    return _as_json_dict(session.get("capture_source_v3"))
+
+
+def _capture_source_state(session: dict[str, Any]) -> str:
+    source = _capture_source_v3(session)
+    state = str(source.get("state", "") or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if state:
+        return state
+    session_state = str(session.get("status", "") or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return session_state if session_state == "WAITING_FOR_SOURCE" else ""
+
+
+def _external_capture_source_owns_session(session: dict[str, Any]) -> bool:
+    return _capture_source_state(session) in _CAPTURE_SOURCE_EXTERNAL_OWNERSHIP_STATES
+
+
+def _capture_source_waiting_for_selection(session: dict[str, Any]) -> bool:
+    source = _capture_source_v3(session)
+    return bool(source) and _capture_source_state(session) in _CAPTURE_SOURCE_WAITING_STATES
+
+
+def _capture_source_supervision_is_healthy(session: dict[str, Any]) -> bool:
+    """Return true when the universal source controller owns session lifecycle.
+
+    Push feeds and WGC/browser capture managers do not have a Pocket Option
+    worker for this launcher to start.  STALE remains a truthful data state but
+    a healthy ownership state: the UI must show it as stale while the
+    supervisor leaves the selected source in place for recovery or switching.
+    """
+
+    return bool(
+        _external_capture_source_owns_session(session)
+        or _capture_source_waiting_for_selection(session)
+    )
+
+
 def _runtime_state_for_session(session: dict[str, Any], capture_interval_sec: float) -> dict[str, Any]:
+    source = _capture_source_v3(session)
+    source_state = _capture_source_state(session)
+    if _capture_source_supervision_is_healthy(session):
+        external_owned = _external_capture_source_owns_session(session)
+        source_fresh = source.get("fresh") is True and source_state == "LIVE"
+        return {
+            "status": source_state or "WAITING_FOR_SOURCE",
+            "fresh": source_fresh,
+            "stale": source_state == "STALE",
+            "healthy": True,
+            "external_source_owned": external_owned,
+            "reason": (
+                "universal capture source owns the session"
+                if external_owned
+                else "stack is ready and waiting for the operator to select a chart source"
+            ),
+            "release_condition": (
+                "selected source publishes a fresh frame"
+                if external_owned and not source_fresh
+                else "operator selects a chart with Ctrl+Shift+B or the dashboard"
+                if not external_owned
+                else ""
+            ),
+            "last_capture_age_sec": source.get("frame_age_sec", 0.0),
+            "decision_age_sec": 0.0,
+        }
     return tracker_session_runtime_state(
         session,
         max_capture_staleness_sec=max(30.0, float(capture_interval_sec) * 30.0),
@@ -588,6 +667,7 @@ def _status_file_payload(
             "stale_status",
             "active_mode",
             "overlay_mode",
+            "capture_source_v3",
         ):
             value = live_state.get(key)
             if value not in (None, "", [], {}):
@@ -599,6 +679,7 @@ def _status_file_payload(
                         pass
                 status_source[key] = value
     runtime_state = _runtime_state_for_session(status_source, capture_interval_sec)
+    capture_source = _capture_source_v3(status_source)
     return {
         "session_id": status_source.get("session_id", session_id),
         "status": status_source.get("status", ""),
@@ -615,6 +696,10 @@ def _status_file_payload(
         "stale_status": status_source.get("stale_status", ""),
         "active_mode": status_source.get("active_mode", ""),
         "overlay_mode": status_source.get("overlay_mode", ""),
+        "capture_source_state": _capture_source_state(status_source),
+        "capture_source_transport": capture_source.get("transport", ""),
+        "capture_source_fresh": capture_source.get("fresh") is True,
+        "capture_source_owned": _external_capture_source_owns_session(status_source),
         "dashboard_url": dashboard_url,
         "base_url": base_url,
         "api_pid": api_pid,
@@ -623,6 +708,8 @@ def _status_file_payload(
 
 
 def _session_needs_worker_restart(session: dict[str, Any], capture_interval_sec: float) -> bool:
+    if _capture_source_supervision_is_healthy(session):
+        return False
     snapshot_is_stale = tracker_session_is_stale(
         session,
         max_capture_staleness_sec=max(30.0, float(capture_interval_sec) * 30.0),
@@ -852,6 +939,8 @@ def _ensure_session(
     )
     session = _request_json(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}/controls", method="PATCH", payload=controls, timeout=30)
 
+    if _capture_source_supervision_is_healthy(session):
+        return session
     if focus_region is not None:
         for _attempt in range(3):
             manual_focus = _as_json_dict(session.get("manual_focus_region", {}))
@@ -1054,7 +1143,11 @@ def main() -> int:
                 continue
             consecutive_restart_count = 0
             consecutive_session_read_failures = 0
-            if args.wait_for_lock and not tracker_focus_is_locked(session):
+            if (
+                args.wait_for_lock
+                and not tracker_focus_is_locked(session)
+                and not _capture_source_supervision_is_healthy(session)
+            ):
                 print(f"Session '{args.session_id}' is ready but not focus-locked yet.")
                 print(f"Open the dashboard and lock the {args.window_query or 'broker'} chart: {dashboard_url}")
                 while True:
@@ -1105,7 +1198,11 @@ def main() -> int:
                             consecutive_restart_count += 1
                             break
                         continue
-                    if configured_focus_region is not None and not tracker_focus_is_locked(session):
+                    if (
+                        configured_focus_region is not None
+                        and not tracker_focus_is_locked(session)
+                        and not _capture_source_supervision_is_healthy(session)
+                    ):
                         try:
                             session = _request_json(
                                 base_url,
@@ -1130,7 +1227,13 @@ def main() -> int:
                                 consecutive_restart_count += 1
                                 break
                             continue
-                    if tracker_focus_is_locked(session):
+                    if (
+                        tracker_focus_is_locked(session)
+                        or _capture_source_supervision_is_healthy(session)
+                    ):
+                        if _capture_source_supervision_is_healthy(session):
+                            consecutive_session_read_failures = 0
+                            break
                         session = _ensure_session(
                             base_url,
                             args.session_id,
@@ -1142,9 +1245,15 @@ def main() -> int:
                         )
                         consecutive_session_read_failures = 0
                         break
-                if not tracker_focus_is_locked(session):
+                if (
+                    not tracker_focus_is_locked(session)
+                    and not _capture_source_supervision_is_healthy(session)
+                ):
                     continue
-                print("Focus lock detected. Tracker is now armed and running.")
+                if _capture_source_supervision_is_healthy(session):
+                    print("Universal chart source controller is ready.")
+                else:
+                    print("Focus lock detected. Tracker is now armed and running.")
 
             runtime_state = _runtime_state_for_session(session, args.capture_interval)
             _write_status_file(
@@ -1231,7 +1340,12 @@ def main() -> int:
                         f"(attempt {consecutive_restart_count})."
                     )
                     break
-                if configured_focus_region is not None and not tracker_focus_is_locked(session):
+                source_supervised = _capture_source_supervision_is_healthy(session)
+                if (
+                    configured_focus_region is not None
+                    and not tracker_focus_is_locked(session)
+                    and not source_supervised
+                ):
                     print(
                         "Tracker focus lock is missing; reapplying configured broker focus region.",
                         flush=True,
@@ -1258,7 +1372,8 @@ def main() -> int:
                         _stop_process(api_proc)
                         break
                 runtime_state = _runtime_state_for_session(session, args.capture_interval)
-                if not tracker_session_is_running(session):
+                source_supervised = _capture_source_supervision_is_healthy(session)
+                if not source_supervised and not tracker_session_is_running(session):
                     print(
                         "Tracker session is not running; starting tracker worker: "
                         f"{runtime_state.get('reason', 'tracker session stopped')}",
@@ -1282,7 +1397,7 @@ def main() -> int:
                         )
                         _stop_process(api_proc)
                         break
-                elif _session_needs_worker_restart(session, args.capture_interval):
+                elif not source_supervised and _session_needs_worker_restart(session, args.capture_interval):
                     print(
                         "Tracker session is stale; restarting tracker worker: "
                         f"{runtime_state.get('reason', 'stale runtime state')}",

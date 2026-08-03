@@ -1,18 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "PhoenixGuard Edge Background Tab",
-  "version": "0.1.0",
-  "description": "Streams one explicitly locked Pocket Option tab to PhoenixGuard without activating or raising Edge.",
+  "name": "PhoenixGuard Universal Chart Region",
+  "version": "0.2.0",
+  "description": "Streams one explicitly selected region of any HTTP(S) chart tab to local PhoenixGuard without activating or raising Edge.",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
     "offscreen",
+    "scripting",
     "storage",
     "tabCapture"
   ],
   "host_permissions": [
-    "https://pocketoption.com/*",
-    "https://*.pocketoption.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -21,7 +20,26 @@
     "type": "module"
   },
   "action": {
-    "default_title": "PhoenixGuard: click once to lock the active Pocket Option tab"
+    "default_title": "PhoenixGuard: select or switch the active chart region"
+  },
+  "commands": {
+    "select-chart-region": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+8",
+        "linux": "Ctrl+Shift+8",
+        "mac": "Command+Shift+8"
+      },
+      "description": "Select or switch the PhoenixGuard chart region in the active Edge tab"
+    },
+    "stop-chart-capture": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+9",
+        "linux": "Ctrl+Shift+9",
+        "mac": "Command+Shift+9"
+      },
+      "description": "Immediately stop PhoenixGuard chart capture",
+      "global": true
+    }
   },
   "options_ui": {
     "page": "options.html",

@@ -219,6 +219,141 @@ def test_launcher_restarts_stuck_stream_keyframe_handoff(
     ) is True
 
 
+@pytest.mark.parametrize(
+    "source_state",
+    ("SELECTING", "CLAIMING", "VALIDATING", "LIVE", "PAUSED", "STALE", "SWITCHING"),
+)
+def test_launcher_treats_universal_capture_source_as_external_owner(source_state: str) -> None:
+    session = {
+        "status": "external_frame_feed",
+        "tracking_enabled": False,
+        "capture_source_v3": {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state": source_state,
+            "transport": "EDGE_TAB_CAPTURE",
+        },
+    }
+
+    assert tracker_launcher._external_capture_source_owns_session(session) is True
+    assert tracker_launcher._capture_source_supervision_is_healthy(session) is True
+    assert tracker_launcher._session_needs_worker_restart(session, 15.0) is False
+
+
+@pytest.mark.parametrize("source_state", ("NO_SOURCE", "READY", "STOPPED", "KILLED", "WAITING_FOR_SOURCE"))
+def test_launcher_treats_waiting_for_universal_source_as_healthy(source_state: str) -> None:
+    session = {
+        "status": "waiting_for_source",
+        "tracking_enabled": False,
+        "capture_source_v3": {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state": source_state,
+        },
+    }
+
+    state = tracker_launcher._runtime_state_for_session(session, 15.0)
+
+    assert tracker_launcher._capture_source_waiting_for_selection(session) is True
+    assert tracker_launcher._capture_source_supervision_is_healthy(session) is True
+    assert tracker_launcher._session_needs_worker_restart(session, 15.0) is False
+    assert state["healthy"] is True
+    assert state["fresh"] is False
+
+
+def test_launcher_ensure_session_never_starts_pocket_worker_while_external_source_owns_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    owned_session: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "status": "external_frame_feed",
+        "tracking_enabled": False,
+        "capture_source_v3": {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state": "STALE",
+            "transport": "EDGE_TAB_CAPTURE",
+            "fresh": False,
+        },
+    }
+
+    def _fake_request_json(
+        base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        del base_url, payload, timeout
+        calls.append((method, path))
+        return dict(owned_session)
+
+    monkeypatch.setattr(tracker_launcher, "_request_json", _fake_request_json)
+
+    session = tracker_launcher.ensure_session(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        15.0,
+        True,
+        "Pocket Option",
+        0,
+        [0.03, 0.13, 0.87, 0.96],
+    )
+
+    assert session["capture_source_v3"]["state"] == "STALE"
+    assert calls == [
+        ("GET", "/v1/mobile/window-tracker/sessions/pocket-live-8788"),
+        ("PATCH", "/v1/mobile/window-tracker/sessions/pocket-live-8788/controls"),
+    ]
+    assert all(not path.endswith(("/start", "/stop", "/focus-region")) for _method, path in calls)
+
+
+def test_launcher_waits_for_universal_selection_without_opening_pocket_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    waiting_session: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "status": "waiting_for_source",
+        "tracking_enabled": False,
+        "capture_source_v3": {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state": "NO_SOURCE",
+            "fresh": False,
+        },
+    }
+
+    def _fake_request_json(
+        base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        del base_url, payload, timeout
+        calls.append((method, path))
+        return dict(waiting_session)
+
+    monkeypatch.setattr(tracker_launcher, "_request_json", _fake_request_json)
+
+    session = tracker_launcher.ensure_session(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        15.0,
+        True,
+        "Pocket Option",
+        0,
+        [0.03, 0.13, 0.87, 0.96],
+    )
+
+    assert session["capture_source_v3"]["state"] == "NO_SOURCE"
+    assert calls == [
+        ("GET", "/v1/mobile/window-tracker/sessions/pocket-live-8788"),
+        ("PATCH", "/v1/mobile/window-tracker/sessions/pocket-live-8788/controls"),
+    ]
+    assert all(not path.endswith(("/start", "/stop", "/focus-region")) for _method, path in calls)
+
+
 def test_tracker_status_file_write_success(tmp_path: Path) -> None:
     status_path = tmp_path / "tracker_status.json"
 

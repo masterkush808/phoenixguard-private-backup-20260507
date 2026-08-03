@@ -7,56 +7,85 @@ import {dirname, resolve} from "node:path";
 import {
   SAMPLE_FPS,
   canonicalFrameSignaturePayload,
+  capturableHttpUrl,
   frameIngestEndpoint,
   initialStatus,
-  isPocketOptionTitle,
-  isPocketOptionUrl,
+  mapNormalizedRegionToPixels,
   meanAbsoluteDifference,
   normalizeConfig,
+  normalizeRegionSelection,
   sanitizeSourceUrl,
-  validateConfig,
-  validatePocketOptionTab
+  sourceControlClaimEndpoint,
+  sourceControlKillEndpoint,
+  sourceControlKillPayload,
+  sourceOrigin,
+  validateCapturableTab,
+  validateConfig
 } from "../common.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(here, "..");
 
-test("Pocket Option identity requires the real HTTPS host and title", () => {
-  assert.equal(isPocketOptionUrl("https://pocketoption.com/en/cabinet/demo-quick-high-low/"), true);
-  assert.equal(isPocketOptionUrl("https://api.pocketoption.com/chart"), true);
-  assert.equal(isPocketOptionUrl("http://pocketoption.com/chart"), false);
-  assert.equal(isPocketOptionUrl("https://pocketoption.com.evil.example/chart"), false);
-  assert.equal(isPocketOptionTitle("The Most Innovative Trading Platform and 31 more pages - Microsoft Edge"), true);
-  assert.equal(isPocketOptionTitle("Pocket Option - Microsoft Edge"), true);
-  assert.equal(isPocketOptionTitle("PhoenixGuard dashboard"), false);
-
+test("any explicit HTTP(S) chart tab is capturable while protected schemes are rejected", () => {
+  assert.equal(capturableHttpUrl("https://www.tradingview.com/chart/ABC?secret=1"), true);
+  assert.equal(capturableHttpUrl("https://pocketoption.com/en/cabinet/"), true);
+  assert.equal(capturableHttpUrl("http://localhost:3000/chart"), true);
+  for (const url of ["edge://settings", "chrome://extensions", "file:///chart.html", "data:text/html,chart", "javascript:void(0)"]) {
+    assert.equal(capturableHttpUrl(url), false, url);
+  }
   assert.deepEqual(
-    validatePocketOptionTab({
-      id: 123,
-      url: "https://pocketoption.com/en/cabinet/",
-      title: "The Most Innovative Trading Platform - Microsoft Edge"
-    }),
-    {ok: true, reason: "Pocket Option URL and title verified."}
+    validateCapturableTab({id: 12, active: true, url: "https://www.tradingview.com/chart/x", title: "Chart"}),
+    {ok: true, reason: "The active HTTP(S) chart tab can be selected."}
   );
-  assert.equal(validatePocketOptionTab({id: 123, url: "https://example.com", title: "Pocket Option"}).ok, false);
-  assert.equal(validatePocketOptionTab({id: 123, url: "https://pocketoption.com", title: "Inbox"}).ok, false);
+  assert.equal(validateCapturableTab({id: 12, active: false, url: "https://example.com"}).ok, false);
+  assert.equal(validateCapturableTab({id: 12, active: true, url: "edge://settings"}).ok, false);
 });
 
-test("source URL lineage strips query parameters and fragments", () => {
+test("source URL lineage removes credentials, query, and fragment", () => {
   assert.equal(
-    sanitizeSourceUrl("https://pocketoption.com/en/cabinet/?token=secret#chart"),
-    "https://pocketoption.com/en/cabinet/"
+    sanitizeSourceUrl("https://user:pass@charts.example.test/view?token=secret#chart"),
+    "https://charts.example.test/view"
   );
-  assert.equal(sanitizeSourceUrl("not a URL"), "");
+  assert.equal(sourceOrigin("https://charts.example.test/view?token=secret"), "https://charts.example.test");
+  assert.equal(sanitizeSourceUrl("edge://settings"), "");
 });
 
-test("local frame-ingest configuration is normalized and bounded", () => {
+test("ROI selection clamps to viewport and rejects undersized geometry", () => {
+  const selected = normalizeRegionSelection({
+    rectCss: {x: 900, y: 600, width: -800, height: -500},
+    viewportCss: {width: 1000, height: 700},
+    devicePixelRatio: 1.5
+  });
+  assert.equal(selected.ok, true);
+  assert.deepEqual(selected.region.rectCss, {x: 100, y: 100, width: 800, height: 500});
+  assert.deepEqual(selected.region.normalized, {
+    x: 0.1,
+    y: 0.14285714,
+    width: 0.8,
+    height: 0.71428571
+  });
+  assert.equal(normalizeRegionSelection({
+    rectCss: {x: 0, y: 0, width: 100, height: 100},
+    viewportCss: {width: 1000, height: 700}
+  }).ok, false);
+});
+
+test("normalized ROI maps deterministically into current video pixels", () => {
+  assert.deepEqual(
+    mapNormalizedRegionToPixels({x: 0.1, y: 0.2, width: 0.5, height: 0.4}, 1920, 1080),
+    {x: 192, y: 216, width: 960, height: 432, sourceWidth: 1920, sourceHeight: 1080}
+  );
+  const bounded = mapNormalizedRegionToPixels({x: 0.99, y: 0.99, width: 1, height: 1}, 100, 100);
+  assert.deepEqual(bounded, {x: 99, y: 99, width: 1, height: 1, sourceWidth: 100, sourceHeight: 100});
+});
+
+test("local frame-ingest and source-control configuration is bounded", () => {
   const config = normalizeConfig({
     baseUrl: "http://127.0.0.1:8793///",
     sessionId: "pocket-live-8788",
-    sourceId: "edge-source",
+    sourceId: "edge-chart-region-v3",
     token: " secret ",
-    timeframe: "m5",
+    timeframe: "",
     maxWidth: 99_999,
     jpegQuality: 0.1,
     materialDeltaThreshold: 4,
@@ -64,7 +93,7 @@ test("local frame-ingest configuration is normalized and bounded", () => {
   });
   assert.equal(config.baseUrl, "http://127.0.0.1:8793");
   assert.equal(config.token, "secret");
-  assert.equal(config.timeframe, "M5");
+  assert.equal(config.timeframe, "");
   assert.equal(config.maxWidth, 2560);
   assert.equal(config.jpegQuality, 0.55);
   assert.equal(config.materialDeltaThreshold, 0.08);
@@ -72,18 +101,30 @@ test("local frame-ingest configuration is normalized and bounded", () => {
   assert.equal(validateConfig(config).ok, true);
   assert.equal(validateConfig({...config, baseUrl: "https://remote.example"}).ok, false);
   assert.equal(validateConfig({...config, token: ""}).ok, false);
-  assert.equal(
-    frameIngestEndpoint(config),
-    "http://127.0.0.1:8793/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames"
-  );
+  assert.equal(frameIngestEndpoint(config), "http://127.0.0.1:8793/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames");
+  assert.equal(sourceControlClaimEndpoint(config), "http://127.0.0.1:8793/v1/mobile/frame-ingest/sessions/pocket-live-8788/source-control/claim");
+  assert.equal(sourceControlKillEndpoint(config), "http://127.0.0.1:8793/v1/mobile/frame-ingest/sessions/pocket-live-8788/source-control/kill");
+  assert.deepEqual(sourceControlKillPayload({
+    sourceId: " edge-chart-region-v3 ",
+    sequenceId: " edge-roi-5-seq ",
+    sourceGeneration: 7.9,
+    sourceLeaseId: " lease-private ",
+    reason: " Operator kill "
+  }), {
+    source_id: "edge-chart-region-v3",
+    sequence_id: "edge-roi-5-seq",
+    source_generation: 7,
+    source_lease_id: "lease-private",
+    reason: "Operator kill"
+  });
 });
 
 test("signature canonicalization matches PG_FRAME_INGEST_V1 field order", () => {
   const canonical = canonicalFrameSignaturePayload({
     path: "/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames",
     sessionId: "pocket-live-8788",
-    sourceId: "edge-source",
-    sequenceId: "edge-tab-5-seq",
+    sourceId: "edge-chart-region-v3",
+    sequenceId: "edge-roi-5-seq",
     frameId: 42,
     captureEpochMs: 1780000000000,
     frameSha256: "ABCDEF",
@@ -91,17 +132,9 @@ test("signature canonicalization matches PG_FRAME_INGEST_V1 field order", () => 
     nonce: "nonce-42"
   });
   assert.equal(canonical, [
-    "PG_FRAME_INGEST_V1",
-    "POST",
-    "/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames",
-    "pocket-live-8788",
-    "edge-source",
-    "edge-tab-5-seq",
-    "42",
-    "1780000000000",
-    "abcdef",
-    "1780000001000",
-    "nonce-42"
+    "PG_FRAME_INGEST_V1", "POST", "/v1/mobile/frame-ingest/sessions/pocket-live-8788/frames",
+    "pocket-live-8788", "edge-chart-region-v3", "edge-roi-5-seq", "42", "1780000000000",
+    "abcdef", "1780000001000", "nonce-42"
   ].join("\n"));
 });
 
@@ -111,41 +144,46 @@ test("material probe difference is normalized", () => {
   assert.equal(meanAbsoluteDifference(null, new Uint8Array([10])), 1);
 });
 
-test("status contract reports quarter-FPS and an immutable no-focus policy", () => {
+test("status contract reports ROI capture, freshness, and immutable no-focus policy", () => {
   const status = initialStatus();
   assert.equal(SAMPLE_FPS, 0.25);
-  assert.equal(status.sampleFps, 0.25);
+  assert.equal(status.schemaVersion, "PG_EDGE_REGION_CAPTURE_STATUS_V2");
+  assert.equal(status.captureMode, "tab_region");
+  assert.equal(status.sourceRenderFresh, false);
   assert.equal(status.focusPolicy, "never_activate_raise_or_focus_tabs");
 });
 
-test("manifest is MV3 and runtime source contains no tab/window focus calls", async () => {
+test("manifest is least-privilege MV3 with explicit select and global kill commands", async () => {
   const manifest = JSON.parse(await readFile(resolve(extensionRoot, "manifest.json"), "utf8"));
   assert.equal(manifest.manifest_version, 3);
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["activeTab", "offscreen", "storage", "tabCapture"].sort()
+    ["activeTab", "offscreen", "scripting", "storage", "tabCapture"].sort()
   );
+  assert.deepEqual([...manifest.host_permissions].sort(), ["http://127.0.0.1/*", "http://localhost/*"].sort());
+  assert.equal(manifest.commands["select-chart-region"].suggested_key.windows, "Ctrl+Shift+8");
+  assert.equal(manifest.commands["stop-chart-capture"].suggested_key.windows, "Ctrl+Shift+9");
+  assert.equal(manifest.commands["stop-chart-capture"].global, true);
+  assert.equal(JSON.stringify(manifest).includes("Ctrl+Shift+B"), false);
   assert.equal(manifest.action.default_popup, undefined);
   assert.equal(manifest.background.type, "module");
+});
 
-  const source = [
-    await readFile(resolve(extensionRoot, "common.js"), "utf8"),
-    await readFile(resolve(extensionRoot, "service_worker.js"), "utf8"),
-    await readFile(resolve(extensionRoot, "offscreen.js"), "utf8")
-  ].join("\n");
-  assert.match(source, /coordinate_space:\s*"edge_tab_content_v1"/);
-  assert.match(source, /browser_chrome_included:\s*false/);
-  assert.match(source, /extension_id:\s*chrome\.runtime\.id/);
-  assert.match(source, /extension_version:\s*chrome\.runtime\.getManifest\(\)\.version/);
-  assert.match(source, /form\.append\("source_url",\s*sanitizeSourceUrl\(lockedTab\.url\)\)/);
-  assert.match(source, /sourceId:\s*"edge-background-tab-v3"/);
+test("runtime contains ROI lease lineage and no focus-changing API", async () => {
+  const source = (await Promise.all([
+    "common.js", "service_worker.js", "offscreen.js", "roi_selector.js", "options.js"
+  ].map((name) => readFile(resolve(extensionRoot, name), "utf8")))).join("\n");
+  assert.match(source, /coordinate_space:\s*"edge_tab_roi_v1"/);
+  assert.match(source, /source_type:\s*"browser_tab_roi_capture"/);
+  assert.match(source, /form\.append\("source_generation"/);
+  assert.match(source, /form\.append\("source_lease_id"/);
+  assert.match(source, /source_render_fresh/);
+  assert.match(source, /PREPARE_CAPTURE_CANDIDATE_V1/);
+  assert.match(source, /COMMIT_CAPTURE_REGION_V1/);
+  assert.match(source, /STOP_ALL_CAPTURE_V1/);
   for (const forbidden of [
-    "chrome.tabs.update",
-    "chrome.windows.update",
-    "chrome.windows.create",
-    "window.focus(",
-    "tabs.highlight"
+    "chrome.tabs.update", "chrome.windows.update", "chrome.windows.create", "window.focus(", "tabs.highlight", "<all_urls>"
   ]) {
-    assert.equal(source.includes(forbidden), false, `forbidden focus-changing API: ${forbidden}`);
+    assert.equal(source.includes(forbidden), false, `forbidden focus or broad-access primitive: ${forbidden}`);
   }
 });

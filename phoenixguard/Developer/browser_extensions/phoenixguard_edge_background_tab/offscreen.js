@@ -1,36 +1,44 @@
 import {
   SAMPLE_FPS,
   SAMPLE_INTERVAL_MS,
+  SELECTION_TIMEOUT_MS,
+  SOURCE_FREEZE_TIMEOUT_MS,
   canonicalFrameSignaturePayload,
   frameIngestConfigEndpoint,
   frameIngestEndpoint,
   initialStatus,
+  mapNormalizedRegionToPixels,
   meanAbsoluteDifference,
   normalizeConfig,
-  sanitizeSourceUrl
+  normalizeRegionSelection,
+  sanitizeSourceUrl,
+  sourceControlClaimEndpoint,
+  sourceControlKillEndpoint,
+  sourceControlKillPayload,
+  sourceOrigin
 } from "./common.js";
 
-const video = document.getElementById("captureVideo");
+const videoHost = document.getElementById("captureVideos");
 const frameCanvas = document.getElementById("frameCanvas");
 const probeCanvas = document.getElementById("probeCanvas");
 const frameContext = frameCanvas.getContext("2d", {alpha: false});
 const probeContext = probeCanvas.getContext("2d", {alpha: false, willReadFrequently: true});
 
-let active = false;
-let mediaStream = null;
+let activeSession = null;
+let candidateSession = null;
+let candidateTimer = null;
 let sampleTimer = null;
 let uploadTimer = null;
 let contractTimer = null;
 let uploadInFlight = false;
+let samplingPausedForSelector = false;
 let pendingFrame = null;
 let previousQueuedProbe = null;
 let lastQueuedAt = 0;
 let lastAcceptedAtMs = 0;
+let lastVisualChangeAtMs = 0;
 let serverArmed = false;
 let signatureRequired = false;
-let config = normalizeConfig();
-let lockedTab = {id: 0, title: "", url: ""};
-let sequenceId = "";
 let status = initialStatus();
 
 function clearTimer(handle) {
@@ -48,28 +56,69 @@ function errorText(value) {
   }
 }
 
+function currentVideoAge(session = activeSession) {
+  if (!session?.lastVideoFrameAtMs) return -1;
+  return Math.max(0, Date.now() - session.lastVideoFrameAtMs);
+}
+
+function activeFresh() {
+  const age = currentVideoAge();
+  return Boolean(activeSession && age >= 0 && age <= SOURCE_FREEZE_TIMEOUT_MS);
+}
+
+function statusIdentity(update = {}) {
+  const candidate = candidateSession;
+  const active = activeSession;
+  return {
+    lockedTabId: active?.tab.id || Number(update.lockedTabId || 0),
+    lockedTitle: active?.tab.title || String(update.lockedTitle || ""),
+    lockedUrl: active?.tab.url || String(update.lockedUrl || ""),
+    lockedOrigin: active?.tab.origin || String(update.lockedOrigin || ""),
+    sequenceId: active?.sequenceId || String(update.sequenceId || ""),
+    region: active?.region || update.region || null,
+    candidateTabId: candidate?.tab.id || 0,
+    candidateTitle: candidate?.tab.title || "",
+    candidateUrl: candidate?.tab.url || "",
+    candidateOrigin: candidate?.tab.origin || "",
+    selectionId: candidate?.selectionId || "",
+    sourceGeneration: active?.sourceGeneration || 0,
+    sourceLeaseActive: Boolean(active?.sourceLeaseId)
+  };
+}
+
 async function notifyStatus(update = {}) {
+  const effectiveUpdate = {...update};
+  if (candidateSession && !["error", "configuration_required"].includes(String(effectiveUpdate.phase || ""))) {
+    effectiveUpdate.phase = "selecting";
+    effectiveUpdate.message = "Select the exact chart rectangle. Candidate pixels are not being uploaded.";
+  }
+  const videoAge = currentVideoAge();
   status = initialStatus({
     ...status,
-    ...update,
-    lockedTabId: active ? lockedTab.id : Number(update.lockedTabId || 0),
-    lockedTitle: active ? lockedTab.title : String(update.lockedTitle || ""),
-    lockedUrl: active ? lockedTab.url : String(update.lockedUrl || ""),
-    sequenceId: active ? sequenceId : String(update.sequenceId || ""),
+    ...statusIdentity(effectiveUpdate),
+    ...effectiveUpdate,
+    transportFrameAgeMs: videoAge,
+    visualChangeAgeMs: lastVisualChangeAtMs > 0 ? Math.max(0, Date.now() - lastVisualChangeAtMs) : -1,
+    sourceRenderFresh: activeFresh(),
+    lastVideoFrameAt: activeSession?.lastVideoFrameAtMs
+      ? new Date(activeSession.lastVideoFrameAtMs).toISOString()
+      : "",
+    lastVisualChangeAt: lastVisualChangeAtMs > 0 ? new Date(lastVisualChangeAtMs).toISOString() : "",
     updatedAt: new Date().toISOString()
   });
   try {
-    await chrome.runtime.sendMessage({type: "OFFSCREEN_STATUS", status});
+    await chrome.runtime.sendMessage({type: "OFFSCREEN_STATUS_V2", status});
   } catch (error) {
     console.debug("Status delivery deferred until the service worker wakes.", error);
   }
+  return status;
 }
 
 function canvasBlob(canvas, type, quality) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
-      else reject(new Error("Edge could not encode the sampled tab frame."));
+      else reject(new Error("Edge could not encode the selected chart region."));
     }, type, quality);
   });
 }
@@ -96,15 +145,228 @@ async function hmacSha256Hex(secret, payload) {
   return byteArrayToHex(new Uint8Array(signature));
 }
 
+function createVideo() {
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  videoHost.appendChild(video);
+  return video;
+}
+
+function watchPresentedFrames(session) {
+  if (!session || session.stopped || typeof session.video.requestVideoFrameCallback !== "function") return;
+  session.frameCallbackId = session.video.requestVideoFrameCallback((_now, metadata) => {
+    if (session.stopped) return;
+    session.presentedFrames = Number(metadata?.presentedFrames || session.presentedFrames + 1);
+    session.mediaTime = Number(metadata?.mediaTime || 0);
+    session.lastVideoFrameAtMs = Date.now();
+    if (session === activeSession && status.phase === "source_frozen") {
+      void notifyStatus({
+        phase: serverArmed && status.acceptedFrames > 0 ? "live" : "starting",
+        message: "The selected chart region resumed rendering."
+      });
+    }
+    watchPresentedFrames(session);
+  });
+}
+
+async function waitForVideo(session) {
+  const video = session.video;
+  if (video.readyState >= HTMLMediaElement.HAVE_METADATA && video.videoWidth > 0) return;
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Timed out waiting for chart-tab pixels.")), 8_000);
+    video.addEventListener("loadedmetadata", () => {
+      clearTimeout(timeout);
+      resolve();
+    }, {once: true});
+  });
+}
+
+function waitForCleanVideoFrame(session, timeoutMs = 1_500) {
+  if (typeof session?.video.requestVideoFrameCallback !== "function") {
+    return new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    }, timeoutMs);
+    session.video.requestVideoFrameCallback(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function waitForUploadIdle(timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (uploadInFlight && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (uploadInFlight) throw new Error("Timed out waiting for the previous source upload to settle.");
+}
+
+async function createCapturedSession(message) {
+  const video = createVideo();
+  const session = {
+    stream: null,
+    video,
+    tab: {
+      id: Number(message.tab?.id || 0),
+      title: String(message.tab?.title || "").slice(0, 180),
+      url: sanitizeSourceUrl(message.tab?.url).slice(0, 2048),
+      origin: sourceOrigin(message.tab?.url)
+    },
+    selectionId: String(message.selectionId || ""),
+    sequenceId: String(message.sequenceId || ""),
+    region: null,
+    config: normalizeConfig(message.config),
+    stopped: false,
+    presentedFrames: 0,
+    mediaTime: 0,
+    lastVideoFrameAtMs: Date.now(),
+    frameCallbackId: 0,
+    reusesActive: false,
+    sourceGeneration: 0,
+    sourceLeaseId: ""
+  };
+  try {
+    session.stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: String(message.streamId),
+          maxFrameRate: 1
+        }
+      }
+    });
+    const [track] = session.stream.getVideoTracks();
+    if (!track) throw new Error("Edge returned a tab stream without a video track.");
+    track.contentHint = "detail";
+    track.addEventListener("ended", () => {
+      if (session.stopped) return;
+      if (session === activeSession) {
+        void stopAllCapture("The locked chart-tab stream ended.");
+      } else if (session === candidateSession) {
+        void cancelCandidate("The candidate chart-tab stream ended before confirmation.");
+      }
+    }, {once: true});
+    video.srcObject = session.stream;
+    await video.play();
+    await waitForVideo(session);
+    session.lastVideoFrameAtMs = Date.now();
+    watchPresentedFrames(session);
+    return session;
+  } catch (error) {
+    stopSession(session);
+    throw error;
+  }
+}
+
+async function claimSource(session) {
+  const response = await fetch(sourceControlClaimEndpoint(session.config), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${session.config.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      source_id: session.config.sourceId,
+      sequence_id: session.sequenceId,
+      source_type: "browser_tab_roi_capture",
+      selection_id: session.selectionId,
+      display_name: String(session.tab.title || "Selected Edge chart").slice(0, 180),
+      coordinate_space: "edge_tab_roi_v1"
+    }),
+    cache: "no-store"
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(errorText(payload.detail || payload.message || `Source claim returned HTTP ${response.status}.`));
+    error.httpStatus = response.status;
+    throw error;
+  }
+  const generation = Number(payload.source_generation || payload.source_control?.source_generation || 0);
+  const leaseId = String(payload.source_lease_id || payload.source_control?.source_lease_id || "");
+  if (!Number.isInteger(generation) || generation <= 0 || !leaseId) {
+    throw new Error("PhoenixGuard accepted the source claim without a valid generation and lease ID.");
+  }
+  session.sourceGeneration = generation;
+  session.sourceLeaseId = leaseId;
+  return payload;
+}
+
+async function killSource(session, reason) {
+  if (!session?.config?.token) return;
+  try {
+    await fetch(sourceControlKillEndpoint(session.config), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.config.token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(sourceControlKillPayload({
+        sourceId: session.config.sourceId,
+        sequenceId: session.sequenceId,
+        sourceGeneration: session.sourceGeneration,
+        sourceLeaseId: session.sourceLeaseId,
+        reason
+      })),
+      cache: "no-store"
+    });
+  } catch (error) {
+    console.debug("PhoenixGuard source-control kill acknowledgement unavailable.", error);
+  }
+}
+
+function stopSession(session) {
+  if (!session || session.stopped) return;
+  session.stopped = true;
+  if (session.frameCallbackId && typeof session.video.cancelVideoFrameCallback === "function") {
+    session.video.cancelVideoFrameCallback(session.frameCallbackId);
+  }
+  if (session.stream) {
+    for (const track of session.stream.getTracks()) track.stop();
+  }
+  session.video.pause();
+  session.video.srcObject = null;
+  session.video.remove();
+}
+
+function resetFramePipeline() {
+  sampleTimer = clearTimer(sampleTimer);
+  uploadTimer = clearTimer(uploadTimer);
+  contractTimer = clearTimer(contractTimer);
+  pendingFrame = null;
+  uploadInFlight = false;
+  previousQueuedProbe = null;
+  lastQueuedAt = 0;
+  lastAcceptedAtMs = 0;
+  lastVisualChangeAtMs = 0;
+  serverArmed = false;
+  signatureRequired = false;
+  status = initialStatus({
+    phase: "starting",
+    message: "The selected chart region is waiting for its first accepted frame.",
+    ...statusIdentity()
+  });
+}
+
 async function refreshServerContract() {
   contractTimer = clearTimer(contractTimer);
-  if (!active) return;
+  if (!activeSession || samplingPausedForSelector) return;
+  const config = activeSession.config;
   try {
     const response = await fetch(frameIngestConfigEndpoint(config), {method: "GET", cache: "no-store"});
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(`Frame-ingest config returned HTTP ${response.status}.`);
-    }
+    if (!response.ok) throw new Error(`Frame-ingest config returned HTTP ${response.status}.`);
     const advertisedInterval = Number(payload.min_interval_sec ?? payload.readiness?.min_interval_sec ?? 10);
     status.uploadMinIntervalSec = Math.max(
       SAMPLE_INTERVAL_MS / 1000,
@@ -116,7 +378,7 @@ async function refreshServerContract() {
       serverArmed = false;
       await notifyStatus({
         phase: "configuration_required",
-        message: "Frame ingest requires an HMAC signing secret. Save it in extension options and relock the tab.",
+        message: "Frame ingest requires an HMAC signing secret. Save it in extension options and reselect the chart.",
         lastError: "Missing required frame-ingest signing secret."
       });
       return;
@@ -124,7 +386,7 @@ async function refreshServerContract() {
     if (!serverArmed) {
       await notifyStatus({
         phase: "waiting_for_ingest",
-        message: "Pocket Option is locked, but PhoenixGuard frame ingest is not armed yet.",
+        message: "The chart region is locked, but PhoenixGuard frame ingest is not armed yet.",
         lastError: ""
       });
       contractTimer = setTimeout(refreshServerContract, 30_000);
@@ -133,8 +395,8 @@ async function refreshServerContract() {
     await notifyStatus({
       phase: status.acceptedFrames > 0 ? "live" : "starting",
       message: status.acceptedFrames > 0
-        ? "Background tab capture is live. Edge focus is untouched."
-        : "Pocket Option is locked; waiting for the first accepted frame.",
+        ? "The selected chart region is streaming in the background."
+        : "The chart region is locked; waiting for the first accepted frame.",
       lastError: ""
     });
     void drainLatestFrame();
@@ -142,7 +404,7 @@ async function refreshServerContract() {
     serverArmed = false;
     await notifyStatus({
       phase: "degraded",
-      message: "Pocket Option remains locked; PhoenixGuard ingest is temporarily unreachable.",
+      message: "The chart region remains locked; PhoenixGuard ingest is temporarily unreachable.",
       lastError: errorText(error)
     });
     contractTimer = setTimeout(refreshServerContract, 15_000);
@@ -150,7 +412,7 @@ async function refreshServerContract() {
 }
 
 function captureProbe() {
-  probeContext.drawImage(video, 0, 0, probeCanvas.width, probeCanvas.height);
+  probeContext.drawImage(frameCanvas, 0, 0, probeCanvas.width, probeCanvas.height);
   const rgba = probeContext.getImageData(0, 0, probeCanvas.width, probeCanvas.height).data;
   const grayscale = new Uint8Array(probeCanvas.width * probeCanvas.height);
   for (let pixel = 0, offset = 0; pixel < grayscale.length; pixel += 1, offset += 4) {
@@ -160,39 +422,65 @@ function captureProbe() {
 }
 
 async function sampleFrame() {
-  if (!active) return;
+  sampleTimer = clearTimer(sampleTimer);
+  if (!activeSession || samplingPausedForSelector) return;
   try {
-    const sourceWidth = Number(video.videoWidth) || 0;
-    const sourceHeight = Number(video.videoHeight) || 0;
-    if (sourceWidth < 64 || sourceHeight < 64) {
-      throw new Error("The locked tab stream has not produced a usable video frame yet.");
+    if (!activeFresh()) {
+      pendingFrame = null;
+      await notifyStatus({
+        phase: "source_frozen",
+        message: "The tab stream is connected, but Edge has not presented a fresh chart frame. Upload is paused.",
+        lastError: "No freshly presented tab video frame inside the bounded freshness window."
+      });
+      return;
     }
-    const scale = Math.min(1, config.maxWidth / sourceWidth);
-    const width = Math.max(64, Math.round(sourceWidth * scale));
-    const height = Math.max(64, Math.round(sourceHeight * scale));
+    const sourceWidth = Number(activeSession.video.videoWidth) || 0;
+    const sourceHeight = Number(activeSession.video.videoHeight) || 0;
+    if (sourceWidth < 64 || sourceHeight < 64) throw new Error("The locked chart stream has no usable video frame.");
+    const crop = mapNormalizedRegionToPixels(activeSession.region.normalized, sourceWidth, sourceHeight);
+    const scale = Math.min(1, activeSession.config.maxWidth / crop.width);
+    const width = Math.max(64, Math.round(crop.width * scale));
+    const height = Math.max(64, Math.round(crop.height * scale));
     if (frameCanvas.width !== width || frameCanvas.height !== height) {
       frameCanvas.width = width;
       frameCanvas.height = height;
     }
-    frameContext.drawImage(video, 0, 0, width, height);
+    frameContext.drawImage(
+      activeSession.video,
+      crop.x,
+      crop.y,
+      crop.width,
+      crop.height,
+      0,
+      0,
+      width,
+      height
+    );
     const probe = captureProbe();
     const materialDelta = meanAbsoluteDifference(previousQueuedProbe, probe);
     const now = Date.now();
-    const heartbeatDue = now - lastQueuedAt >= config.heartbeatSec * 1000;
-    const materialChange = !previousQueuedProbe || materialDelta >= config.materialDeltaThreshold;
+    const heartbeatDue = now - lastQueuedAt >= activeSession.config.heartbeatSec * 1000;
+    const materialChange = !previousQueuedProbe || materialDelta >= activeSession.config.materialDeltaThreshold;
     status.sampledFrames += 1;
+    status.cropPixels = crop;
+    if (materialChange) lastVisualChangeAtMs = now;
 
     if (materialChange || heartbeatDue) {
-      const blob = await canvasBlob(frameCanvas, "image/jpeg", config.jpegQuality);
+      const blob = await canvasBlob(frameCanvas, "image/jpeg", activeSession.config.jpegQuality);
       if (pendingFrame) status.replacedFrames += 1;
       pendingFrame = {
         blob,
         captureEpochMs: now,
         width,
         height,
+        crop,
         materialDelta,
         materialChange,
-        heartbeatDue
+        heartbeatDue,
+        transportFrameAgeMs: currentVideoAge(),
+        visualChangeAgeMs: lastVisualChangeAtMs ? now - lastVisualChangeAtMs : -1,
+        presentedFrames: activeSession.presentedFrames,
+        mediaTime: activeSession.mediaTime
       };
       previousQueuedProbe = probe;
       lastQueuedAt = now;
@@ -202,50 +490,72 @@ async function sampleFrame() {
   } catch (error) {
     await notifyStatus({
       phase: "degraded",
-      message: "The tab remains locked, but the latest sample could not be encoded.",
+      message: "The chart stream remains locked, but its latest selected-region sample could not be encoded.",
       lastError: errorText(error)
     });
   } finally {
-    if (active) sampleTimer = setTimeout(sampleFrame, SAMPLE_INTERVAL_MS);
+    if (activeSession && !samplingPausedForSelector) sampleTimer = setTimeout(sampleFrame, SAMPLE_INTERVAL_MS);
   }
 }
 
 function scheduleUpload(delayMs) {
   uploadTimer = clearTimer(uploadTimer);
-  if (active) uploadTimer = setTimeout(() => void drainLatestFrame(), Math.max(0, delayMs));
+  if (activeSession && !samplingPausedForSelector) {
+    uploadTimer = setTimeout(() => void drainLatestFrame(), Math.max(0, delayMs));
+  }
 }
 
 async function uploadFrame(frame) {
+  const session = activeSession;
+  if (!session) throw new Error("The selected chart source ended before upload.");
+  const config = session.config;
   const frameId = status.frameId + 1;
   const endpoint = frameIngestEndpoint(config);
   const endpointUrl = new URL(endpoint);
   const form = new FormData();
-  form.append("frame", frame.blob, `edge_tab_${String(frameId).padStart(8, "0")}.jpg`);
+  form.append("frame", frame.blob, `edge_roi_${String(frameId).padStart(8, "0")}.jpg`);
   form.append("source_id", config.sourceId);
-  form.append("source_url", sanitizeSourceUrl(lockedTab.url));
+  form.append("source_url", sanitizeSourceUrl(session.tab.url));
   form.append("symbol", config.symbol);
   form.append("timeframe", config.timeframe);
-  form.append("sequence_id", sequenceId);
+  form.append("sequence_id", session.sequenceId);
   form.append("capture_epoch_ms", String(frame.captureEpochMs));
   form.append("frame_id", String(frameId));
+  form.append("source_generation", String(session.sourceGeneration));
+  form.append("source_lease_id", session.sourceLeaseId);
   form.append("metadata_json", JSON.stringify({
-    source_type: "browser_extension_capture",
+    source_type: "browser_tab_roi_capture",
     browser: "Microsoft Edge",
     extension_id: chrome.runtime.id,
     extension_version: chrome.runtime.getManifest().version,
-    capture_mode: "tabCapture_offscreen",
-    coordinate_space: "edge_tab_content_v1",
+    capture_mode: "tabCapture_offscreen_roi",
+    coordinate_space: "edge_tab_roi_v1",
     browser_chrome_included: false,
     focus_policy: "never_activate_raise_or_focus_tabs",
     sample_fps: SAMPLE_FPS,
     latest_frame_wins: true,
+    selection_id: session.selectionId,
+    region_revision: session.sequenceId,
+    source_generation: session.sourceGeneration,
+    source_lease_id: session.sourceLeaseId,
+    roi_normalized: session.region.normalized,
+    roi_css: session.region.rectCss,
+    roi_source_pixels: frame.crop,
+    source_surface_width: frame.crop.sourceWidth,
+    source_surface_height: frame.crop.sourceHeight,
     material_change: frame.materialChange,
     material_delta: Number(frame.materialDelta.toFixed(6)),
     heartbeat_frame: frame.heartbeatDue,
     capture_width: frame.width,
     capture_height: frame.height,
-    locked_tab_id: lockedTab.id,
-    locked_tab_title: lockedTab.title
+    locked_tab_id: session.tab.id,
+    locked_tab_title: session.tab.title,
+    locked_origin: session.tab.origin,
+    source_render_fresh: frame.transportFrameAgeMs <= SOURCE_FREEZE_TIMEOUT_MS,
+    transport_frame_age_ms: frame.transportFrameAgeMs,
+    visual_change_age_ms: frame.visualChangeAgeMs,
+    presented_frames: frame.presentedFrames,
+    media_time: frame.mediaTime
   }));
 
   const headers = {Authorization: `Bearer ${config.token}`};
@@ -257,7 +567,7 @@ async function uploadFrame(frame) {
       path: endpointUrl.pathname,
       sessionId: config.sessionId,
       sourceId: config.sourceId,
-      sequenceId,
+      sequenceId: session.sequenceId,
       frameId,
       captureEpochMs: frame.captureEpochMs,
       frameSha256,
@@ -285,14 +595,18 @@ async function uploadFrame(frame) {
 
 async function drainLatestFrame() {
   uploadTimer = clearTimer(uploadTimer);
-  if (!active || uploadInFlight || !pendingFrame || !serverArmed) return;
+  if (!activeSession || samplingPausedForSelector || uploadInFlight || !pendingFrame || !serverArmed) return;
+  if (!activeFresh()) {
+    pendingFrame = null;
+    await notifyStatus({phase: "source_frozen", message: "A stale rendered frame was blocked before upload."});
+    return;
+  }
   const minIntervalMs = Math.max(SAMPLE_INTERVAL_MS, Number(status.uploadMinIntervalSec || 10) * 1000);
   const elapsed = Date.now() - lastAcceptedAtMs;
   if (lastAcceptedAtMs > 0 && elapsed < minIntervalMs) {
     scheduleUpload(minIntervalMs - elapsed);
     return;
   }
-
   const frame = pendingFrame;
   pendingFrame = null;
   uploadInFlight = true;
@@ -302,31 +616,33 @@ async function drainLatestFrame() {
     status.acceptedFrames += 1;
     await notifyStatus({
       phase: "live",
-      message: "Background tab capture is live. Edge focus is untouched.",
+      message: "The selected chart region is streaming in the background.",
       lastAcceptedAt: new Date(lastAcceptedAtMs).toISOString(),
       lastError: ""
     });
   } catch (error) {
     status.rejectedFrames += 1;
     const httpStatus = Number(error?.httpStatus || 0);
-    if (httpStatus === 401 || httpStatus === 403) {
+    if (httpStatus === 409 || httpStatus === 410) {
+      await stopAllCapture("PhoenixGuard rejected this superseded or killed chart-source lease.", true, false);
+    } else if (httpStatus === 401 || httpStatus === 403) {
       serverArmed = false;
       await notifyStatus({
         phase: "configuration_required",
-        message: "Frame ingest rejected the token or source scope. Fix extension options, then relock.",
+        message: "Frame ingest rejected the token or source scope. Fix options, then reselect the chart.",
         lastError: errorText(error)
       });
     } else if (httpStatus === 429) {
       await notifyStatus({
         phase: "waiting_for_ingest",
-        message: "PhoenixGuard is applying its advertised upload interval; the newest frame remains authoritative.",
+        message: "PhoenixGuard is applying its advertised upload interval; the newest chart frame remains authoritative.",
         lastError: errorText(error)
       });
       scheduleUpload(minIntervalMs);
     } else {
       await notifyStatus({
         phase: "degraded",
-        message: "Capture continues in the background while frame ingest recovers.",
+        message: "Chart capture continues in the background while frame ingest recovers.",
         lastError: errorText(error)
       });
       contractTimer = clearTimer(contractTimer);
@@ -334,115 +650,196 @@ async function drainLatestFrame() {
     }
   } finally {
     uploadInFlight = false;
-    if (active && pendingFrame && serverArmed) {
+    if (activeSession && pendingFrame && serverArmed && !samplingPausedForSelector) {
       scheduleUpload(Math.max(0, minIntervalMs - (Date.now() - lastAcceptedAtMs)));
     }
   }
 }
 
-async function waitForVideo() {
-  if (video.readyState >= HTMLMediaElement.HAVE_METADATA && video.videoWidth > 0) return;
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for Pocket Option tab pixels.")), 8_000);
-    video.addEventListener("loadedmetadata", () => {
-      clearTimeout(timeout);
-      resolve();
-    }, {once: true});
-  });
-}
-
-async function startCapture(message) {
-  await stopCapture("Replacing the previous tab stream.", false);
-  config = normalizeConfig(message.config);
-  lockedTab = {
-    id: Number(message.tab?.id || 0),
-    title: String(message.tab?.title || ""),
-    url: String(message.tab?.url || "")
-  };
-  sequenceId = String(message.sequenceId || "");
-  active = true;
-  status = initialStatus({
-    phase: "starting",
-    message: "Consuming the explicit Edge tabCapture grant in an offscreen document.",
-    lockedTabId: lockedTab.id,
-    lockedTitle: lockedTab.title,
-    lockedUrl: lockedTab.url,
-    sequenceId
-  });
-  await notifyStatus();
+async function prepareCandidate(message) {
+  await cancelCandidate("A newer chart selection replaced the previous candidate.", false);
+  const selectionId = String(message.selectionId || "");
+  if (!selectionId) return {ok: false, error: "Candidate selection ID is missing."};
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        mandatory: {
-          chromeMediaSource: "tab",
-          chromeMediaSourceId: String(message.streamId),
-          maxFrameRate: 1
-        }
+    if (message.reuseActiveStream) {
+      if (!activeSession || activeSession.tab.id !== Number(message.tab?.id || 0)) {
+        throw new Error("The active chart stream is unavailable for region reselection.");
       }
+      candidateSession = {
+        ...activeSession,
+        tab: {...activeSession.tab},
+        selectionId,
+        sequenceId: String(message.sequenceId || ""),
+        config: normalizeConfig(message.config),
+        reusesActive: true,
+        stopped: false
+      };
+      samplingPausedForSelector = true;
+      sampleTimer = clearTimer(sampleTimer);
+      uploadTimer = clearTimer(uploadTimer);
+      pendingFrame = null;
+    } else {
+      candidateSession = await createCapturedSession(message);
+    }
+    candidateTimer = setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: "OFFSCREEN_CANDIDATE_TIMEOUT_V1",
+            selectionId: candidateSession?.selectionId || "",
+            candidateTabId: candidateSession?.tab.id || 0
+          });
+          if (response?.ok) return;
+        } catch {
+          // If the service worker cannot be reached, release the bounded candidate locally.
+        }
+        await cancelCandidate("Chart-region selection timed out before confirmation.");
+      })();
+    }, Math.min(SELECTION_TIMEOUT_MS, Number(message.timeoutMs) || SELECTION_TIMEOUT_MS));
+    await notifyStatus({
+      phase: "selecting",
+      message: "Select the exact chart rectangle. Candidate pixels are not being uploaded.",
+      lastError: ""
     });
-    const [videoTrack] = mediaStream.getVideoTracks();
-    if (!videoTrack) throw new Error("Edge returned a tab stream without a video track.");
-    videoTrack.contentHint = "detail";
-    videoTrack.addEventListener("ended", () => {
-      if (active) void stopCapture("The locked Edge tab capture track ended.");
-    }, {once: true});
-    video.srcObject = mediaStream;
-    await video.play();
-    await waitForVideo();
-    await refreshServerContract();
-    await sampleFrame();
-    return {ok: true};
+    return {ok: true, status};
   } catch (error) {
-    const messageText = errorText(error);
-    await notifyStatus({phase: "error", message: `Tab capture failed: ${messageText}`, lastError: messageText});
-    await stopCapture("Tab capture failed before the first frame.", false);
-    return {ok: false, error: messageText};
+    await cancelCandidate("Candidate chart stream failed.", false);
+    return {ok: false, error: errorText(error)};
   }
 }
 
-async function stopCapture(reason = "Capture stopped.", announce = true) {
-  active = false;
+async function cancelCandidate(reason = "Chart-region selection cancelled.", announce = true) {
+  candidateTimer = clearTimer(candidateTimer);
+  const candidate = candidateSession;
+  candidateSession = null;
+  if (candidate && !candidate.reusesActive) stopSession(candidate);
+  if (candidate?.reusesActive) samplingPausedForSelector = false;
+  if (activeSession && !samplingPausedForSelector) {
+    if (candidate?.reusesActive) await waitForCleanVideoFrame(activeSession);
+    if (!sampleTimer) sampleTimer = setTimeout(sampleFrame, 150);
+    if (announce) {
+      await notifyStatus({
+        phase: activeFresh() && serverArmed && status.acceptedFrames > 0 ? "live" : "starting",
+        message: "Existing chart capture preserved; the new selection was cancelled.",
+        lastError: ""
+      });
+    }
+  } else if (announce) {
+    await notifyStatus({
+      phase: "stopped",
+      message: reason,
+      lockedTabId: 0,
+      sequenceId: "",
+      region: null,
+      sourceRenderFresh: false
+    });
+  }
+  return {ok: true, status};
+}
+
+async function commitCandidate(message) {
+  if (!candidateSession || candidateSession.selectionId !== String(message.selectionId || "")) {
+    return {ok: false, error: "The candidate chart selection expired or was replaced."};
+  }
+  const normalized = normalizeRegionSelection(message.region);
+  if (!normalized.ok) return {ok: false, error: normalized.reason};
+  candidateTimer = clearTimer(candidateTimer);
+  const candidate = candidateSession;
+  candidate.region = normalized.region;
+  samplingPausedForSelector = true;
+  sampleTimer = clearTimer(sampleTimer);
+  uploadTimer = clearTimer(uploadTimer);
+  pendingFrame = null;
+  try {
+    await waitForUploadIdle();
+    if (candidateSession !== candidate || candidate.stopped) {
+      throw new Error("The candidate chart stream ended before source promotion.");
+    }
+    await claimSource(candidate);
+    if (candidateSession !== candidate || candidate.stopped) {
+      await killSource(candidate, "Candidate source was stopped during claim promotion.");
+      throw new Error("The candidate chart stream was stopped during source promotion.");
+    }
+  } catch (error) {
+    samplingPausedForSelector = false;
+    if (activeSession && !sampleTimer) sampleTimer = setTimeout(sampleFrame, 150);
+    return {ok: false, error: `PhoenixGuard source claim failed: ${errorText(error)}`};
+  }
+  candidateSession = null;
+
+  if (candidate.reusesActive) {
+    activeSession.selectionId = candidate.selectionId;
+    activeSession.sequenceId = candidate.sequenceId;
+    activeSession.region = candidate.region;
+    activeSession.config = candidate.config;
+    activeSession.sourceGeneration = candidate.sourceGeneration;
+    activeSession.sourceLeaseId = candidate.sourceLeaseId;
+  } else {
+    const previous = activeSession;
+    activeSession = candidate;
+    if (previous) stopSession(previous);
+  }
+  samplingPausedForSelector = false;
+  resetFramePipeline();
+  await waitForCleanVideoFrame(activeSession);
+  await notifyStatus({
+    phase: "starting",
+    message: "The chart region is locked; waiting for the first accepted clean frame.",
+    lastError: ""
+  });
+  await refreshServerContract();
+  await sampleFrame();
+  return {ok: true, status};
+}
+
+async function stopAllCapture(reason = "Chart capture stopped.", announce = true, notifyBackend = true) {
+  candidateTimer = clearTimer(candidateTimer);
   sampleTimer = clearTimer(sampleTimer);
   uploadTimer = clearTimer(uploadTimer);
   contractTimer = clearTimer(contractTimer);
+  const active = activeSession;
+  const candidate = candidateSession;
+  activeSession = null;
+  candidateSession = null;
+  if (candidate && !candidate.reusesActive && candidate !== active) stopSession(candidate);
+  if (active && notifyBackend) await killSource(active, reason);
+  if (active) stopSession(active);
+  samplingPausedForSelector = false;
   pendingFrame = null;
   uploadInFlight = false;
   previousQueuedProbe = null;
   lastQueuedAt = 0;
   lastAcceptedAtMs = 0;
+  lastVisualChangeAtMs = 0;
   serverArmed = false;
   signatureRequired = false;
-  if (mediaStream) {
-    for (const track of mediaStream.getTracks()) track.stop();
-  }
-  mediaStream = null;
-  video.pause();
-  video.srcObject = null;
-  lockedTab = {id: 0, title: "", url: ""};
-  sequenceId = "";
   if (announce) {
-    await notifyStatus({
-      phase: "stopped",
-      message: reason,
-      lockedTabId: 0,
-      lockedTitle: "",
-      lockedUrl: "",
-      sequenceId: "",
-      lastError: ""
-    });
+    status = initialStatus({phase: "stopped", message: reason});
+    await notifyStatus({phase: "stopped", message: reason, sourceRenderFresh: false});
   }
-  return {ok: true};
+  return {ok: true, status};
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== "offscreen") return false;
-  if (message.type === "START_CAPTURE") {
-    void startCapture(message).then(sendResponse);
+  if (message.type === "PREPARE_CAPTURE_CANDIDATE_V1") {
+    void prepareCandidate(message).then(sendResponse);
     return true;
   }
-  if (message.type === "STOP_CAPTURE") {
-    void stopCapture(message.reason || "Capture stopped.").then(sendResponse);
+  if (message.type === "COMMIT_CAPTURE_REGION_V1") {
+    void commitCandidate(message).then(sendResponse);
+    return true;
+  }
+  if (message.type === "CANCEL_CAPTURE_CANDIDATE_V1") {
+    if (candidateSession && message.selectionId && candidateSession.selectionId !== message.selectionId) {
+      sendResponse({ok: false, error: "Candidate selection ID mismatch.", status});
+      return false;
+    }
+    void cancelCandidate(message.reason || "Chart-region selection cancelled.").then(sendResponse);
+    return true;
+  }
+  if (message.type === "STOP_ALL_CAPTURE_V1") {
+    void stopAllCapture(message.reason || "Chart capture stopped.").then(sendResponse);
     return true;
   }
   if (message.type === "GET_STATUS") {

@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Protocol, Sequence, cast
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 from PIL import Image
 
@@ -31,6 +31,7 @@ DEFAULT_SIGNATURE_MAX_SKEW_SEC = 300
 DEFAULT_SIGNATURE_NONCE_TTL_SEC = 600
 SUPPORTED_FRAME_SOURCE_TYPES = (
     "windows_window_capture",
+    "windows_graphics_capture_roi",
     "edge_agent_screenshot",
     "pc_screen_capture",
     "mobile_manual_upload",
@@ -38,6 +39,7 @@ SUPPORTED_FRAME_SOURCE_TYPES = (
     "android_native_capture",
     "ios_replaykit_capture",
     "browser_extension_capture",
+    "browser_tab_roi_capture",
     "cloud_browser_worker",
     "mt4_chart_screenshot",
     "replay_upload",
@@ -49,7 +51,14 @@ _SERVER_METADATA_FIELDS = (
     "feed_user_id",
     "frame_sha256",
     "frame_bytes",
+    "source_generation",
+    "source_lease_id",
 )
+BROWSER_EXTENSION_COORDINATE_SPACES = (
+    "edge_tab_content_v1",
+    "edge_tab_roi_v1",
+)
+LEASED_COORDINATE_SPACES = frozenset({"edge_tab_roi_v1", "wgc_hwnd_roi_v1"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,9 +82,18 @@ class FeedRuntimeState:
     session_id: str
     source_id: str
     sequence_id: str
+    source_generation: int
     last_capture_epoch_ms: int
     last_frame_id: int
     last_seen_monotonic: float
+
+
+@dataclass(frozen=True, slots=True)
+class FeedRuntimeReservation:
+    key: str
+    current: FeedRuntimeState
+    previous: FeedRuntimeState | None
+    retired_states: tuple[tuple[str, FeedRuntimeState], ...] = ()
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -112,6 +130,42 @@ class FrameIngestTracker(Protocol):
         ...
 
     def get_session_snapshot(self, session_id: str) -> dict[str, Any]:
+        ...
+
+    def claim_external_source(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_type: str,
+        selection_id: str,
+        display_name: str,
+        coordinate_space: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def validate_external_source_lease(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def kill_external_source(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        source_id: str = "",
+        sequence_id: str = "",
+        source_generation: int = 0,
+        source_lease_id: str = "",
+    ) -> dict[str, Any]:
         ...
 
 
@@ -470,10 +524,19 @@ def _metadata_from_json(raw_json: str) -> dict[str, Any]:
     if source_type and source_type not in SUPPORTED_FRAME_SOURCE_TYPES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="metadata_json source_type is not supported.")
     coordinate_space = str(metadata.get("coordinate_space", "") or "").strip()
-    if source_type == "browser_extension_capture" and coordinate_space != "edge_tab_content_v1":
+    if source_type in {"browser_extension_capture", "browser_tab_roi_capture"} and coordinate_space not in BROWSER_EXTENSION_COORDINATE_SPACES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Browser extension frames must declare coordinate_space=edge_tab_content_v1.",
+            detail=(
+                "Browser extension frames must declare coordinate_space as one of: "
+                + ", ".join(BROWSER_EXTENSION_COORDINATE_SPACES)
+                + "."
+            ),
+        )
+    if source_type == "windows_graphics_capture_roi" and coordinate_space != "wgc_hwnd_roi_v1":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Windows Graphics Capture ROI frames must declare coordinate_space=wgc_hwnd_roi_v1.",
         )
     for field_name in _SERVER_METADATA_FIELDS:
         metadata.pop(field_name, None)
@@ -501,16 +564,31 @@ def _active_feed_states(now_monotonic: float) -> list[FeedRuntimeState]:
     return list(_FEED_RUNTIME_STATE.values())
 
 
-def _record_or_reject_feed_runtime(
+def _retire_feed_runtime_for_session(session_id: str) -> int:
+    """Release capacity held by every superseded transport for one session."""
+
+    normalized_session_id = str(session_id or "").strip()
+    with _FEED_STATE_LOCK:
+        matching_keys = [
+            key
+            for key, state in _FEED_RUNTIME_STATE.items()
+            if state.session_id == normalized_session_id
+        ]
+        for key in matching_keys:
+            _FEED_RUNTIME_STATE.pop(key, None)
+    return len(matching_keys)
+
+
+def _reserve_feed_runtime(
     context: FeedAuthContext,
     *,
     session_id: str,
     source_id: str,
     sequence_id: str,
+    source_generation: int,
     capture_epoch_ms: int,
     frame_id: int,
-    commit: bool = True,
-) -> None:
+) -> FeedRuntimeReservation:
     if _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH", True) and int(capture_epoch_ms or 0) <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="capture_epoch_ms is required for live frame ingest.")
     if _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID", True) and int(frame_id or 0) <= 0:
@@ -518,13 +596,34 @@ def _record_or_reject_feed_runtime(
     key = _feed_key(context, session_id, source_id)
     now_monotonic = time.monotonic()
     with _FEED_STATE_LOCK:
-        active_states = _active_feed_states(now_monotonic)
-        existing = _FEED_RUNTIME_STATE.get(key)
+        normalized_session_id = str(session_id or "").strip()
+        normalized_generation = max(0, int(source_generation or 0))
+        _active_feed_states(now_monotonic)
+        superseded_keys: list[str] = []
+        if normalized_generation > 0:
+            superseded_keys = [
+                state_key
+                for state_key, state in _FEED_RUNTIME_STATE.items()
+                if state.session_id == normalized_session_id
+                and int(state.source_generation or 0) != normalized_generation
+            ]
+        superseded_key_set = set(superseded_keys)
+        retired_states = [
+            (state_key, _FEED_RUNTIME_STATE[state_key])
+            for state_key in superseded_keys
+            if state_key in _FEED_RUNTIME_STATE
+        ]
+        active_states = [
+            state
+            for state_key, state in _FEED_RUNTIME_STATE.items()
+            if state_key not in superseded_key_set
+        ]
+        existing = None if key in superseded_key_set else _FEED_RUNTIME_STATE.get(key)
         same_sequence = bool(
             existing is not None
             and existing.sequence_id == str(sequence_id or "").strip()
         )
-        if existing is not None and same_sequence:
+        if existing is not None:
             elapsed = now_monotonic - float(existing.last_seen_monotonic)
             if elapsed < float(context.min_interval_sec):
                 raise HTTPException(
@@ -532,6 +631,7 @@ def _record_or_reject_feed_runtime(
                     detail=f"Frame feed interval is too fast. Wait at least {context.min_interval_sec} seconds between frames.",
                     headers={"Retry-After": str(int(context.min_interval_sec))},
                 )
+        if existing is not None and same_sequence:
             if int(capture_epoch_ms or 0) <= int(existing.last_capture_epoch_ms or 0):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -552,17 +652,39 @@ def _record_or_reject_feed_runtime(
         total_limit = _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_TOTAL", DEFAULT_MAX_ACTIVE_FEEDS_TOTAL, 1)
         if existing is None and len(active_states) >= total_limit:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="PhoenixGuard active frame feed capacity is full.")
-        if commit:
-            _FEED_RUNTIME_STATE[key] = FeedRuntimeState(
-                token_name=context.token_name,
-                user_id=context.user_id,
-                session_id=str(session_id or "").strip(),
-                source_id=str(source_id or "").strip(),
-                sequence_id=str(sequence_id or "").strip(),
-                last_capture_epoch_ms=int(capture_epoch_ms or 0),
-                last_frame_id=int(frame_id or 0),
-                last_seen_monotonic=now_monotonic,
-            )
+        for state_key in superseded_keys:
+            _FEED_RUNTIME_STATE.pop(state_key, None)
+        current = FeedRuntimeState(
+            token_name=context.token_name,
+            user_id=context.user_id,
+            session_id=normalized_session_id,
+            source_id=str(source_id or "").strip(),
+            sequence_id=str(sequence_id or "").strip(),
+            source_generation=normalized_generation,
+            last_capture_epoch_ms=int(capture_epoch_ms or 0),
+            last_frame_id=int(frame_id or 0),
+            last_seen_monotonic=now_monotonic,
+        )
+        _FEED_RUNTIME_STATE[key] = current
+        return FeedRuntimeReservation(
+            key=key,
+            current=current,
+            previous=existing,
+            retired_states=tuple(retired_states),
+        )
+
+
+def _rollback_feed_runtime_reservation(reservation: FeedRuntimeReservation | None) -> None:
+    if reservation is None:
+        return
+    with _FEED_STATE_LOCK:
+        if _FEED_RUNTIME_STATE.get(reservation.key) is not reservation.current:
+            return
+        _FEED_RUNTIME_STATE.pop(reservation.key, None)
+        if reservation.previous is not None:
+            _FEED_RUNTIME_STATE[reservation.key] = reservation.previous
+        for state_key, state in reservation.retired_states:
+            _FEED_RUNTIME_STATE.setdefault(state_key, state)
 
 
 def _readiness_payload() -> dict[str, object]:
@@ -648,6 +770,105 @@ async def _read_image_upload(frame: UploadFile) -> tuple[Image.Image, str, int]:
 def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> APIRouter:
     router = APIRouter(prefix="/v1/mobile/frame-ingest", tags=["frame-ingest"])
 
+    def _public_source_control(value: object, *, include_lease: bool = False) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        source = dict(cast(Mapping[str, Any], value))
+        if not include_lease:
+            source.pop("source_lease_id", None)
+            source.pop("lease_id", None)
+        source.pop("target_private", None)
+        return cast(dict[str, object], source)
+
+    def _source_lease_rejection(status_code: int, reason_code: str, message: str) -> HTTPException:
+        return HTTPException(
+            status_code=int(status_code),
+            detail={"reason_code": str(reason_code), "message": str(message)},
+        )
+
+    def _require_current_frame_source_contract(
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        tracker = get_tracker()
+        try:
+            snapshot = tracker.get_session_snapshot(session_id)
+        except KeyError:
+            snapshot = {}
+        capture_source_value: object = snapshot.get("capture_source_v3", {})
+        capture_source = (
+            dict(cast(Mapping[str, Any], capture_source_value))
+            if isinstance(capture_source_value, Mapping)
+            else {}
+        )
+        state = str(capture_source.get("state", "NO_SOURCE") or "NO_SOURCE").strip().upper()
+        expected_source_id = str(capture_source.get("source_id", "") or "").strip()
+        expected_sequence_id = str(capture_source.get("sequence_id", "") or "").strip()
+        expected_generation = int(capture_source.get("source_generation", 0) or 0)
+        expected_coordinate_space = str(capture_source.get("coordinate_space", "") or "").strip()
+        expected_source_type = str(capture_source.get("source_type", "") or "").strip()
+        if not expected_source_type:
+            expected_source_type = {
+                "edge_tab_roi_v1": "browser_tab_roi_capture",
+                "wgc_hwnd_roi_v1": "windows_graphics_capture_roi",
+            }.get(expected_coordinate_space, "")
+        claimed_source_exists = bool(
+            expected_source_id
+            and expected_generation > 0
+            and expected_coordinate_space in LEASED_COORDINATE_SPACES
+        )
+        incoming_source_type = str(metadata.get("source_type", "") or "").strip()
+        incoming_coordinate_space = str(metadata.get("coordinate_space", "") or "").strip()
+        if claimed_source_exists:
+            if state == "KILLED":
+                raise _source_lease_rejection(
+                    status.HTTP_410_GONE,
+                    "SOURCE_KILLED",
+                    "This chart source was stopped. Select a chart again to create a new lease.",
+                )
+            exact_declared_contract = bool(
+                state in {"VALIDATING", "LIVE", "STALE"}
+                and str(source_id or "").strip() == expected_source_id
+                and str(sequence_id or "").strip() == expected_sequence_id
+                and int(source_generation or 0) == expected_generation
+                and str(source_lease_id or "").strip()
+                and incoming_source_type == expected_source_type
+                and incoming_coordinate_space == expected_coordinate_space
+            )
+            if not exact_declared_contract:
+                raise _source_lease_rejection(
+                    status.HTTP_409_CONFLICT,
+                    "SOURCE_SUPERSEDED",
+                    "This frame does not match the currently claimed chart source contract.",
+                )
+        elif incoming_coordinate_space not in LEASED_COORDINATE_SPACES:
+            return
+        try:
+            validation = tracker.validate_external_source_lease(
+                session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                source_generation=int(source_generation or 0),
+                source_lease_id=str(source_lease_id or ""),
+            )
+        except KeyError as exc:
+            raise _source_lease_rejection(
+                status.HTTP_409_CONFLICT,
+                "SOURCE_CLAIM_REQUIRED",
+                "A current chart source claim is required before leased frames can be uploaded.",
+            ) from exc
+        if not bool(validation.get("allowed", False)):
+            raise _source_lease_rejection(
+                int(validation.get("status_code", status.HTTP_409_CONFLICT) or status.HTTP_409_CONFLICT),
+                str(validation.get("reason_code", "SOURCE_SUPERSEDED") or "SOURCE_SUPERSEDED"),
+                str(validation.get("message", "Source lease is not current.") or "Source lease is not current."),
+            )
+
     def frame_ingest_config() -> dict[str, object]:
         readiness = _readiness_payload()
         return {
@@ -664,6 +885,8 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             "max_active_feeds_per_token": readiness["max_active_feeds_per_token"],
             "supported_sources": list(SUPPORTED_FRAME_SOURCE_TYPES),
             "browser_extension_coordinate_space": "edge_tab_content_v1",
+            "browser_extension_coordinate_spaces": list(BROWSER_EXTENSION_COORDINATE_SPACES),
+            "leased_coordinate_spaces": sorted(LEASED_COORDINATE_SPACES),
         }
 
     def frame_ingest_readiness() -> dict[str, object]:
@@ -679,6 +902,165 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             html = "<!doctype html><title>PhoenixGuard frame ingest</title><p>Mobile frame uploader asset is missing.</p>"
         return HTMLResponse(html)
 
+    def claim_source_control(
+        request: Request,
+        session_id: str,
+        payload: dict[str, Any] = Body(...),
+        authorization: str | None = Header(default=None),
+        x_phoenixguard_token: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        _require_origin_allowed(request.headers.get("origin"))
+        auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
+        source_id = str(payload.get("source_id", "") or "").strip()
+        sequence_id = str(payload.get("sequence_id", "") or "").strip()
+        source_type = str(payload.get("source_type", "") or "").strip()
+        selection_id = str(payload.get("selection_id", "") or "").strip()
+        display_name = str(payload.get("display_name", "Selected chart") or "Selected chart").strip()
+        coordinate_space = str(payload.get("coordinate_space", "") or "").strip()
+        _require_scope_allowed(auth_context, session_id, source_id, "", "")
+        if not source_id or len(source_id) > 128 or not sequence_id or len(sequence_id) > 192:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="source_id and sequence_id are required for a source claim.",
+            )
+        if source_type not in {"browser_tab_roi_capture", "windows_graphics_capture_roi"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Source claims support browser_tab_roi_capture or windows_graphics_capture_roi.",
+            )
+        expected_space = "edge_tab_roi_v1" if source_type == "browser_tab_roi_capture" else "wgc_hwnd_roi_v1"
+        if coordinate_space != expected_space:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{source_type} must claim coordinate_space={expected_space}.",
+            )
+        try:
+            state = get_tracker().claim_external_source(
+                session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                source_type=source_type,
+                selection_id=selection_id,
+                display_name=display_name[:180],
+                coordinate_space=coordinate_space,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        _retire_feed_runtime_for_session(session_id)
+        _security_audit(
+            "frame_source_claimed",
+            auth_context,
+            {
+                "session_id": session_id,
+                "source_id": source_id,
+                "sequence_id": sequence_id,
+                "source_type": source_type,
+                "source_generation": int(state.get("source_generation", 0) or 0),
+            },
+        )
+        return {
+            "schema_version": "PG_CAPTURE_SOURCE_CLAIM_ACCEPTED_V1",
+            "accepted": True,
+            "session_id": session_id,
+            "source_control": _public_source_control(state, include_lease=True),
+            "source_generation": int(state.get("source_generation", 0) or 0),
+            "source_lease_id": str(state.get("source_lease_id", "") or state.get("lease_id", "") or ""),
+        }
+
+    def kill_source_control(
+        request: Request,
+        session_id: str,
+        payload: dict[str, Any] = Body(default={}),
+        authorization: str | None = Header(default=None),
+        x_phoenixguard_token: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        _require_origin_allowed(request.headers.get("origin"))
+        auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
+        source_id = str(payload.get("source_id", "") or "").strip()
+        sequence_id = str(payload.get("sequence_id", "") or "").strip()
+        source_generation = int(payload.get("source_generation", 0) or 0)
+        source_lease_id = str(payload.get("source_lease_id", "") or "").strip()
+        _require_scope_allowed(auth_context, session_id, source_id, "", "")
+        if not source_id or not sequence_id or source_generation <= 0 or not source_lease_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A current source_id, sequence_id, source_generation, and source_lease_id are required to stop capture.",
+            )
+        validation = get_tracker().validate_external_source_lease(
+            session_id,
+            source_id=source_id,
+            sequence_id=sequence_id,
+            source_generation=source_generation,
+            source_lease_id=source_lease_id,
+        )
+        if not bool(validation.get("allowed", False)):
+            raise HTTPException(
+                status_code=int(validation.get("status_code", status.HTTP_409_CONFLICT) or status.HTTP_409_CONFLICT),
+                detail={
+                    "reason_code": str(validation.get("reason_code", "SOURCE_SUPERSEDED") or "SOURCE_SUPERSEDED"),
+                    "message": str(validation.get("message", "Source lease is not current.") or "Source lease is not current."),
+                },
+            )
+        reason = str(payload.get("reason", "Capture stopped by the operator.") or "Capture stopped by the operator.")[:240]
+        try:
+            state = get_tracker().kill_external_source(
+                session_id,
+                reason=reason,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                source_generation=source_generation,
+                source_lease_id=source_lease_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
+        except Exception as exc:
+            lease_status = int(getattr(exc, "status_code", 0) or 0)
+            lease_reason = str(getattr(exc, "reason_code", "") or "")
+            if lease_status in {status.HTTP_409_CONFLICT, status.HTTP_410_GONE} and lease_reason:
+                detail_factory = getattr(exc, "as_detail", None)
+                detail = detail_factory() if callable(detail_factory) else {
+                    "reason_code": lease_reason,
+                    "message": str(getattr(exc, "message", "") or str(exc)),
+                }
+                raise HTTPException(status_code=lease_status, detail=detail) from exc
+            raise
+        _retire_feed_runtime_for_session(session_id)
+        _security_audit(
+            "frame_source_killed",
+            auth_context,
+            {
+                "session_id": session_id,
+                "source_id": source_id,
+                "source_generation": source_generation,
+                "reason": reason,
+            },
+        )
+        return {
+            "schema_version": "PG_CAPTURE_SOURCE_KILLED_V1",
+            "accepted": True,
+            "session_id": session_id,
+            "source_control": _public_source_control(state),
+        }
+
+    def get_source_control(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+        x_phoenixguard_token: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
+        _require_session_scope_allowed(auth_context, session_id)
+        try:
+            session = get_tracker().get_session_snapshot(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
+        return {
+            "schema_version": "PG_CAPTURE_SOURCE_STATUS_V1",
+            "session_id": session_id,
+            "source_control": _public_source_control(session.get("capture_source_v3", {})),
+        }
+
     async def ingest_session_frame(
         request: Request,
         session_id: str,
@@ -690,11 +1072,15 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
         sequence_id: str = Form(""),
         capture_epoch_ms: int = Form(0),
         frame_id: int = Form(0),
+        source_generation: int = Form(0),
+        source_lease_id: str = Form(""),
         metadata_json: str = Form("{}"),
         authorization: str | None = Header(default=None),
         x_phoenixguard_token: str | None = Header(default=None),
     ) -> dict[str, object]:
         auth_context: FeedAuthContext | None = None
+        feed_reservation: FeedRuntimeReservation | None = None
+        feed_reservation_committed = False
         audit_base: dict[str, object] = {
             "session_id": session_id,
             "source_id": source_id,
@@ -703,12 +1089,22 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             "timeframe": timeframe,
             "frame_id": int(frame_id or 0),
             "capture_epoch_ms": int(capture_epoch_ms or 0),
+            "source_generation": int(source_generation or 0),
             "client_host": request.client.host if request.client else "",
         }
         try:
             _require_origin_allowed(request.headers.get("origin"))
             auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
             _require_scope_allowed(auth_context, session_id, source_id, symbol, timeframe)
+            metadata = _metadata_from_json(metadata_json)
+            _require_current_frame_source_contract(
+                session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                source_generation=int(source_generation or 0),
+                source_lease_id=str(source_lease_id or ""),
+                metadata=metadata,
+            )
             image, frame_sha256, frame_bytes = await _read_image_upload(frame)
             audit_base["frame_sha256"] = frame_sha256
             audit_base["frame_bytes"] = frame_bytes
@@ -722,22 +1118,23 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 frame_id=int(frame_id or 0),
                 frame_sha256=frame_sha256,
             )
-            _record_or_reject_feed_runtime(
+            feed_reservation = _reserve_feed_runtime(
                 auth_context,
                 session_id=session_id,
                 source_id=source_id,
                 sequence_id=sequence_id,
+                source_generation=int(source_generation or 0),
                 capture_epoch_ms=int(capture_epoch_ms or 0),
                 frame_id=int(frame_id or 0),
-                commit=False,
             )
-            metadata = _metadata_from_json(metadata_json)
             metadata["client_host"] = request.client.host if request.client else ""
             metadata["filename"] = frame.filename or ""
             metadata["feed_token_name"] = auth_context.token_name
             metadata["feed_user_id"] = auth_context.user_id
             metadata["frame_sha256"] = frame_sha256
             metadata["frame_bytes"] = frame_bytes
+            metadata["source_generation"] = int(source_generation or 0)
+            metadata["source_lease_id"] = str(source_lease_id or "")
             tracker_response = get_tracker().ingest_external_frame(
                 session_id,
                 image,
@@ -750,15 +1147,7 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 frame_id=frame_id,
                 metadata=metadata,
             )
-            _record_or_reject_feed_runtime(
-                auth_context,
-                session_id=session_id,
-                source_id=source_id,
-                sequence_id=sequence_id,
-                capture_epoch_ms=int(capture_epoch_ms or 0),
-                frame_id=int(frame_id or 0),
-                commit=True,
-            )
+            feed_reservation_committed = True
             _security_audit("frame_ingest_accepted", auth_context, audit_base)
             external_feed = tracker_response.get("external_frame_feed", {})
             return {
@@ -791,12 +1180,49 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
+            message = str(exc)
+            lease_reason = ""
+            lease_status = 0
+            if "SOURCE_KILLED" in message:
+                lease_reason = "SOURCE_KILLED"
+                lease_status = status.HTTP_410_GONE
+            elif "SOURCE_SUPERSEDED" in message:
+                lease_reason = "SOURCE_SUPERSEDED"
+                lease_status = status.HTTP_409_CONFLICT
+            if lease_status:
+                detail = {"reason_code": lease_reason, "message": message}
+                _security_audit(
+                    "frame_ingest_rejected",
+                    auth_context,
+                    {**audit_base, "status_code": lease_status, "detail": message},
+                )
+                raise HTTPException(status_code=lease_status, detail=detail) from exc
             _security_audit(
                 "frame_ingest_rejected",
                 auth_context,
-                {**audit_base, "status_code": status.HTTP_400_BAD_REQUEST, "detail": str(exc)},
+                {**audit_base, "status_code": status.HTTP_400_BAD_REQUEST, "detail": message},
             )
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message) from exc
+        except Exception as exc:
+            lease_status = int(getattr(exc, "status_code", 0) or 0)
+            lease_reason = str(getattr(exc, "reason_code", "") or "")
+            if lease_status in {status.HTTP_409_CONFLICT, status.HTTP_410_GONE} and lease_reason:
+                message = str(getattr(exc, "message", "") or str(exc))
+                detail_factory = getattr(exc, "as_detail", None)
+                detail = detail_factory() if callable(detail_factory) else {
+                    "reason_code": lease_reason,
+                    "message": message,
+                }
+                _security_audit(
+                    "frame_ingest_rejected",
+                    auth_context,
+                    {**audit_base, "status_code": lease_status, "detail": message},
+                )
+                raise HTTPException(status_code=lease_status, detail=detail) from exc
+            raise
+        finally:
+            if not feed_reservation_committed:
+                _rollback_feed_runtime_reservation(feed_reservation)
 
     def frame_ingest_status(
         session_id: str,
@@ -824,6 +1250,22 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
     router.add_api_route("/config", frame_ingest_config, methods=["GET"])
     router.add_api_route("/readiness", frame_ingest_readiness, methods=["GET"])
     router.add_api_route("/mobile-uploader", mobile_frame_uploader, methods=["GET"], response_class=HTMLResponse)
+    router.add_api_route(
+        "/sessions/{session_id}/source-control/claim",
+        claim_source_control,
+        methods=["POST"],
+        status_code=status.HTTP_201_CREATED,
+    )
+    router.add_api_route(
+        "/sessions/{session_id}/source-control/kill",
+        kill_source_control,
+        methods=["POST"],
+    )
+    router.add_api_route(
+        "/sessions/{session_id}/source-control",
+        get_source_control,
+        methods=["GET"],
+    )
     router.add_api_route(
         "/sessions/{session_id}/frames",
         ingest_session_frame,

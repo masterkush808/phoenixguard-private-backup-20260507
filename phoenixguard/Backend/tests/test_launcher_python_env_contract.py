@@ -472,3 +472,43 @@ def test_dashboard_browser_launcher_quotes_chrome_profile_paths_with_spaces() ->
     assert "ConvertTo-PhoenixGuardProcessArgumentString -Arguments $browserArguments" in text
     assert "Start-Process -FilePath $browserPath -ArgumentList $browserArgumentString" in text
     assert "Start-Process -FilePath $browserPath -ArgumentList (Get-PhoenixGuardDashboardBrowserArguments" not in text
+
+
+def test_canonical_launchers_own_and_certify_universal_source_controller() -> None:
+    full_local = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+    live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+    topology = _read("Backend/tools/certify_process_topology_v3.py")
+
+    assert "function Start-WindowsRegionCaptureChildProcess" in full_local
+    assert "start_phoenixguard_windows_region_capture.py" in full_local
+    assert "hotkey_registered" in full_local
+    assert "--require-source-controller" in full_local
+    assert "*start_phoenixguard_windows_region_capture.py*" in live_ready
+    assert "$sourceControllerReady" in live_ready
+    assert "[bool]$windowsRegionCaptureStatus.hotkey_registered" in live_ready
+    assert "$sourceControllerStatus -notin @('', 'error', 'failed', 'unavailable')" in live_ready
+    assert "--require-source-controller" in live_ready
+    assert 'find_processes(processes, "start_phoenixguard_windows_region_capture.py")' in topology
+    assert "expected at most one Windows chart source controller" in topology
+    assert "source controller base_url mismatch" in topology
+    assert "source controller session mismatch" in topology
+
+
+def test_live_ready_launcher_does_not_wait_for_artifacts_before_source_selection() -> None:
+    live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+
+    assert "$sourceOperationalWithoutFrame" in live_ready
+    for state in (
+        "NO_SOURCE",
+        "READY",
+        "SELECTING",
+        "VALIDATING",
+        "PAUSED",
+        "STALE",
+        "SWITCHING",
+        "STOPPED",
+        "KILLED",
+        "WAITING_FOR_SOURCE",
+    ):
+        assert f"'{state}'" in live_ready
+    assert '"universal_source_$($result.source_state.ToLowerInvariant())"' in live_ready

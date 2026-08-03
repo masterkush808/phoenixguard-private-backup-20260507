@@ -72,6 +72,71 @@ def test_topology_data_dir_proof_uses_local_slugged_session_state(tmp_path: Path
     assert session_state.is_file()
 
 
+def test_source_controller_topology_requires_one_correctly_scoped_process() -> None:
+    base_url = "http://127.0.0.1:8793"
+    session_id = "pocket-live-8788"
+
+    missing, missing_corrections = topology.source_controller_topology_findings(
+        [],
+        required=True,
+        base_url=base_url,
+        session_id=session_id,
+    )
+    assert missing == ["universal Windows chart source controller is not running"]
+    assert missing_corrections
+
+    correct = {
+        "ProcessId": 101,
+        "CommandLine": (
+            "python start_phoenixguard_windows_region_capture.py "
+            f"--base-url {base_url} --session-id {session_id}"
+        ),
+    }
+    failures, corrections = topology.source_controller_topology_findings(
+        [correct],
+        required=True,
+        base_url=base_url,
+        session_id=session_id,
+    )
+    assert failures == []
+    assert corrections == []
+
+
+def test_source_controller_topology_rejects_duplicate_or_mismatched_processes() -> None:
+    correct = {
+        "ProcessId": 101,
+        "CommandLine": (
+            "python start_phoenixguard_windows_region_capture.py "
+            "--base-url http://127.0.0.1:8793 --session-id pocket-live-8788"
+        ),
+    }
+    duplicate_failures, _ = topology.source_controller_topology_findings(
+        [correct, dict(correct, ProcessId=102)],
+        required=True,
+        base_url="http://127.0.0.1:8793",
+        session_id="pocket-live-8788",
+    )
+    assert duplicate_failures == [
+        "expected at most one Windows chart source controller, found 2"
+    ]
+
+    mismatched = {
+        "ProcessId": 103,
+        "CommandLine": (
+            "python start_phoenixguard_windows_region_capture.py "
+            "--base-url http://127.0.0.1:9999 --session-id other-session"
+        ),
+    }
+    mismatch_failures, _ = topology.source_controller_topology_findings(
+        [mismatched],
+        required=True,
+        base_url="http://127.0.0.1:8793",
+        session_id="pocket-live-8788",
+    )
+    assert any("base_url mismatch" in failure for failure in mismatch_failures)
+    assert any("session mismatch" in failure for failure in mismatch_failures)
+
+
 def test_dashboard_capture_retention_prunes_old_timestamp_bundles(tmp_path: Path) -> None:
     session = "pocket-live-8788"
     stamps = ["20260616_010000", "20260616_010100", "20260616_010200"]

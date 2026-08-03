@@ -3271,6 +3271,7 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "session_id",
         "status",
         "tracking_enabled",
+        "capture_source_v3",
         "capture_count",
         "frame_index",
         "chart_frame_id",
@@ -6010,6 +6011,22 @@ class StaleCPUStreamKeyframeError(RuntimeError):
     """Raised when an immutable stream keyframe no longer matches live session identity."""
 
 
+class ExternalSourceLeaseError(RuntimeError):
+    """Raised when a generation-fenced source mutation targets a stale lease."""
+
+    def __init__(self, *, status_code: int, reason_code: str, message: str) -> None:
+        super().__init__(str(message or reason_code or "External source lease is not current."))
+        self.status_code = int(status_code)
+        self.reason_code = str(reason_code or "SOURCE_SUPERSEDED")
+        self.message = str(message or "External source lease is not current.")
+
+    def as_detail(self) -> dict[str, str]:
+        return {
+            "reason_code": self.reason_code,
+            "message": self.message,
+        }
+
+
 def _capture_looks_like_pocket_option_surface(image: Image.Image) -> bool:
     try:
         width, height = image.size
@@ -6480,6 +6497,191 @@ def _public_manual_focus_region(value: Any) -> dict[str, Any]:
         "source": str(region.get("source", "") or ""),
         "updated_at": str(region.get("updated_at", "") or ""),
     }
+
+
+def _default_capture_source_v3(*, state: str = "NO_SOURCE", message: str = "No chart source is selected.") -> dict[str, Any]:
+    return {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 0,
+        "state": str(state or "NO_SOURCE").upper(),
+        "selection_state": "IDLE",
+        "source_id": "",
+        "source_generation": 0,
+        "source_lease_id": "",
+        "source_type": "",
+        "source_kind": "",
+        "transport": "",
+        "display_name": "",
+        "coordinate_space": "",
+        "selection_id": "",
+        "sequence_id": "",
+        "decision_usable": False,
+        "fresh": False,
+        "reason_code": str(state or "NO_SOURCE").upper(),
+        "message": str(message or ""),
+        "selected_at": 0.0,
+        "updated_at": _now_epoch(),
+        "last_frame_epoch": 0.0,
+        "last_frame_id": 0,
+        "frame_age_sec": 0.0,
+        "stale_after_sec": 20.0,
+        "roi": {},
+        "stream": {},
+    }
+
+
+def _normalize_capture_source_v3(value: Any) -> dict[str, Any]:
+    row = _mapping_to_dict(value)
+    normalized = _default_capture_source_v3()
+    normalized.update(row)
+    normalized["schema_version"] = "PG_CAPTURE_SOURCE_V3"
+    normalized["state_revision"] = max(0, int(_float_or(row.get("state_revision"), 0.0) or 0))
+    normalized["state"] = str(row.get("state", "NO_SOURCE") or "NO_SOURCE").strip().upper()
+    normalized["selection_state"] = str(row.get("selection_state", "IDLE") or "IDLE").strip().upper()
+    normalized["source_generation"] = max(0, int(_float_or(row.get("source_generation"), 0.0) or 0))
+    normalized["source_lease_id"] = str(
+        row.get("source_lease_id", "") or row.get("lease_id", "") or ""
+    ).strip()
+    normalized.pop("lease_id", None)
+    for key in (
+        "source_id",
+        "source_type",
+        "source_kind",
+        "transport",
+        "display_name",
+        "coordinate_space",
+        "selection_id",
+        "sequence_id",
+        "reason_code",
+        "message",
+    ):
+        normalized[key] = str(row.get(key, normalized.get(key, "")) or "").strip()
+    for key in ("selected_at", "updated_at", "last_frame_epoch"):
+        normalized[key] = max(0.0, _float_or(row.get(key, normalized.get(key, 0.0)), 0.0))
+    normalized["last_frame_id"] = max(0, int(_float_or(row.get("last_frame_id"), 0.0) or 0))
+    normalized["decision_usable"] = bool(row.get("decision_usable", False))
+    normalized["fresh"] = bool(row.get("fresh", False))
+    normalized["roi"] = _mapping_to_dict(row.get("roi", {}))
+    normalized["stream"] = _mapping_to_dict(row.get("stream", {}))
+    return normalized
+
+
+def _public_capture_source_v3(value: Any, *, include_lease: bool = False) -> dict[str, Any]:
+    row = _normalize_capture_source_v3(value)
+    state = str(row.get("state", "NO_SOURCE") or "NO_SOURCE").strip().upper()
+    now_epoch = _now_epoch()
+    last_frame_epoch = _float_or(row.get("last_frame_epoch", 0.0), 0.0)
+    frame_age_sec = max(0.0, now_epoch - last_frame_epoch) if last_frame_epoch > 0.0 else 0.0
+    stale_after_sec = _env_float("PHOENIXGUARD_SELECTED_SOURCE_STALE_SEC", 20.0, 5.0)
+    fresh = bool(row.get("fresh", False)) and last_frame_epoch > 0.0 and frame_age_sec <= stale_after_sec
+    decision_usable = bool(row.get("decision_usable", False)) and fresh and state == "LIVE"
+    reason_code = str(row.get("reason_code", state) or state)
+    message = str(row.get("message", "") or "")
+    if state == "LIVE" and not fresh:
+        state = "STALE"
+        reason_code = "SOURCE_STALE"
+        message = "The selected chart stopped delivering fresh frames. Choose it again or select another source."
+        decision_usable = False
+    public = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": int(row.get("state_revision", 0) or 0),
+        "state": state,
+        "selection_state": str(row.get("selection_state", "IDLE") or "IDLE").upper(),
+        "source_id": str(row.get("source_id", "") or ""),
+        "source_generation": int(row.get("source_generation", 0) or 0),
+        "source_type": str(row.get("source_type", "") or ""),
+        "source_kind": str(row.get("source_kind", "") or ""),
+        "transport": str(row.get("transport", "") or ""),
+        "display_name": str(row.get("display_name", "") or ""),
+        "coordinate_space": str(row.get("coordinate_space", "") or ""),
+        "selection_id": str(row.get("selection_id", "") or ""),
+        "sequence_id": str(row.get("sequence_id", "") or ""),
+        "decision_usable": decision_usable,
+        "fresh": fresh,
+        "reason_code": reason_code,
+        "message": message,
+        "selected_at": _float_or(row.get("selected_at", 0.0), 0.0),
+        "updated_at": _float_or(row.get("updated_at", 0.0), 0.0),
+        "last_frame_epoch": last_frame_epoch,
+        "last_frame_id": int(row.get("last_frame_id", 0) or 0),
+        "frame_age_sec": round(frame_age_sec, 3),
+        "stale_after_sec": round(stale_after_sec, 3),
+        "roi": _mapping_to_dict(row.get("roi", {})),
+        "stream": _mapping_to_dict(row.get("stream", {})),
+        "hotkeys": {
+            "desktop_select": "Ctrl+Shift+B",
+            "desktop_kill": "Ctrl+Shift+K",
+            "edge_select": "Ctrl+Shift+8",
+            "edge_kill": "Ctrl+Shift+9",
+        },
+    }
+    if include_lease:
+        public["source_lease_id"] = str(row.get("source_lease_id", "") or row.get("lease_id", "") or "")
+    return public
+
+
+def _external_evidence_lineage_v3(
+    source: Mapping[str, Any] | None,
+    *,
+    model_frame_id: int = 0,
+    study_surface_signature: str = "",
+    published_epoch: float = 0.0,
+) -> dict[str, Any]:
+    row = _mapping_to_dict(source or {})
+    source_id = str(row.get("source_id", "") or "").strip()
+    if not source_id:
+        return {}
+    return {
+        "schema_version": "PG_EXTERNAL_EVIDENCE_LINEAGE_V3",
+        "source_id": source_id,
+        "sequence_id": str(row.get("sequence_id", "") or "").strip(),
+        "source_generation": max(
+            0,
+            int(_float_or(row.get("source_generation"), 0.0) or 0),
+        ),
+        "source_type": str(row.get("source_type", "") or "").strip(),
+        "coordinate_space": str(row.get("coordinate_space", "") or "").strip(),
+        "model_frame_id": max(0, int(model_frame_id or 0)),
+        "study_surface_signature": str(study_surface_signature or "").strip(),
+        "published_epoch": max(0.0, float(published_epoch or 0.0)),
+    }
+
+
+def _external_duplicate_evidence_guard_armed_v3(
+    *,
+    capture_started_with_tracking_enabled: bool,
+    using_external_frame: bool,
+    using_local_cpu_stream_frame: bool,
+    previous_model_frame: int,
+    previous_lineage: Mapping[str, Any] | None,
+    incoming_lineage: Mapping[str, Any] | None,
+) -> bool:
+    if capture_started_with_tracking_enabled:
+        return True
+    if (
+        not using_external_frame
+        or using_local_cpu_stream_frame
+        or int(previous_model_frame or 0) <= 0
+    ):
+        return False
+    previous = _mapping_to_dict(previous_lineage or {})
+    incoming = _mapping_to_dict(incoming_lineage or {})
+    incoming_source_id = str(incoming.get("source_id", "") or "").strip()
+    previous_source_id = str(previous.get("source_id", "") or "").strip()
+    if not incoming_source_id or not previous_source_id:
+        # No prior lineage means this is the first model frame for the source.
+        return False
+    return bool(
+        incoming_source_id == previous_source_id
+        and str(incoming.get("sequence_id", "") or "").strip()
+        == str(previous.get("sequence_id", "") or "").strip()
+        and int(_float_or(incoming.get("source_generation"), 0.0) or 0)
+        == int(_float_or(previous.get("source_generation"), 0.0) or 0)
+        and str(incoming.get("source_type", "") or "").strip()
+        == str(previous.get("source_type", "") or "").strip()
+        and str(incoming.get("coordinate_space", "") or "").strip()
+        == str(previous.get("coordinate_space", "") or "").strip()
+    )
 
 
 def _focus_selector_state(
@@ -28627,6 +28829,12 @@ class ContinuousWindowTrackerService:
             _slugify(session_id_hint or f"tracker-{uuid4().hex[:10]}", "tracker-session"),
         )
         manual_focus_region = _public_manual_focus_region(raw.get("manual_focus_region", {}))
+        capture_source_v3 = _normalize_capture_source_v3(raw.get("capture_source_v3", {}))
+        capture_source_state = str(capture_source_v3.get("state", "NO_SOURCE") or "NO_SOURCE").upper()
+        external_source_owned = bool(capture_source_v3.get("source_id")) and capture_source_state not in {
+            "NO_SOURCE",
+            "KILLED",
+        }
         locked_window: dict[str, Any] = _mapping_to_dict(raw.get("locked_window", {}))
         if not locked_window and int(raw.get("locked_hwnd", 0) or 0) > 0:
             locked_window = {
@@ -28669,7 +28877,14 @@ class ContinuousWindowTrackerService:
             )
 
         tracking_enabled = bool(raw.get("tracking_enabled", False))
-        if tracking_enabled:
+        if external_source_owned:
+            status = {
+                "LIVE": "external_frame_feed",
+                "STALE": "external_source_stale",
+                "LOST": "external_source_lost",
+                "ERROR": "external_source_error",
+            }.get(capture_source_state, "external_source_validating")
+        elif tracking_enabled:
             status = "running"
         elif bool(manual_focus_region.get("enabled", False)):
             status = "ready"
@@ -28803,6 +29018,11 @@ class ContinuousWindowTrackerService:
             "decision_version": int(raw.get("decision_version", 0) or 0),
             "decision_valid_until_epoch": _float_or(raw.get("decision_valid_until_epoch", 0.0), 0.0),
             "cpu_stream_v3": _mapping_to_dict(raw.get("cpu_stream_v3", {})),
+            "capture_source_v3": capture_source_v3,
+            "external_frame_feed": _mapping_to_dict(raw.get("external_frame_feed", {})),
+            "external_evidence_lineage_v3": _mapping_to_dict(
+                raw.get("external_evidence_lineage_v3", {})
+            ),
             "locked_window": locked_window,
             "locked_title": locked_title,
             "manual_focus_region": {
@@ -28861,6 +29081,12 @@ class ContinuousWindowTrackerService:
         return normalized
 
     def _ensure_preview_for_locked_focus(self, session_id: str, payload: Mapping[str, Any]) -> None:
+        capture_source = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+        if bool(capture_source.get("source_id")) and str(capture_source.get("state", "") or "").upper() not in {
+            "NO_SOURCE",
+            "KILLED",
+        }:
+            return
         manual_focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
         if not bool(manual_focus.get("enabled", False)):
             return
@@ -29055,6 +29281,394 @@ class ContinuousWindowTrackerService:
         payload = self._require_session(session_id)
         return self._public_session_payload(payload)
 
+    @staticmethod
+    def _revoke_capture_source_decision_authority(
+        payload: dict[str, Any],
+        *,
+        message: str,
+        reason_code: str,
+        clear_artifacts: bool,
+    ) -> None:
+        previous_packet = _model_council_packet_from_payload(
+            payload,
+            require_live_overlay_truth=False,
+        )
+        tombstone = {
+            "schema_version": "PG_EXECUTION_PACKET_REVOCATION_V3",
+            "revoked_packet_id": str(previous_packet.get("packet_id", "") or "") if previous_packet else "",
+            "frame_id": int(payload.get("frame_index", 0) or 0),
+            "capture_count": int(payload.get("capture_count", 0) or 0),
+            "reason": str(reason_code or "CAPTURE_SOURCE_NOT_DECISION_USABLE"),
+        }
+        latest_signal = _default_signal(
+            message=str(message or "The selected chart is not decision-usable."),
+            status="source_not_ready",
+        )
+        latest_signal.update(
+            {
+                "source_reason_code": str(reason_code or "CAPTURE_SOURCE_NOT_DECISION_USABLE"),
+                "visual_observation_status": "SOURCE_NOT_READY",
+                "new_visual_evidence": False,
+            }
+        )
+        tracking_summary = _default_tracking_summary(message=str(message or ""))
+        tracking_summary.update(
+            {
+                "source_capture_status": "SOURCE_NOT_READY",
+                "source_reason_code": str(reason_code or "CAPTURE_SOURCE_NOT_DECISION_USABLE"),
+                "new_visual_evidence": False,
+            }
+        )
+        _clear_execution_packet_aliases(latest_signal, tombstone=tombstone)
+        _clear_execution_packet_aliases(tracking_summary, tombstone=tombstone)
+        _clear_execution_packet_aliases(payload, tombstone=tombstone)
+        payload["latest_signal"] = latest_signal
+        payload["tracking_summary"] = tracking_summary
+        payload["model_council"] = {}
+        payload["model_council_result"] = {}
+        payload["model_council_study_packet"] = {}
+        payload["scenario_analysis"] = {}
+        payload["visual_observation_v3"] = {}
+        payload["forecast_snapshot_v3"] = {}
+        payload["trade_intent"] = {}
+        payload["decision_valid_until_epoch"] = 0.0
+        payload["decision_version"] = int(payload.get("decision_version", 0) or 0) + 1
+        if clear_artifacts:
+            for key in (
+                "last_frame_path",
+                "last_window_path",
+                "last_display_window_path",
+                "last_chart_path",
+                "last_full_overlay_path",
+                "last_display_chart_path",
+                "last_overlay_path",
+                "last_decision_path",
+                "last_projection_path",
+                "last_memory_reference_path",
+            ):
+                payload[key] = ""
+            for key in (
+                "last_window_surface_signature",
+                "last_display_surface_signature",
+                "last_study_surface_signature",
+                "overlay_source_window_signature",
+                "overlay_source_study_signature",
+                "source_capture_id",
+            ):
+                payload[key] = ""
+            payload["memory_projection_predict"] = _default_memory_projection_payload(mode="predict")
+            payload["memory_projection_future"] = _default_memory_projection_payload(mode="future")
+            payload["memory_projection_active_mode"] = ""
+            payload["external_evidence_lineage_v3"] = {}
+
+    def claim_external_source(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_type: str,
+        selection_id: str,
+        display_name: str,
+        coordinate_space: str,
+    ) -> dict[str, Any]:
+        normalized_source_id = str(source_id or "").strip()
+        normalized_sequence_id = str(sequence_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_coordinate_space = str(coordinate_space or "").strip()
+        if not normalized_source_id or not normalized_sequence_id:
+            raise ValueError("source_id and sequence_id are required to claim a chart source.")
+        source_contracts = {
+            "browser_tab_roi_capture": (
+                "edge_tab_roi_v1",
+                "BROWSER_TAB_ROI",
+                "EDGE_TAB_CAPTURE",
+            ),
+            "windows_graphics_capture_roi": (
+                "wgc_hwnd_roi_v1",
+                "WINDOW_ROI",
+                "WINDOWS_GRAPHICS_CAPTURE",
+            ),
+        }
+        contract = source_contracts.get(normalized_source_type)
+        if contract is None:
+            raise ValueError("Unsupported universal chart source type.")
+        expected_space, source_kind, transport = contract
+        if normalized_coordinate_space != expected_space:
+            raise ValueError(
+                f"{normalized_source_type} must use coordinate_space={expected_space}."
+            )
+
+        normalized_session_id = _slugify(str(session_id or "").strip(), "external-frame-feed")
+        self._stop_worker(normalized_session_id)
+        now_epoch = _now_epoch()
+        with self._lock:
+            payload = self._require_session(normalized_session_id)
+            previous = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+            source_generation = int(previous.get("source_generation", 0) or 0) + 1
+            source_lease_id = secrets.token_urlsafe(32)
+            source_state = {
+                **_default_capture_source_v3(
+                    state="VALIDATING",
+                    message="Checking the selected chart. Decisions are paused until its first fresh frame is studied.",
+                ),
+                "state_revision": int(previous.get("state_revision", 0) or 0) + 1,
+                "selection_state": "LOCKED",
+                "source_id": normalized_source_id[:128],
+                "source_generation": source_generation,
+                "source_lease_id": source_lease_id,
+                "source_type": normalized_source_type,
+                "source_kind": source_kind,
+                "transport": transport,
+                "display_name": str(display_name or "Selected chart").strip()[:180] or "Selected chart",
+                "coordinate_space": normalized_coordinate_space,
+                "selection_id": str(selection_id or "").strip()[:192],
+                "sequence_id": normalized_sequence_id[:192],
+                "reason_code": "SOURCE_VALIDATING",
+                "selected_at": now_epoch,
+                "updated_at": now_epoch,
+                "roi": {"coordinate_space": normalized_coordinate_space},
+                "stream": {
+                    "accepted_frames": 0,
+                    "duplicate_frames": 0,
+                    "last_error": "",
+                },
+            }
+            payload["capture_source_v3"] = source_state
+            payload["window_query"] = "Selected Chart Source"
+            payload["layout_profile"] = "external_frame_feed"
+            payload["effective_layout_profile"] = "external_frame_feed"
+            payload["status"] = "external_source_validating"
+            payload["tracking_enabled"] = False
+            payload["market"] = ""
+            payload["locked_window"] = {}
+            payload["locked_title"] = ""
+            payload["manual_focus_region"] = {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+                "source": "universal_source_claim",
+                "updated_at": _epoch_to_utc_iso(now_epoch),
+            }
+            payload["focus_selector"] = _focus_selector_state(
+                supported=self.focus_selector_backend.is_supported(),
+                status="selected",
+                message="A background chart source is locked and validating.",
+            )
+            self._revoke_capture_source_decision_authority(
+                payload,
+                message=str(source_state["message"]),
+                reason_code="SOURCE_VALIDATING",
+                clear_artifacts=True,
+            )
+            payload["external_frame_feed"] = {}
+            payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
+            payload["__control_write_v3"] = True
+            try:
+                self._display_state_path(normalized_session_id).unlink(missing_ok=True)
+            except OSError:
+                LOGGER.debug("Unable to clear old display state while switching chart source.", exc_info=True)
+            self._save_session(payload)
+        return _public_capture_source_v3(source_state, include_lease=True)
+
+    def validate_external_source_lease(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+    ) -> dict[str, Any]:
+        payload = self._require_session(session_id)
+        source = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+        state = str(source.get("state", "NO_SOURCE") or "NO_SOURCE").upper()
+        if state == "KILLED":
+            return {
+                "allowed": False,
+                "status_code": 410,
+                "reason_code": "SOURCE_KILLED",
+                "message": "This chart source was stopped. Select a chart again to create a new lease.",
+            }
+        exact_match = bool(
+            str(source_id or "").strip()
+            and str(sequence_id or "").strip()
+            and str(source_lease_id or "").strip()
+            and str(source.get("source_id", "") or "") == str(source_id or "").strip()
+            and str(source.get("sequence_id", "") or "") == str(sequence_id or "").strip()
+            and int(source.get("source_generation", 0) or 0) == int(source_generation or 0)
+            and secrets.compare_digest(
+                str(source.get("source_lease_id", "") or ""),
+                str(source_lease_id or "").strip(),
+            )
+        )
+        if not exact_match or state not in {"VALIDATING", "LIVE", "STALE"}:
+            return {
+                "allowed": False,
+                "status_code": 409,
+                "reason_code": "SOURCE_SUPERSEDED",
+                "message": "This frame belongs to an old or inactive chart source.",
+            }
+        return {
+            "allowed": True,
+            "status_code": 200,
+            "reason_code": "SOURCE_LEASE_CURRENT",
+            "source_generation": int(source.get("source_generation", 0) or 0),
+        }
+
+    @staticmethod
+    def _require_external_ingest_lease(
+        source: Mapping[str, Any],
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+        source_type: str,
+        coordinate_space: str,
+    ) -> None:
+        current = _normalize_capture_source_v3(source)
+        current_source_id = str(current.get("source_id", "") or "").strip()
+        leased_coordinate_spaces = {"edge_tab_roi_v1", "wgc_hwnd_roi_v1"}
+        if not current_source_id:
+            if coordinate_space in leased_coordinate_spaces:
+                raise ExternalSourceLeaseError(
+                    status_code=409,
+                    reason_code="SOURCE_SUPERSEDED",
+                    message="No claimed chart source owns this leased coordinate space.",
+                )
+            return
+
+        current_state = str(current.get("state", "NO_SOURCE") or "NO_SOURCE").upper()
+        if current_state == "KILLED":
+            raise ExternalSourceLeaseError(
+                status_code=410,
+                reason_code="SOURCE_KILLED",
+                message="This chart source was stopped. Select a chart again to create a new lease.",
+            )
+        expected_coordinate_space = str(current.get("coordinate_space", "") or "").strip()
+        expected_source_type = str(current.get("source_type", "") or "").strip()
+        if not expected_source_type:
+            expected_source_type = {
+                "edge_tab_roi_v1": "browser_tab_roi_capture",
+                "wgc_hwnd_roi_v1": "windows_graphics_capture_roi",
+            }.get(expected_coordinate_space, "")
+        exact_match = bool(
+            current_state in {"VALIDATING", "LIVE", "STALE"}
+            and str(source_id or "").strip() == current_source_id
+            and str(sequence_id or "").strip() == str(current.get("sequence_id", "") or "").strip()
+            and int(source_generation or 0) == int(current.get("source_generation", 0) or 0)
+            and str(source_lease_id or "").strip()
+            and secrets.compare_digest(
+                str(source_lease_id or "").strip(),
+                str(current.get("source_lease_id", "") or ""),
+            )
+            and str(source_type or "").strip() == expected_source_type
+            and str(coordinate_space or "").strip() == expected_coordinate_space
+        )
+        if not exact_match:
+            raise ExternalSourceLeaseError(
+                status_code=409,
+                reason_code="SOURCE_SUPERSEDED",
+                message="This frame belongs to an old, mismatched, or inactive chart source.",
+            )
+
+    def kill_external_source(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        source_id: str = "",
+        sequence_id: str = "",
+        source_generation: int = 0,
+        source_lease_id: str = "",
+    ) -> dict[str, Any]:
+        """Stop the current source, optionally fenced by its complete lease tuple.
+
+        Remote callers must supply all four lease fields. A stale tuple raises
+        ``ExternalSourceLeaseError`` before worker or persisted state mutation.
+        Omitting the complete tuple is reserved for the trusted local operator
+        kill route.
+        """
+
+        normalized_session_id = _slugify(str(session_id or "").strip(), "external-frame-feed")
+        now_epoch = _now_epoch()
+        with self._lock:
+            payload = self._require_session(normalized_session_id)
+            previous = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+            expected_source_id = str(source_id or "").strip()
+            expected_sequence_id = str(sequence_id or "").strip()
+            expected_source_generation = int(source_generation or 0)
+            expected_source_lease_id = str(source_lease_id or "").strip()
+            expected_lease_supplied = bool(
+                expected_source_id
+                or expected_sequence_id
+                or expected_source_generation > 0
+                or expected_source_lease_id
+            )
+            if expected_lease_supplied:
+                current_state = str(previous.get("state", "NO_SOURCE") or "NO_SOURCE").upper()
+                if current_state == "KILLED":
+                    raise ExternalSourceLeaseError(
+                        status_code=410,
+                        reason_code="SOURCE_KILLED",
+                        message="This chart source was already stopped. Select a chart again to create a new lease.",
+                    )
+                complete_expected_lease = bool(
+                    expected_source_id
+                    and expected_sequence_id
+                    and expected_source_generation > 0
+                    and expected_source_lease_id
+                )
+                exact_match = bool(
+                    complete_expected_lease
+                    and str(previous.get("source_id", "") or "") == expected_source_id
+                    and str(previous.get("sequence_id", "") or "") == expected_sequence_id
+                    and int(previous.get("source_generation", 0) or 0) == expected_source_generation
+                    and secrets.compare_digest(
+                        str(previous.get("source_lease_id", "") or ""),
+                        expected_source_lease_id,
+                    )
+                    and current_state in {"VALIDATING", "LIVE", "STALE"}
+                )
+                if not exact_match:
+                    raise ExternalSourceLeaseError(
+                        status_code=409,
+                        reason_code="SOURCE_SUPERSEDED",
+                        message="This stop request belongs to an old or inactive chart source.",
+                    )
+            message = str(reason or "Tracking stopped. The previous picture is historical.").strip()[:240]
+            killed = dict(previous)
+            killed.update(
+                {
+                    "schema_version": "PG_CAPTURE_SOURCE_V3",
+                    "state_revision": int(previous.get("state_revision", 0) or 0) + 1,
+                    "state": "KILLED",
+                    "selection_state": "IDLE",
+                    "source_generation": int(previous.get("source_generation", 0) or 0) + 1,
+                    "source_lease_id": "",
+                    "decision_usable": False,
+                    "fresh": False,
+                    "reason_code": "SOURCE_KILLED",
+                    "message": message,
+                    "updated_at": now_epoch,
+                    "historical_frame": bool(payload.get("last_window_path") or payload.get("last_chart_path")),
+                }
+            )
+            payload["capture_source_v3"] = killed
+            payload["status"] = "source_killed"
+            payload["tracking_enabled"] = False
+            self._revoke_capture_source_decision_authority(
+                payload,
+                message=message,
+                reason_code="SOURCE_KILLED",
+                clear_artifacts=False,
+            )
+            payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
+            payload["__control_write_v3"] = True
+            self._save_session(payload)
+        self._stop_worker(normalized_session_id)
+        return _public_capture_source_v3(killed)
+
     def ingest_external_frame(
         self,
         session_id: str,
@@ -29093,6 +29707,30 @@ class ContinuousWindowTrackerService:
             metadata_payload.get("coordinate_space", "external_frame_v1")
             or "external_frame_v1"
         ).strip()
+        source_generation = max(
+            0,
+            int(_float_or(metadata_payload.get("source_generation"), 0.0) or 0),
+        )
+        source_lease_id = str(metadata_payload.get("source_lease_id", "") or "").strip()
+        leased_coordinate_spaces = {"edge_tab_roi_v1", "wgc_hwnd_roi_v1"}
+        with self._lock:
+            try:
+                lease_session = self._require_session(normalized_session_id)
+            except KeyError:
+                lease_session = {}
+            if lease_session or coordinate_space in leased_coordinate_spaces:
+                self._require_external_ingest_lease(
+                    _mapping_to_dict(lease_session.get("capture_source_v3", {})),
+                    source_id=normalized_source_id,
+                    sequence_id=str(sequence_id or "").strip(),
+                    source_generation=source_generation,
+                    source_lease_id=source_lease_id,
+                    source_type=normalized_source_type,
+                    coordinate_space=coordinate_space,
+                )
+        if coordinate_space in leased_coordinate_spaces:
+            if metadata_payload.get("source_render_fresh") is False:
+                raise ValueError("SOURCE_STALE: the selected chart transport did not present a fresh frame.")
         source_payload: dict[str, Any] = {
             "source_id": normalized_source_id,
             "source_type": normalized_source_type,
@@ -29103,6 +29741,7 @@ class ContinuousWindowTrackerService:
             "frame_id": int(frame_id or 0),
             "capture_epoch_ms": int(round(capture_epoch * 1000.0)),
             "coordinate_space": coordinate_space,
+            "source_generation": source_generation,
             "metadata": metadata_payload,
         }
 
@@ -29128,6 +29767,15 @@ class ContinuousWindowTrackerService:
 
         with self._lock:
             payload = self._require_session(normalized_session_id)
+            self._require_external_ingest_lease(
+                _mapping_to_dict(payload.get("capture_source_v3", {})),
+                source_id=normalized_source_id,
+                sequence_id=str(sequence_id or "").strip(),
+                source_generation=source_generation,
+                source_lease_id=source_lease_id,
+                source_type=normalized_source_type,
+                coordinate_space=coordinate_space,
+            )
             previous_feed = _mapping_to_dict(payload.get("external_frame_feed"))
             previous_source_id = str(previous_feed.get("source_id") or "").strip()
             previous_sequence_id = str(previous_feed.get("sequence_id") or "").strip()
@@ -29141,10 +29789,10 @@ class ContinuousWindowTrackerService:
             incoming_frame_id = int(frame_id or 0)
             frame_did_not_advance = incoming_frame_id > 0 and previous_frame_id > 0 and incoming_frame_id <= previous_frame_id
             capture_did_not_advance = previous_capture_epoch > 0.0 and capture_epoch <= previous_capture_epoch
+            if same_feed_sequence and frame_did_not_advance:
+                raise ValueError("External frame_id did not advance for this source/sequence.")
             if same_feed_sequence and capture_did_not_advance:
                 raise ValueError("External frame capture time did not advance for this source/sequence.")
-            if same_feed_sequence and frame_did_not_advance and capture_did_not_advance:
-                raise ValueError("External frame_id and capture time did not advance for this source/sequence.")
             payload["window_query"] = "External Frame Feed"
             payload["layout_profile"] = "external_frame_feed"
             payload["effective_layout_profile"] = "external_frame_feed"
@@ -29152,7 +29800,11 @@ class ContinuousWindowTrackerService:
             payload["tracking_enabled"] = False
             if normalized_symbol:
                 payload["market"] = normalized_symbol
-            elif normalized_source_type == "browser_extension_capture":
+            elif normalized_source_type in {
+                "browser_extension_capture",
+                "browser_tab_roi_capture",
+                "windows_graphics_capture_roi",
+            }:
                 # A tab feed may switch pairs without changing its tab/stream
                 # identity. Blank client metadata must never preserve a prior
                 # pair as if it were verified; the visual selector must prove
@@ -29185,6 +29837,35 @@ class ContinuousWindowTrackerService:
                     "browser_chrome_included": bool(
                         metadata_payload.get("browser_chrome_included", False)
                     ),
+                    "selection_id": str(metadata_payload.get("selection_id", "") or "")[:192],
+                    "region_revision": str(metadata_payload.get("region_revision", "") or "")[:192],
+                    "geometry_epoch": int(
+                        _float_or(
+                            metadata_payload.get("geometry_epoch", metadata_payload.get("geometry_generation")),
+                            0.0,
+                        )
+                        or 0
+                    ),
+                    "source_generation": source_generation,
+                    "roi_normalized": list(
+                        cast(Sequence[Any], metadata_payload.get("roi_normalized", []))
+                    )[:4]
+                    if isinstance(metadata_payload.get("roi_normalized"), list | tuple)
+                    else [],
+                    "roi_source_pixels": _mapping_to_dict(metadata_payload.get("roi_source_pixels", {})),
+                    "source_surface_width": int(
+                        _float_or(metadata_payload.get("source_surface_width"), 0.0) or 0
+                    ),
+                    "source_surface_height": int(
+                        _float_or(metadata_payload.get("source_surface_height"), 0.0) or 0
+                    ),
+                    "source_render_fresh": bool(metadata_payload.get("source_render_fresh", True)),
+                    "transport_frame_age_ms": int(
+                        _float_or(metadata_payload.get("transport_frame_age_ms"), 0.0) or 0
+                    ),
+                    "visual_change_age_ms": int(
+                        _float_or(metadata_payload.get("visual_change_age_ms"), 0.0) or 0
+                    ),
                 },
                 "frame_id": int(frame_id or 0),
                 "last_ingest_epoch": now_epoch,
@@ -29202,6 +29883,65 @@ class ContinuousWindowTrackerService:
             external_source=source_payload,
             external_capture_epoch=capture_epoch,
         )
+        if accepted and coordinate_space in leased_coordinate_spaces:
+            with self._lock:
+                current = self._require_session(normalized_session_id)
+                lease_validation = self.validate_external_source_lease(
+                    normalized_session_id,
+                    source_id=normalized_source_id,
+                    sequence_id=str(sequence_id or "").strip(),
+                    source_generation=source_generation,
+                    source_lease_id=source_lease_id,
+                )
+                if not bool(lease_validation.get("allowed", False)):
+                    raise ValueError("SOURCE_SUPERSEDED")
+                capture_source = _normalize_capture_source_v3(current.get("capture_source_v3", {}))
+                stream = _mapping_to_dict(capture_source.get("stream", {}))
+                stream["accepted_frames"] = int(stream.get("accepted_frames", 0) or 0) + 1
+                stream["last_error"] = ""
+                stream["last_frame_id"] = int(frame_id or 0)
+                stream["last_capture_epoch"] = capture_epoch
+                roi = _mapping_to_dict(capture_source.get("roi", {}))
+                roi.update(
+                    {
+                        "coordinate_space": coordinate_space,
+                        "normalized_bbox": list(
+                            cast(Sequence[Any], metadata_payload.get("roi_normalized", []))
+                        )[:4]
+                        if isinstance(metadata_payload.get("roi_normalized"), list | tuple)
+                        else list(cast(Sequence[Any], roi.get("normalized_bbox", []))),
+                        "source_pixels": _mapping_to_dict(metadata_payload.get("roi_source_pixels", {})),
+                        "bound_width": int(_float_or(metadata_payload.get("source_surface_width"), 0.0) or 0),
+                        "bound_height": int(_float_or(metadata_payload.get("source_surface_height"), 0.0) or 0),
+                        "geometry_epoch": int(
+                            _float_or(
+                                metadata_payload.get("geometry_epoch", metadata_payload.get("geometry_generation")),
+                                0.0,
+                            )
+                            or 0
+                        ),
+                    }
+                )
+                capture_source.update(
+                    {
+                        "state_revision": int(capture_source.get("state_revision", 0) or 0) + 1,
+                        "state": "LIVE",
+                        "selection_state": "IDLE",
+                        "decision_usable": True,
+                        "fresh": True,
+                        "reason_code": "SOURCE_LIVE",
+                        "message": f"{str(capture_source.get('display_name', '') or 'Selected chart')} is streaming in the background.",
+                        "updated_at": now_epoch,
+                        "last_frame_epoch": capture_epoch,
+                        "last_frame_id": int(frame_id or 0),
+                        "roi": roi,
+                        "stream": stream,
+                    }
+                )
+                current["capture_source_v3"] = capture_source
+                current["status"] = "external_frame_feed"
+                current["updated_at"] = _epoch_to_utc_iso(now_epoch)
+                self._save_session(current)
         snapshot = self.get_session_snapshot(normalized_session_id)
         snapshot["frame_ingest"] = {
             "schema_version": "PG_FRAME_INGEST_RESULT_V1",
@@ -29210,6 +29950,7 @@ class ContinuousWindowTrackerService:
             "source_url": source_payload["source_url"],
             "sequence_id": source_payload["sequence_id"],
             "frame_id": int(frame_id or 0),
+            "source_generation": source_generation,
             "capture_epoch_ms": int(round(capture_epoch * 1000.0)),
             "ingested_epoch_ms": int(round(now_epoch * 1000.0)),
         }
@@ -34908,6 +35649,11 @@ class ContinuousWindowTrackerService:
         cpu_stream_lineage = _mapping_to_dict(
             external_frame_source.get("cpu_stream_lineage_v3", {})
         )
+        incoming_external_evidence_lineage = (
+            _external_evidence_lineage_v3(external_frame_source)
+            if using_external_frame and not using_local_cpu_stream_frame
+            else {}
+        )
         capture_started_epoch = float(external_capture_epoch or _now_epoch())
         if capture_started_epoch <= 0.0 or capture_started_epoch > _now_epoch() + 5.0:
             capture_started_epoch = _now_epoch()
@@ -35201,13 +35947,24 @@ class ContinuousWindowTrackerService:
         previous_model_frame = int(
             fresh_for_index.get("model_vote_frame_id", fresh_for_index.get("frame_index", 0)) or 0
         )
+        previous_external_evidence_lineage = _mapping_to_dict(
+            fresh_for_index.get("external_evidence_lineage_v3", {})
+        )
         previous_observation = _mapping_to_dict(fresh_for_index.get("visual_observation_v3", {}))
         last_recovery_attempt_epoch = _float_or(
             previous_observation.get("last_recovery_attempt_epoch"),
             0.0,
         )
+        duplicate_evidence_guard_armed = _external_duplicate_evidence_guard_armed_v3(
+            capture_started_with_tracking_enabled=capture_started_with_tracking_enabled,
+            using_external_frame=using_external_frame,
+            using_local_cpu_stream_frame=using_local_cpu_stream_frame,
+            previous_model_frame=previous_model_frame,
+            previous_lineage=previous_external_evidence_lineage,
+            incoming_lineage=incoming_external_evidence_lineage,
+        )
         duplicate_study_surface = bool(
-            capture_started_with_tracking_enabled
+            duplicate_evidence_guard_armed
             and previous_model_frame > 0
             and previous_study_signature
             and study_surface_signature == previous_study_signature
@@ -36819,6 +37576,13 @@ class ContinuousWindowTrackerService:
                 f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
                 f"{int(capture_started_epoch * 1000.0)}"
             )
+            if incoming_external_evidence_lineage:
+                payload["external_evidence_lineage_v3"] = _external_evidence_lineage_v3(
+                    incoming_external_evidence_lineage,
+                    model_frame_id=frame_index,
+                    study_surface_signature=study_surface_signature,
+                    published_epoch=published_epoch,
+                )
             payload["updated_at"] = published_at
             payload["status"] = "running" if bool(payload.get("tracking_enabled", False)) else "ready"
             payload["locked_window"] = dict(descriptor)
@@ -37376,6 +38140,28 @@ class ContinuousWindowTrackerService:
         except Exception:
             previous = {}
         if previous:
+            previous_source_generation = int(
+                _normalize_capture_source_v3(previous.get("capture_source_v3", {})).get(
+                    "source_generation",
+                    0,
+                )
+                or 0
+            )
+            payload_source_generation = int(
+                _normalize_capture_source_v3(payload.get("capture_source_v3", {})).get(
+                    "source_generation",
+                    0,
+                )
+                or 0
+            )
+            if not control_write and previous_source_generation > payload_source_generation:
+                LOGGER.warning(
+                    "Skipped superseded source write for %s: payload generation=%s current generation=%s.",
+                    session_id,
+                    payload_source_generation,
+                    previous_source_generation,
+                )
+                return
             previous_frame = int(previous.get("frame_index", 0) or 0)
             previous_capture_count = int(previous.get("capture_count", previous_frame) or 0)
             previous_display_frame = int(previous.get("display_frame_id", previous_frame) or 0)
@@ -37504,6 +38290,8 @@ class ContinuousWindowTrackerService:
         public = _synchronize_session_versions(payload)
         session_id = str(public.get("session_id", "") or "")
         public["cpu_stream_v3"] = self._cpu_stream_public_health_v3(session_id, public)
+        capture_source = _public_capture_source_v3(public.get("capture_source_v3", {}))
+        public["capture_source_v3"] = capture_source
         public["manual_focus_region"] = _public_manual_focus_region(public.get("manual_focus_region", {}))
         public["event_log_path"] = str(self._event_log_path(session_id)) if session_id else ""
         public["focus_selector"] = _public_focus_selector_state(
@@ -37524,7 +38312,17 @@ class ContinuousWindowTrackerService:
         )
         public["broker_surface"]["amount_lock"] = amount_lock
         public["broker_execution_state"] = _normalize_broker_execution_state(public.get("broker_execution_state", {}))
-        if bool(public.get("tracking_enabled", False)):
+        capture_source_state = str(capture_source.get("state", "NO_SOURCE") or "NO_SOURCE").upper()
+        capture_source_known = bool(capture_source.get("source_id")) or capture_source_state == "KILLED"
+        if capture_source_known:
+            public["status"] = {
+                "LIVE": "external_frame_feed",
+                "STALE": "external_source_stale",
+                "LOST": "external_source_lost",
+                "ERROR": "external_source_error",
+                "KILLED": "source_killed",
+            }.get(capture_source_state, "external_source_validating")
+        elif bool(public.get("tracking_enabled", False)):
             current_status = str(public.get("status", "") or "").strip().lower()
             public["status"] = current_status if current_status in {"running", "tracking"} else "running"
         elif bool(public["manual_focus_region"].get("enabled", False)):
@@ -37705,6 +38503,41 @@ class ContinuousWindowTrackerService:
         except Exception:
             # Avoid raising in payload normalization; dashboard will handle missing artifacts.
             pass
+
+        if capture_source_known and not bool(capture_source.get("decision_usable", False)):
+            source_message = str(
+                capture_source.get("message")
+                or "The selected chart is not delivering current decision-usable frames."
+            )
+            source_reason = str(
+                capture_source.get("reason_code")
+                or "CAPTURE_SOURCE_NOT_DECISION_USABLE"
+            )
+            public_latest_signal = _mapping_to_dict(public.get("latest_signal", {}))
+            public_latest_signal.update(
+                {
+                    "actionable": False,
+                    "execution_action": "HOLD",
+                    "execution_permission": "WAIT",
+                    "entry_state": "WAIT",
+                    "entry_label": "WAIT",
+                    "status": "source_not_ready",
+                    "stale": True,
+                    "freshness_score": 0.0,
+                    "valid_until_epoch": 0.0,
+                    "source_reason_code": source_reason,
+                    "execution_block_reason": source_message,
+                    "no_trade_reason": source_message,
+                }
+            )
+            public_latest_signal.pop("trade_intent", None)
+            _clear_execution_packet_aliases(public_latest_signal)
+            public["latest_signal"] = public_latest_signal
+            public["trade_intent"] = {}
+            public["decision_valid_until_epoch"] = 0.0
+            public["freshness_score"] = 0.0
+            _clear_execution_packet_aliases(public)
+            public["capture_source_v3"] = capture_source
 
         return cast(
             dict[str, Any],
