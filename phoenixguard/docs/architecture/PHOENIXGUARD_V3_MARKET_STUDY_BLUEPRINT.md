@@ -1447,6 +1447,38 @@ authoritative and may append one plain timing sentence only after the field is m
 the single best action now. The streaming refresh applies the same gate, so a heartbeat cannot
 erase a timing veto or revive stale timing from another pair, frame, or close.
 
+A newer forming-frame analysis also cannot replace a compatible completed
+direction with generic `ANALYZING` or `WAIT FOR CURRENT READ`. For the exact
+same confirmed pair, timeframe, capture selector, surface identity,
+source/stream generation, and coordinate/geometry revision, the operator may
+retain the newest completed-candle direction and its compatible move-start
+window while clearly marking the next frame as in progress. This exception is
+limited to a processing-only response where both Q2 and Q3 are absent. A
+present newer contract with a different side or close key, or without an
+admissible timing field, clears the older read immediately. Publication is
+monotonic by completed-candle lineage, not by bitmap arrival alone. Any missing
+selector, identity, generation, coordinate, geometry, stop, restart, or
+reselection mismatch vetoes the retained read instead of allowing evidence
+from another chart to leak through. Its explicit `valid_until` or bounded
+forecast lifetime is enforced and an elapsed move-start window is cleared and
+marked as elapsed.
+
+The exact study is also the reconciliation authority at the same candle key.
+Q2, Q3, the study projection, and the timing forecast may not publish opposing
+sides because an older command or council sentence survived in cache. Any such
+conflict is rebuilt from the current `directional_read`, while every entry and
+execution-authority field is forced closed. A frame arriving during that build
+may make the response `UPDATING`; it cannot leave an older permission open.
+
+Every public candle range answers **when the studied move may begin relative to
+its named closed-candle anchor**. It is not a recommended hold duration and is
+not a broker expiry. If a separately proven trade-duration field is absent, the
+operator says that duration is unproven; it does not hide the valid directional
+study or relabel the move-start window as a duration.
+If a numeric recommendation exists without explicit duration proof, it is
+labelled an unproven hold-duration recommendation. Only an explicit proof flag
+allows the operator to call that separate duration proven.
+
 An operator entry deadline of zero has one exact meaning: no executable entry
 window was issued. It is not an expired deadline and must not relabel an honest,
 current BUY/SELL market study as generic stale WAIT. Only a positive issued

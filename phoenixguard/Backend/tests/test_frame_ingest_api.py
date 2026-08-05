@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
+from phoenixguard.mobile_api import frame_ingest as frame_ingest_module
 from phoenixguard.mobile_api.app import create_app
 from phoenixguard.mobile_api.frame_ingest import reset_frame_ingest_runtime_state_for_tests
 
@@ -21,6 +22,15 @@ from phoenixguard.mobile_api.frame_ingest import reset_frame_ingest_runtime_stat
 def _client(tracker: _FakeFrameTracker | None = None) -> TestClient:
     reset_frame_ingest_runtime_state_for_tests()
     return TestClient(create_app(window_tracker_service=tracker or _FakeFrameTracker()))
+
+
+def _wait_until(predicate: Any, *, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if bool(predicate()):
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 class _FakeFrameTracker:
@@ -235,6 +245,106 @@ class _FailOnceFrameTracker(_FakeFrameTracker):
         return super().ingest_external_frame(*args, **kwargs)
 
 
+class _ProcessingFailOnceFrameTracker(_FakeFrameTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_ingest = True
+        self.attempted_frame_ids: list[int] = []
+
+    def ingest_external_frame(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        frame_id = int(kwargs.get("frame_id", 0) or 0)
+        self.attempted_frame_ids.append(frame_id)
+        self.capture_source_v3["state"] = "VALIDATING"
+        self.capture_source_v3["stream"] = {
+            **dict(self.capture_source_v3.get("stream", {})),
+            "processing": True,
+            "processing_frame_id": frame_id,
+        }
+        if self.fail_next_ingest:
+            self.fail_next_ingest = False
+            raise RuntimeError("synthetic secret=do-not-publish")
+        result = super().ingest_external_frame(*args, **kwargs)
+        stream = dict(self.capture_source_v3.get("stream", {}))
+        stream.update(
+            {
+                "processing": False,
+                "processing_frame_id": 0,
+                "last_frame_id": frame_id,
+            }
+        )
+        self.capture_source_v3.update({"state": "LIVE", "stream": stream})
+        return result
+
+    def fail_external_frame_analysis(
+        self,
+        session_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        del session_id
+        frame_id = int(kwargs.get("frame_id", 0) or 0)
+        validation = self.validate_external_source_lease(
+            "",
+            source_id=str(kwargs.get("source_id", "") or ""),
+            sequence_id=str(kwargs.get("sequence_id", "") or ""),
+            source_generation=int(kwargs.get("source_generation", 0) or 0),
+            source_lease_id=str(kwargs.get("source_lease_id", "") or ""),
+        )
+        stream = dict(self.capture_source_v3.get("stream", {}))
+        if (
+            not bool(validation.get("allowed", False))
+            or stream.get("processing") is not True
+            or int(stream.get("processing_frame_id", 0) or 0) != frame_id
+        ):
+            return {"cleared": False, "reason_code": "SOURCE_SUPERSEDED"}
+        stream.update(
+            {
+                "processing": False,
+                "processing_frame_id": 0,
+                "last_failed_frame_id": frame_id,
+                "last_failure_reason_code": str(
+                    kwargs.get("reason_code", "") or ""
+                ),
+                "last_failure_error_type": str(
+                    kwargs.get("error_type", "") or ""
+                ),
+            }
+        )
+        self.capture_source_v3.update(
+            {
+                "state": "ERROR",
+                "reason_code": "FRAME_ANALYSIS_FAILED",
+                "stream": stream,
+            }
+        )
+        return {"cleared": True, "reason_code": "FRAME_ANALYSIS_FAILED"}
+
+    def get_external_frame_transport_status(
+        self,
+        session_id: str,
+    ) -> dict[str, Any]:
+        stream = dict(self.capture_source_v3.get("stream", {}))
+        return {
+            "schema_version": "PG_EXTERNAL_FRAME_TRANSPORT_STATUS_V1",
+            "session_id": session_id,
+            "status": str(self.capture_source_v3.get("state", "NO_SOURCE")),
+            "source_state": str(
+                self.capture_source_v3.get("state", "NO_SOURCE")
+            ),
+            "reason_code": str(self.capture_source_v3.get("reason_code", "")),
+            "source_id": str(self.capture_source_v3.get("source_id", "")),
+            "source_type": str(self.capture_source_v3.get("source_type", "")),
+            "sequence_id": str(self.capture_source_v3.get("sequence_id", "")),
+            "source_generation": int(
+                self.capture_source_v3.get("source_generation", 0) or 0
+            ),
+            "coordinate_space": str(
+                self.capture_source_v3.get("coordinate_space", "")
+            ),
+            "last_frame_id": int(stream.get("last_frame_id", 0) or 0),
+            "stream": stream,
+        }
+
+
 class _LateLeaseFailureTracker(_FakeFrameTracker):
     def __init__(self, *, status_code: int, reason_code: str) -> None:
         super().__init__()
@@ -246,6 +356,18 @@ class _LateLeaseFailureTracker(_FakeFrameTracker):
         raise _FakeSourceLeaseError(self.status_code, self.reason_code)
 
 
+class _WorkerLeaseValidationFailureTracker(_FakeFrameTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.validation_calls = 0
+
+    def validate_external_source_lease(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.validation_calls += 1
+        if self.validation_calls >= 2:
+            raise RuntimeError("secret lease backend failure")
+        return super().validate_external_source_lease(*args, **kwargs)
+
+
 class _BlockingFrameTracker(_FakeFrameTracker):
     def __init__(self) -> None:
         super().__init__()
@@ -254,9 +376,43 @@ class _BlockingFrameTracker(_FakeFrameTracker):
 
     def ingest_external_frame(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         self.entered.set()
-        if not self.release.wait(timeout=5.0):
+        if not self.release.wait(timeout=10.0):
             raise RuntimeError("test did not release blocked frame ingest")
         return super().ingest_external_frame(*args, **kwargs)
+
+
+class _RejectOnceClaimBlockingTracker(_BlockingFrameTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reject_next_claim = False
+
+    def claim_external_source(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if self.reject_next_claim:
+            self.reject_next_claim = False
+            raise _FakeSourceLeaseError(409, "SOURCE_SUPERSEDED")
+        return super().claim_external_source(*args, **kwargs)
+
+
+class _CommitFencedClaimBlockingTracker(_RejectOnceClaimBlockingTracker):
+    def ingest_external_frame(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.entered.set()
+        if not self.release.wait(timeout=10.0):
+            raise RuntimeError("test did not release blocked frame ingest")
+        metadata = dict(kwargs.get("metadata") or {})
+        if metadata.get("coordinate_space") in {"edge_tab_roi_v1", "wgc_hwnd_roi_v1"}:
+            validation = self.validate_external_source_lease(
+                str(args[0]),
+                source_id=str(kwargs.get("source_id", "") or ""),
+                sequence_id=str(kwargs.get("sequence_id", "") or ""),
+                source_generation=int(metadata.get("source_generation", 0) or 0),
+                source_lease_id=str(metadata.get("source_lease_id", "") or ""),
+            )
+            if not bool(validation.get("allowed", False)):
+                raise _FakeSourceLeaseError(
+                    int(validation.get("status_code", 409) or 409),
+                    str(validation.get("reason_code", "SOURCE_SUPERSEDED") or "SOURCE_SUPERSEDED"),
+                )
+        return _FakeFrameTracker.ingest_external_frame(self, *args, **kwargs)
 
 
 def _png_bytes(width: int = 160, height: int = 120) -> bytes:
@@ -328,6 +484,10 @@ def test_frame_ingest_config_reports_contract(monkeypatch: Any) -> None:
     assert payload["browser_extension_coordinate_space"] == "edge_tab_content_v1"
     assert "mobile_manual_upload" in payload["supported_sources"]
     assert payload["readiness"]["armed"] is False
+    assert payload["retry_after_ms"] >= 1_000
+    assert payload["analysis_mailbox"]["max_active_per_session"] == 1
+    assert payload["analysis_mailbox"]["max_pending_per_session"] == 1
+    assert payload["analysis_mailbox"]["latest_pending_replaces"] is True
 
 
 def test_frame_ingest_readiness_requires_armed_ingest(monkeypatch: Any) -> None:
@@ -395,7 +555,12 @@ def test_frame_ingest_accepts_authenticated_chart_frame(monkeypatch: Any) -> Non
     assert payload["accepted"] is True
     assert payload["session_id"] == "external-live"
     assert payload["external_frame_feed"]["source_id"] == "edge-agent"
-    assert len(tracker.calls) == 1
+    assert payload["analysis_busy"] is True
+    assert payload["active_frame_id"] == 42
+    assert payload["pending_frame_id"] is None
+    assert payload["replaced_frame_count"] == 0
+    assert payload["retry_after_ms"] > 0
+    assert _wait_until(lambda: len(tracker.calls) == 1)
     call = tracker.calls[0]
     assert call["size"] == (160, 120)
     assert call["symbol"] == "EURCAD"
@@ -453,6 +618,7 @@ def test_leased_browser_roi_source_claim_accepts_only_current_generation(monkeyp
         },
     )
     assert accepted.status_code == 202
+    assert _wait_until(lambda: len(tracker.calls) == 1)
     assert tracker.calls[-1]["symbol"] == ""
     assert tracker.calls[-1]["timeframe"] == ""
     assert tracker.calls[-1]["metadata"]["identity_hint_policy"] == "visual_reproof_required"
@@ -941,6 +1107,7 @@ def test_frame_ingest_overwrites_client_supplied_security_metadata(monkeypatch: 
     )
 
     assert response.status_code == 202
+    assert _wait_until(lambda: len(tracker.calls) == 1)
     metadata = tracker.calls[0]["metadata"]
     assert metadata["feed_token_name"] == "global"
     assert metadata["frame_bytes"] == len(_png_bytes())
@@ -984,8 +1151,8 @@ def test_frame_ingest_accepts_valid_signature_and_writes_audit(monkeypatch: Any,
 
     assert response.status_code == 202
     entries = [json.loads(line) for line in audit_log.read_text(encoding="utf-8").splitlines()]
-    assert entries[-1]["event"] == "frame_ingest_accepted"
-    assert entries[-1]["frame_sha256"] == hashlib.sha256(frame_bytes).hexdigest()
+    accepted_entries = [entry for entry in entries if entry["event"] == "frame_ingest_accepted"]
+    assert accepted_entries[-1]["frame_sha256"] == hashlib.sha256(frame_bytes).hexdigest()
 
 
 def test_frame_ingest_rejects_signature_nonce_replay(monkeypatch: Any) -> None:
@@ -1097,78 +1264,616 @@ def test_frame_ingest_sequence_rollover_cannot_bypass_feed_cadence(monkeypatch: 
     assert rollover.headers["Retry-After"] == "60"
 
 
-def test_frame_ingest_tracker_failure_rolls_back_atomic_feed_reservation(monkeypatch: Any) -> None:
+def test_frame_ingest_async_failure_is_audited_without_secret_or_exception_message(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
     monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
     monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
-    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "60")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
     tracker = _FailOnceFrameTracker()
     client = _client(tracker)
 
-    def send_frame() -> Any:
-        return client.post(
-            "/v1/mobile/frame-ingest/sessions/external-live/frames",
-            headers={"Authorization": "Bearer secret-token"},
-            files={"frame": ("chart.png", _png_bytes(), "image/png")},
-            data={
-                "source_id": "edge-agent",
-                "sequence_id": "sequence-1",
-                "capture_epoch_ms": "1780000000000",
-                "frame_id": "1",
-            },
-        )
-
-    failed = send_frame()
-    retried = send_frame()
-
-    assert failed.status_code == 400
-    assert retried.status_code == 202
-    assert len(tracker.calls) == 1
-
-
-def test_frame_ingest_reservation_blocks_concurrent_preflight_race(monkeypatch: Any) -> None:
-    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
-    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
-    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "60")
-    reset_frame_ingest_runtime_state_for_tests()
-    tracker = _BlockingFrameTracker()
-    app = create_app(window_tracker_service=tracker)
-    first_client = TestClient(app)
-    second_client = TestClient(app)
-    first_result: dict[str, Any] = {}
-
-    def send_first() -> None:
-        first_result["response"] = first_client.post(
-            "/v1/mobile/frame-ingest/sessions/external-live/frames",
-            headers={"Authorization": "Bearer secret-token"},
-            files={"frame": ("chart.png", _png_bytes(), "image/png")},
-            data={
-                "source_id": "edge-agent",
-                "sequence_id": "sequence-1",
-                "capture_epoch_ms": "1780000000000",
-                "frame_id": "1",
-            },
-        )
-
-    worker = threading.Thread(target=send_first, daemon=True)
-    worker.start()
-    assert tracker.entered.wait(timeout=3.0)
-    second = second_client.post(
+    accepted = client.post(
         "/v1/mobile/frame-ingest/sessions/external-live/frames",
         headers={"Authorization": "Bearer secret-token"},
         files={"frame": ("chart.png", _png_bytes(), "image/png")},
         data={
             "source_id": "edge-agent",
             "sequence_id": "sequence-1",
-            "capture_epoch_ms": "1780000001000",
-            "frame_id": "2",
+            "capture_epoch_ms": "1780000000000",
+            "frame_id": "1",
         },
     )
-    tracker.release.set()
-    worker.join(timeout=5.0)
 
-    assert second.status_code == 429
-    assert not worker.is_alive()
-    assert first_result["response"].status_code == 202
+    assert accepted.status_code == 202
+    assert _wait_until(
+        lambda: audit_log.exists()
+        and "frame_analysis_failed" in audit_log.read_text(encoding="utf-8"),
+    )
+    audit_text = audit_log.read_text(encoding="utf-8")
+    assert "secret-token" not in audit_text
+    assert "synthetic analysis failure" not in audit_text
+    assert '"error_type":"ValueError"' in audit_text
+
+
+def test_async_failure_clears_exact_processing_frame_and_allows_retry(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
+    tracker = _ProcessingFailOnceFrameTracker()
+    client = _client(tracker)
+    headers = {"Authorization": "Bearer secret-token"}
+    claim_response = client.post(
+        "/v1/mobile/frame-ingest/sessions/failure-retry-live/source-control/claim",
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "failure-retry-sequence",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "failure-retry-selection",
+            "display_name": "Failure retry chart",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    )
+    assert claim_response.status_code == 201
+    claim = claim_response.json()
+    base_epoch_ms = int(time.time() * 1000)
+    metadata_json = json.dumps(
+        {
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_render_fresh": True,
+        }
+    )
+
+    def send_frame(frame_id: int) -> Any:
+        return client.post(
+            "/v1/mobile/frame-ingest/sessions/failure-retry-live/frames",
+            headers=headers,
+            files={"frame": ("chart.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-roi",
+                "sequence_id": "failure-retry-sequence",
+                "capture_epoch_ms": str(base_epoch_ms + frame_id * 2_000),
+                "frame_id": str(frame_id),
+                "source_generation": str(claim["source_generation"]),
+                "source_lease_id": str(claim["source_lease_id"]),
+                "metadata_json": metadata_json,
+            },
+        )
+
+    def status_payload() -> dict[str, Any]:
+        response = client.get(
+            "/v1/mobile/frame-ingest/sessions/failure-retry-live/status",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    first = send_frame(1)
+    assert first.status_code == 202
+    assert _wait_until(lambda: status_payload()["last_failed_frame_id"] == 1)
+    failed = status_payload()
+    assert failed["analysis_busy"] is False
+    assert failed["last_failed_epoch_ms"] > 0
+    assert failed["last_failure_reason_code"] == "FRAME_ANALYSIS_FAILED"
+    assert failed["last_failure_error_type"] == "RuntimeError"
+    assert failed["transport_state"]["source_state"] == "ERROR"
+    assert failed["transport_state"]["stream"]["processing"] is False
+    assert failed["transport_state"]["stream"]["processing_frame_id"] == 0
+    assert "do-not-publish" not in json.dumps(failed)
+
+    time.sleep(1.05)
+    second = send_frame(2)
+    assert second.status_code == 202
+    assert second.json()["last_failed_frame_id"] == 1
+    assert _wait_until(lambda: status_payload()["last_completed_frame_id"] == 2)
+    recovered = status_payload()
+    assert recovered["analysis_busy"] is False
+    assert recovered["last_completed_epoch_ms"] >= failed["last_failed_epoch_ms"]
+    assert recovered["transport_state"]["stream"]["processing"] is False
+    assert tracker.attempted_frame_ids == [1, 2]
+    assert [call["frame_id"] for call in tracker.calls] == [2]
+    audit_text = audit_log.read_text(encoding="utf-8")
+    assert "do-not-publish" not in audit_text
+
+
+def test_worker_lease_validation_exception_is_a_visible_bounded_failure(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
+    tracker = _WorkerLeaseValidationFailureTracker()
+    client = _client(tracker)
+    headers = {"Authorization": "Bearer secret-token"}
+    claim_response = client.post(
+        "/v1/mobile/frame-ingest/sessions/lease-validation-live/source-control/claim",
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "lease-validation-sequence",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "lease-validation-selection",
+            "display_name": "Lease validation chart",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    )
+    assert claim_response.status_code == 201
+    claim = claim_response.json()
+    accepted = client.post(
+        "/v1/mobile/frame-ingest/sessions/lease-validation-live/frames",
+        headers=headers,
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            "source_id": "edge-roi",
+            "sequence_id": "lease-validation-sequence",
+            "capture_epoch_ms": str(int(time.time() * 1000)),
+            "frame_id": "1",
+            "source_generation": str(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "metadata_json": json.dumps(
+                {
+                    "source_type": "browser_tab_roi_capture",
+                    "coordinate_space": "edge_tab_roi_v1",
+                    "source_render_fresh": True,
+                }
+            ),
+        },
+    )
+    assert accepted.status_code == 202
+
+    def status_payload() -> dict[str, Any]:
+        response = client.get(
+            "/v1/mobile/frame-ingest/sessions/lease-validation-live/status",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    assert _wait_until(lambda: status_payload()["last_failed_frame_id"] == 1)
+    failed = status_payload()
+    assert failed["analysis_busy"] is False
+    assert failed["last_failure_reason_code"] == "LEASE_REVALIDATION_FAILED"
+    assert failed["last_failure_error_type"] == "RuntimeError"
+    assert tracker.calls == []
+    assert "secret lease backend failure" not in json.dumps(failed)
+    assert "secret lease backend failure" not in audit_log.read_text(encoding="utf-8")
+
+
+def test_frame_ingest_mailbox_returns_quickly_and_replaces_only_pending_frame(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    tracker = _BlockingFrameTracker()
+    client = _client(tracker)
+    tracked_images: dict[str, Image.Image] = {}
+
+    async def read_tracked_image(frame: Any) -> tuple[Image.Image, str, int]:
+        data = await frame.read()
+        filename = str(frame.filename or "chart-0.png")
+        frame_number = int(filename.removeprefix("chart-").removesuffix(".png"))
+        image = Image.new("RGB", (160, 120), (frame_number, 12, 18))
+        tracked_images[filename] = image
+        return image, hashlib.sha256(data).hexdigest(), len(data)
+
+    monkeypatch.setattr(frame_ingest_module, "_read_image_upload", read_tracked_image)
+
+    def send_frame(frame_id: int) -> tuple[Any, float]:
+        started = time.monotonic()
+        response = client.post(
+            "/v1/mobile/frame-ingest/sessions/external-live/frames",
+            headers={"Authorization": "Bearer secret-token"},
+            files={"frame": (f"chart-{frame_id}.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-agent",
+                "sequence_id": "sequence-1",
+                "capture_epoch_ms": str(1_780_000_000_000 + frame_id * 2_000),
+                "frame_id": str(frame_id),
+            },
+        )
+        return response, time.monotonic() - started
+
+    try:
+        first, first_elapsed = send_frame(1)
+        assert first.status_code == 202
+        assert first_elapsed < 2.0
+        assert tracker.entered.wait(timeout=3.0)
+        assert first.json()["analysis_disposition"] == "active"
+
+        time.sleep(1.05)
+        second, second_elapsed = send_frame(2)
+        assert second.status_code == 202
+        assert second_elapsed < 2.0
+        assert second.json()["analysis_disposition"] == "pending"
+        assert second.json()["pending_frame_id"] == 2
+        assert tracked_images["chart-2.png"].getchannel("R").getpixel((0, 0)) == 2
+
+        time.sleep(1.05)
+        third, third_elapsed = send_frame(3)
+        assert third.status_code == 202
+        assert third_elapsed < 2.0
+        assert third.json()["analysis_disposition"] == "replaced_pending"
+        assert third.json()["active_frame_id"] == 1
+        assert third.json()["pending_frame_id"] == 3
+        assert third.json()["replaced_frame_count"] == 1
+        try:
+            tracked_images["chart-2.png"].getpixel((0, 0))
+            replaced_image_closed = False
+        except ValueError:
+            replaced_image_closed = True
+        assert replaced_image_closed is True
+
+        status_response = client.get(
+            "/v1/mobile/frame-ingest/sessions/external-live/status",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        assert status_response.status_code == 200
+        assert status_response.json()["analysis_busy"] is True
+        assert status_response.json()["active_frame_id"] == 1
+        assert status_response.json()["pending_frame_id"] == 3
+    finally:
+        tracker.release.set()
+
+    assert _wait_until(lambda: len(tracker.calls) == 2)
+    assert [call["frame_id"] for call in tracker.calls] == [1, 3]
+
+
+def test_idle_analysis_mailboxes_are_evicted_at_configured_bound(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MAX_MAILBOX_STATES", "2")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_TOTAL", "8")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_PER_TOKEN", "8")
+    tracker = _FakeFrameTracker()
+    client = _client(tracker)
+    headers = {"Authorization": "Bearer secret-token"}
+    base_epoch_ms = int(time.time() * 1000)
+
+    for index in range(3):
+        session_id = f"bounded-mailbox-{index}"
+        response = client.post(
+            f"/v1/mobile/frame-ingest/sessions/{session_id}/frames",
+            headers=headers,
+            files={"frame": ("chart.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-agent",
+                "sequence_id": f"sequence-{index}",
+                "capture_epoch_ms": str(base_epoch_ms + index),
+                "frame_id": "1",
+            },
+        )
+        assert response.status_code == 202
+        assert _wait_until(
+            lambda session_id=session_id: client.get(
+                f"/v1/mobile/frame-ingest/sessions/{session_id}/status",
+                headers=headers,
+            ).json()["analysis_busy"]
+            is False
+        )
+
+    config = client.get("/v1/mobile/frame-ingest/config").json()
+    capacity = config["analysis_mailbox"]
+    assert capacity["max_mailbox_states"] == 2
+    assert capacity["mailbox_state_count"] == 2
+
+
+def test_source_replacement_discards_old_generation_pending_frame(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    tracker = _CommitFencedClaimBlockingTracker()
+    client = _client(tracker)
+    claim_path = "/v1/mobile/frame-ingest/sessions/external-live/source-control/claim"
+    frame_path = "/v1/mobile/frame-ingest/sessions/external-live/frames"
+    headers = {"Authorization": "Bearer secret-token"}
+    metadata_json = json.dumps(
+        {
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_render_fresh": True,
+        }
+    )
+    first_claim = client.post(
+        claim_path,
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "generation-one",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "selection-one",
+            "display_name": "Chart one",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    ).json()
+    base_epoch_ms = int(time.time() * 1000)
+
+    def send_frame(*, frame_id: int, sequence_id: str, claim: Mapping[str, Any]) -> Any:
+        return client.post(
+            frame_path,
+            headers=headers,
+            files={"frame": ("chart.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-roi",
+                "sequence_id": sequence_id,
+                "capture_epoch_ms": str(base_epoch_ms + frame_id * 2_000),
+                "frame_id": str(frame_id),
+                "source_generation": str(claim["source_generation"]),
+                "source_lease_id": str(claim["source_lease_id"]),
+                "metadata_json": metadata_json,
+            },
+        )
+
+    try:
+        first = send_frame(frame_id=1, sequence_id="generation-one", claim=first_claim)
+        assert first.status_code == 202
+        assert tracker.entered.wait(timeout=3.0)
+        time.sleep(1.05)
+        pending = send_frame(frame_id=2, sequence_id="generation-one", claim=first_claim)
+        assert pending.status_code == 202
+        assert pending.json()["pending_frame_id"] == 2
+
+        second_claim_payload = {
+            "source_id": "edge-roi",
+            "sequence_id": "generation-two",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "selection-two",
+            "display_name": "Chart two",
+            "coordinate_space": "edge_tab_roi_v1",
+        }
+        tracker.reject_next_claim = True
+        rejected_claim = client.post(
+            claim_path,
+            headers=headers,
+            json=second_claim_payload,
+        )
+        assert rejected_claim.status_code == 409
+        mailbox_after_rejection = client.get(
+            "/v1/mobile/frame-ingest/sessions/external-live/status",
+            headers=headers,
+        ).json()
+        assert mailbox_after_rejection["pending_frame_id"] == 2
+
+        second_claim_response = client.post(
+            claim_path,
+            headers=headers,
+            json=second_claim_payload,
+        )
+        assert second_claim_response.status_code == 201
+        second_claim = second_claim_response.json()
+        assert second_claim["source_generation"] == first_claim["source_generation"] + 1
+        mailbox_status = client.get(
+            "/v1/mobile/frame-ingest/sessions/external-live/status",
+            headers=headers,
+        ).json()
+        assert mailbox_status["pending_frame_id"] is None
+        current = send_frame(
+            frame_id=1,
+            sequence_id="generation-two",
+            claim=second_claim,
+        )
+        assert current.status_code == 202
+        assert current.json()["active_frame_id"] == 1
+        assert current.json()["active_superseded"] is True
+        assert current.json()["pending_frame_id"] == 1
+        superseded_status = client.get(
+            "/v1/mobile/frame-ingest/sessions/external-live/status",
+            headers=headers,
+        ).json()
+        assert superseded_status["analysis_busy"] is True
+        assert superseded_status["active_superseded"] is True
+        assert superseded_status["pending_frame_id"] == 1
+    finally:
+        tracker.release.set()
+
+    assert _wait_until(lambda: len(tracker.calls) == 1)
+    assert tracker.calls[-1]["sequence_id"] == "generation-two"
+    assert tracker.calls[-1]["metadata"]["source_generation"] == second_claim["source_generation"]
+
+
+def test_source_kill_discards_pending_frame(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    tracker = _CommitFencedClaimBlockingTracker()
+    client = _client(tracker)
+    headers = {"Authorization": "Bearer secret-token"}
+    sequence_id = "kill-pending-sequence"
+    claim = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/source-control/claim",
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": sequence_id,
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "kill-pending-selection",
+            "display_name": "Kill pending chart",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    ).json()
+    base_epoch_ms = int(time.time() * 1000)
+    metadata_json = json.dumps(
+        {
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_render_fresh": True,
+        }
+    )
+
+    def send_frame(frame_id: int) -> Any:
+        return client.post(
+            "/v1/mobile/frame-ingest/sessions/external-live/frames",
+            headers=headers,
+            files={"frame": ("chart.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-roi",
+                "sequence_id": sequence_id,
+                "capture_epoch_ms": str(base_epoch_ms + frame_id * 2_000),
+                "frame_id": str(frame_id),
+                "source_generation": str(claim["source_generation"]),
+                "source_lease_id": str(claim["source_lease_id"]),
+                "metadata_json": metadata_json,
+            },
+        )
+
+    try:
+        first = send_frame(1)
+        assert first.status_code == 202
+        assert tracker.entered.wait(timeout=3.0)
+        time.sleep(1.05)
+        pending = send_frame(2)
+        assert pending.status_code == 202
+        assert pending.json()["pending_frame_id"] == 2
+
+        killed = client.post(
+            "/v1/mobile/frame-ingest/sessions/external-live/source-control/kill",
+            headers=headers,
+            json={
+                "source_id": "edge-roi",
+                "sequence_id": sequence_id,
+                "source_generation": claim["source_generation"],
+                "source_lease_id": claim["source_lease_id"],
+                "reason": "Test kill invalidates pending work.",
+            },
+        )
+        assert killed.status_code == 200
+        mailbox_status = client.get(
+            "/v1/mobile/frame-ingest/sessions/external-live/status",
+            headers=headers,
+        ).json()
+        assert mailbox_status["pending_frame_id"] is None
+    finally:
+        tracker.release.set()
+
+    time.sleep(0.05)
+    assert tracker.calls == []
+
+
+def test_frame_ingest_runtime_reset_retires_worker_and_drops_pending_job(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    tracker = _BlockingFrameTracker()
+    client = _client(tracker)
+    path = "/v1/mobile/frame-ingest/sessions/reset-live/frames"
+    headers = {"Authorization": "Bearer secret-token"}
+
+    def send_frame(frame_id: int) -> Any:
+        return client.post(
+            path,
+            headers=headers,
+            files={"frame": ("chart.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-agent",
+                "sequence_id": "reset-sequence",
+                "capture_epoch_ms": str(1_780_000_000_000 + frame_id * 2_000),
+                "frame_id": str(frame_id),
+            },
+        )
+
+    try:
+        assert send_frame(1).status_code == 202
+        assert tracker.entered.wait(timeout=3.0)
+        time.sleep(1.05)
+        pending = send_frame(2)
+        assert pending.status_code == 202
+        assert pending.json()["pending_frame_id"] == 2
+        reset_frame_ingest_runtime_state_for_tests()
+    finally:
+        tracker.release.set()
+
+    assert _wait_until(lambda: len(tracker.calls) == 1)
+    assert _wait_until(
+        lambda: not any(
+            thread.is_alive()
+            and thread.name == "phoenixguard-frame-analysis-reset-live"
+            for thread in threading.enumerate()
+        )
+    )
+    assert [call["frame_id"] for call in tracker.calls] == [1]
+
+
+def test_worker_start_failure_clears_racing_pending_job(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
+    reset_frame_ingest_runtime_state_for_tests()
+    tracker = _FakeFrameTracker()
+    app = create_app(window_tracker_service=tracker)
+    first_client = TestClient(app)
+    second_client = TestClient(app)
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    first_result: dict[str, Any] = {}
+
+    def fail_worker_start(worker: threading.Thread) -> None:
+        del worker
+        start_entered.set()
+        if not release_start.wait(timeout=5.0):
+            raise RuntimeError("worker start test timed out")
+        raise RuntimeError("synthetic worker start failure")
+
+    monkeypatch.setattr(frame_ingest_module, "_start_analysis_worker", fail_worker_start)
+
+    def send_frame(client: TestClient, frame_id: int) -> Any:
+        return client.post(
+            "/v1/mobile/frame-ingest/sessions/start-failure-live/frames",
+            headers={"Authorization": "Bearer secret-token"},
+            files={"frame": ("chart.png", _png_bytes(), "image/png")},
+            data={
+                "source_id": "edge-agent",
+                "sequence_id": "start-failure-sequence",
+                "capture_epoch_ms": str(1_780_000_000_000 + frame_id * 2_000),
+                "frame_id": str(frame_id),
+            },
+        )
+
+    def send_first() -> None:
+        try:
+            first_result["response"] = send_frame(first_client, 1)
+        except Exception as exc:
+            first_result["error"] = exc
+
+    first_request = threading.Thread(target=send_first, daemon=True)
+    first_request.start()
+    assert start_entered.wait(timeout=3.0)
+    time.sleep(1.05)
+    pending = send_frame(second_client, 2)
+    assert pending.status_code == 202
+    assert pending.json()["pending_frame_id"] == 2
+    release_start.set()
+    first_request.join(timeout=5.0)
+
+    assert not first_request.is_alive()
+    assert isinstance(first_result.get("error"), RuntimeError)
+    status_response = second_client.get(
+        "/v1/mobile/frame-ingest/sessions/start-failure-live/status",
+        headers={"Authorization": "Bearer secret-token"},
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["analysis_busy"] is False
+    assert status_response.json()["pending_frame_id"] is None
+    assert tracker.calls == []
+    assert _wait_until(
+        lambda: audit_log.exists()
+        and audit_log.read_text(encoding="utf-8").count("WORKER_START_FAILED") >= 2,
+    )
 
 
 def test_frame_ingest_analysis_does_not_block_status_requests(monkeypatch: Any) -> None:
@@ -1206,6 +1911,9 @@ def test_frame_ingest_analysis_does_not_block_status_requests(monkeypatch: Any) 
                     timeout=1.0,
                 )
                 assert status_response.status_code == 200
+                assert status_response.json()["analysis_busy"] is True
+                assert status_response.json()["active_frame_id"] == 1
+                assert status_response.json()["status"] == "analysis_queued"
             finally:
                 tracker.release.set()
             ingest_response = await asyncio.wait_for(ingest_task, timeout=3.0)
@@ -1214,9 +1922,14 @@ def test_frame_ingest_analysis_does_not_block_status_requests(monkeypatch: Any) 
     asyncio.run(exercise())
 
 
-def test_frame_ingest_preserves_late_tracker_source_lease_hard_stop(monkeypatch: Any) -> None:
+def test_frame_ingest_audits_late_tracker_source_lease_hard_stop(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
     monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
     monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
     tracker = _LateLeaseFailureTracker(status_code=409, reason_code="SOURCE_SUPERSEDED")
     client = _client(tracker)
 
@@ -1232,8 +1945,14 @@ def test_frame_ingest_preserves_late_tracker_source_lease_hard_stop(monkeypatch:
         },
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["reason_code"] == "SOURCE_SUPERSEDED"
+    assert response.status_code == 202
+    assert _wait_until(
+        lambda: audit_log.exists()
+        and "frame_analysis_discarded" in audit_log.read_text(encoding="utf-8"),
+    )
+    audit_text = audit_log.read_text(encoding="utf-8")
+    assert '"reason_code":"SOURCE_SUPERSEDED"' in audit_text
+    assert "source lease is not current" not in audit_text
 
 
 def test_frame_ingest_rejected_image_does_not_poison_feed_interval(monkeypatch: Any) -> None:
@@ -1317,6 +2036,7 @@ def test_frame_ingest_accepts_scoped_token_registry(monkeypatch: Any, tmp_path: 
     )
 
     assert response.status_code == 202
+    assert _wait_until(lambda: len(tracker.calls) == 1)
     assert tracker.calls[0]["metadata"]["feed_token_name"] == "user001-feed"
     assert tracker.calls[0]["metadata"]["feed_user_id"] == "user001"
 

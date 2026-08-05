@@ -3331,6 +3331,9 @@
       overlayOpacity: Number(readStoredValue("phoenixguard.overlay.opacity", "88")) || 88,
       payload: null,
       visualPayload: null,
+      latestSafeCompletedStudyContext: null,
+      completedStudyExpiryTimer: 0,
+      completedStudyExpiredNotice: "",
       overlays: [],
       selectedOverlayId: "",
       lastRevision: -1,
@@ -4142,15 +4145,49 @@
         return;
       }
       if (readiness.state === "ANALYZING") {
+        const completedStudyContext = rememberSafeCompletedStudyContext(
+          payload,
+          readiness,
+        );
+        if (completedStudyContext) {
+          renderCompletedStudyDuringAnalysis(completedStudyContext);
+          return;
+        }
+        const expiredNotice = safeText(
+          state.completedStudyExpiredNotice,
+          "",
+        );
+        if (expiredNotice) {
+          els.questionDirectionStudy.dataset.state = "elapsed";
+          setText(els.innerTrendTitle, "Latest completed timing window elapsed");
+          setText(
+            els.beginnerNextRead,
+            expiredNotice + " Direction remains completed history only while the newer frame is analyzed.",
+          );
+          setText(
+            els.directionStudyConfidence,
+            "Completed direction retained as history · future timing cleared",
+          );
+          setText(
+            els.beginnerEvidenceTiming,
+            "Elapsed move-start window · no entry or execution authority",
+          );
+        }
         renderReadinessEntryState({
           state: "analyzing",
           readStatus: "Stream live · analyzing latest frame",
           headline: "ANALYZING LATEST FRAME",
-          confidence: "Fresh capture · completed study updating",
-          projection: "The chart stream is live. The newest frame is ahead of the last completed study, so no older entry answer is presented as current.",
+          confidence: expiredNotice
+            ? "Fresh capture · previous move-start window elapsed"
+            : "Fresh capture · completed study updating",
+          projection: expiredNotice
+            ? expiredNotice + " The chart stream remains live while a new completed study is prepared."
+            : "The chart stream is live. The newest frame is ahead of the last completed study, so no older entry answer is presented as current.",
           actionLabel: "WAIT FOR CURRENT READ",
           instruction: "Use the market-history and direction panels as context while the current decision catches up.",
-          reason: "Image processing can take longer than the capture interval; this is active analysis, not a stale source.",
+          reason: expiredNotice
+            ? "The elapsed window was cleared instead of being presented as a future forecast."
+            : "Image processing can take longer than the capture interval; this is active analysis, not a stale source.",
           nextCondition: "A frame-matched completed study and overlay set publish the next current answer.",
           evidence: "Live capture · analysis in progress · entry answer withheld",
         });
@@ -4501,6 +4538,28 @@
     }
 
     function showSourceSelectionGuide() {
+      // Reselecting begins a new capture namespace before the backend reports
+      // its incremented source generation.
+      clearSafeCompletedStudyContext();
+      els.questionDirectionStudy.dataset.state = "switching";
+      setText(els.innerTrendTitle, "Chart reselection requested");
+      setText(
+        els.beginnerNextRead,
+        "The prior completed direction is no longer attached while a chart is being selected.",
+      );
+      setText(els.directionStudyConfidence, "Previous chart context cleared");
+      renderReadinessEntryState({
+        state: "switching",
+        readStatus: "Selecting a chart",
+        headline: "SELECTING NEW CHART",
+        confidence: "Previous timing and entry context cleared",
+        projection: "Lock the intended chart region. Its own identity, geometry, direction, and timing must be verified before publication.",
+        actionLabel: "WAIT FOR CURRENT READ",
+        instruction: "Press Ctrl+Shift+B and select the exact chart region.",
+        reason: "Reselection starts a new source generation and invalidates the previous completed-study namespace.",
+        nextCondition: "A fresh completed study publishes after the selected chart is locked and identified.",
+        evidence: "Chart reselection · old timing cleared · no entry authority",
+      });
       state.sourceGuideUntilEpoch = Date.now() / 1000 + 8;
       renderCaptureSource(state.payload || {});
       window.setTimeout(function () {
@@ -4516,6 +4575,20 @@
       if (state.sourceKillBusy || els.sourceKill.disabled) {
         return;
       }
+      clearSafeCompletedStudyContext();
+      renderReadinessEntryState({
+        state: "stopping",
+        tone: "blocked",
+        readStatus: "Stopping chart tracking",
+        headline: "TRACKING STOPPING",
+        confidence: "Previous timing and entry context cleared",
+        projection: "Tracking has been asked to stop. No retained study is current while shutdown completes.",
+        actionLabel: "DO NOT USE OLD SIGNAL",
+        instruction: "Wait until a chart is selected and a new current study is published.",
+        reason: "A stop request invalidates the prior capture generation immediately.",
+        nextCondition: "Select and verify a chart to begin a new study namespace.",
+        evidence: "Tracking stop requested · no entry authority",
+      });
       state.sourceKillBusy = true;
       renderCaptureSource(state.payload || {});
       try {
@@ -4579,6 +4652,7 @@
           return false;
         }
         // A newer observation with a lower revision means the backend restarted.
+        clearSafeCompletedStudyContext();
         state.lastRevision = revision;
         state.lastObservedAt = observed;
         state.acceptedView = requestedView;
@@ -4810,6 +4884,7 @@
     }
 
     function renderUnavailableState(error) {
+      clearSafeCompletedStudyContext();
       if (state.entryExpiryTimer) {
         window.clearTimeout(state.entryExpiryTimer);
         state.entryExpiryTimer = 0;
@@ -5299,6 +5374,80 @@
       return "From a mixed market";
     }
 
+    function questionContractIsPresent(payload, key, aliases) {
+      const questions = safeObject(safeObject(payload).three_questions);
+      return [key].concat(safeList(aliases)).some(function (candidateKey) {
+        return Object.prototype.hasOwnProperty.call(questions, candidateKey);
+      });
+    }
+
+    function timingForecastAdmissibility(timingForecast, currentTimeframe) {
+      const forecast = safeObject(timingForecast);
+      const timeframe = safeText(currentTimeframe, "").toUpperCase();
+      const status = safeText(forecast.status, "").toUpperCase();
+      const sourceTier = safeText(
+        forecast.source || forecast.source_tier,
+        "",
+      ).toUpperCase();
+      const timingSupportCount = Number(
+        forecast.timing_support_count !== undefined
+          ? forecast.timing_support_count
+          : 0,
+      );
+      const eventSupportCount = Number(
+        forecast.event_likelihood_support_count !== undefined
+          ? forecast.event_likelihood_support_count
+          : forecast.support_count || 0,
+      );
+      const calibrationGrade = safeText(
+        forecast.calibration_grade,
+        "UNRATED",
+      ).toUpperCase();
+      const horizonSecondsLow = forecast.horizon_seconds_low === null
+        || forecast.horizon_seconds_low === undefined
+        ? NaN
+        : Number(forecast.horizon_seconds_low);
+      const horizonSecondsHigh = forecast.horizon_seconds_high === null
+        || forecast.horizon_seconds_high === undefined
+        ? NaN
+        : Number(forecast.horizon_seconds_high);
+      const liveSequenceSource = sourceTier === "LIVE_M5_SEQUENCE";
+      const empiricalPairSource = (
+        sourceTier === "PAIR" || sourceTier.startsWith("PAIR_")
+      )
+        && forecast.timing_empirical === true
+        && Number.isFinite(timingSupportCount)
+        && timingSupportCount > 0;
+      const calibratedSource = forecast.calibrated === true
+        && Number.isFinite(eventSupportCount)
+        && eventSupportCount > 0
+        && !["", "UNKNOWN", "UNRATED"].includes(calibrationGrade);
+      const sourceApproved = calibratedSource
+        || liveSequenceSource
+        || empiricalPairSource;
+      const rangeAdmissible = status === "FORECAST_AVAILABLE"
+        && timeframe === "M5"
+        && sourceApproved
+        && Number.isFinite(horizonSecondsLow)
+        && Number.isFinite(horizonSecondsHigh)
+        && horizonSecondsLow >= 900
+        && horizonSecondsHigh >= horizonSecondsLow;
+      return {
+        status: status,
+        sourceTier: sourceTier,
+        timingSupportCount: timingSupportCount,
+        eventSupportCount: eventSupportCount,
+        calibrationGrade: calibrationGrade,
+        horizonSecondsLow: horizonSecondsLow,
+        horizonSecondsHigh: horizonSecondsHigh,
+        liveSequenceSource: liveSequenceSource,
+        empiricalPairSource: empiricalPairSource,
+        calibratedSource: calibratedSource,
+        sourceApproved: sourceApproved,
+        rangeAdmissible: rangeAdmissible,
+      };
+    }
+
     function threeQuestionAnswers(payload, study, permission) {
       const operatorState = safeObject(payload);
       const permissionContract = safeObject(permission);
@@ -5452,45 +5601,27 @@
           ? timingForecast.event_likelihood_support_count
           : timingForecast.support_count || 0,
       );
-      const timingObservationSupportCount = Number(
-        timingForecast.timing_support_count !== undefined
-          ? timingForecast.timing_support_count
-          : 0,
-      );
       const calibrationGrade = safeText(
         timingForecast.calibration_grade,
         "UNRATED",
       ).toUpperCase();
-      const timingForecastStatus = safeText(timingForecast.status, "").toUpperCase();
-      const timingSourceTier = safeText(
-        timingForecast.source || timingForecast.source_tier,
-        "",
-      ).toUpperCase();
-      const horizonSecondsLow = timingForecast.horizon_seconds_low === null
-        || timingForecast.horizon_seconds_low === undefined
-        ? NaN
-        : Number(timingForecast.horizon_seconds_low);
-      const horizonSecondsHigh = timingForecast.horizon_seconds_high === null
-        || timingForecast.horizon_seconds_high === undefined
-        ? NaN
-        : Number(timingForecast.horizon_seconds_high);
-      const liveSequenceTimingSource = timingSourceTier === "LIVE_M5_SEQUENCE";
-      const empiricalPairTimingSource = (
-        timingSourceTier === "PAIR" || timingSourceTier.startsWith("PAIR_")
-      )
-        && timingForecast.timing_empirical === true
-        && Number.isFinite(timingObservationSupportCount)
-        && timingObservationSupportCount > 0;
+      const timingAdmissibility = timingForecastAdmissibility(
+        timingForecast,
+        currentTimeframe,
+      );
+      const timingForecastStatus = timingAdmissibility.status;
+      const timingSourceTier = timingAdmissibility.sourceTier;
+      const timingObservationSupportCount = timingAdmissibility.timingSupportCount;
+      const horizonSecondsLow = timingAdmissibility.horizonSecondsLow;
+      const horizonSecondsHigh = timingAdmissibility.horizonSecondsHigh;
+      const liveSequenceTimingSource = timingAdmissibility.liveSequenceSource;
+      const empiricalPairTimingSource = timingAdmissibility.empiricalPairSource;
       const uncalibratedClosedCandleEstimateAvailable = forecastIdentityMatches
-        && timingForecastStatus === "FORECAST_AVAILABLE"
-        && (liveSequenceTimingSource || empiricalPairTimingSource)
-        && currentTimeframe === "M5"
-        && Number.isFinite(horizonSecondsLow)
-        && Number.isFinite(horizonSecondsHigh)
-        && horizonSecondsLow >= 900
-        && horizonSecondsHigh >= horizonSecondsLow
+        && timingAdmissibility.rangeAdmissible
         && timingForecast.calibrated !== true;
       const projectionTimingUnproven = forecastIdentityMatches && (
+        !timingAdmissibility.rangeAdmissible
+        ||
         !Number.isFinite(timingSupportCount)
         || timingSupportCount <= 0
         || timingForecast.calibrated !== true
@@ -5714,6 +5845,505 @@
       };
     }
 
+    function completedStudyContractPresence(payload) {
+      return {
+        studied: questionContractIsPresent(
+          payload,
+          "studied_direction_current",
+          ["question_2", "q2"],
+        ),
+        entry: questionContractIsPresent(
+          payload,
+          "entry_now",
+          ["question_3", "q3"],
+        ),
+      };
+    }
+
+    function completedStudyNamespaceProof(payload) {
+      const operatorState = safeObject(payload);
+      const surface = safeObject(operatorState.surface);
+      const source = safeObject(captureSourceContract(operatorState).source);
+      const stream = safeObject(streamContract(operatorState));
+      const numericGeneration = function (value) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0 ? String(parsed) : "";
+      };
+      const sourceGeneration = numericGeneration(source.source_generation);
+      const streamGeneration = numericGeneration(stream.stream_generation);
+      const geometryIdentity = JSON.stringify({
+        semanticRevision: safeText(
+          surface.overlay_semantic_revision
+            || operatorState.overlay_semantic_revision,
+          "",
+        ),
+        geometryRevision: safeText(
+          surface.overlay_geometry_revision
+            || operatorState.overlay_geometry_revision
+            || surface.geometry_revision,
+          "",
+        ),
+        primarySpace: safeText(surface.primary_space, ""),
+        fallbackSpace: safeText(surface.fallback_space, ""),
+        overlayViewport: surface.overlay_viewport || null,
+        exactViewports: surface.exact_overlay_viewports
+          || surface.overlay_viewports
+          || null,
+        sourceRegion: source.selection_region
+          || source.capture_region
+          || source.roi
+          || null,
+      });
+      const proof = {
+        semanticIdentity: safeText(surface.semantic_identity, ""),
+        selectorFingerprint: safeText(
+          surface.market_selector_visual_fingerprint,
+          "",
+        ),
+        sourceGeneration: sourceGeneration,
+        streamGeneration: streamGeneration,
+        sourceType: safeText(source.source_type, "").toLowerCase(),
+        sourceCoordinateSpace: safeText(
+          source.coordinate_space || safeObject(source.roi).coordinate_space,
+          "",
+        ).toLowerCase(),
+        sourceId: safeText(source.source_id, ""),
+        sequenceId: safeText(source.sequence_id, ""),
+        selectionId: safeText(source.selection_id, ""),
+        geometryIdentity: geometryIdentity,
+      };
+      return Object.assign(proof, {
+        identity: JSON.stringify(proof),
+      });
+    }
+
+    function completedStudyForecastValidUntil(
+      operatorState,
+      studyContract,
+      entryContract,
+      timingForecast,
+      timingAdmissibility,
+    ) {
+      const forecast = safeObject(timingForecast);
+      const explicitDeadlines = [
+        forecast.valid_until,
+        forecast.forecast_valid_until,
+        forecast.target_window_end_epoch_seconds,
+        safeObject(entryContract).valid_until,
+        safeObject(studyContract).valid_until,
+      ].map(eventEpochSeconds).filter(function (value) {
+        return Number.isFinite(value) && value > 0;
+      });
+      const freshness = safeObject(safeObject(operatorState).freshness);
+      const surface = safeObject(safeObject(operatorState).surface);
+      const forecastOrigin = eventEpochSeconds(
+        forecast.anchor_close_epoch_seconds
+          || forecast.generated_at
+          || forecast.observed_at
+          || safeObject(studyContract).observed_at
+          || freshness.observed_at
+          || surface.updated_at,
+      );
+      const horizonSecondsHigh = Number(
+        safeObject(timingAdmissibility).horizonSecondsHigh,
+      );
+      if (
+        forecastOrigin > 0
+        && Number.isFinite(horizonSecondsHigh)
+        && horizonSecondsHigh > 0
+      ) {
+        explicitDeadlines.push(forecastOrigin + horizonSecondsHigh);
+      }
+      if (!explicitDeadlines.length) {
+        return 0;
+      }
+      return Math.min(...explicitDeadlines);
+    }
+
+    function completedStudyContextFromPayload(payload) {
+      const operatorState = safeObject(payload);
+      const market = safeObject(operatorState.market);
+      const surface = safeObject(operatorState.surface);
+      const studyContract = questionContract(
+        operatorState,
+        "studied_direction_current",
+        ["question_2", "q2"],
+      );
+      const entryContract = questionContract(
+        operatorState,
+        "entry_now",
+        ["question_3", "q3"],
+      );
+      const studyEvidence = safeObject(studyContract.evidence);
+      const timingForecast = safeObject(entryContract.timing_forecast);
+      const forecastScope = safeObject(timingForecast.scope);
+      const symbol = safeText(market.symbol || market.market, "");
+      const timeframe = safeText(market.timeframe, "").toUpperCase();
+      const symbolToken = canonicalMarketToken(symbol);
+      const scopeSymbolToken = canonicalMarketToken(forecastScope.symbol);
+      const scopeTimeframe = safeText(forecastScope.timeframe, "").toUpperCase();
+      const closedCandleKey = safeText(studyEvidence.closed_candle_key, "");
+      const scopeClosedCandleKey = safeText(
+        forecastScope.closed_candle_key,
+        "",
+      );
+      const completedSide = studyDirection(
+        studyEvidence.current_regression_side
+          || studyEvidence.last_completed_side
+          || studyContract.side,
+      );
+      const forecastSide = studyDirection(
+        timingForecast.side || entryContract.side,
+      );
+      const namespaceProof = completedStudyNamespaceProof(operatorState);
+      const surfaceFrame = safeText(surface.frame_id, "");
+      const horizonLabel = questionField(
+        timingForecast,
+        ["horizon_label"],
+        "",
+      );
+      const timingAdmissibility = timingForecastAdmissibility(
+        timingForecast,
+        timeframe,
+      );
+      const validUntil = completedStudyForecastValidUntil(
+        operatorState,
+        studyContract,
+        entryContract,
+        timingForecast,
+        timingAdmissibility,
+      );
+      const rawHoldDurationSeconds = timingForecast.recommended_trade_duration_seconds;
+      const holdDurationSeconds = rawHoldDurationSeconds === null
+        || rawHoldDurationSeconds === undefined
+        || rawHoldDurationSeconds === ""
+        ? null
+        : Number(rawHoldDurationSeconds);
+      const durationProvenance = safeObject(timingForecast.duration_provenance);
+      const holdDurationProven = (
+        timingForecast.recommended_trade_duration_proven === true
+        || durationProvenance.recommended_trade_duration_proven === true
+      ) && Number.isFinite(holdDurationSeconds) && holdDurationSeconds > 0;
+      if (
+        market.identity_pending === true
+        || !symbolToken
+        || symbolToken === "UNKNOWN"
+        || timeframe !== "M5"
+        || !namespaceProof.semanticIdentity
+        || !namespaceProof.selectorFingerprint
+        || !surfaceFrame
+        || !["BUY", "SELL"].includes(completedSide)
+        || forecastSide !== completedSide
+        || forecastScope.identity_proven !== true
+        || scopeSymbolToken !== symbolToken
+        || scopeTimeframe !== timeframe
+        || !closedCandleKey
+        || scopeClosedCandleKey !== closedCandleKey
+        || !timingAdmissibility.rangeAdmissible
+        || !horizonLabel
+        || !validUntil
+      ) {
+        return null;
+      }
+      const freshness = safeObject(operatorState.freshness);
+      const explicitAgeSeconds = Number(freshness.age_seconds);
+      const observedAt = eventEpochSeconds(
+        timingForecast.generated_at
+          || timingForecast.observed_at
+          || studyContract.observed_at
+          || freshness.observed_at
+          || surface.updated_at,
+      );
+      const cachedAt = Date.now() / 1000;
+      return {
+        namespace: namespaceProof.identity + "|" + symbolToken + "|" + timeframe,
+        namespaceProof: namespaceProof,
+        surfaceIdentity: namespaceProof.semanticIdentity,
+        selectorFingerprint: namespaceProof.selectorFingerprint,
+        symbol: symbol,
+        symbolToken: symbolToken,
+        timeframe: timeframe,
+        closedCandleKey: closedCandleKey,
+        side: completedSide,
+        horizonLabel: horizonLabel,
+        validUntil: validUntil,
+        holdDurationSeconds: Number.isFinite(holdDurationSeconds)
+          && holdDurationSeconds > 0
+          ? holdDurationSeconds
+          : null,
+        holdDurationProven: holdDurationProven,
+        studyHeadline: questionField(
+          studyContract,
+          ["headline"],
+          "Latest completed " + completedSide + " study",
+        ),
+        studyAnswer: questionField(
+          studyContract,
+          ["answer"],
+          "The latest completed regression studies " + completedSide + ".",
+        ),
+        studyEvidence: questionEvidence(
+          studyContract,
+          "Closed-candle direction and chart identity agree.",
+        ),
+        studyConfidence: questionConfidence(studyContract.confidence),
+        forecastSummary: questionField(
+          timingForecast,
+          ["summary", "closed_candle_summary"],
+          completedSide + " remains the latest completed-candle timing study.",
+        ),
+        observedAt: observedAt,
+        baseAgeSeconds: Number.isFinite(explicitAgeSeconds)
+          && explicitAgeSeconds >= 0
+          ? explicitAgeSeconds
+          : null,
+        cachedAt: cachedAt,
+      };
+    }
+
+    function clearSafeCompletedStudyContext(options) {
+      const config = safeObject(options);
+      if (state.completedStudyExpiryTimer) {
+        window.clearTimeout(state.completedStudyExpiryTimer);
+        state.completedStudyExpiryTimer = 0;
+      }
+      state.latestSafeCompletedStudyContext = null;
+      if (config.keepExpiredNotice !== true) {
+        state.completedStudyExpiredNotice = "";
+      }
+    }
+
+    function completedStudyContextIsCurrent(context) {
+      const validUntil = Number(safeObject(context).validUntil || 0);
+      return Number.isFinite(validUntil)
+        && validUntil > Date.now() / 1000;
+    }
+
+    function markCompletedStudyContextExpired(context) {
+      const completed = safeObject(context);
+      clearSafeCompletedStudyContext({keepExpiredNotice: true});
+      state.completedStudyExpiredNotice = "The latest completed "
+        + safeText(completed.side, "directional")
+        + " move-start window elapsed and is no longer a future timing forecast.";
+    }
+
+    function completedStudyContextMatchesPayload(context, payload, readiness) {
+      const completed = safeObject(context);
+      const operatorState = safeObject(payload);
+      const market = safeObject(operatorState.market);
+      const identity = safeObject(safeObject(readiness).identity);
+      const readinessState = safeText(safeObject(readiness).state, "READY").toUpperCase();
+      const tracking = safeObject(operatorState.tracking);
+      const trackingState = safeText(tracking.state || tracking.status, "LIVE").toUpperCase();
+      if (
+        !Object.keys(completed).length
+        || !["READY", "ANALYZING"].includes(readinessState)
+        || tracking.active === false
+        || ["OFF", "OFFLINE", "PAUSED", "STOPPED", "KILLED", "ERROR"].includes(trackingState)
+        || identity.pending === true
+        || identity.mismatch === true
+        || market.identity_pending === true
+        || !completedStudyContextIsCurrent(completed)
+      ) {
+        return false;
+      }
+      const symbolToken = canonicalMarketToken(market.symbol || market.market);
+      const timeframe = safeText(market.timeframe, "").toUpperCase();
+      const identitySymbolToken = canonicalMarketToken(identity.symbol);
+      const identityTimeframe = safeText(identity.timeframe, "").toUpperCase();
+      const namespaceProof = completedStudyNamespaceProof(operatorState);
+      if (
+        !symbolToken
+        || symbolToken !== safeText(completed.symbolToken, "")
+        || timeframe !== safeText(completed.timeframe, "")
+        || !namespaceProof.selectorFingerprint
+        || namespaceProof.identity
+          !== safeText(safeObject(completed.namespaceProof).identity, "")
+        || (
+          identitySymbolToken
+          && identitySymbolToken !== symbolToken
+        )
+        || (
+          identityTimeframe
+          && identityTimeframe !== timeframe
+        )
+      ) {
+        return false;
+      }
+      return !state.imageSemanticIdentity
+        || visualNamespaceIdentity(operatorState) === state.imageSemanticIdentity;
+    }
+
+    function rememberSafeCompletedStudyContext(payload, readiness) {
+      const contracts = completedStudyContractPresence(payload);
+      const candidate = completedStudyContextFromPayload(payload);
+      if (candidate) {
+        if (!completedStudyContextIsCurrent(candidate)) {
+          markCompletedStudyContextExpired(candidate);
+          return null;
+        }
+        if (completedStudyContextMatchesPayload(candidate, payload, readiness)) {
+          clearSafeCompletedStudyContext();
+          state.latestSafeCompletedStudyContext = candidate;
+          return candidate;
+        }
+      }
+      // Retention is permitted only for a processing-only adapter response in
+      // which both public Q2 and Q3 contracts are absent. If either contract
+      // is present, it is newer public truth; an incompatible side, close key,
+      // or timing field invalidates the old completed read immediately.
+      if (contracts.studied || contracts.entry) {
+        clearSafeCompletedStudyContext();
+        return null;
+      }
+      const retained = state.latestSafeCompletedStudyContext;
+      if (!completedStudyContextIsCurrent(retained)) {
+        if (Object.keys(safeObject(retained)).length) {
+          markCompletedStudyContextExpired(retained);
+        } else {
+          clearSafeCompletedStudyContext({keepExpiredNotice: true});
+        }
+        return null;
+      }
+      if (completedStudyContextMatchesPayload(retained, payload, readiness)) {
+        return retained;
+      }
+      clearSafeCompletedStudyContext();
+      return null;
+    }
+
+    function completedStudyAgeLabel(context) {
+      const completed = safeObject(context);
+      const nowEpoch = Date.now() / 1000;
+      const observedAt = Number(completed.observedAt || 0);
+      const cachedAt = Number(completed.cachedAt || nowEpoch);
+      const baseAge = Number(completed.baseAgeSeconds);
+      const seconds = observedAt > 0 && observedAt <= nowEpoch + 5
+        ? Math.max(0, nowEpoch - observedAt)
+        : Number.isFinite(baseAge) && baseAge >= 0
+          ? baseAge + Math.max(0, nowEpoch - cachedAt)
+          : 0;
+      if (seconds < 60) {
+        return "Study age " + Math.max(0, Math.round(seconds)) + "s";
+      }
+      if (seconds < 3600) {
+        const minutes = Math.floor(seconds / 60);
+        const remainder = Math.round(seconds - minutes * 60);
+        return "Study age " + minutes + "m " + remainder + "s";
+      }
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.round((seconds - hours * 3600) / 60);
+      return "Study age " + hours + "h " + minutes + "m";
+    }
+
+    function completedStudyWindowLabel(context) {
+      const remainingSeconds = Math.max(
+        0,
+        Number(safeObject(context).validUntil || 0) - Date.now() / 1000,
+      );
+      if (remainingSeconds < 60) {
+        return "move-start window ends in "
+          + Math.max(1, Math.ceil(remainingSeconds)) + "s";
+      }
+      return "move-start window ends in "
+        + Math.max(1, Math.ceil(remainingSeconds / 60)) + "m";
+    }
+
+    function scheduleCompletedStudyContextExpiry(context) {
+      if (state.completedStudyExpiryTimer) {
+        window.clearTimeout(state.completedStudyExpiryTimer);
+        state.completedStudyExpiryTimer = 0;
+      }
+      const completed = safeObject(context);
+      const validUntil = Number(completed.validUntil || 0);
+      const remainingMs = Math.floor((validUntil - Date.now() / 1000) * 1000);
+      if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+        markCompletedStudyContextExpired(completed);
+        return;
+      }
+      const namespace = safeText(completed.namespace, "");
+      const closedCandleKey = safeText(completed.closedCandleKey, "");
+      state.completedStudyExpiryTimer = window.setTimeout(function () {
+        state.completedStudyExpiryTimer = 0;
+        const retained = safeObject(state.latestSafeCompletedStudyContext);
+        if (
+          safeText(retained.namespace, "") !== namespace
+          || safeText(retained.closedCandleKey, "") !== closedCandleKey
+        ) {
+          return;
+        }
+        // Browser timers cap at roughly 24.8 days. Re-arm instead of
+        // expiring a longer explicit forecast lifetime early.
+        if (completedStudyContextIsCurrent(retained)) {
+          scheduleCompletedStudyContextExpiry(retained);
+          return;
+        }
+        markCompletedStudyContextExpired(retained);
+        if (state.payload) {
+          enforceCaptureSourceDecision(state.payload);
+        }
+      }, Math.min(remainingMs + 25, 2147483647));
+    }
+
+    function renderCompletedStudyDuringAnalysis(context) {
+      const completed = safeObject(context);
+      const side = safeText(completed.side, "");
+      const ageLabel = completedStudyAgeLabel(completed);
+      const holdDurationSeconds = Number(completed.holdDurationSeconds);
+      let holdDurationLabel = "Hold duration unavailable and not proven.";
+      if (Number.isFinite(holdDurationSeconds) && holdDurationSeconds > 0) {
+        holdDurationLabel = completed.holdDurationProven === true
+          ? "Proven studied hold duration: "
+            + Math.max(1, Math.round(holdDurationSeconds / 60)) + " minutes."
+          : "Unproven hold-duration recommendation: "
+            + Math.max(1, Math.round(holdDurationSeconds / 60))
+            + " minutes; do not treat it as an expiry.";
+      }
+      const windowLabel = completedStudyWindowLabel(completed);
+      els.questionDirectionStudy.dataset.state = "last-completed";
+      setText(
+        els.innerTrendTitle,
+        "Latest completed " + side + " study · newer frame analyzing",
+      );
+      setText(
+        els.beginnerNextRead,
+        safeText(
+          completed.studyAnswer,
+          "The latest completed regression studies " + side + ".",
+        ) + " A newer live frame is still being analyzed and has not replaced this completed close.",
+      );
+      setText(
+        els.directionStudyConfidence,
+        ageLabel + " · " + windowLabel + " · exact completed-candle context",
+      );
+      setText(
+        els.beginnerEvidenceTiming,
+        safeText(completed.studyEvidence, "Closed-candle direction and chart identity agree.")
+          + " · latest completed " + side + " study · no entry authority",
+      );
+      renderReadinessEntryState({
+        state: "analyzing-completed",
+        readStatus: "Stream live · latest frame analyzing",
+        headline: "LATEST COMPLETED " + side + " STUDY",
+        confidence: ageLabel + " · " + windowLabel
+          + " · completed-candle context · entry not current",
+        projection: "Expected " + side + " move-start window: " + safeText(
+          completed.horizonLabel,
+          "not published",
+        ) + ". This estimates when the studied move may start after the anchor; it is not a hold or expiry duration. "
+          + holdDurationLabel + " " + safeText(completed.forecastSummary, "")
+          + " A newer live frame is still being analyzed.",
+        actionLabel: "WATCH " + side + " · ENTRY NOT CURRENT",
+        instruction: "Use this as completed-study context only. Do not enter until the latest frame publishes a current verified permission contract.",
+        reason: "Capture is advancing faster than completed-frame analysis. The last identity-matched study remains visible instead of being erased.",
+        nextCondition: "The next frame-matched completed study will replace this context; any pair, timeframe, selector, or surface change clears it.",
+        evidence: safeText(completed.symbol, "Current pair") + " · "
+          + safeText(completed.timeframe, "Current timeframe") + " · "
+          + ageLabel + " · exact identity matched · no entry or execution authority",
+      });
+      scheduleCompletedStudyContextExpiry(completed);
+    }
+
     function passiveDecisionAudit(payload) {
       const operatorState = safeObject(payload);
       const market = safeObject(operatorState.market);
@@ -5844,6 +6474,12 @@
       const pressure = safeObject(payload.pressure_event);
       const study = marketRegressionStudy(payload);
       const answers = threeQuestionAnswers(payload, study, permission);
+      // Retain only a fully lineage-matched completed study. This is display
+      // context for a later analyzing frame; it never retains permission.
+      rememberSafeCompletedStudyContext(
+        payload,
+        operatorReadinessView(payload),
+      );
       const action = answers.entry.action;
       const setupWindowOpen = permission.window_open === true || action !== "WAIT";
       const setupWindowVerifying = action === "WAIT" && setupWindowOpen;
@@ -6309,6 +6945,7 @@
       state.focusedOverlayId = "";
       state.overlays = [];
       state.visualPayload = null;
+      clearSafeCompletedStudyContext();
       // The capture source belongs to the session, not to the old pair's
       // overlay namespace. Preserve it across a pair/timeframe switch so a
       // genuinely live background stream never flashes as disconnected while

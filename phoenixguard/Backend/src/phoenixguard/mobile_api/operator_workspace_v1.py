@@ -8078,6 +8078,7 @@ def _streaming_three_question_synthesis_v3(
     order_reference_rows: object = (),
     identity_matches: bool = True,
     identity_rebind_pending: bool = False,
+    completed_study_current: bool = False,
     now_epoch: float,
 ) -> dict[str, object]:
     """Refresh Q2/Q3 from one bounded stream heartbeat without minting authority."""
@@ -8536,22 +8537,38 @@ def _streaming_three_question_synthesis_v3(
                 "there is no verified entry permission now."
             )
     elif stream_fresh:
-        best_action = (
-            "ANALYZE_CURRENT_FRAME"
-            if stream_state == "ANALYZING"
-            else "OBSERVE"
-        )
-        decision_state = (
-            "ANALYZING" if stream_state == "ANALYZING" else "OBSERVING"
-        )
-        entry["headline"] = (
-            "ANALYZING CURRENT FRAME"
-            if stream_state == "ANALYZING"
-            else "OBSERVE — the stream is building the current read"
-        )
-        entry["answer"] = (
-            f"{stream_summary} Do not enter until completed-candle permission is current."
-        )
+        if (
+            stream_state == "ANALYZING"
+            and completed_study_current
+            and selected_side in _DIRECTIONAL_SIDES
+        ):
+            best_action = f"TRACK_{selected_side}"
+            decision_state = "TRACKING_LATEST_COMPLETED"
+            entry["headline"] = (
+                f"TRACK {selected_side} — next frame is being analyzed"
+            )
+            entry["answer"] = (
+                f"The exact latest completed-candle study tracks {selected_side}. "
+                f"{stream_summary} Its lineage-bound timing forecast remains visible, "
+                "but entry permission is closed while the new frame is analyzed."
+            )
+        else:
+            best_action = (
+                "ANALYZE_CURRENT_FRAME"
+                if stream_state == "ANALYZING"
+                else "OBSERVE"
+            )
+            decision_state = (
+                "ANALYZING" if stream_state == "ANALYZING" else "OBSERVING"
+            )
+            entry["headline"] = (
+                "ANALYZING CURRENT FRAME"
+                if stream_state == "ANALYZING"
+                else "OBSERVE — the stream is building the current read"
+            )
+            entry["answer"] = (
+                f"{stream_summary} Do not enter until completed-candle permission is current."
+            )
     else:
         best_action = "STAND_ASIDE" if timing_state in {"STALE", "WAITING"} else "OBSERVE"
         decision_state = timing_state
@@ -8880,8 +8897,18 @@ def _streaming_three_question_synthesis_v3(
     ):
         operator_action.update(
             {
-                "state": "ANALYZING",
-                "label": "ANALYZING",
+                "state": (
+                    "TRACKING_LATEST_COMPLETED"
+                    if completed_study_current
+                    and selected_side in _DIRECTIONAL_SIDES
+                    else "ANALYZING"
+                ),
+                "label": (
+                    f"TRACK {selected_side}"
+                    if completed_study_current
+                    and selected_side in _DIRECTIONAL_SIDES
+                    else "ANALYZING"
+                ),
                 "instruction": stream_instruction,
             }
         )
@@ -9080,6 +9107,11 @@ def _streaming_three_question_synthesis_v3(
         action_headline = "PREPARE"
     elif action_state == "ANALYZING":
         action_headline = "ANALYZING CURRENT FRAME"
+    elif (
+        action_state == "TRACKING_LATEST_COMPLETED"
+        and selected_side in _DIRECTIONAL_SIDES
+    ):
+        action_headline = f"TRACK {selected_side} — next frame is being analyzed"
     else:
         action_headline = "STAY OUT"
         operator_action["label"] = "STAY OUT"
@@ -9111,6 +9143,8 @@ def _streaming_three_question_synthesis_v3(
         if enter_now
         else "ANALYZING"
         if action_state == "ANALYZING"
+        else "TRACKING_LATEST_COMPLETED"
+        if action_state == "TRACKING_LATEST_COMPLETED"
         else "OBSERVING"
         if current_study_without_issued_window
         else entry["timing_state"]
@@ -9492,6 +9526,353 @@ def _apply_heartbeat_identity_veto_v3(
     return result
 
 
+def _atomic_runtime_completed_study_v3(
+    runtime_payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Return one internally coherent completed runtime study, or nothing.
+
+    The display state can advance while the expensive operator projection is
+    still rebuilding.  This check intentionally mirrors the atomic display
+    barrier used by the API cache: every public artifact must own the same
+    frame and the overlay source signatures must still match that frame.
+    """
+
+    if runtime_payload.get("frame_bundle_complete_v3") is not True:
+        return {}
+    fast_path = _mapping(runtime_payload.get("display_fast_path_v3"))
+    if any(
+        (
+            runtime_payload.get("display_snapshot_only_v3") is True,
+            runtime_payload.get("display_busy_reuse_heartbeat_v3") is True,
+            runtime_payload.get("display_reuse_only_heartbeat_v3") is True,
+            fast_path.get("reuse_only_heartbeat") is True,
+        )
+    ):
+        return {}
+    frame_id = _integer(runtime_payload.get("display_frame_id"))
+    if frame_id <= 0 or any(
+        _integer(runtime_payload.get(key)) != frame_id
+        for key in (
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+        )
+    ):
+        return {}
+    display_signature = _text(
+        runtime_payload.get("last_display_surface_signature")
+        or runtime_payload.get("last_window_surface_signature"),
+        "",
+        limit=256,
+    )
+    study_signature = _text(
+        runtime_payload.get("last_study_surface_signature"),
+        "",
+        limit=256,
+    )
+    overlay_window_signature = _text(
+        runtime_payload.get("overlay_source_window_signature"),
+        "",
+        limit=256,
+    )
+    overlay_study_signature = _text(
+        runtime_payload.get("overlay_source_study_signature"),
+        "",
+        limit=256,
+    )
+    signatures_published = any(
+        (
+            display_signature,
+            study_signature,
+            overlay_window_signature,
+            overlay_study_signature,
+        )
+    )
+    if signatures_published and (
+        not display_signature
+        or not study_signature
+        or not overlay_window_signature
+        or not overlay_study_signature
+        or overlay_window_signature != display_signature
+        or overlay_study_signature != study_signature
+    ):
+        return {}
+
+    tracking_summary = _mapping(runtime_payload.get("tracking_summary"))
+    latest_signal = _mapping(runtime_payload.get("latest_signal"))
+    runtime_study = (
+        _mapping(tracking_summary.get("market_study_v3"))
+        or _mapping(latest_signal.get("market_study_v3"))
+    )
+    study_key = _safe_identifier(runtime_study.get("closed_candle_key"), "")
+    study_sequence = _integer(runtime_study.get("closed_candle_sequence"))
+    study_symbol = _safe_public_text(
+        runtime_study.get("symbol"), "", limit=64
+    )
+    study_timeframe = _safe_public_text(
+        runtime_study.get("timeframe"), "", limit=32
+    ).upper()
+    runtime_symbol = _safe_public_text(
+        tracking_summary.get("detected_market")
+        or latest_signal.get("symbol")
+        or latest_signal.get("pair"),
+        "",
+        limit=64,
+    )
+    runtime_timeframe = _safe_public_text(
+        tracking_summary.get("detected_timeframe")
+        or latest_signal.get("timeframe"),
+        "",
+        limit=32,
+    ).upper()
+    directional_side = _side(
+        _mapping(runtime_study.get("directional_read")).get("side")
+    )
+    broker_source_lock = _mapping(tracking_summary.get("broker_source_lock"))
+    identity_confirmed = bool(
+        tracking_summary.get("market_identity_confirmed") is True
+        and tracking_summary.get("timeframe_identity_confirmed") is True
+    )
+    source_locked = bool(
+        broker_source_lock.get("valid") is True
+        and broker_source_lock.get("broker_source_locked") is True
+        and _text(
+            broker_source_lock.get("status"), "", limit=32
+        ).upper()
+        == "VALID"
+    )
+    if (
+        _text(runtime_study.get("status"), "", limit=32).upper()
+        != "STUDIED"
+        or runtime_study.get("study_only") is not True
+        or runtime_study.get("execution_authority") is not False
+        or not study_key
+        or study_sequence <= 0
+        or directional_side not in _DIRECTIONAL_SIDES
+        or not identity_confirmed
+        or not source_locked
+        or not runtime_symbol
+        or not runtime_timeframe
+        or _instrument_token(study_symbol) != _instrument_token(runtime_symbol)
+        or study_timeframe != runtime_timeframe
+    ):
+        return {}
+    return {
+        "frame_id": frame_id,
+        "symbol": runtime_symbol,
+        "timeframe": runtime_timeframe,
+        "closed_candle_key": study_key,
+        "closed_candle_sequence": study_sequence,
+        "side": directional_side,
+        "study": runtime_study,
+    }
+
+
+def _adopt_newer_completed_runtime_study_v3(
+    workspace: Mapping[str, object],
+    runtime_payload: Mapping[str, object],
+    bundle: Mapping[str, object],
+    *,
+    now_epoch: float,
+) -> dict[str, object]:
+    """Replace stale operator study fields from one exact same-identity bundle.
+
+    This is a read-through for the lightweight operator cache, not a decision
+    engine.  It clears old-frame overlays and always closes entry permission.
+    """
+
+    result = dict(workspace)
+    runtime_study = _mapping(bundle.get("study"))
+    frame_id = _integer(bundle.get("frame_id"))
+    market = {
+        "symbol": _safe_public_text(bundle.get("symbol"), "Unknown", limit=64),
+        "timeframe": _safe_public_text(
+            bundle.get("timeframe"), "Unknown", limit=32
+        ).upper(),
+    }
+    tracking_summary = _mapping(runtime_payload.get("tracking_summary"))
+    command = _mapping(runtime_payload.get("decision_command_center"))
+    canonical_current, canonical_pressure = _canonical_candle_movement_fallback(
+        runtime_payload,
+        frame_id,
+    )
+    explicit_current = _mapping(command.get("current_movement")) or _mapping(
+        runtime_payload.get("current_movement")
+    )
+    current_event = _reconcile_current_event(
+        explicit_current,
+        canonical_current,
+        frame_id,
+    )
+    explicit_pressure = _mapping(command.get("pressure_event")) or _mapping(
+        runtime_payload.get("pressure_event")
+    )
+    pressure_source = _reconcile_pressure_event(
+        explicit_pressure,
+        canonical_pressure,
+        current_event,
+        frame_id,
+    )
+    current_move = _sanitize_event(current_event, frame_id, pressure=False)
+    pressure_event = _sanitize_event(pressure_source, frame_id, pressure=True)
+    public_study = _market_study_contract(runtime_study)
+    history = _history_contract(
+        runtime_payload,
+        current_symbol=str(market["symbol"]),
+        current_timeframe=str(market["timeframe"]),
+    )
+    observed_at = _epoch(
+        runtime_study.get("published_epoch"),
+        runtime_study.get("observed_epoch"),
+        tracking_summary.get("last_capture_epoch"),
+        runtime_payload.get("display_published_epoch"),
+        runtime_payload.get("last_capture_epoch"),
+    )
+    freshness = {
+        "state": "UPDATING",
+        "label": "Latest completed study shown while the next frame is analyzed",
+        "observed_at": observed_at,
+        "valid_until": None,
+        "age_seconds": (
+            round(max(0.0, now_epoch - observed_at), 3)
+            if observed_at is not None
+            else None
+        ),
+    }
+    permission = dict(_mapping(result.get("permission")))
+    permission.update(
+        {
+            "action": "WAIT",
+            "allowed": False,
+            "side": "NEUTRAL",
+            "message": (
+                "The latest completed study is current, but the next frame is still "
+                "being analyzed and no entry permission is open."
+            ),
+            "next_condition": (
+                "Wait for an independently verified entry window on a completed candle."
+            ),
+            "window_open": False,
+            "valid_for_seconds": 0.0,
+            "window_label": "Closed",
+        }
+    )
+
+    # Deliberately exclude command/council fields here.  They may belong to an
+    # older completed candle; the exact runtime study's directional_read and
+    # lineage-bound timing field own this replacement.
+    study_question_payload: dict[str, object] = {
+        "tracking_summary": {"market_study_v3": runtime_study},
+        "latest_signal": {},
+    }
+    questions = _three_question_brief_v3(
+        study_question_payload,
+        command={},
+        market=market,
+        market_study=public_study,
+        history=history,
+        freshness=freshness,
+        current_move=current_move,
+        pressure_event=pressure_event,
+        permission=permission,
+        now_epoch=now_epoch,
+    )
+
+    session_id = _safe_session_id(runtime_payload.get("session_id")) or _safe_session_id(
+        result.get("session_id")
+    )
+    encoded_session_id = quote(session_id, safe="")
+    surface_base = (
+        f"/v1/mobile/window-tracker/sessions/{encoded_session_id}/artifacts"
+        if encoded_session_id
+        else ""
+    )
+    surface_query = f"?frame_id={frame_id}" if surface_base and frame_id > 0 else ""
+    overlay_viewports = _overlay_viewports_contract(
+        runtime_payload,
+        tracking_summary,
+    )
+    surface_revisions = _surface_overlay_revision_contract(
+        runtime_payload,
+        tracking_summary,
+        market,
+        overlay_viewports,
+        [],
+    )
+    surface = dict(_mapping(result.get("surface")))
+    surface.update(
+        {
+            "primary_url": (
+                f"{surface_base}/latest-window{surface_query}" if surface_query else ""
+            ),
+            "primary_space": "window",
+            "fallback_url": (
+                f"{surface_base}/latest-chart{surface_query}" if surface_query else ""
+            ),
+            "fallback_space": "chart",
+            "focus_url": (
+                f"{surface_base}/latest-chart{surface_query}" if surface_query else ""
+            ),
+            "overlay_viewport": overlay_viewports["window"],
+            "overlay_viewports": overlay_viewports,
+            "frame_id": frame_id,
+            "updated_at": observed_at,
+            "market_selector_visual_fingerprint": _safe_public_text(
+                runtime_payload.get("market_selector_visual_fingerprint")
+                or _mapping(runtime_payload.get("latest_signal")).get(
+                    "market_selector_visual_fingerprint"
+                )
+                or tracking_summary.get("market_selector_visual_fingerprint"),
+                "",
+                limit=80,
+            ),
+            "overlay_state_version": _safe_public_text(
+                runtime_payload.get("overlay_state_version"), "", limit=160
+            ),
+            "overlay_frame_state_version": _safe_public_text(
+                runtime_payload.get("overlay_frame_state_version"), "", limit=160
+            ),
+            **surface_revisions,
+        }
+    )
+    tracking = dict(_mapping(result.get("tracking")))
+    tracking.update(
+        {
+            "active": True,
+            "state": "UPDATING",
+            "updated_at": observed_at,
+            "history_count": len(history),
+            "market_study_v3": public_study,
+        }
+    )
+    result.update(
+        {
+            "revision": max(
+                _integer(result.get("revision")),
+                _integer(runtime_payload.get("state_version")),
+                _integer(runtime_payload.get("decision_version")),
+                _integer(runtime_payload.get("sequence_id")),
+                frame_id,
+                _integer(runtime_payload.get("capture_count")),
+            ),
+            "market": market,
+            "three_questions": questions,
+            "tracking": tracking,
+            "freshness": freshness,
+            "current_move": current_move,
+            "permission": permission,
+            "pressure_event": pressure_event,
+            "surface": surface,
+            # Never retain geometry from the older display frame.  The normal
+            # projection refresh will republish exact-frame overlay rows.
+            "overlays": [],
+            "history": history,
+        }
+    )
+    return result
+
+
 def refresh_operator_streaming_read_v3(
     workspace: Mapping[str, object],
     runtime_payload: Mapping[str, object],
@@ -9582,6 +9963,56 @@ def refresh_operator_streaming_read_v3(
     runtime_study_key = _safe_identifier(
         runtime_study.get("closed_candle_key"), ""
     )
+    atomic_runtime_bundle = _atomic_runtime_completed_study_v3(runtime_payload)
+    cached_study_key = _safe_identifier(
+        cached_study.get("closed_candle_key"), ""
+    )
+    cached_study_sequence = _integer(
+        cached_study.get("closed_candle_sequence")
+    )
+    atomic_study_sequence = _integer(
+        atomic_runtime_bundle.get("closed_candle_sequence")
+    )
+    atomic_study_key = _safe_identifier(
+        atomic_runtime_bundle.get("closed_candle_key"), ""
+    )
+    atomic_same_identity = bool(
+        atomic_runtime_bundle
+        and not heartbeat_identity_mismatch
+        and cached_symbol
+        and cached_timeframe
+        and _instrument_token(atomic_runtime_bundle.get("symbol"))
+        == _instrument_token(cached_symbol)
+        and _safe_public_text(
+            atomic_runtime_bundle.get("timeframe"), "", limit=32
+        ).upper()
+        == cached_timeframe
+    )
+    atomic_study_advanced = bool(
+        atomic_same_identity
+        and atomic_study_sequence > cached_study_sequence
+        and atomic_study_key
+        and atomic_study_key != cached_study_key
+        and _integer(atomic_runtime_bundle.get("frame_id")) >= _integer(cached_frame)
+    )
+    if atomic_study_advanced:
+        result = _adopt_newer_completed_runtime_study_v3(
+            result,
+            runtime_payload,
+            atomic_runtime_bundle,
+            now_epoch=current_epoch,
+        )
+        cached_market = dict(_mapping(result.get("market")))
+        cached_symbol = _safe_public_text(
+            cached_market.get("symbol"), "", limit=64
+        )
+        cached_timeframe = _safe_public_text(
+            cached_market.get("timeframe"), "", limit=32
+        ).upper()
+        cached_frame = _frame_id(_mapping(result.get("surface")).get("frame_id"))
+        cached_study = _mapping(
+            _mapping(result.get("tracking")).get("market_study_v3")
+        )
     coherent_new_identity = bool(
         identity_change_detected
         and runtime_frame is not None
@@ -9690,6 +10121,126 @@ def refresh_operator_streaming_read_v3(
                 current_rows.append(row)
             result["overlays"] = current_rows
     result["tracking"] = tracking
+    completed_study_current = bool(
+        atomic_runtime_bundle
+        and not heartbeat_identity_mismatch
+        and _integer(_mapping(result.get("surface")).get("frame_id"))
+        == _integer(atomic_runtime_bundle.get("frame_id"))
+        and _instrument_token(_mapping(result.get("market")).get("symbol"))
+        == _instrument_token(atomic_runtime_bundle.get("symbol"))
+        and _safe_public_text(
+            _mapping(result.get("market")).get("timeframe"), "", limit=32
+        ).upper()
+        == _safe_public_text(
+            atomic_runtime_bundle.get("timeframe"), "", limit=32
+        ).upper()
+        and _integer(
+            _mapping(_mapping(result.get("tracking")).get("market_study_v3")).get(
+                "closed_candle_sequence"
+            )
+        )
+        == atomic_study_sequence
+        and _safe_identifier(
+            _mapping(_mapping(result.get("tracking")).get("market_study_v3")).get(
+                "closed_candle_key"
+            ),
+            "",
+        )
+        == atomic_study_key
+    )
+    current_questions = _mapping(result.get("three_questions"))
+    current_q2 = _mapping(current_questions.get("studied_direction_current"))
+    current_q3 = _mapping(current_questions.get("entry_now"))
+    current_q3_forecast = _mapping(current_q3.get("timing_forecast"))
+    current_q3_projection = _mapping(current_q3.get("study_projection"))
+    atomic_directional_side = _side(atomic_runtime_bundle.get("side"))
+    q2_directional_side = _side(current_q2.get("side"))
+    q3_directional_side = _side(current_q3.get("side"))
+    q3_forecast_side = _side(current_q3_forecast.get("side"))
+    q3_projection_side = _side(current_q3_projection.get("side"))
+    atomic_question_side_conflict = bool(
+        completed_study_current
+        and atomic_directional_side in _DIRECTIONAL_SIDES
+        and (
+            q2_directional_side != atomic_directional_side
+            or (
+                q3_forecast_side in _DIRECTIONAL_SIDES
+                and q3_forecast_side != atomic_directional_side
+            )
+            or (
+                q3_directional_side in _DIRECTIONAL_SIDES
+                and q3_directional_side != atomic_directional_side
+            )
+            or (
+                q3_projection_side in _DIRECTIONAL_SIDES
+                and q3_projection_side != atomic_directional_side
+            )
+        )
+    )
+    if atomic_question_side_conflict:
+        # An operator cache can already own the newest candle key while its Q2
+        # text still reflects an older command/council side.  Rebuild only the
+        # study-facing contracts from the exact atomic market study; preserve
+        # same-frame surface geometry and keep entry authority closed.
+        atomic_market = {
+            "symbol": _safe_public_text(
+                atomic_runtime_bundle.get("symbol"), "Unknown", limit=64
+            ),
+            "timeframe": _safe_public_text(
+                atomic_runtime_bundle.get("timeframe"), "Unknown", limit=32
+            ).upper(),
+        }
+        atomic_study = _mapping(atomic_runtime_bundle.get("study"))
+        public_atomic_study = _market_study_contract(atomic_study)
+        atomic_history = _history_contract(
+            runtime_payload,
+            current_symbol=str(atomic_market["symbol"]),
+            current_timeframe=str(atomic_market["timeframe"]),
+        )
+        atomic_permission = dict(_mapping(result.get("permission")))
+        atomic_permission.update(
+            {
+                "action": "WAIT",
+                "allowed": False,
+                "side": "NEUTRAL",
+                "message": (
+                    "The exact completed study was reconciled to the current candle; "
+                    "no entry permission is open."
+                ),
+                "next_condition": (
+                    "Wait for an independently verified entry window on a completed candle."
+                ),
+                "window_open": False,
+                "valid_for_seconds": 0.0,
+                "window_label": "Closed",
+            }
+        )
+        atomic_questions = _three_question_brief_v3(
+            {
+                "tracking_summary": {"market_study_v3": atomic_study},
+                "latest_signal": {},
+            },
+            command={},
+            market=atomic_market,
+            market_study=public_atomic_study,
+            history=atomic_history,
+            freshness=_mapping(result.get("freshness")),
+            current_move=_mapping(result.get("current_move")),
+            pressure_event=_mapping(result.get("pressure_event")),
+            permission=atomic_permission,
+            now_epoch=current_epoch,
+        )
+        tracking["market_study_v3"] = public_atomic_study
+        tracking["history_count"] = len(atomic_history)
+        result.update(
+            {
+                "market": atomic_market,
+                "tracking": tracking,
+                "history": atomic_history,
+                "permission": atomic_permission,
+                "three_questions": atomic_questions,
+            }
+        )
     result["three_questions"] = _streaming_three_question_synthesis_v3(
         _mapping(result.get("three_questions")),
         permission=_mapping(result.get("permission")),
@@ -9697,6 +10248,7 @@ def refresh_operator_streaming_read_v3(
         order_reference_rows=result.get("overlays"),
         identity_matches=identity_matches,
         identity_rebind_pending=identity_rebind_pending,
+        completed_study_current=completed_study_current,
         now_epoch=current_epoch,
     )
     if heartbeat_identity_mismatch:

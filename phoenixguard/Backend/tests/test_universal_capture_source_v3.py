@@ -42,6 +42,84 @@ def _accept_capture(*args: Any, **kwargs: Any) -> bool:
     return True
 
 
+def test_external_analysis_exception_clears_processing_and_allows_next_frame(
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    service = _service_with_session(tmp_path)
+    try:
+        claim = _claim_browser_source(
+            service,
+            source_id="edge-chart",
+            sequence_id="seq-failure-retry",
+        )
+        attempts = 0
+
+        def fail_once(*args: Any, **kwargs: Any) -> bool:
+            nonlocal attempts
+            del args, kwargs
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("secret=must-not-be-persisted")
+            return True
+
+        monkeypatch.setattr(service, "_capture_and_analyze", fail_once)
+        base_epoch_ms = int(time.time() * 1000)
+        common = {
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": claim["source_generation"],
+            "source_lease_id": claim["source_lease_id"],
+            "source_render_fresh": True,
+        }
+
+        with pytest.raises(RuntimeError, match="must-not-be-persisted"):
+            service.ingest_external_frame(
+                "universal-live",
+                Image.new("RGB", (640, 360), (15, 20, 30)),
+                source_id="edge-chart",
+                sequence_id="seq-failure-retry",
+                capture_epoch_ms=base_epoch_ms,
+                frame_id=1,
+                metadata=common,
+            )
+
+        failed = service.load_session_payload("universal-live")
+        failed_source = failed["capture_source_v3"]
+        failed_stream = failed_source["stream"]
+        assert failed["status"] == "external_source_error"
+        assert failed_source["state"] == "ERROR"
+        assert failed_source["decision_usable"] is False
+        assert failed_source["reason_code"] == "FRAME_ANALYSIS_FAILED"
+        assert failed_stream["processing"] is False
+        assert failed_stream["processing_frame_id"] == 0
+        assert failed_stream["last_failed_frame_id"] == 1
+        assert failed_stream["last_failure_error_type"] == "RuntimeError"
+        assert "must-not-be-persisted" not in str(failed)
+        transport = service.get_external_frame_transport_status("universal-live")
+        assert transport["source_state"] == "ERROR"
+        assert transport["stream"]["processing"] is False
+
+        recovered = service.ingest_external_frame(
+            "universal-live",
+            Image.new("RGB", (640, 360), (15, 20, 30)),
+            source_id="edge-chart",
+            sequence_id="seq-failure-retry",
+            capture_epoch_ms=base_epoch_ms + 1_000,
+            frame_id=2,
+            metadata=common,
+        )
+        recovered_source = recovered["capture_source_v3"]
+        assert recovered_source["state"] == "LIVE"
+        assert recovered_source["decision_usable"] is True
+        assert recovered_source["stream"]["processing"] is False
+        assert recovered_source["stream"]["processing_frame_id"] == 0
+        assert recovered_source["last_frame_id"] == 2
+        assert attempts == 2
+    finally:
+        service.shutdown()
+
+
 def test_source_claim_switch_and_kill_are_generation_fenced(tmp_path: Any) -> None:
     service = _service_with_session(tmp_path)
     try:

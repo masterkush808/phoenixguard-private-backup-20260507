@@ -296,12 +296,13 @@ def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions
         "const uncalibratedClosedCandleEstimateAvailable = forecastIdentityMatches"
         in text
     )
-    assert 'timingForecastStatus === "FORECAST_AVAILABLE"' in text
-    assert 'timingSourceTier === "LIVE_M5_SEQUENCE"' in text
-    assert 'timingSourceTier === "PAIR" || timingSourceTier.startsWith("PAIR_")' in text
-    assert "timingForecast.timing_empirical === true" in text
-    assert "timingObservationSupportCount > 0" in text
-    assert 'currentTimeframe === "M5"' in text
+    assert "function timingForecastAdmissibility(" in text
+    assert "timingAdmissibility.rangeAdmissible" in text
+    assert 'sourceTier === "LIVE_M5_SEQUENCE"' in text
+    assert 'sourceTier === "PAIR" || sourceTier.startsWith("PAIR_")' in text
+    assert "forecast.timing_empirical === true" in text
+    assert "timingSupportCount > 0" in text
+    assert 'timeframe === "M5"' in text
     assert "horizonSecondsLow >= 900" in text
     assert "horizonSecondsHigh >= horizonSecondsLow" in text
     assert (

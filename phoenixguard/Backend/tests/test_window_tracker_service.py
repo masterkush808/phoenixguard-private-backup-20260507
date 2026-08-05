@@ -10729,6 +10729,7 @@ def test_tracker_rejects_mismatched_overlay_plane_before_publishing_signal(tmp_p
     assert payload["latest_signal"]["status"] == "error"
     assert payload["latest_signal"]["action"] == "HOLD"
     assert "Tracker plane integrity failed" in str(payload["last_error"])
+    assert payload.get("frame_bundle_complete_v3", False) is False
     integrity = cast(dict[str, Any], payload["tracking_summary"]["artifact_integrity"])
     selected_plane = cast(dict[str, Any], integrity["selected_plane"])
     assert integrity["matches_selected_plane"] is True
@@ -14110,41 +14111,117 @@ def test_external_live_study_budget_failure_is_published_as_discarded(
         coordinate_space="edge_tab_roi_v1",
     )
 
-    accepted = tracker._capture_and_analyze(  # pyright: ignore[reportPrivateUsage]
+    result = tracker.ingest_external_frame(
         session_id,
-        force=True,
-        external_window_image=_surface(width=1280, height=720),
-        external_source={
-            "source_id": "edge-chart-region-v3",
+        _surface(width=1280, height=720),
+        source_id="edge-chart-region-v3",
+        source_url="https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        sequence_id="edge-expired-study-sequence",
+        capture_epoch_ms=int(time.time() * 1000),
+        frame_id=1,
+        metadata={
             "source_type": "browser_tab_roi_capture",
-            "source_url": "https://pocketoption.com/en/cabinet/demo-quick-high-low/",
-            "sequence_id": "edge-expired-study-sequence",
             "coordinate_space": "edge_tab_roi_v1",
             "source_generation": int(claim["source_generation"]),
-            "frame_id": 1,
-            "metadata": {
-                "source_lease_id": str(claim["source_lease_id"]),
-                "source_render_fresh": True,
-                "extension_id": "edge-extension-test",
-                "locked_tab_id": "17",
-                "locked_tab_title": "The Most Innovative Trading Platform",
-                "locked_origin": "https://pocketoption.com",
-            },
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "extension_id": "edge-extension-test",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
         },
-        external_capture_epoch=time.time(),
     )
 
-    assert accepted is True
-    persisted = tracker.load_session_payload(session_id)
-    timing = cast(
-        Mapping[str, Any],
-        persisted["tracking_summary"]["study_timing_contract_v3"],
+    assert result["frame_ingest"]["accepted"] is False
+    assert (
+        result["frame_ingest"]["failure_reason_code"]
+        == "LIVE_STUDY_LATENCY_BUDGET_EXCEEDED"
     )
-    assert timing["budget_enforced"] is True
-    assert timing["status"] == "BUDGET_EXCEEDED"
-    assert timing["expired_stage"] == "adapter_entry"
-    assert timing["result_discarded"] is True
-    assert persisted["latest_signal"]["study_timing_contract_v3"] == timing
+    assert (
+        result["frame_ingest"]["failure_error_type"]
+        == "LiveStudyLatencyBudgetExceeded"
+    )
+    persisted = tracker.load_session_payload(session_id)
+    assert persisted["status"] == "external_source_error"
+    assert persisted["capture_source_v3"]["state"] == "ERROR"
+    assert persisted["capture_source_v3"]["decision_usable"] is False
+    assert (
+        persisted["capture_source_v3"]["reason_code"]
+        == "LIVE_STUDY_LATENCY_BUDGET_EXCEEDED"
+    )
+    assert persisted["capture_source_v3"]["stream"]["processing"] is False
+    assert persisted["capture_source_v3"]["stream"]["processing_frame_id"] == 0
+    assert (
+        persisted["capture_source_v3"]["stream"]["last_failure_error_type"]
+        == "LiveStudyLatencyBudgetExceeded"
+    )
+
+
+def test_external_adapter_failure_is_bounded_and_never_publishes_secret_text(
+    tmp_path: Path,
+) -> None:
+    class _BrokenStudyAdapter(_FakeTrackingAdapter):
+        def study(
+            self,
+            image: Image.Image,
+            *,
+            session_payload: Mapping[str, Any] | None = None,
+        ) -> TrackingStudy:
+            del image, session_payload
+            raise RuntimeError("api_key=super-secret-adapter-value")
+
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "broken-live-study",
+        tracking_adapter=_BrokenStudyAdapter("BUY"),
+    )
+    session_id = "broken-live-study"
+    tracker.create_session(session_id=session_id, auto_start=False)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-broken-study-sequence",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-broken-study-selection",
+        display_name="Pocket Option chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+
+    result = tracker.ingest_external_frame(
+        session_id,
+        _surface(width=1280, height=720),
+        source_id="edge-chart-region-v3",
+        source_url="https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        sequence_id="edge-broken-study-sequence",
+        capture_epoch_ms=int(time.time() * 1000),
+        frame_id=1,
+        metadata={
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "extension_id": "edge-extension-test",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    )
+
+    assert result["frame_ingest"]["accepted"] is False
+    assert result["frame_ingest"]["failure_reason_code"] == "TRACKER_STUDY_FAILED"
+    assert result["frame_ingest"]["failure_error_type"] == "TrackingAdapterError"
+    persisted = tracker.load_session_payload(session_id)
+    assert persisted["status"] == "external_source_error"
+    assert persisted["capture_source_v3"]["state"] == "ERROR"
+    assert persisted["capture_source_v3"]["decision_usable"] is False
+    assert persisted["capture_source_v3"]["stream"]["processing"] is False
+    assert persisted["capture_source_v3"]["stream"]["processing_frame_id"] == 0
+    combined_public_state = json.dumps(
+        {"result": result, "persisted": persisted},
+        sort_keys=True,
+    )
+    assert "super-secret-adapter-value" not in combined_public_state
+    assert "api_key" not in combined_public_state
 
 
 def test_live_chart_resolution_path_uses_incremental_candle_extraction(

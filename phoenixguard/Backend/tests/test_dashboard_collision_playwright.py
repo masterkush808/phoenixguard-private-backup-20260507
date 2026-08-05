@@ -435,6 +435,27 @@ def _with_timing_forecast(
     return result
 
 
+def _make_retention_timing_admissible(
+    payload: dict[str, Any],
+    *,
+    generated_at: float,
+    valid_until: float,
+) -> dict[str, Any]:
+    result = copy.deepcopy(payload)
+    forecast = result["three_questions"]["entry_now"]["timing_forecast"]
+    forecast.update(
+        {
+            "source": "PAIR",
+            "timing_empirical": True,
+            "timing_support_count": 11,
+            "forecast_lineage_matches": True,
+            "generated_at": generated_at,
+            "valid_until": valid_until,
+        }
+    )
+    return result
+
+
 @pytest.fixture(scope="module")
 def chromium_browser() -> Generator[Browser, None, None]:
     with sync_playwright() as playwright:
@@ -1003,6 +1024,521 @@ def test_frame_processing_heartbeat_is_active_analysis_not_stale_transport(
             "WAIT FOR CURRENT READ"
         )
         assert page.locator("#connection-state").get_attribute("data-state") == "live"
+
+
+def test_analyzing_frame_retains_latest_identity_matched_completed_study(
+    chromium_browser: Browser,
+) -> None:
+    now_epoch = time.time()
+    payload = _make_retention_timing_admissible(
+        _with_timing_forecast(
+            _operator_payload(action="BUY_NOW"),
+            side="BUY",
+            action_state="ENTER_NOW",
+            enter_now=True,
+        ),
+        generated_at=now_epoch - 47,
+        valid_until=now_epoch + 120,
+    )
+    payload["capture_source_v3"] = _live_capture_source()
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "label": "Completed study updating",
+            "observed_at": now_epoch - 47,
+            "age_seconds": 47,
+            "valid_until": None,
+        }
+    )
+    payload["surface"]["updated_at"] = now_epoch - 47
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": _live_capture_source(),
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "broker_source_lock": {"status": "VALID"},
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#connection-label").inner_text() == (
+            "Chart live · analyzing latest frame"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+        forecast_copy = page.locator("#beginner-forecast-summary").inner_text()
+        assert "Expected BUY move-start window: 3–6 completed M5 candles" in (
+            forecast_copy
+        )
+        assert "when the studied move may start after the anchor" in forecast_copy
+        assert "not a hold or expiry duration" in forecast_copy
+        assert "Hold duration unavailable and not proven" in forecast_copy
+        confidence_copy = page.locator("#beginner-confidence").inner_text()
+        assert confidence_copy.startswith("Study age ")
+        assert "completed-candle context · entry not current" in confidence_copy
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WATCH BUY · ENTRY NOT CURRENT"
+        )
+        assert page.locator("#inner-trend-title").inner_text() == (
+            "Latest completed BUY study · newer frame analyzing"
+        )
+        assert "latest completed BUY study" in (
+            page.locator("#beginner-evidence-timing").text_content() or ""
+        )
+
+        safety = page.locator("#beginner-evidence-safety").text_content() or ""
+        assert "EUR/USD · M5" in safety
+        assert "exact identity matched" in safety
+        assert "no entry or execution authority" in safety
+        assert "ENTER —" not in page.locator(
+            "#question-entry-now"
+        ).inner_text()
+
+        # A newer capture response may carry only processing state while the
+        # completed-study adapter catches up. Retain the exact same-chart
+        # completed context rather than reverting to an empty wait card.
+        processing_only = copy.deepcopy(payload)
+        processing_only["revision"] = 43
+        processing_only.pop("three_questions")
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            processing_only,
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WATCH BUY · ENTRY NOT CURRENT"
+        )
+        assert "Latest completed BUY study" in page.locator(
+            "#inner-trend-title"
+        ).inner_text()
+
+        # A selector change starts a new visual namespace even when OCR still
+        # reports the same pair and timeframe. Never carry the prior study
+        # across that boundary.
+        selector_changed = copy.deepcopy(processing_only)
+        selector_changed["revision"] = 44
+        selector_changed["surface"]["market_selector_visual_fingerprint"] = (
+            "selector_v3_eur_usd_new_surface"
+        )
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            selector_changed,
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
+        assert "LATEST COMPLETED BUY STUDY" not in page.locator(
+            "#question-entry-now"
+        ).inner_text()
+
+
+def test_analyzing_frame_does_not_retain_wrong_scope_timing_study(
+    chromium_browser: Browser,
+) -> None:
+    payload = _with_timing_forecast(_operator_payload(), side="BUY")
+    payload["three_questions"]["entry_now"]["timing_forecast"]["scope"][
+        "symbol"
+    ] = "GBP/USD"
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "label": "Completed study updating",
+            "observed_at": time.time() - 20,
+            "age_seconds": 20,
+            "valid_until": None,
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": _live_capture_source(),
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
+        assert "LATEST COMPLETED BUY STUDY" not in page.locator(
+            "#question-entry-now"
+        ).inner_text()
+
+
+def test_present_new_sell_contract_clears_retained_buy_instead_of_falling_back(
+    chromium_browser: Browser,
+) -> None:
+    now_epoch = time.time()
+    payload = _make_retention_timing_admissible(
+        _with_timing_forecast(_operator_payload(), side="BUY"),
+        generated_at=now_epoch - 20,
+        valid_until=now_epoch + 180,
+    )
+    payload["capture_source_v3"] = _live_capture_source()
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "observed_at": now_epoch - 20,
+            "valid_until": None,
+            "age_seconds": 20,
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": _live_capture_source(),
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+
+        incoming_sell = copy.deepcopy(payload)
+        incoming_sell["revision"] = 43
+        sell_study = incoming_sell["three_questions"][
+            "studied_direction_current"
+        ]
+        sell_study["side"] = "SELL"
+        sell_study["evidence"].update(
+            {
+                "ensemble_studied_side": "SELL",
+                "current_regression_side": "SELL",
+                "closed_candle_key": "operator-eurusd-m5-close-B",
+            }
+        )
+        sell_entry = incoming_sell["three_questions"]["entry_now"]
+        sell_entry["side"] = "SELL"
+        sell_entry.pop("timing_forecast")
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            incoming_sell,
+        )
+
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+        assert "completed SELL" in page.locator(
+            "#inner-trend-title"
+        ).inner_text()
+        assert "LATEST COMPLETED BUY STUDY" not in page.locator(
+            "#question-entry-now"
+        ).inner_text()
+
+        # Once newer public Q2/Q3 truth invalidates BUY, a following
+        # processing-only response cannot revive it.
+        processing_only = copy.deepcopy(incoming_sell)
+        processing_only["revision"] = 44
+        processing_only.pop("three_questions")
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            processing_only,
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+        assert "LATEST COMPLETED BUY STUDY" not in page.locator(
+            "#question-entry-now"
+        ).inner_text()
+
+
+def test_retained_study_namespace_includes_selector_generation_and_geometry(
+    chromium_browser: Browser,
+) -> None:
+    now_epoch = time.time()
+    payload = _make_retention_timing_admissible(
+        _with_timing_forecast(_operator_payload(), side="BUY"),
+        generated_at=now_epoch - 10,
+        valid_until=now_epoch + 300,
+    )
+    capture_source = _live_capture_source()
+    capture_source.update(
+        {
+            "source_id": "edge-chart-region-v3",
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "selection_id": "edge-selection-17",
+            "sequence_id": "edge-sequence-17",
+        }
+    )
+    payload["capture_source_v3"] = copy.deepcopy(capture_source)
+    payload["surface"]["overlay_geometry_revision"] = "geometry-a"
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "observed_at": now_epoch - 10,
+            "valid_until": None,
+            "age_seconds": 10,
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": copy.deepcopy(capture_source),
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        },
+    }
+
+    boundaries: list[tuple[str, dict[str, Any]]] = []
+    missing_selector = copy.deepcopy(payload)
+    missing_selector["surface"].pop("market_selector_visual_fingerprint")
+    boundaries.append(("missing selector", missing_selector))
+    changed_generation = copy.deepcopy(payload)
+    changed_generation["capture_source_v3"]["source_generation"] = 3
+    boundaries.append(("source generation", changed_generation))
+    changed_stream_generation = copy.deepcopy(payload)
+    changed_stream_generation["tracking"]["stream"]["stream_generation"] = 4
+    boundaries.append(("stream generation", changed_stream_generation))
+    changed_source_type = copy.deepcopy(payload)
+    changed_source_type["capture_source_v3"]["source_type"] = (
+        "windows_graphics_capture_roi"
+    )
+    changed_source_type["capture_source_v3"]["updated_at"] += 1
+    boundaries.append(("capture source type", changed_source_type))
+    changed_source_coordinates = copy.deepcopy(payload)
+    changed_source_coordinates["capture_source_v3"]["coordinate_space"] = (
+        "edge_tab_content_v1"
+    )
+    changed_source_coordinates["capture_source_v3"]["updated_at"] += 1
+    boundaries.append(("capture coordinate space", changed_source_coordinates))
+    changed_source_id = copy.deepcopy(payload)
+    changed_source_id["capture_source_v3"]["source_id"] = "edge-chart-region-v4"
+    changed_source_id["capture_source_v3"]["updated_at"] += 1
+    boundaries.append(("capture source id", changed_source_id))
+    changed_sequence_id = copy.deepcopy(payload)
+    changed_sequence_id["capture_source_v3"]["sequence_id"] = "edge-sequence-18"
+    changed_sequence_id["capture_source_v3"]["updated_at"] += 1
+    boundaries.append(("capture sequence id", changed_sequence_id))
+    changed_selection_id = copy.deepcopy(payload)
+    changed_selection_id["capture_source_v3"]["selection_id"] = (
+        "edge-selection-18"
+    )
+    changed_selection_id["capture_source_v3"]["updated_at"] += 1
+    boundaries.append(("capture selection id", changed_selection_id))
+    changed_geometry = copy.deepcopy(payload)
+    changed_geometry["surface"]["overlay_geometry_revision"] = "geometry-b"
+    boundaries.append(("geometry revision", changed_geometry))
+    changed_coordinate = copy.deepcopy(payload)
+    changed_coordinate["surface"]["primary_space"] = "chart"
+    boundaries.append(("coordinate space", changed_coordinate))
+    tracking_stopped = copy.deepcopy(payload)
+    tracking_stopped["tracking"].update({"active": False, "state": "STOPPED"})
+    boundaries.append(("tracking stopped", tracking_stopped))
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        for label, boundary in boundaries:
+            page.evaluate(
+                "seed => window.renderOperatorState(seed)",
+                payload,
+            )
+            assert page.locator("#beginner-decision-title").inner_text() == (
+                "LATEST COMPLETED BUY STUDY"
+            ), label
+            processing_boundary = copy.deepcopy(boundary)
+            processing_boundary.pop("three_questions")
+            page.evaluate(
+                "nextPayload => window.renderOperatorState(nextPayload)",
+                processing_boundary,
+            )
+            assert page.locator("#beginner-decision-title").inner_text() != (
+                "LATEST COMPLETED BUY STUDY"
+            ), label
+            assert page.locator("#beginner-action-label").inner_text() != (
+                "WATCH BUY · ENTRY NOT CURRENT"
+            ), label
+
+        page.evaluate("seed => window.renderOperatorState(seed)", payload)
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+        page.locator("#source-select").click()
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "SELECTING NEW CHART"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
+
+        page.evaluate("seed => window.renderOperatorState(seed)", payload)
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+        page.locator("#source-kill").click()
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "TRACKING STOPPING"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "DO NOT USE OLD SIGNAL"
+        )
+
+
+def test_retained_study_uses_normal_timing_gate_and_expires_its_window(
+    chromium_browser: Browser,
+) -> None:
+    now_epoch = time.time()
+    base = _with_timing_forecast(_operator_payload(), side="BUY")
+    base["capture_source_v3"] = _live_capture_source()
+    base["freshness"].update(
+        {
+            "state": "STALE",
+            "observed_at": now_epoch - 10,
+            "valid_until": None,
+            "age_seconds": 10,
+        }
+    )
+    # PAIR without timing_empirical/timing_support_count is not admissible.
+    base_forecast = base["three_questions"]["entry_now"]["timing_forecast"]
+    base_forecast.update(
+        {
+            "generated_at": now_epoch - 10,
+            "valid_until": now_epoch + 300,
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": _live_capture_source(),
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        base,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+
+        below_minimum = _make_retention_timing_admissible(
+            base,
+            generated_at=now_epoch - 10,
+            valid_until=now_epoch + 300,
+        )
+        below_minimum_forecast = below_minimum["three_questions"]["entry_now"][
+            "timing_forecast"
+        ]
+        below_minimum_forecast.update(
+            {
+                "horizon_seconds_low": 899,
+                "horizon_seconds_high": 1_800,
+            }
+        )
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            below_minimum,
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+
+        admissible = _make_retention_timing_admissible(
+            base,
+            generated_at=now_epoch - 10,
+            valid_until=now_epoch + 300,
+        )
+        admissible_forecast = admissible["three_questions"]["entry_now"][
+            "timing_forecast"
+        ]
+        admissible_forecast["recommended_trade_duration_seconds"] = 1_200
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            admissible,
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+        projection = page.locator("#beginner-forecast-summary").inner_text()
+        assert "Unproven hold-duration recommendation: 20 minutes" in projection
+        assert "Proven studied hold duration" not in projection
+
+        proven = copy.deepcopy(admissible)
+        proven_forecast = proven["three_questions"]["entry_now"][
+            "timing_forecast"
+        ]
+        proven_forecast["duration_provenance"] = {
+            "recommended_trade_duration_proven": True
+        }
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            proven,
+        )
+        assert "Proven studied hold duration: 20 minutes" in page.locator(
+            "#beginner-forecast-summary"
+        ).inner_text()
+
+        expires = copy.deepcopy(proven)
+        expires_forecast = expires["three_questions"]["entry_now"][
+            "timing_forecast"
+        ]
+        expires_forecast["valid_until"] = time.time() + 1.2
+        expires_forecast["generated_at"] = time.time() - 10
+        page.evaluate(
+            "nextPayload => window.renderOperatorState(nextPayload)",
+            expires,
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "LATEST COMPLETED BUY STUDY"
+        )
+        page.wait_for_function(
+            """
+            () => document.querySelector('#beginner-decision-title')?.textContent.trim()
+              === 'ANALYZING LATEST FRAME'
+            """,
+            timeout=5_000,
+        )
+        assert "move-start window elapsed" in page.locator(
+            "#beginner-forecast-summary"
+        ).inner_text()
+        assert page.locator("#inner-trend-title").inner_text() == (
+            "Latest completed timing window elapsed"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
 
 
 def test_capture_source_uses_server_frame_age_instead_of_dashboard_clock(

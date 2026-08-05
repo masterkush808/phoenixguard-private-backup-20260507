@@ -2859,6 +2859,74 @@ def _operator_entry_deadline_expired(
     )
 
 
+def _fail_closed_operator_projection_v1(
+    projection: Mapping[str, object],
+    *,
+    message: str,
+    next_condition: str,
+) -> dict[str, object]:
+    """Close every public entry-authority carrier while retaining study context."""
+
+    result = dict(projection)
+    permission = _mapping_to_plain_dict(result.get("permission"))
+    permission.update(
+        {
+            "action": "WAIT",
+            "allowed": False,
+            "side": "NEUTRAL",
+            "message": message,
+            "next_condition": next_condition,
+            "window_open": False,
+            "valid_for_seconds": 0.0,
+            "window_label": "Closed",
+        }
+    )
+    result["permission"] = permission
+
+    questions = _mapping_to_plain_dict(result.get("three_questions"))
+    entry = _mapping_to_plain_dict(questions.get("entry_now"))
+    if entry:
+        operator_action = _mapping_to_plain_dict(entry.get("operator_action"))
+        operator_action.update(
+            {
+                "state": "ANALYZING",
+                "label": "ANALYZING",
+                "instruction": message,
+                "entry_permission_authorized": False,
+                "execution_authority": False,
+                "broker_click_authority": False,
+            }
+        )
+        evidence = _mapping_to_plain_dict(entry.get("evidence"))
+        evidence.update(
+            {
+                "permission_allowed": False,
+                "entry_permission_authorized": False,
+                "permission_contract_authorized": False,
+                "execution_authority": False,
+                "broker_click_authority": False,
+            }
+        )
+        entry.update(
+            {
+                "headline": "ANALYZING CURRENT FRAME",
+                "answer": message,
+                "state": "ANALYZING",
+                "decision_state": "ANALYZING",
+                "decision": "ANALYZE_CURRENT_FRAME",
+                "action": "DO_NOT_ENTER",
+                "enter_now": False,
+                "permission_allowed": False,
+                "entry_permission_authorized": False,
+                "operator_action": operator_action,
+                "evidence": evidence,
+            }
+        )
+        questions["entry_now"] = entry
+        result["three_questions"] = questions
+    return result
+
+
 def _payload_created_epoch(payload: Mapping[str, object]) -> float:
     for key in ("created_epoch_sec", "created_epoch", "published_epoch", "signal_created_epoch", "capture_started_epoch"):
         created = _epoch_float(payload.get(key), 0.0)
@@ -7606,24 +7674,15 @@ def create_app(
             freshness["label"] = "Updating on the next complete frame"
             projected["freshness"] = freshness
         if stale_while_refreshing or decision_expired:
-            permission = _mapping_to_plain_dict(projected.get("permission"))
-            permission.update(
-                {
-                    "action": "WAIT",
-                    "allowed": False,
-                    "side": "NEUTRAL",
-                    "message": (
-                        "Wait: the next complete frame is still being prepared."
-                        if stale_while_refreshing
-                        else "Wait: this frame's decision window has expired."
-                    ),
-                    "next_condition": "Wait for a fresh complete frame.",
-                    "window_open": False,
-                    "valid_for_seconds": 0.0,
-                    "window_label": "Closed",
-                }
+            projected = _fail_closed_operator_projection_v1(
+                projected,
+                message=(
+                    "Wait: the next complete frame is still being prepared."
+                    if stale_while_refreshing
+                    else "Wait: this frame's decision window has expired."
+                ),
+                next_condition="Wait for a fresh complete frame.",
             )
-            projected["permission"] = permission
         projected_session_id = str(projected.get("session_id", "") or "").strip()
         if projected_session_id:
             try:
@@ -7638,6 +7697,45 @@ def create_app(
                     projected_session_id,
                     exc_info=True,
                 )
+        if stale_while_refreshing:
+            tracking = _mapping_to_plain_dict(projected.get("tracking"))
+            stream = _mapping_to_plain_dict(tracking.get("stream"))
+            market_read = _mapping_to_plain_dict(stream.get("market_read"))
+            capture_source = _mapping_to_plain_dict(
+                tracking.get("capture_source")
+            )
+            live_processing = bool(
+                (
+                    market_read.get("fresh") is True
+                    and str(market_read.get("state") or "").strip().upper()
+                    in {
+                        "ANALYZING",
+                        "MATERIAL_CHANGE",
+                        "MOVING",
+                        "RESTING",
+                        "UNCHANGED",
+                    }
+                )
+                or (
+                    capture_source.get("active") is True
+                    and capture_source.get("processing") is True
+                )
+            )
+            if live_processing:
+                # Cache rebuild latency is not transport staleness.  Continue
+                # to fail-close entry permission, but tell the operator that
+                # current frames are arriving and being analyzed.
+                freshness = _mapping_to_plain_dict(projected.get("freshness"))
+                freshness.update(
+                    {
+                        "state": "UPDATING",
+                        "label": (
+                            "Live capture; latest completed study shown while "
+                            "the next frame is analyzed"
+                        ),
+                    }
+                )
+                projected["freshness"] = freshness
         assert projected.get("schema_version") == OPERATOR_WORKSPACE_SCHEMA_VERSION
         return projected
 
@@ -7888,24 +7986,30 @@ def create_app(
         final_source_revision = _operator_projection_source_revision(
             requested_session_id
         )
+        source_advanced_during_build = bool(
+            final_source_revision != source_revision
+        )
         response_frame_number = int(_epoch_float(response_frame_id, 0.0))
         cache_revision: tuple[str, int, float] | None = None
         if (
             source_revision is not None
             and response_frame_number == source_revision[1]
         ):
-            # The response is an internally atomic projection of the source
-            # revision captured at build start. Publish that completed frame
-            # even when a newer frame arrived during the expensive CPU build;
-            # otherwise a stream whose cadence is faster than projection time
-            # can starve the operator cache forever. Because the stored
-            # revision is still the build-start revision, the next poll sees
-            # the newer source and schedules another catch-up. The monotonic
-            # insertion guard below prevents an older in-flight build from
-            # replacing a newer completed surface, while the heartbeat
-            # identity veto clears any cross-pair surface before projection.
+            # Cache the internally atomic build-start projection under its own
+            # older revision even when capture advanced. The next poll sees the
+            # newer source and schedules catch-up, avoiding cache starvation.
+            # Its stored and returned entry contracts are both fail-closed.
             cache_revision = source_revision
         if cache_revision is not None:
+            cache_state = dict(operator_state)
+            if source_advanced_during_build:
+                cache_state = _fail_closed_operator_projection_v1(
+                    cache_state,
+                    message=(
+                        "Wait: a newer complete frame arrived while this study was built."
+                    ),
+                    next_condition="Wait for the newer complete frame to finish processing.",
+                )
             with operator_projection_cache_lock:
                 existing_projection = operator_projection_cache.get(
                     requested_session_id
@@ -7925,12 +8029,12 @@ def create_app(
                 if response_frame_number >= existing_frame_number:
                     operator_projection_cache[requested_session_id] = (
                         cache_revision[0],
-                        dict(operator_state),
+                        cache_state,
                     )
         return public_operator_projection_for_view(
             operator_state,
             operator_view,
-            stale_while_refreshing=False,
+            stale_while_refreshing=source_advanced_during_build,
             decision_valid_until_epoch=(
                 cache_revision[2]
                 if cache_revision is not None

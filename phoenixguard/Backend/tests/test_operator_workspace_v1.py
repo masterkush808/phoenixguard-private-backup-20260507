@@ -4478,6 +4478,23 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
             }
         )
         changed_compact_payload.update(next_frame_fields)
+        changed_compact_payload["capture_source_v3"] = {
+            "state": "VALIDATING",
+            "fresh": True,
+            "decision_usable": False,
+            "source_id": "edge-chart-region-v3",
+            "sequence_id": "edge-sequence-74",
+            "source_generation": 4,
+            "reason_code": "FRAME_PROCESSING",
+            "message": "The latest Edge frame is being studied.",
+            "updated_at": now_epoch,
+            "last_frame_epoch": now_epoch,
+            "last_frame_id": next_frame_id,
+            "stream": {
+                "processing": True,
+                "last_transport_heartbeat_epoch": now_epoch,
+            },
+        }
         replacement_path.write_text(
             json.dumps(changed_compact_payload),
             encoding="utf-8",
@@ -4550,6 +4567,10 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
     assert f"frame_id={frame_id}" in stale_while_refreshing_response.json()["surface"]["primary_url"]
     assert stale_while_refreshing_response.json()["permission"]["action"] == "WAIT"
     assert stale_while_refreshing_response.json()["permission"]["allowed"] is False
+    assert stale_while_refreshing_response.json()["freshness"]["state"] == "UPDATING"
+    assert "Live capture" in stale_while_refreshing_response.json()["freshness"][
+        "label"
+    ]
     assert operator_projection_calls == 2
     assert changed_pair_response.json()["surface"]["frame_id"] == next_frame_id
     assert changed_pair_response.json()["market"]["symbol"] == "GBP/JPY OTC"
@@ -4724,6 +4745,146 @@ def test_operator_same_frame_cache_is_complete_in_both_view_orders(
     assert operator_projection_calls == 2
 
 
+def test_operator_cache_miss_advance_seeds_fail_closed_cache_and_reports_updating(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session_id = "operator-cache-miss-advance"
+    now_epoch = time.time()
+    active_frame = {"value": 14}
+    active_revision = {
+        "value": ("operator-revision-14", 14, now_epoch + 60.0),
+    }
+
+    def live_state_for_active_frame() -> dict[str, object]:
+        frame_id = active_frame["value"]
+        payload = _fresh_payload(side="BUY", now=now_epoch)
+        payload.update(
+            {
+                "session_id": session_id,
+                "capture_count": frame_id,
+                "frame_index": frame_id,
+                "display_frame_id": frame_id,
+                "chart_frame_id": frame_id,
+                "overlay_frame_id": frame_id,
+                "full_overlay_frame_id": frame_id,
+                "model_vote_frame_id": frame_id,
+                "state_version": frame_id,
+                "decision_version": frame_id,
+                "frame_bundle_complete_v3": True,
+                "last_display_surface_signature": f"surface-{frame_id}",
+                "last_window_surface_signature": f"surface-{frame_id}",
+                "last_study_surface_signature": f"study-{frame_id}",
+                "overlay_source_window_signature": f"surface-{frame_id}",
+                "overlay_source_study_signature": f"study-{frame_id}",
+                "capture_source_v3": {
+                    "state": "VALIDATING",
+                    "fresh": True,
+                    "decision_usable": False,
+                    "source_id": "edge-chart-region-v3",
+                    "sequence_id": f"edge-sequence-{frame_id}",
+                    "source_generation": 4,
+                    "reason_code": "FRAME_PROCESSING",
+                    "updated_at": now_epoch,
+                    "last_frame_epoch": now_epoch,
+                    "last_frame_id": frame_id,
+                    "stream": {
+                        "processing": True,
+                        "last_transport_heartbeat_epoch": now_epoch,
+                    },
+                },
+                "overlays": {"objects": []},
+                "live_visual_state": {"overlays": {"objects": []}},
+            }
+        )
+        command = _mutable_mapping(payload["decision_command_center"])
+        for key in ("current_movement", "pressure_event"):
+            _mutable_mapping(command[key])["frame_id"] = frame_id
+        broker_expiry = _mutable_mapping(command["broker_expiry_contract_v3"])
+        broker_expiry["frame_id"] = frame_id
+        return payload
+
+    class _Tracker:
+        def get_session_snapshot(self, requested_session_id: str) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return live_state_for_active_frame()
+
+        def latest_model_council_state(
+            self, requested_session_id: str
+        ) -> dict[str, object]:
+            assert requested_session_id == session_id
+            return {}
+
+    def build_state(
+        tracker: object,
+        requested_session_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert isinstance(tracker, _Tracker)
+        assert requested_session_id == session_id
+        return live_state_for_active_frame()
+
+    projection_calls = 0
+    original_builder = mobile_app.build_operator_workspace_v1
+
+    def advancing_builder(source: Mapping[str, object]) -> dict[str, object]:
+        nonlocal projection_calls
+        projection_calls += 1
+        built = original_builder(source)
+        if projection_calls == 1:
+            active_frame["value"] = 15
+            active_revision["value"] = (
+                "operator-revision-15",
+                15,
+                now_epoch + 60.0,
+            )
+        return built
+
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", tmp_path)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_DIRECT_READ", "0")
+    monkeypatch.setattr(mobile_app, "_LIVE_STATE_V3_CACHE_TTL_SEC", 0.0)
+    monkeypatch.setattr(
+        mobile_app,
+        "build_live_state_v3_from_tracker_service",
+        build_state,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "build_operator_workspace_v1",
+        advancing_builder,
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "_operator_projection_source_revision",
+        lambda requested_session_id: (
+            active_revision["value"]
+            if requested_session_id == session_id
+            else None
+        ),
+    )
+
+    with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
+        first_response = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
+        second_response = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
+
+    assert first_response.status_code == 200
+    first = first_response.json()
+    assert first["surface"]["frame_id"] == 14
+    assert first["permission"]["action"] == "WAIT"
+    assert first["permission"]["allowed"] is False
+    assert first["three_questions"]["entry_now"]["enter_now"] is False
+    assert first["three_questions"]["entry_now"]["action"] == "DO_NOT_ENTER"
+    assert first["freshness"]["state"] == "UPDATING"
+    assert "Live capture" in first["freshness"]["label"]
+    assert second_response.status_code == 200
+    assert second_response.json()["permission"]["allowed"] is False
+    assert projection_calls == 2
+
+
 def test_operator_rollover_defers_one_refresh_until_after_stale_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4888,6 +5049,11 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
         assert progressive_response.status_code == 200
         assert progressive_response.json()["surface"]["frame_id"] == 15
         assert progressive_response.json()["freshness"]["state"] == "STALE"
+        assert progressive_response.json()["permission"]["action"] == "WAIT"
+        assert progressive_response.json()["permission"]["allowed"] is False
+        assert progressive_response.json()["three_questions"]["entry_now"][
+            "enter_now"
+        ] is False
         assert len(deferred_tasks) == 1
 
         advance_during_second_projection["value"] = False
@@ -5232,6 +5398,255 @@ def test_fresh_leased_external_processing_is_analyzing_without_cpu_stream() -> N
     assert entry["action"] == "DO_NOT_ENTER"
     assert action["state"] == "ANALYZING"
     assert action["entry_permission_authorized"] is False
+
+
+def test_cached_operator_adopts_newer_atomic_same_pair_study_while_next_frame_analyzes() -> None:
+    base_payload = _countertrend_study_payload(now=100.0)
+    _set_current_regression_side(base_payload, side="BUY")
+    base_command = _mutable_mapping(base_payload["decision_command_center"])
+    base_command["selected_side"] = "BUY"
+    base_command["sides"] = {
+        "BUY": {"score": 0.83, "selected": True},
+        "SELL": {"score": 0.41, "selected": False},
+    }
+    base = _build_workspace(base_payload, now_epoch=100.0)
+    assert base["three_questions"]["studied_direction_current"]["side"] == "BUY"
+
+    runtime = _countertrend_study_payload(now=101.0)
+    runtime_tracking = _mutable_mapping(runtime["tracking_summary"])
+    runtime_tracking.update(
+        {
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "broker_source_lock": {
+                "status": "VALID",
+                "valid": True,
+                "broker_source_locked": True,
+            },
+        }
+    )
+    runtime_study = _mutable_mapping(runtime_tracking["market_study_v3"])
+    runtime_study["closed_candle_sequence"] = 90
+    runtime_study["closed_candle_key"] = "5f61d87fce6546ed9dda510a"
+    _set_current_regression_side(runtime, side="SELL")
+    _attach_forward_timing_forecast(
+        runtime,
+        side="SELL",
+        probability=0.67,
+        evidence_confidence=0.44,
+        calibrated=False,
+        source_tier="LIVE_M5_SEQUENCE",
+        support_count=7,
+        sweep_support_count=7,
+    )
+    timing = _mutable_mapping(runtime_study["path_clock_liquidity_v3"])
+    forward = _mutable_mapping(timing["forward_timing_forecast"])
+    forward["forecast_horizon_seconds"] = 1_500
+    move_window = _mutable_mapping(forward["move_window"])
+    move_window["latest"] = {"seconds": 1_500, "minutes": 25, "candles": 5}
+
+    # Deliberately leave an older BUY command/council read in the runtime.  The
+    # advancing closed-candle study, not that stale side, owns the read-through.
+    runtime_command = _mutable_mapping(runtime["decision_command_center"])
+    runtime_command["selected_side"] = "BUY"
+    runtime["model_council_result"] = {
+        "final_side": "BUY",
+        "council_scores": {"buy_score": 0.91, "sell_score": 0.32},
+    }
+    runtime.update(
+        {
+            "state_version": 18,
+            "decision_version": 18,
+            "sequence_id": 18,
+            "capture_count": 18,
+            "display_frame_id": 18,
+            "chart_frame_id": 18,
+            "overlay_frame_id": 18,
+            "full_overlay_frame_id": 18,
+            "model_vote_frame_id": 18,
+            "frame_bundle_complete_v3": True,
+            "capture_source_v3": {
+                "state": "VALIDATING",
+                "fresh": True,
+                "decision_usable": False,
+                "source_id": "edge-chart-region-v3",
+                "sequence_id": "edge-sequence-22",
+                "source_generation": 4,
+                "reason_code": "FRAME_PROCESSING",
+                "message": "The next Edge frame is being studied.",
+                "updated_at": 101.0,
+                "last_frame_epoch": 101.0,
+                "last_frame_id": 19,
+                "stream": {
+                    "processing": True,
+                    "last_transport_heartbeat_epoch": 101.0,
+                },
+            },
+        }
+    )
+    runtime_tracking["last_capture_epoch"] = 101.0
+    assert "last_display_surface_signature" not in runtime
+    assert "last_study_surface_signature" not in runtime
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        runtime,
+        now_epoch=101.0,
+    )
+
+    assert refreshed["market"] == {"symbol": "EUR/USD", "timeframe": "M5"}
+    assert refreshed["surface"]["frame_id"] == 18
+    assert refreshed["overlays"] == []
+    public_study = refreshed["tracking"]["market_study_v3"]
+    assert public_study["closed_candle_sequence"] == 90
+    assert public_study["closed_candle_key"] == "5f61d87fce6546ed9dda510a"
+    assert public_study["directional_read"]["side"] == "SELL"
+
+    questions = refreshed["three_questions"]
+    studied = questions["studied_direction_current"]
+    entry = questions["entry_now"]
+    forecast = entry["timing_forecast"]
+    assert studied["side"] == "SELL"
+    assert studied["evidence"]["current_regression_side"] == "SELL"
+    assert "SELL" in str(studied["headline"])
+    assert entry["headline"] == "TRACK SELL — next frame is being analyzed"
+    assert entry["decision"] == "TRACK_SELL"
+    assert entry["decision_state"] == "TRACKING_LATEST_COMPLETED"
+    assert entry["enter_now"] is False
+    assert entry["entry_permission_authorized"] is False
+    assert forecast["side"] == "SELL"
+    assert forecast["scope"] == {
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "closed_candle_key": "5f61d87fce6546ed9dda510a",
+        "identity_proven": True,
+    }
+    assert forecast["horizon_candles_low"] == 3
+    assert forecast["horizon_candles_high"] == 5
+    assert forecast["recommended_trade_duration_seconds"] is None
+    assert forecast["broker_expiry_seconds"] is None
+    assert refreshed["permission"]["allowed"] is False
+    assert refreshed["permission"]["action"] == "WAIT"
+
+
+def test_cached_operator_does_not_adopt_non_monotonic_atomic_study() -> None:
+    base_payload = _countertrend_study_payload(now=100.0)
+    base = _build_workspace(base_payload, now_epoch=100.0)
+    runtime = _countertrend_study_payload(now=101.0)
+    runtime_tracking = _mutable_mapping(runtime["tracking_summary"])
+    runtime_tracking.update(
+        {
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "broker_source_lock": {
+                "status": "VALID",
+                "valid": True,
+                "broker_source_locked": True,
+            },
+        }
+    )
+    runtime.update(
+        {
+            "display_frame_id": 18,
+            "chart_frame_id": 18,
+            "overlay_frame_id": 18,
+            "full_overlay_frame_id": 18,
+            "model_vote_frame_id": 18,
+            "frame_bundle_complete_v3": True,
+            "last_display_surface_signature": "window-signature-18",
+            "last_study_surface_signature": "study-signature-18",
+            "overlay_source_window_signature": "window-signature-18",
+            "overlay_source_study_signature": "study-signature-18",
+        }
+    )
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        runtime,
+        now_epoch=101.0,
+    )
+
+    assert refreshed["surface"]["frame_id"] == 14
+    assert refreshed["tracking"]["market_study_v3"][
+        "closed_candle_sequence"
+    ] == 88
+
+
+def test_same_key_atomic_sell_reconciles_stale_buy_q2_without_clearing_overlays() -> None:
+    runtime = _countertrend_study_payload(now=100.0)
+    _attach_forward_timing_forecast(
+        runtime,
+        side="SELL",
+        probability=0.66,
+        evidence_confidence=0.43,
+        calibrated=False,
+        source_tier="LIVE_M5_SEQUENCE",
+        support_count=6,
+        sweep_support_count=6,
+    )
+    runtime_tracking = _mutable_mapping(runtime["tracking_summary"])
+    runtime_tracking.update(
+        {
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "broker_source_lock": {
+                "status": "VALID",
+                "valid": True,
+                "broker_source_locked": True,
+            },
+        }
+    )
+    runtime.update(
+        {
+            "chart_frame_id": 14,
+            "overlay_frame_id": 14,
+            "full_overlay_frame_id": 14,
+            "model_vote_frame_id": 14,
+            "frame_bundle_complete_v3": True,
+        }
+    )
+    workspace = _build_workspace(runtime, now_epoch=100.0)
+    questions = _mutable_mapping(workspace["three_questions"])
+    stale_q2 = _mutable_mapping(questions["studied_direction_current"])
+    stale_q2["side"] = "BUY"
+    stale_q2["headline"] = "BUY was studied and remains current"
+    q3 = _mutable_mapping(questions["entry_now"])
+    q3_forecast = _mutable_mapping(q3["timing_forecast"])
+    assert q3_forecast["side"] == "SELL"
+    sentinel_overlay = {
+        "id": "same-frame-zone-14",
+        "family": "supply_demand",
+        "frame_id": 14,
+        "lifecycle": "current",
+    }
+    workspace["overlays"] = [sentinel_overlay]
+
+    refreshed = refresh_operator_streaming_read_v3(
+        workspace,
+        runtime,
+        now_epoch=100.0,
+    )
+
+    refreshed_questions = _mutable_mapping(refreshed["three_questions"])
+    refreshed_q2 = _mutable_mapping(
+        refreshed_questions["studied_direction_current"]
+    )
+    refreshed_q3 = _mutable_mapping(refreshed_questions["entry_now"])
+    refreshed_forecast = _mutable_mapping(refreshed_q3["timing_forecast"])
+    assert refreshed["surface"]["frame_id"] == 14
+    assert refreshed["overlays"] == [sentinel_overlay]
+    assert refreshed["tracking"]["market_study_v3"][
+        "closed_candle_sequence"
+    ] == 88
+    assert refreshed_q2["side"] == "SELL"
+    assert "SELL" in str(refreshed_q2["headline"])
+    assert refreshed_forecast["side"] == "SELL"
+    assert refreshed_forecast["scope"]["closed_candle_key"] == (
+        "3d40b65dac4324cb7bb8e288"
+    )
+    assert refreshed["permission"]["allowed"] is False
+    assert refreshed["permission"]["action"] == "WAIT"
+    assert refreshed_q3["enter_now"] is False
 
 
 def test_unowned_external_validating_snapshot_does_not_become_live() -> None:

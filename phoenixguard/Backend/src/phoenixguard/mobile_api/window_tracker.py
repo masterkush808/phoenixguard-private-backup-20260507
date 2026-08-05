@@ -6126,6 +6126,23 @@ class LiveStudyLatencyBudgetExceeded(RuntimeError):
         )
 
 
+class ExternalFrameStudyError(RuntimeError):
+    """Bounded leased-frame study failure safe for transport publication."""
+
+    def __init__(self, *, reason_code: str, error_type: str) -> None:
+        self.reason_code = "".join(
+            character
+            for character in str(reason_code or "").upper()
+            if character.isalnum() or character in {"_", "-"}
+        )[:64] or "FRAME_ANALYSIS_FAILED"
+        self.error_type = "".join(
+            character
+            for character in str(error_type or "")
+            if character.isalnum() or character in {"_", ".", "-"}
+        )[:96]
+        super().__init__("The leased chart frame could not complete its study.")
+
+
 class ExternalSourceLeaseError(RuntimeError):
     """Raised when a generation-fenced source mutation targets a stale lease."""
 
@@ -31678,7 +31695,7 @@ class ContinuousWindowTrackerService:
                 str(source_lease_id or "").strip(),
             )
         )
-        if not exact_match or state not in {"VALIDATING", "LIVE", "STALE"}:
+        if not exact_match or state not in {"VALIDATING", "LIVE", "STALE", "ERROR"}:
             return {
                 "allowed": False,
                 "status_code": 409,
@@ -31730,7 +31747,7 @@ class ContinuousWindowTrackerService:
                 "wgc_hwnd_roi_v1": "windows_graphics_capture_roi",
             }.get(expected_coordinate_space, "")
         exact_match = bool(
-            current_state in {"VALIDATING", "LIVE", "STALE"}
+            current_state in {"VALIDATING", "LIVE", "STALE", "ERROR"}
             and str(source_id or "").strip() == current_source_id
             and str(sequence_id or "").strip() == str(current.get("sequence_id", "") or "").strip()
             and int(source_generation or 0) == int(current.get("source_generation", 0) or 0)
@@ -32238,6 +32255,183 @@ class ContinuousWindowTrackerService:
         self._stop_worker(normalized_session_id)
         return _public_capture_source_v3(killed)
 
+    def fail_external_frame_analysis(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+        source_type: str,
+        coordinate_space: str,
+        capture_epoch_ms: int,
+        frame_id: int,
+        reason_code: str = "FRAME_ANALYSIS_FAILED",
+        error_type: str = "",
+    ) -> dict[str, Any]:
+        """Finish one failed leased-frame transition without touching newer work.
+
+        The inference pipeline intentionally runs outside the tracker lock.  A
+        source can therefore be rebound, or a newer frame can start, while an
+        older call is failing.  This transition re-proves the exact source lease
+        and clears ``processing`` only when the persisted processing frame is the
+        frame that failed.  Exception messages are never persisted.
+        """
+
+        normalized_session_id = _slugify(
+            str(session_id or "").strip(),
+            "external-frame-feed",
+        )
+        normalized_reason = "".join(
+            character
+            for character in str(reason_code or "").upper()
+            if character.isalnum() or character in {"_", "-"}
+        )[:64] or "FRAME_ANALYSIS_FAILED"
+        normalized_error_type = "".join(
+            character
+            for character in str(error_type or "")
+            if character.isalnum() or character in {"_", ".", "-"}
+        )[:96]
+        normalized_frame_id = max(0, int(frame_id or 0))
+        capture_epoch = (
+            float(capture_epoch_ms) / 1000.0
+            if int(capture_epoch_ms or 0) > 0
+            else 0.0
+        )
+        source = {
+            "source_id": str(source_id or "").strip(),
+            "source_type": str(source_type or "").strip(),
+            "sequence_id": str(sequence_id or "").strip(),
+            "source_generation": max(0, int(source_generation or 0)),
+            "coordinate_space": str(coordinate_space or "").strip(),
+            "metadata": {
+                "source_lease_id": str(source_lease_id or "").strip(),
+            },
+        }
+        with self._external_source_publication_guard_v3(
+            normalized_session_id,
+            source,
+            capture_epoch=capture_epoch,
+        ) as publication_current:
+            if not publication_current:
+                return {
+                    "cleared": False,
+                    "reason_code": "SOURCE_SUPERSEDED",
+                    "frame_id": normalized_frame_id,
+                }
+            payload = self._require_session(normalized_session_id)
+            capture_source = _normalize_capture_source_v3(
+                payload.get("capture_source_v3", {})
+            )
+            stream = _mapping_to_dict(capture_source.get("stream", {}))
+            processing_frame_id = int(
+                _float_or(stream.get("processing_frame_id"), 0.0) or 0
+            )
+            if (
+                stream.get("processing") is not True
+                or processing_frame_id != normalized_frame_id
+            ):
+                return {
+                    "cleared": False,
+                    "reason_code": "PROCESSING_FRAME_SUPERSEDED",
+                    "frame_id": normalized_frame_id,
+                }
+
+            failed_epoch = _now_epoch()
+            stream.update(
+                {
+                    "processing": False,
+                    "processing_frame_id": 0,
+                    "processing_started_epoch": 0.0,
+                    "last_failed_frame_id": normalized_frame_id,
+                    "last_failed_epoch": failed_epoch,
+                    "last_failure_reason_code": normalized_reason,
+                    "last_failure_error_type": normalized_error_type,
+                    "last_error": "The received frame could not complete the study pipeline.",
+                }
+            )
+            capture_source.update(
+                {
+                    "state_revision": int(
+                        capture_source.get("state_revision", 0) or 0
+                    )
+                    + 1,
+                    "state": "ERROR",
+                    "selection_state": "IDLE",
+                    "decision_usable": False,
+                    "fresh": False,
+                    "reason_code": normalized_reason,
+                    "message": str(stream["last_error"]),
+                    "updated_at": failed_epoch,
+                    "stream": stream,
+                }
+            )
+            payload["capture_source_v3"] = capture_source
+            payload["status"] = "external_source_error"
+            payload["updated_at"] = _epoch_to_utc_iso(failed_epoch)
+            self._save_session(payload)
+            return {
+                "cleared": True,
+                "reason_code": normalized_reason,
+                "error_type": normalized_error_type,
+                "frame_id": normalized_frame_id,
+                "failed_epoch_ms": int(round(failed_epoch * 1000.0)),
+            }
+
+    def get_external_frame_transport_status(
+        self,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Return bounded live transport state without building a full snapshot."""
+
+        normalized_session_id = _slugify(
+            str(session_id or "").strip(),
+            "external-frame-feed",
+        )
+        source = self._external_source_lease_snapshot_v3(normalized_session_id)
+        stream = _mapping_to_dict(source.get("stream", {}))
+        bounded_stream: dict[str, Any] = {}
+        for key in (
+            "processing",
+            "processing_frame_id",
+            "processing_started_epoch",
+            "received_frames",
+            "accepted_frames",
+            "last_frame_id",
+            "last_capture_epoch",
+            "last_analysis_completed_epoch",
+            "material_change_pending",
+            "pending_capture_epoch",
+            "last_failed_frame_id",
+            "last_failed_epoch",
+            "last_failure_reason_code",
+            "last_failure_error_type",
+        ):
+            if key in stream:
+                bounded_stream[key] = stream.get(key)
+        return {
+            "schema_version": "PG_EXTERNAL_FRAME_TRANSPORT_STATUS_V1",
+            "session_id": normalized_session_id,
+            "status": str(source.get("state", "NO_SOURCE") or "NO_SOURCE"),
+            "source_state": str(source.get("state", "NO_SOURCE") or "NO_SOURCE"),
+            "reason_code": str(source.get("reason_code", "") or "")[:64],
+            "source_id": str(source.get("source_id", "") or "")[:128],
+            "source_type": str(source.get("source_type", "") or "")[:64],
+            "sequence_id": str(source.get("sequence_id", "") or "")[:192],
+            "source_generation": max(
+                0,
+                int(_float_or(source.get("source_generation"), 0.0) or 0),
+            ),
+            "coordinate_space": str(source.get("coordinate_space", "") or "")[:64],
+            "last_frame_id": max(
+                0,
+                int(_float_or(source.get("last_frame_id"), 0.0) or 0),
+            ),
+            "updated_at": float(_float_or(source.get("updated_at"), 0.0) or 0.0),
+            "stream": bounded_stream,
+        }
+
     def ingest_external_frame(
         self,
         session_id: str,
@@ -32654,13 +32848,65 @@ class ContinuousWindowTrackerService:
             payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
             self._save_session(payload)
 
-        accepted = self._capture_and_analyze(
-            normalized_session_id,
-            force=True,
-            external_window_image=image.convert("RGB"),
-            external_source=source_payload,
-            external_capture_epoch=capture_epoch,
-        )
+        frame_failure_reason_code = ""
+        frame_failure_error_type = ""
+        try:
+            accepted = self._capture_and_analyze(
+                normalized_session_id,
+                force=True,
+                external_window_image=image.convert("RGB"),
+                external_source=source_payload,
+                external_capture_epoch=capture_epoch,
+            )
+        except ExternalFrameStudyError as exc:
+            frame_failure_reason_code = exc.reason_code
+            frame_failure_error_type = exc.error_type
+            self.fail_external_frame_analysis(
+                normalized_session_id,
+                source_id=normalized_source_id,
+                sequence_id=str(sequence_id or "").strip(),
+                source_generation=source_generation,
+                source_lease_id=source_lease_id,
+                source_type=normalized_source_type,
+                coordinate_space=coordinate_space,
+                capture_epoch_ms=int(round(capture_epoch * 1000.0)),
+                frame_id=int(frame_id or 0),
+                reason_code=frame_failure_reason_code,
+                error_type=frame_failure_error_type,
+            )
+            accepted = False
+        except Exception as exc:
+            if coordinate_space in leased_coordinate_spaces:
+                frame_failure_reason_code = "".join(
+                    character
+                    for character in str(
+                        getattr(exc, "reason_code", "FRAME_ANALYSIS_FAILED")
+                        or "FRAME_ANALYSIS_FAILED"
+                    ).upper()
+                    if character.isalnum() or character in {"_", "-"}
+                )[:64] or "FRAME_ANALYSIS_FAILED"
+                frame_failure_error_type = "".join(
+                    character
+                    for character in str(
+                        getattr(exc, "error_type", type(exc).__name__)
+                        or type(exc).__name__
+                    )
+                    if character.isalnum() or character in {"_", ".", "-"}
+                )[:96]
+                self.fail_external_frame_analysis(
+                    normalized_session_id,
+                    source_id=normalized_source_id,
+                    sequence_id=str(sequence_id or "").strip(),
+                    source_generation=source_generation,
+                    source_lease_id=source_lease_id,
+                    source_type=normalized_source_type,
+                    coordinate_space=coordinate_space,
+                    capture_epoch_ms=int(round(capture_epoch * 1000.0)),
+                    frame_id=int(frame_id or 0),
+                    reason_code=frame_failure_reason_code,
+                    error_type=frame_failure_error_type,
+                )
+            raise
         if accepted and coordinate_space in leased_coordinate_spaces:
             analysis_completed_epoch = _now_epoch()
             with self._lock:
@@ -32779,37 +33025,39 @@ class ContinuousWindowTrackerService:
                 )
                 self._save_session(current)
         elif coordinate_space in leased_coordinate_spaces:
-            failed_epoch = _now_epoch()
-            with self._lock:
-                current = self._require_session(normalized_session_id)
-                capture_source = _normalize_capture_source_v3(
-                    current.get("capture_source_v3", {})
+            if not frame_failure_reason_code:
+                failed_payload = self._require_session(normalized_session_id)
+                failed_summary = _mapping_to_dict(
+                    failed_payload.get("tracking_summary", {})
                 )
-                stream = _mapping_to_dict(capture_source.get("stream", {}))
-                stream["processing"] = False
-                stream["processing_frame_id"] = 0
-                stream["last_error"] = (
-                    "The received frame could not enter the study pipeline."
+                failed_timing = _mapping_to_dict(
+                    failed_summary.get("study_timing_contract_v3", {})
                 )
-                capture_source.update(
-                    {
-                        "state_revision": int(
-                            capture_source.get("state_revision", 0) or 0
-                        )
-                        + 1,
-                        "state": "ERROR",
-                        "decision_usable": False,
-                        "fresh": False,
-                        "reason_code": "FRAME_STUDY_NOT_ACCEPTED",
-                        "message": str(stream["last_error"]),
-                        "updated_at": failed_epoch,
-                        "stream": stream,
-                    }
+                failed_timing_status = str(
+                    failed_timing.get("status", "") or ""
+                ).strip().upper()
+                if failed_timing_status == "BUDGET_EXCEEDED":
+                    frame_failure_reason_code = "LIVE_STUDY_LATENCY_BUDGET_EXCEEDED"
+                    frame_failure_error_type = "LiveStudyLatencyBudgetExceeded"
+                elif failed_timing_status == "ERROR":
+                    frame_failure_reason_code = "TRACKER_STUDY_FAILED"
+                    frame_failure_error_type = "TrackingAdapterError"
+                else:
+                    frame_failure_reason_code = "FRAME_STUDY_NOT_ACCEPTED"
+                    frame_failure_error_type = ""
+                self.fail_external_frame_analysis(
+                    normalized_session_id,
+                    source_id=normalized_source_id,
+                    sequence_id=str(sequence_id or "").strip(),
+                    source_generation=source_generation,
+                    source_lease_id=source_lease_id,
+                    source_type=normalized_source_type,
+                    coordinate_space=coordinate_space,
+                    capture_epoch_ms=int(round(capture_epoch * 1000.0)),
+                    frame_id=int(frame_id or 0),
+                    reason_code=frame_failure_reason_code,
+                    error_type=frame_failure_error_type,
                 )
-                current["capture_source_v3"] = capture_source
-                current["status"] = "external_source_error"
-                current["updated_at"] = _epoch_to_utc_iso(failed_epoch)
-                self._save_session(current)
         snapshot = self.get_session_snapshot(normalized_session_id)
         snapshot["frame_ingest"] = {
             "schema_version": "PG_FRAME_INGEST_RESULT_V1",
@@ -32821,6 +33069,8 @@ class ContinuousWindowTrackerService:
             "source_generation": source_generation,
             "capture_epoch_ms": int(round(capture_epoch * 1000.0)),
             "ingested_epoch_ms": int(round(now_epoch * 1000.0)),
+            "failure_reason_code": frame_failure_reason_code,
+            "failure_error_type": frame_failure_error_type,
         }
         return snapshot
 
@@ -38441,13 +38691,15 @@ class ContinuousWindowTrackerService:
             LOGGER.debug("Study gate skipped overlapping capture for session %s.", session_id)
             return False
         try:
-            self._capture_and_analyze_claimed(
+            study_completed = self._capture_and_analyze_claimed(
                 session_id,
                 force=force,
                 external_window_image=external_window_image,
                 external_source=external_source,
                 external_capture_epoch=external_capture_epoch,
             )
+            if study_completed is not True:
+                return False
             return True
         except StaleCPUStreamKeyframeError as exc:
             lineage = _mapping_to_dict(
@@ -38632,7 +38884,7 @@ class ContinuousWindowTrackerService:
         external_window_image: Image.Image | None = None,
         external_source: Mapping[str, Any] | None = None,
         external_capture_epoch: float = 0.0,
-    ) -> None:
+    ) -> bool | None:
         capture_started_at = time.monotonic()
         external_frame_source = _mapping_to_dict(external_source or {})
         using_external_frame = external_window_image is not None
@@ -38653,6 +38905,15 @@ class ContinuousWindowTrackerService:
             and not using_local_cpu_stream_frame
             and external_frame_contract
             == ("browser_tab_roi_capture", "edge_tab_roi_v1")
+        )
+        authoritative_leased_external_frame = bool(
+            using_external_frame
+            and not using_local_cpu_stream_frame
+            and external_frame_contract
+            in {
+                ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+                ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+            }
         )
         cpu_stream_lineage = _mapping_to_dict(
             external_frame_source.get("cpu_stream_lineage_v3", {})
@@ -38693,7 +38954,7 @@ class ContinuousWindowTrackerService:
                     session_id,
                     (capture_started_at - last_capture_time) * 1000.0,
                 )
-                return
+                return False
             self._last_capture_time[session_id] = capture_started_at
         mark_stage("rate_limit")
         payload = self._require_session(session_id)
@@ -38717,7 +38978,7 @@ class ContinuousWindowTrackerService:
                     fresh_epoch,
                     capture_started_epoch,
                 )
-                return
+                return True
             if bool(fresh_payload.get("tracking_enabled", False)) and not bool(payload.get("tracking_enabled", False)):
                 payload["tracking_enabled"] = True
                 payload["status"] = "running"
@@ -38746,7 +39007,7 @@ class ContinuousWindowTrackerService:
                 )
                 payload["updated_at"] = _now_iso()
                 self._save_session(payload)
-            return
+            return False
 
         if using_local_cpu_stream_frame:
             assert external_window_image is not None
@@ -38925,7 +39186,7 @@ class ContinuousWindowTrackerService:
                     session_status="waiting_for_window",
                     signal_status="waiting_for_window",
                 )
-                return
+                return False
             descriptor = dict(resolved_descriptor)
             payload["locked_window"] = dict(descriptor)
             payload["locked_title"] = str(descriptor.get("title", "") or payload.get("locked_title", "") or "")
@@ -39101,11 +39362,11 @@ class ContinuousWindowTrackerService:
                 # Stream heartbeats are observation-health events, not new
                 # candle evidence.  Never revoke or refresh the current V3
                 # decision merely because identical pixels were re-observed.
-                return
+                return True
             if cpu_stream_owns_duplicate_recovery:
                 # Snapshot watchdog duplicates follow the same non-evidence
                 # contract while the CPU stream is degraded or recovering.
-                return
+                return True
             attempted_at = _now_iso()
             observation_status = (
                 _VISUAL_OBSERVATION_LIVE_UNCHANGED
@@ -39118,7 +39379,7 @@ class ContinuousWindowTrackerService:
                 capture_epoch=capture_started_epoch,
             ) as external_source_current:
                 if not external_source_current:
-                    return
+                    return True
                 self._publish_duplicate_visual_wait(
                     str(payload["session_id"]),
                     observation={
@@ -39148,7 +39409,7 @@ class ContinuousWindowTrackerService:
                         "cpu_stream_lineage_v3": dict(cpu_stream_lineage),
                     },
                 )
-            return
+            return True
 
         payload["visual_observation_v3"] = {
             "schema_version": _VISUAL_OBSERVATION_SCHEMA_VERSION,
@@ -39459,7 +39720,7 @@ class ContinuousWindowTrackerService:
                 self._session_commit_lock_for(str(payload["session_id"])),
             ):
                 if not external_source_current or not stream_generation_current:
-                    return
+                    return True
                 guarded_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
                     guarded_payload["tracking_enabled"] = True
@@ -39514,7 +39775,7 @@ class ContinuousWindowTrackerService:
                 message=message,
             )
             self._prune_session_artifacts(artifact_dir)
-            return
+            return False
         prestudy_broker_identity_attestation: dict[str, Any] = {}
         external_identity_contract = external_frame_contract
         if (
@@ -39951,9 +40212,27 @@ class ContinuousWindowTrackerService:
                 }
             )
             mark_stage("tracker_study_budget_exceeded")
+            if authoritative_leased_external_frame:
+                raise ExternalFrameStudyError(
+                    reason_code="LIVE_STUDY_LATENCY_BUDGET_EXCEEDED",
+                    error_type="LiveStudyLatencyBudgetExceeded",
+                ) from exc
         except Exception as exc:
+            if authoritative_leased_external_frame:
+                LOGGER.error(
+                    "Tracker study failed for leased session %s "
+                    "(error_type=%s).",
+                    session_id,
+                    type(exc).__name__,
+                )
+                raise ExternalFrameStudyError(
+                    reason_code="TRACKER_STUDY_FAILED",
+                    error_type="TrackingAdapterError",
+                ) from exc
             LOGGER.exception("Tracker study failed for session %s.", session_id)
-            error_message = f"Tracker study failed: {exc}"
+            error_message = (
+                "Tracker study failed before a result could be published."
+            )
             study_timing_contract_v3.update(
                 {
                     "status": "ERROR",
@@ -40201,7 +40480,7 @@ class ContinuousWindowTrackerService:
                 self._session_commit_lock_for(str(payload["session_id"])),
             ):
                 if not external_source_current or not stream_generation_current:
-                    return
+                    return True
                 visual_ready_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
                     visual_ready_payload["tracking_enabled"] = True
@@ -40653,7 +40932,7 @@ class ContinuousWindowTrackerService:
             self._session_commit_lock_for(str(payload["session_id"])),
         ):
             if not external_source_current or not stream_generation_current:
-                return
+                return True
             visual_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
             visual_display_window_path = str(window_path)
             visual_display_surface_signature = window_signature
@@ -40691,8 +40970,13 @@ class ContinuousWindowTrackerService:
             visual_payload["display_published_epoch"] = display_published_epoch
             visual_payload.pop("display_snapshot_only_v3", None)
             visual_payload.pop("display_fast_path_v3", None)
-            visual_payload["frame_bundle_complete_v3"] = True
-            visual_payload.pop("frame_bundle_pending_reason_v3", None)
+            visual_payload["frame_bundle_complete_v3"] = study is not None
+            if study is None:
+                visual_payload["frame_bundle_pending_reason_v3"] = (
+                    "study_failed_no_complete_overlay_model_bundle"
+                )
+            else:
+                visual_payload.pop("frame_bundle_pending_reason_v3", None)
             visual_payload["last_window_surface_signature"] = window_signature
             visual_payload["last_display_surface_signature"] = visual_display_surface_signature
             visual_payload["last_study_surface_signature"] = study_surface_signature
@@ -40815,7 +41099,7 @@ class ContinuousWindowTrackerService:
                 status="running" if capture_started_with_tracking_enabled else "ready",
             )
             self._prune_session_artifacts(artifact_dir)
-            return
+            return study is not None
         broker_surface = _default_broker_surface_payload()
         settled_execution_state = self._settle_expired_active_trade(
             payload,
@@ -41128,7 +41412,7 @@ class ContinuousWindowTrackerService:
             self._session_commit_lock_for(str(payload["session_id"])),
         ):
             if not external_source_current or not stream_generation_current:
-                return
+                return True
             persisted_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {}))
             persisted_last_capture_epoch = _float_or(persisted_payload.get("last_capture_epoch", 0.0), 0.0)
             if persisted_last_capture_epoch > float(published_epoch) + 0.001:
@@ -41138,7 +41422,7 @@ class ContinuousWindowTrackerService:
                     float(published_epoch),
                     persisted_last_capture_epoch,
                 )
-                return
+                return True
             if capture_started_with_tracking_enabled:
                 payload["tracking_enabled"] = True
             elif "tracking_enabled" in persisted_payload:
@@ -41189,8 +41473,13 @@ class ContinuousWindowTrackerService:
             payload["display_published_epoch"] = display_published_epoch
             payload.pop("display_snapshot_only_v3", None)
             payload.pop("display_fast_path_v3", None)
-            payload["frame_bundle_complete_v3"] = True
-            payload.pop("frame_bundle_pending_reason_v3", None)
+            payload["frame_bundle_complete_v3"] = study is not None
+            if study is None:
+                payload["frame_bundle_pending_reason_v3"] = (
+                    "study_failed_no_complete_overlay_model_bundle"
+                )
+            else:
+                payload.pop("frame_bundle_pending_reason_v3", None)
             payload["last_window_surface_signature"] = window_signature
             payload["last_display_surface_signature"] = display_surface_signature_for_payload
             payload["last_study_surface_signature"] = study_surface_signature
@@ -41397,6 +41686,7 @@ class ContinuousWindowTrackerService:
                 execution_debug_log_path=str(self._event_log_path(str(payload["session_id"]))),
             )
             self._prune_session_artifacts(artifact_dir)
+        return study is not None
 
     def _restore_locked_window_descriptor(self, hwnd: int) -> dict[str, Any]:
         if int(hwnd or 0) <= 0:

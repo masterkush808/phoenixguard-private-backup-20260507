@@ -128,6 +128,27 @@ lanes from running four times per second.
 
 ## 5. Bounded resource contract
 
+External frame ingestion is an asynchronous latest-frame mailbox, not a
+synchronous inference RPC. After authentication, lease validation, payload
+validation, and bounded image decode, the API acknowledges the frame and hands
+it to one per-session worker. The mailbox permits exactly one active analysis
+and one replaceable pending frame. A newer admissible frame replaces and closes
+the older pending image; it never creates an unbounded queue. Public ingest
+status names the active frame, pending frame, replacement count, busy state,
+and retry interval. Before inference starts, the worker revalidates the source
+lease and generation. Stop, source replacement, pair/timeframe change, or
+geometry reset invalidates the pending slot so evidence cannot cross lineages.
+
+`202 Accepted` means queued for bounded analysis, not analysis completed. The
+accepted and status contracts therefore expose the active and pending frame,
+whether active work was superseded, and the most recent completed or failed
+frame with a sanitized reason and timestamp. A model exception performs an
+exact lease-, generation-, capture-, and frame-fenced failure transition: only
+that frame's `processing` flag may be cleared, and a newer frame is never
+mutated. The mailbox registry is bounded and evicts only idle state. A source
+switch discards superseded publication while the one-worker CPU cap remains
+intact and the newest pending frame waits for the active call to finish.
+
 | Resource | V3 CPU default | Hard behavior |
 |---|---:|---|
 | Native capture target | 0.25 FPS default | Configurable, clamped to 0.25-8 FPS |
@@ -356,6 +377,37 @@ operator response arrives. The larger broker bitmap may finish transfer and
 decode afterward. Overlay geometry and its individual entry-area controls stay
 on the last committed bitmap until the new exact-frame image is ready, so UI
 latency improves without mixing frames.
+
+Heavy analysis of a newer frame does not erase an exact completed study from
+the same confirmed pair, timeframe, selector, surface, source/stream
+generation, and coordinate/geometry contract. Retention applies only to a
+processing-only adapter response in which Q2 and Q3 are both absent. If either
+contract is present, its side, completed-candle key, and admissible timing are
+new public truth; any incompatibility clears the older study rather than
+falling through to it. While analysis is busy, Q2 and Q3 retain the same latest
+completed direction and frame-matched move-start timing, label the study age
+and remaining forecast lifetime, and separately report that a newer frame is
+being processed. A pair, timeframe, missing/changed selector, surface,
+generation, coordinate, geometry, stop, reselect, or restart boundary clears
+it immediately. The retained move-start window also clears when its explicit
+`valid_until` or bounded forecast lifetime elapses. Move-start timing is never
+presented as a holding period or broker expiry, and neither retained direction
+nor timing creates entry permission. A numeric duration is labelled an
+unproven recommendation unless an explicit duration-proof flag accompanies it.
+
+Capture freshness and completed-study freshness are separate facts. If frames
+are advancing and a worker owns the newest keyframe, the source is `UPDATING`,
+not stale; only the independent entry permission remains fail-closed. `STALE`
+is reserved for an expired or non-advancing source heartbeat. This prevents an
+expensive but healthy analysis from being misreported as a dead stream.
+
+All public directional carriers are atomic. Q2 side, Q3 side, study projection,
+and timing side must agree with the exact current study's `directional_read`.
+If a cached council sentence conflicts even at the same completed-candle key,
+the exact study replaces it and permission remains closed. If a newer source
+revision arrives during a projection build, the build-start snapshot may still
+seed the cache to prevent starvation, but cached permission and the direct
+response are fail-closed and labelled `UPDATING` until catch-up.
 
 The default `Live read` overlay preset is deliberately semantic and current:
 current price, reaction map, combined analysis, order areas, entry triggers,
