@@ -16,6 +16,27 @@ from phoenixguard.runtime.tracker_bootstrap import (
 )
 
 
+def test_direct_edge_dashboard_browser_args_preserve_background_rendering_without_forcing_a_window(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "msedge.exe"
+    url = "http://127.0.0.1:8793/v3/mobile/window-tracker/dashboard/test"
+
+    args = tracker_launcher._dashboard_browser_args("edge", executable, url)
+
+    assert args[0] == str(executable)
+    assert args[-1] == url
+    assert not any(argument.startswith("--user-data-dir=") for argument in args)
+    for flag in (
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache",
+    ):
+        assert flag in args
+    assert "--new-window" not in args
+
+
 def test_build_locked_tracker_controls_uses_safe_tracking_defaults() -> None:
     controls = build_locked_tracker_controls(1.0)
 

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlsplit
 from functools import cached_property, lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -1224,6 +1225,7 @@ _DISPLAY_STATE_KEYS = frozenset(
         "display_reuse_only_heartbeat_v3",
         "frame_bundle_complete_v3",
         "frame_bundle_pending_reason_v3",
+        "current_chart_identity_v3",
     }
 )
 _DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
@@ -2275,6 +2277,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "stale",
         "state_version",
         "status",
+        "study_timing_contract_v3",
         "summary",
         "symbol",
         "timestamp",
@@ -3395,6 +3398,7 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "display_fast_path_v3",
         "display_busy_reuse_heartbeat_v3",
         "display_reuse_only_heartbeat_v3",
+        "current_chart_identity_v3",
         "manual_focus_region",
         "tracking_summary",
         "latest_signal",
@@ -3578,6 +3582,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "source_capture_blocked_v3",
         "source_capture_status",
         "status",
+        "study_timing_contract_v3",
         "study_stage_timings",
         "structure_boxes",
         "summary",
@@ -6097,6 +6102,30 @@ class StaleCPUStreamKeyframeError(RuntimeError):
     """Raised when an immutable stream keyframe no longer matches live session identity."""
 
 
+class LiveStudyLatencyBudgetExceeded(RuntimeError):
+    """Raised when a live leased-frame study can no longer be timely."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        elapsed_sec: float,
+        budget_sec: float,
+        adapter_entry_delay_sec: float = 0.0,
+    ) -> None:
+        self.stage = str(stage or "unknown")
+        self.elapsed_sec = max(0.0, float(elapsed_sec or 0.0))
+        self.budget_sec = max(0.0, float(budget_sec or 0.0))
+        self.adapter_entry_delay_sec = max(
+            0.0,
+            float(adapter_entry_delay_sec or 0.0),
+        )
+        super().__init__(
+            "Live study latency budget expired at "
+            f"{self.stage} ({self.elapsed_sec:.3f}s > {self.budget_sec:.3f}s)."
+        )
+
+
 class ExternalSourceLeaseError(RuntimeError):
     """Raised when a generation-fenced source mutation targets a stale lease."""
 
@@ -6288,6 +6317,25 @@ def _broker_source_lock_is_study_only(lock: Mapping[str, Any]) -> bool:
     return bool(evidence.get("study_source_expected", False) or evidence.get("chart_source_like", False))
 
 
+def _normalized_http_origin_v3(value: Any) -> str:
+    """Return a canonical HTTP(S) origin, or an empty string when it is invalid."""
+
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        scheme = parsed.scheme.lower()
+        hostname = str(parsed.hostname or "").strip().lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if scheme not in {"http", "https"} or not hostname:
+        return ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    default_port = 80 if scheme == "http" else 443
+    port_suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{hostname}{port_suffix}"
+
+
 def _external_frame_source_lock_v3(
     source: Mapping[str, Any],
     window_image: Image.Image,
@@ -6304,6 +6352,30 @@ def _external_frame_source_lock_v3(
     metadata = _mapping_to_dict(source.get("metadata", {}))
     extension_id = str(metadata.get("extension_id", "") or "").strip()
     locked_tab_id = str(metadata.get("locked_tab_id", "") or "").strip()
+    locked_tab_title = str(metadata.get("locked_tab_title", "") or "").strip()[:180]
+    locked_origin = str(metadata.get("locked_origin", "") or "").strip()[:2048]
+    source_origin = _normalized_http_origin_v3(source_url)
+    locked_origin_normalized = _normalized_http_origin_v3(locked_origin)
+    browser_tab_contract = (
+        (source_type, coordinate_space)
+        in {
+            ("browser_extension_capture", "edge_tab_content_v1"),
+            ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+        }
+    )
+    url_valid = bool(browser_tab_contract and source_origin)
+    origin_matches = bool(
+        url_valid
+        and locked_origin_normalized
+        and locked_origin_normalized == source_origin
+    )
+    title_valid = bool(origin_matches and locked_tab_title)
+    browser_identity_evidence: dict[str, Any] = {}
+    if browser_tab_contract:
+        browser_identity_evidence = {
+            "url_valid": url_valid,
+            "title_valid": title_valid,
+        }
     lock_basis = "|".join(
         [
             source_id,
@@ -6315,17 +6387,37 @@ def _external_frame_source_lock_v3(
         ]
     )
     lock_id = hashlib.sha256(lock_basis.encode("utf-8", errors="ignore")).hexdigest()[:24]
+    candidate_evidence: list[dict[str, Any]] = []
+    if title_valid:
+        candidate_evidence.append(
+            {
+                "candidate_id": lock_id,
+                "browser": "edge",
+                "browser_ok": True,
+                "title": locked_tab_title,
+                "url": source_url,
+                "title_matches": True,
+                "url_matches": True,
+                "text_matches": True,
+                "window_handle": "",
+                "target_id": lock_id,
+                "viewport": [int(window_image.width), int(window_image.height)],
+            }
+        )
+    reason_codes = ["EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"]
+    if title_valid:
+        reason_codes.append("BROWSER_TAB_IDENTITY_VERIFIED")
     return {
         "schema_version": "BROKER_SOURCE_LOCK_V3",
         "status": "VALID",
         "valid": True,
         "broker_source_locked": True,
         "reason": "External frame feed supplied a fresh chart image through the frame-ingest contract.",
-        "reason_codes": ["EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"],
+        "reason_codes": reason_codes,
         "selected_target": {
-            "browser": "edge_extension" if source_type == "browser_extension_capture" else "external_frame_feed",
+            "browser": "edge_extension" if browser_tab_contract else "external_frame_feed",
             "url": source_url,
-            "title": source_id,
+            "title": locked_tab_title or source_id,
             "window_handle": "",
             "target_id": lock_id,
             "viewport": {"width": int(window_image.width), "height": int(window_image.height)},
@@ -6352,6 +6444,11 @@ def _external_frame_source_lock_v3(
                 "coordinate_space": coordinate_space,
                 "extension_id": extension_id,
                 "locked_tab_id": locked_tab_id,
+                "locked_tab_title": locked_tab_title,
+                "locked_origin": locked_origin,
+                "source_origin": source_origin,
+                "origin_matches": origin_matches,
+                **browser_identity_evidence,
             },
         },
         "broker_pixel_fingerprint": window_signature,
@@ -6367,6 +6464,12 @@ def _external_frame_source_lock_v3(
             "coordinate_space": coordinate_space,
             "extension_id": extension_id,
             "locked_tab_id": locked_tab_id,
+            "locked_tab_title": locked_tab_title,
+            "locked_origin": locked_origin,
+            "source_origin": source_origin,
+            "origin_matches": origin_matches,
+            **browser_identity_evidence,
+            "candidates": candidate_evidence,
             "study_source_expected": True,
             "chart_source_like": True,
             "study_source_only": True,
@@ -6381,7 +6484,7 @@ def _external_frame_source_lock_v3(
     }
 
 
-def _external_wgc_broker_identity_attestation_v3(
+def _external_study_source_broker_identity_attestation_v3(
     source: Mapping[str, Any],
     source_lock: Mapping[str, Any],
     identity_surface: Mapping[str, Any],
@@ -6389,13 +6492,13 @@ def _external_wgc_broker_identity_attestation_v3(
     window_signature: str,
     capture_epoch: float,
 ) -> dict[str, Any]:
-    """Attest chart identity read from the exact leased WGC frame.
+    """Attest chart identity read from an exact leased study-source frame.
 
     This proof is private to the in-process study call. It lets the full selected
     surface provide instrument identity when the derived candle plane excludes
     the chart header. The reader is deliberately broker-agnostic; authority
-    still comes only from the exact WGC lease, lock, pixel signature, and capture
-    epoch, and the study source never becomes click-safe.
+    still comes only from an exact source lease, lock, pixel signature, and
+    capture epoch, and the study source never becomes click-safe.
     """
 
     source_row = _mapping_to_dict(source)
@@ -6408,16 +6511,29 @@ def _external_wgc_broker_identity_attestation_v3(
     source_type = str(source_row.get("source_type", "") or "").strip()
     coordinate_space = str(source_row.get("coordinate_space", "") or "").strip()
     source_generation = int(_float_or(source_row.get("source_generation"), 0.0) or 0)
+    source_frame_id = int(_float_or(source_row.get("frame_id"), 0.0) or 0)
     source_lease_id = str(metadata.get("source_lease_id", "") or "").strip()
+    extension_id = str(lock_evidence.get("extension_id", "") or "").strip()
+    locked_tab_id = str(lock_evidence.get("locked_tab_id", "") or "").strip()
+    locked_tab_title = str(lock_evidence.get("locked_tab_title", "") or "").strip()
+    locked_origin = str(lock_evidence.get("locked_origin", "") or "").strip()
+    source_origin = str(lock_evidence.get("source_origin", "") or "").strip()
     reason_codes = {
         str(item).strip()
         for item in cast(Sequence[Any], lock_row.get("reason_codes", []))
         if str(item).strip()
     }
-    exact_wgc_lease = bool(
+    wgc_contract = bool(
         source_type == "windows_graphics_capture_roi"
         and coordinate_space == "wgc_hwnd_roi_v1"
-        and source_id == "windows-region-capture-v3"
+    )
+    edge_tab_contract = bool(
+        source_type == "browser_tab_roi_capture"
+        and coordinate_space == "edge_tab_roi_v1"
+    )
+    exact_source_lease = bool(
+        (wgc_contract or edge_tab_contract)
+        and source_id
         and sequence_id
         and source_generation > 0
         and source_lease_id
@@ -6425,6 +6541,8 @@ def _external_wgc_broker_identity_attestation_v3(
         and str(lock_row.get("status", "") or "").upper() == "VALID"
         and bool(lock_row.get("broker_source_locked", False))
         and _broker_source_lock_is_study_only(lock_row)
+        and lock_evidence.get("study_source_only") is True
+        and lock_evidence.get("broker_click_safe") is False
         and "EXTERNAL_FRAME_FEED_LOCKED" in reason_codes
         and "CHART_STUDY_SOURCE_LOCKED" in reason_codes
         and str(lock_evidence.get("source_id", "") or "").strip() == source_id
@@ -6432,43 +6550,175 @@ def _external_wgc_broker_identity_attestation_v3(
         and str(lock_evidence.get("source_type", "") or "").strip() == source_type
         and str(lock_evidence.get("coordinate_space", "") or "").strip()
         == coordinate_space
+        and (
+            (
+                wgc_contract
+                and source_id == "windows-region-capture-v3"
+            )
+            or (
+                edge_tab_contract
+                and "BROWSER_TAB_IDENTITY_VERIFIED" in reason_codes
+                and bool(lock_evidence.get("url_valid", False))
+                and bool(lock_evidence.get("title_valid", False))
+                and bool(lock_evidence.get("origin_matches", False))
+                and extension_id
+                and locked_tab_id
+                and locked_tab_title
+                and locked_origin
+                and source_origin
+                and metadata.get("source_render_fresh") is True
+                and source_frame_id > 0
+                and bool(_normalized_http_origin_v3(locked_origin))
+                and _normalized_http_origin_v3(locked_origin)
+                == _normalized_http_origin_v3(source_origin)
+            )
+        )
     )
     normalized_signature = str(window_signature or "").strip()
+    identity_surface_signature = str(
+        surface.get("broker_surface_hash", "") or ""
+    ).strip()
+    identity_probe_derivation = str(
+        surface.get("identity_probe_derivation", "") or ""
+    ).strip()
+    identity_probe_parent_signature = str(
+        surface.get("identity_probe_parent_surface_hash", "") or ""
+    ).strip()
+    identity_probe_raster_signature = str(
+        surface.get("identity_probe_raster_hash", "") or ""
+    ).strip()
+    direct_identity_surface = bool(
+        identity_surface_signature
+        and identity_surface_signature == normalized_signature
+    )
+    derived_edge_identity_surface = bool(
+        edge_tab_contract
+        and identity_probe_derivation
+        == "same_frame_window_artifact_raster_v1"
+        and identity_probe_parent_signature == normalized_signature
+        and identity_probe_raster_signature
+        and identity_probe_raster_signature == identity_surface_signature
+    )
     same_frame_surface = bool(
         normalized_signature
         and str(lock_row.get("broker_pixel_fingerprint", "") or "").strip()
         == normalized_signature
-        and str(surface.get("broker_surface_hash", "") or "").strip()
-        == normalized_signature
+        and (direct_identity_surface or derived_edge_identity_surface)
     )
     market = _complete_fx_market_candidate_v3(surface.get("detected_market", ""))
     timeframe = str(surface.get("detected_timeframe", "") or "").strip().upper()
     market_confidence = _clip01(surface.get("market_confidence", 0.0)) if market else 0.0
     timeframe_confidence = _clip01(surface.get("timeframe_confidence", 0.0))
+    market_bbox = list(cast(Sequence[Any], surface.get("market_bbox", [])))[:4]
+    timeframe_bbox = list(cast(Sequence[Any], surface.get("timeframe_bbox", [])))[:4]
+    market_source = str(surface.get("market_source", "") or "").strip()
+    timeframe_source = str(surface.get("timeframe_source", "") or "").strip()
+    market_selector_visual_fingerprint = str(
+        surface.get("market_selector_visual_fingerprint", "") or ""
+    ).strip()
     complete_pair = bool(market)
     recognized_timeframe = timeframe in _TIMEFRAME_LABELS
+    edge_visual_identity = bool(
+        not edge_tab_contract
+        or (
+            len(market_bbox) == 4
+            and len(timeframe_bbox) == 4
+            and "header" in market_source.lower()
+            and "selector" in timeframe_source.lower()
+        )
+    )
     if not (
-        exact_wgc_lease
+        exact_source_lease
         and same_frame_surface
+        and edge_visual_identity
         and not bool(surface.get("identity_conflict", False))
         and complete_pair
         and recognized_timeframe
         and float(capture_epoch or 0.0) > 0.0
     ):
+        if edge_tab_contract:
+            LOGGER.warning(
+                "Edge same-frame identity attestation rejected: "
+                "exact_lease=%s same_frame=%s visual_identity=%s "
+                "identity_conflict=%s market=%r market_conf=%.3f "
+                "timeframe=%r timeframe_conf=%.3f source_id=%r "
+                "sequence_present=%s generation=%s lease_present=%s "
+                "frame_id=%s render_fresh_is_true=%s lock_valid=%s "
+                "lock_status=%r source_locked=%s study_only=%s "
+                "evidence_study_only=%r evidence_click_safe=%r "
+                "browser_reason=%s title_valid=%s url_valid=%s "
+                "origin_matches=%s extension_present=%s tab_present=%s "
+                "locked_title_present=%s locked_origin=%r source_origin=%r "
+                "lock_signature_matches=%s surface_signature_matches=%s "
+                "market_source=%r timeframe_source=%r market_bbox=%s "
+                "timeframe_bbox=%s capture_epoch=%.3f",
+                exact_source_lease,
+                same_frame_surface,
+                edge_visual_identity,
+                bool(surface.get("identity_conflict", False)),
+                market,
+                market_confidence,
+                timeframe,
+                timeframe_confidence,
+                source_id,
+                bool(sequence_id),
+                source_generation,
+                bool(source_lease_id),
+                source_frame_id,
+                metadata.get("source_render_fresh") is True,
+                bool(lock_row.get("valid", False)),
+                str(lock_row.get("status", "") or ""),
+                bool(lock_row.get("broker_source_locked", False)),
+                _broker_source_lock_is_study_only(lock_row),
+                lock_evidence.get("study_source_only"),
+                lock_evidence.get("broker_click_safe"),
+                "BROWSER_TAB_IDENTITY_VERIFIED" in reason_codes,
+                bool(lock_evidence.get("title_valid", False)),
+                bool(lock_evidence.get("url_valid", False)),
+                bool(lock_evidence.get("origin_matches", False)),
+                bool(extension_id),
+                bool(locked_tab_id),
+                bool(locked_tab_title),
+                locked_origin,
+                source_origin,
+                str(lock_row.get("broker_pixel_fingerprint", "") or "").strip()
+                == normalized_signature,
+                direct_identity_surface or derived_edge_identity_surface,
+                market_source,
+                timeframe_source,
+                market_bbox,
+                timeframe_bbox,
+                float(capture_epoch or 0.0),
+            )
         return {}
 
+    schema_version = (
+        "PG_WGC_BROKER_IDENTITY_ATTESTATION_V3"
+        if wgc_contract
+        else "PG_EDGE_TAB_BROKER_IDENTITY_ATTESTATION_V3"
+    )
+    identity_source = (
+        "same_frame_wgc_broker_identity"
+        if wgc_contract
+        else "same_frame_edge_tab_broker_identity"
+    )
+    attestation_basis_parts = (
+        source_id,
+        sequence_id,
+        str(source_generation),
+        normalized_signature,
+        market,
+        timeframe,
+    )
+    # Preserve the established WGC attestation id. Edge uses a schema prefix so
+    # equal text fields in two source contracts cannot produce the same proof.
     attestation_basis = "|".join(
-        (
-            source_id,
-            sequence_id,
-            str(source_generation),
-            normalized_signature,
-            market,
-            timeframe,
-        )
+        attestation_basis_parts
+        if wgc_contract
+        else (schema_version, *attestation_basis_parts)
     )
     return {
-        "schema_version": "PG_WGC_BROKER_IDENTITY_ATTESTATION_V3",
+        "schema_version": schema_version,
         "attestation_id": hashlib.sha256(
             attestation_basis.encode("utf-8", errors="ignore")
         ).hexdigest()[:24],
@@ -6480,21 +6730,83 @@ def _external_wgc_broker_identity_attestation_v3(
         "source_id": source_id,
         "sequence_id": sequence_id,
         "source_generation": source_generation,
+        "source_frame_id": source_frame_id if edge_tab_contract else 0,
+        "identity_source": identity_source,
+        "browser_tab_identity_verified": bool(edge_tab_contract),
+        "extension_id": extension_id if edge_tab_contract else "",
+        "locked_tab_id": locked_tab_id if edge_tab_contract else "",
+        "locked_tab_title": locked_tab_title if edge_tab_contract else "",
+        "locked_origin": locked_origin if edge_tab_contract else "",
+        "source_origin": source_origin if edge_tab_contract else "",
         "source_frame_signature": normalized_signature,
+        "identity_probe_derivation": (
+            identity_probe_derivation if derived_edge_identity_surface else ""
+        ),
+        "identity_probe_parent_surface_hash": (
+            identity_probe_parent_signature if derived_edge_identity_surface else ""
+        ),
+        "identity_probe_raster_hash": (
+            identity_probe_raster_signature if derived_edge_identity_surface else ""
+        ),
         "capture_epoch": float(capture_epoch),
         "market": market,
         "market_confidence": market_confidence,
-        "market_source": str(
-            surface.get("market_source", "chart_header_identity")
-            or "chart_header_identity"
-        ),
+        "market_source": market_source or "chart_header_identity",
+        "market_bbox": market_bbox,
+        "market_selector_visual_fingerprint": market_selector_visual_fingerprint,
         "timeframe": timeframe,
         "timeframe_confidence": timeframe_confidence,
-        "timeframe_source": str(
-            surface.get("timeframe_source", "chart_header_identity")
-            or "chart_header_identity"
-        ),
+        "timeframe_source": timeframe_source or "chart_header_identity",
+        "timeframe_bbox": timeframe_bbox,
     }
+
+
+def _external_wgc_broker_identity_attestation_v3(
+    source: Mapping[str, Any],
+    source_lock: Mapping[str, Any],
+    identity_surface: Mapping[str, Any],
+    *,
+    window_signature: str,
+    capture_epoch: float,
+) -> dict[str, Any]:
+    """Preserve the strict WGC attestation contract and public source labels."""
+
+    if (
+        str(source.get("source_type", "") or "").strip(),
+        str(source.get("coordinate_space", "") or "").strip(),
+    ) != ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"):
+        return {}
+    return _external_study_source_broker_identity_attestation_v3(
+        source,
+        source_lock,
+        identity_surface,
+        window_signature=window_signature,
+        capture_epoch=capture_epoch,
+    )
+
+
+def _external_edge_tab_broker_identity_attestation_v3(
+    source: Mapping[str, Any],
+    source_lock: Mapping[str, Any],
+    identity_surface: Mapping[str, Any],
+    *,
+    window_signature: str,
+    capture_epoch: float,
+) -> dict[str, Any]:
+    """Attest identity from a leased and origin-verified Edge tab ROI."""
+
+    if (
+        str(source.get("source_type", "") or "").strip(),
+        str(source.get("coordinate_space", "") or "").strip(),
+    ) != ("browser_tab_roi_capture", "edge_tab_roi_v1"):
+        return {}
+    return _external_study_source_broker_identity_attestation_v3(
+        source,
+        source_lock,
+        identity_surface,
+        window_signature=window_signature,
+        capture_epoch=capture_epoch,
+    )
 
 
 def _reconcile_wgc_broker_identity_attestation_v3(
@@ -6503,7 +6815,7 @@ def _reconcile_wgc_broker_identity_attestation_v3(
     session_payload: Mapping[str, Any],
     execution_controls: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Reconcile a same-frame WGC identity proof with chart-plane selectors."""
+    """Reconcile a same-frame leased-source proof with chart-plane selectors."""
 
     market_row = _mapping_to_dict(market_selector)
     timeframe_row = _mapping_to_dict(timeframe_selector)
@@ -6527,16 +6839,49 @@ def _reconcile_wgc_broker_identity_attestation_v3(
     attested_timeframe_confidence = _clip01(
         attestation.get("timeframe_confidence", 0.0)
     )
+    attested_market_fingerprint = str(
+        attestation.get("market_selector_visual_fingerprint", "") or ""
+    ).strip()
+    schema_version = str(attestation.get("schema_version", "") or "").strip()
+    source_type = str(attestation.get("source_type", "") or "").strip()
+    coordinate_space = str(attestation.get("coordinate_space", "") or "").strip()
+    wgc_proof = bool(
+        schema_version == "PG_WGC_BROKER_IDENTITY_ATTESTATION_V3"
+        and source_type == "windows_graphics_capture_roi"
+        and coordinate_space == "wgc_hwnd_roi_v1"
+        and str(attestation.get("identity_source", "") or "")
+        in {"", "same_frame_wgc_broker_identity"}
+    )
+    edge_tab_proof = bool(
+        schema_version == "PG_EDGE_TAB_BROKER_IDENTITY_ATTESTATION_V3"
+        and source_type == "browser_tab_roi_capture"
+        and coordinate_space == "edge_tab_roi_v1"
+        and str(attestation.get("identity_source", "") or "")
+        == "same_frame_edge_tab_broker_identity"
+        and attestation.get("browser_tab_identity_verified") is True
+        and str(attestation.get("extension_id", "") or "").strip()
+        and str(attestation.get("locked_tab_id", "") or "").strip()
+        and str(attestation.get("locked_tab_title", "") or "").strip()
+        and int(_float_or(attestation.get("source_frame_id"), 0.0) or 0) > 0
+        and len(list(cast(Sequence[Any], attestation.get("market_bbox", [])))[:4])
+        == 4
+        and len(
+            list(cast(Sequence[Any], attestation.get("timeframe_bbox", [])))[:4]
+        )
+        == 4
+        and "header"
+        in str(attestation.get("market_source", "") or "").strip().lower()
+        and "selector"
+        in str(attestation.get("timeframe_source", "") or "").strip().lower()
+        and _normalized_http_origin_v3(attestation.get("locked_origin", ""))
+        and _normalized_http_origin_v3(attestation.get("locked_origin", ""))
+        == _normalized_http_origin_v3(attestation.get("source_origin", ""))
+    )
     proof_valid = bool(
-        attestation.get("schema_version")
-        == "PG_WGC_BROKER_IDENTITY_ATTESTATION_V3"
+        (wgc_proof or edge_tab_proof)
         and attestation.get("source_verified") is True
         and attestation.get("study_source_only") is True
         and attestation.get("broker_click_safe") is False
-        and str(attestation.get("source_type", "") or "")
-        == "windows_graphics_capture_roi"
-        and str(attestation.get("coordinate_space", "") or "")
-        == "wgc_hwnd_roi_v1"
         and str(attestation.get("attestation_id", "") or "").strip()
         and str(attestation.get("source_frame_signature", "") or "").strip()
         and capture_epoch > 0.0
@@ -6548,6 +6893,12 @@ def _reconcile_wgc_broker_identity_attestation_v3(
     )
     if not proof_valid:
         return market_row, timeframe_row
+
+    identity_source = (
+        "same_frame_wgc_broker_identity"
+        if wgc_proof
+        else "same_frame_edge_tab_broker_identity"
+    )
 
     current_market = _complete_fx_market_candidate_v3(market_row.get("value", ""))
     current_timeframe = str(timeframe_row.get("value", "") or "").strip().upper()
@@ -6589,12 +6940,19 @@ def _reconcile_wgc_broker_identity_attestation_v3(
     market_row.update(
         {
             "value": attested_market,
-            "source": "same_frame_wgc_broker_identity",
+            "source": identity_source,
             "confidence": attested_market_confidence,
             "market_selector_rebind_required": False,
             "studying_new_pair": False,
             "market_selector_identity_rebound": identity_was_pending,
             "broker_identity_attestation_conflict": False,
+            "market_selector_visual_fingerprint": (
+                attested_market_fingerprint
+                or str(
+                    market_row.get("market_selector_visual_fingerprint", "")
+                    or ""
+                ).strip()
+            ),
             "broker_identity_attestation_id": str(
                 attestation.get("attestation_id", "") or ""
             ),
@@ -6603,7 +6961,7 @@ def _reconcile_wgc_broker_identity_attestation_v3(
     timeframe_row.update(
         {
             "value": attested_timeframe,
-            "source": "same_frame_wgc_broker_identity",
+            "source": identity_source,
             "confidence": attested_timeframe_confidence,
             "broker_identity_attestation_conflict": False,
             "broker_identity_attestation_id": str(
@@ -6883,6 +7241,127 @@ def _normalize_capture_source_v3(value: Any) -> dict[str, Any]:
     normalized["roi"] = _mapping_to_dict(row.get("roi", {}))
     normalized["stream"] = _mapping_to_dict(row.get("stream", {}))
     return normalized
+
+
+def _normalize_external_source_roi_v3(value: Any) -> list[float]:
+    """Normalize the transport ROI without guessing a different coordinate model.
+
+    Edge publishes ``x, y, width, height`` while the Windows ROI source publishes
+    ``left, top, right, bottom``.  Both contracts are four bounded normalized
+    scalars; downstream source status treats this vector as lineage metadata and
+    keeps the source-specific ``coordinate_space`` beside it.
+    """
+
+    if isinstance(value, Mapping):
+        raw: list[Any] = [
+            value.get("x"),
+            value.get("y"),
+            value.get("width"),
+            value.get("height"),
+        ]
+        mapping_geometry = True
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        raw = list(value)[:4]
+        mapping_geometry = False
+    else:
+        return []
+    if len(raw) != 4:
+        return []
+    try:
+        normalized = [float(item) for item in raw]
+    except (TypeError, ValueError):
+        return []
+    if not all(math.isfinite(item) and 0.0 <= item <= 1.0 for item in normalized):
+        return []
+    if normalized[2] <= 0.0 or normalized[3] <= 0.0:
+        return []
+    if mapping_geometry and (
+        normalized[0] + normalized[2] > 1.00000001
+        or normalized[1] + normalized[3] > 1.00000001
+    ):
+        return []
+    return [round(item, 8) for item in normalized]
+
+
+def _revocation_identity_observation_v3(
+    value: Any,
+    *,
+    source_id: str,
+    sequence_id: str,
+    source_generation: int,
+    source_type: str,
+    coordinate_space: str,
+    capture_epoch: float,
+    received_epoch: float,
+) -> dict[str, Any]:
+    """Bound a fast DOM identity to one source lease as revocation-only data.
+
+    This observation has no captured-pixel bracket, so it can invalidate an old
+    pair namespace but can never become completed-study, overlay, direction, or
+    permission evidence. The caller invokes this only after the complete source
+    lease tuple has passed ``_require_external_ingest_lease``.
+    """
+
+    row = _mapping_to_dict(value)
+    if (
+        str(source_type or "").strip() != "browser_tab_roi_capture"
+        or str(coordinate_space or "").strip() != "edge_tab_roi_v1"
+        or str(row.get("schema_version", "") or "").strip()
+        != "PG_EDGE_TAB_IDENTITY_HEARTBEAT_V3"
+        or row.get("revocation_only") is not True
+        or any(
+            row.get(key) is True
+            for key in (
+                "study_authority",
+                "overlay_authority",
+                "decision_authority",
+            )
+        )
+    ):
+        return {}
+    observed_sequence = str(row.get("sequence_id", "") or "").strip()
+    if not observed_sequence or observed_sequence != str(sequence_id or "").strip():
+        return {}
+    symbol = _complete_fx_market_candidate_v3(row.get("symbol", ""))
+    timeframe = str(row.get("timeframe", "") or "").strip().upper()
+    locked_tab_id = max(0, int(_float_or(row.get("locked_tab_id"), 0.0) or 0))
+    locked_origin = _normalized_http_origin_v3(row.get("locked_origin", ""))
+    observed_epoch = _float_or(row.get("observed_epoch_ms"), 0.0)
+    if observed_epoch > 100_000_000_000.0:
+        observed_epoch /= 1000.0
+    maximum_age_sec = _env_float(
+        "PHOENIXGUARD_HEARTBEAT_IDENTITY_MAX_AGE_SEC",
+        20.0,
+        5.0,
+    )
+    if (
+        not symbol
+        or timeframe not in _TIMEFRAME_LABELS
+        or locked_tab_id <= 0
+        or not locked_origin
+        or observed_epoch <= 0.0
+        or observed_epoch > received_epoch + 2.0
+        or received_epoch - observed_epoch > maximum_age_sec
+        or abs(observed_epoch - capture_epoch) > maximum_age_sec
+    ):
+        return {}
+    return {
+        "schema_version": "PG_REVOCATION_IDENTITY_OBSERVATION_V3",
+        "revocation_only": True,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "observed_epoch": round(observed_epoch, 6),
+        "received_epoch": round(received_epoch, 6),
+        "source_id": str(source_id or "").strip()[:128],
+        "sequence_id": observed_sequence[:192],
+        "source_generation": max(0, int(source_generation or 0)),
+        "locked_tab_id": locked_tab_id,
+        "locked_origin": locked_origin[:2048],
+        "lease_fenced": True,
+        "study_authority": False,
+        "overlay_authority": False,
+        "decision_authority": False,
+    }
 
 
 def _public_capture_source_v3(value: Any, *, include_lease: bool = False) -> dict[str, Any]:
@@ -7582,6 +8061,71 @@ def _cpu_stream_frame_hash_v3(image: Image.Image) -> str:
     return digest.hexdigest()
 
 
+def _market_selector_lane_bounds(image: Image.Image) -> tuple[int, int, int, int, str]:
+    """Locate the active-pair lane in focused and letterboxed tab captures.
+
+    Edge ``tabCapture`` can expose the broker content inside a taller video
+    surface, adding black rows above and below the same tab pixels.  Normalized
+    coordinates against the outer video then move the selected pair from the
+    focused 12-20% lane to roughly 18-22%.  Detect that bounded vertical inset
+    first and express the selector lane against the actual broker content.
+    The lane starts below the scrolling asset tabs, so their symbols cannot
+    become selected-market authority.
+    """
+
+    sample = image.convert("RGB")
+    width, height = sample.size
+    if width < 2 or height < 2:
+        return 0, 0, max(1, width), max(1, height), "invalid"
+
+    content_top = 0
+    content_bottom = height
+    profile_width = min(256, width)
+    profile = np.asarray(
+        sample.resize((profile_width, height), Image.Resampling.BILINEAR),
+        dtype=np.uint8,
+    )
+    if profile.ndim == 3:
+        row_coverage = np.mean(np.max(profile, axis=2) >= 12, axis=1)
+        active_rows = row_coverage >= 0.35
+        run_length = max(2, min(6, int(round(height * 0.004))))
+
+        def first_sustained(values: NDArray[np.bool_]) -> int | None:
+            streak = 0
+            for index, enabled in enumerate(values.tolist()):
+                streak = streak + 1 if bool(enabled) else 0
+                if streak >= run_length:
+                    return index - run_length + 1
+            return None
+
+        first_active = first_sustained(active_rows)
+        last_active_reversed = first_sustained(active_rows[::-1])
+        detected_bottom = (
+            height - last_active_reversed
+            if last_active_reversed is not None
+            else height
+        )
+        minimum_inset = max(6, int(round(height * 0.015)))
+        minimum_content_height = max(80, int(round(height * 0.65)))
+        if (
+            first_active is not None
+            and first_active >= minimum_inset
+            and detected_bottom - first_active >= minimum_content_height
+        ):
+            content_top = int(first_active)
+            content_bottom = int(max(content_top + minimum_content_height, detected_bottom))
+
+    content_height = max(2, content_bottom - content_top)
+    left = max(0, min(width - 2, int(round(width * 0.055))))
+    right = max(left + 2, min(width, int(round(width * 0.21))))
+    top = content_top + int(round(content_height * 0.12))
+    bottom = content_top + int(round(content_height * 0.205))
+    top = max(content_top, min(content_bottom - 2, top))
+    bottom = max(top + 2, min(content_bottom, bottom))
+    layout = "edge_letterboxed_tab" if content_top > 0 else "focused_broker_surface"
+    return left, top, right, bottom, layout
+
+
 def _market_selector_visual_fingerprint(image: Image.Image) -> str:
     """Return a stable visual identity for the broker's selected instrument.
 
@@ -7596,10 +8140,7 @@ def _market_selector_visual_fingerprint(image: Image.Image) -> str:
     sample = image.convert("RGB")
     if sample.width < 64 or sample.height < 48:
         return ""
-    left = max(0, min(sample.width - 2, int(round(sample.width * 0.055))))
-    top = max(0, min(sample.height - 2, int(round(sample.height * 0.10))))
-    right = max(left + 2, min(sample.width, int(round(sample.width * 0.21))))
-    bottom = max(top + 2, min(sample.height, int(round(sample.height * 0.19))))
+    left, top, right, bottom, _layout = _market_selector_lane_bounds(sample)
     crop = sample.crop((left, top, right, bottom)).convert("L")
     crop = crop.resize((128, 40), Image.Resampling.BILINEAR)
     # The broker header is dark and its selector glyphs are bright.  A binary
@@ -7617,6 +8158,315 @@ def _market_selector_visual_fingerprint(image: Image.Image) -> str:
         if enabled:
             packed[index // 8] |= 1 << (index % 8)
     return f"selector_v2_{hashlib.sha256(bytes(packed)).hexdigest()[:20]}"
+
+
+def _edge_tab_bracket_identity_surface_v3(
+    image: Image.Image,
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the extension's exact-capture pair/timeframe observation.
+
+    The Edge producer observes the locked tab immediately before and after the
+    video-to-canvas sample.  DOM text is useful for speed, but it is accepted
+    only when the complete capture bracket, source lease identity, geometry,
+    and pixels all agree.  This remains study-only evidence and never grants
+    broker click authority.
+    """
+
+    surface = image.convert("RGB")
+    source_row = _mapping_to_dict(source)
+    metadata = _mapping_to_dict(source_row.get("metadata", {}))
+    observation = _mapping_to_dict(metadata.get("identity_observation_v3", {}))
+    before = _mapping_to_dict(observation.get("before", {}))
+    after = _mapping_to_dict(observation.get("after", {}))
+    if (
+        str(source_row.get("source_type", "") or "").strip()
+        != "browser_tab_roi_capture"
+        or str(source_row.get("coordinate_space", "") or "").strip()
+        != "edge_tab_roi_v1"
+        or str(observation.get("schema_version", "") or "").strip()
+        != "PG_EDGE_TAB_IDENTITY_OBSERVATION_V3"
+        or observation.get("capture_bracket_consistent") is not True
+        or not before
+        or not after
+    ):
+        return {}
+
+    locked_tab_id = str(metadata.get("locked_tab_id", "") or "").strip()
+    locked_origin = _normalized_http_origin_v3(metadata.get("locked_origin", ""))
+    sequence_id = str(source_row.get("sequence_id", "") or "").strip()
+    if (
+        not locked_tab_id
+        or str(observation.get("locked_tab_id", "") or "").strip()
+        != locked_tab_id
+        or not locked_origin
+        or _normalized_http_origin_v3(observation.get("locked_origin", ""))
+        != locked_origin
+        or not sequence_id
+        or str(observation.get("sequence_id", "") or "").strip()
+        != sequence_id
+    ):
+        return {}
+
+    before_market = _complete_fx_market_candidate_v3(before.get("symbol", ""))
+    after_market = _complete_fx_market_candidate_v3(after.get("symbol", ""))
+    before_timeframe = str(before.get("timeframe", "") or "").strip().upper()
+    after_timeframe = str(after.get("timeframe", "") or "").strip().upper()
+    if (
+        not before_market
+        or before_market != after_market
+        or before_timeframe != after_timeframe
+        or before_timeframe not in _TIMEFRAME_LABELS
+    ):
+        return {}
+
+    def finite_bbox(value: Any) -> list[float]:
+        if (
+            not isinstance(value, Sequence)
+            or isinstance(value, (str, bytes, bytearray))
+            or len(cast(Sequence[Any], value)) < 4
+        ):
+            return []
+        try:
+            values = [float(item) for item in cast(Sequence[Any], value)[:4]]
+        except (TypeError, ValueError):
+            return []
+        if (
+            not all(math.isfinite(item) for item in values)
+            or values[2] <= values[0]
+            or values[3] <= values[1]
+        ):
+            return []
+        return values
+
+    def finite_viewport(value: Any) -> tuple[float, float] | None:
+        row = _mapping_to_dict(value)
+        width = _float_or(row.get("width"), 0.0)
+        height = _float_or(row.get("height"), 0.0)
+        if (
+            not math.isfinite(width)
+            or not math.isfinite(height)
+            or width < 64.0
+            or height < 64.0
+        ):
+            return None
+        return float(width), float(height)
+
+    before_market_bbox = finite_bbox(before.get("market_bbox_css", []))
+    after_market_bbox = finite_bbox(after.get("market_bbox_css", []))
+    before_timeframe_bbox = finite_bbox(before.get("timeframe_bbox_css", []))
+    after_timeframe_bbox = finite_bbox(after.get("timeframe_bbox_css", []))
+    before_viewport = finite_viewport(before.get("viewport_css", {}))
+    after_viewport = finite_viewport(after.get("viewport_css", {}))
+    if not (
+        before_market_bbox
+        and after_market_bbox
+        and before_timeframe_bbox
+        and after_timeframe_bbox
+        and before_viewport
+        and before_viewport == after_viewport
+    ):
+        return {}
+    if any(
+        abs(first - second) > 1.0
+        for first, second in zip(
+            (*before_market_bbox, *before_timeframe_bbox),
+            (*after_market_bbox, *after_timeframe_bbox),
+        )
+    ):
+        return {}
+    viewport_width, viewport_height = before_viewport
+    for bbox in (before_market_bbox, before_timeframe_bbox):
+        if (
+            bbox[0] < 0.0
+            or bbox[1] < 0.0
+            or bbox[2] > viewport_width + 1.0
+            or bbox[3] > viewport_height + 1.0
+        ):
+            return {}
+
+    def epoch_seconds(value: Any) -> float:
+        epoch = _float_or(value, 0.0)
+        if epoch > 100_000_000_000.0:
+            epoch /= 1000.0
+        return float(epoch) if math.isfinite(epoch) else 0.0
+
+    before_epoch = epoch_seconds(before.get("observed_epoch"))
+    after_epoch = epoch_seconds(after.get("observed_epoch"))
+    capture_epoch = epoch_seconds(source_row.get("capture_epoch_ms"))
+    if (
+        before_epoch <= 0.0
+        or capture_epoch <= 0.0
+        or after_epoch <= 0.0
+        or before_epoch > capture_epoch + 0.001
+        or capture_epoch > after_epoch + 0.001
+        or after_epoch - before_epoch > 5.0
+    ):
+        return {}
+
+    roi = _mapping_to_dict(metadata.get("roi_source_pixels", {}))
+    source_width = _float_or(
+        roi.get("sourceWidth", metadata.get("source_surface_width")),
+        0.0,
+    )
+    source_height = _float_or(
+        roi.get("sourceHeight", metadata.get("source_surface_height")),
+        0.0,
+    )
+    roi_x = _float_or(roi.get("x"), 0.0)
+    roi_y = _float_or(roi.get("y"), 0.0)
+    roi_width = _float_or(roi.get("width"), source_width)
+    roi_height = _float_or(roi.get("height"), source_height)
+    if (
+        source_width < 64.0
+        or source_height < 64.0
+        or roi_width < 64.0
+        or roi_height < 64.0
+        or roi_x < 0.0
+        or roi_y < 0.0
+        or roi_x + roi_width > source_width + 2.0
+        or roi_y + roi_height > source_height + 2.0
+    ):
+        return {}
+
+    # tabCapture can letterbox the page inside its video track.  For a full
+    # viewport selection, map DOM y-coordinates into the sustained non-black
+    # rows rather than into the outer video height.  A selected sub-region has
+    # no complete letterbox context, so it retains source-pixel mapping.
+    content_top = 0.0
+    content_bottom = float(surface.height)
+    full_source_roi = bool(
+        abs(roi_x) <= 1.0
+        and abs(roi_y) <= 1.0
+        and abs(roi_width - source_width) <= 2.0
+        and abs(roi_height - source_height) <= 2.0
+    )
+    if full_source_roi and surface.height >= 80:
+        profile_width = min(256, surface.width)
+        profile = np.asarray(
+            surface.resize((profile_width, surface.height), Image.Resampling.BILINEAR),
+            dtype=np.uint8,
+        )
+        if profile.ndim == 3:
+            row_coverage = np.mean(np.max(profile, axis=2) >= 12, axis=1)
+            active = row_coverage >= 0.35
+            run_length = max(2, min(6, int(round(surface.height * 0.004))))
+
+            def sustained_start(values: NDArray[np.bool_]) -> int | None:
+                streak = 0
+                for index, enabled in enumerate(values.tolist()):
+                    streak = streak + 1 if bool(enabled) else 0
+                    if streak >= run_length:
+                        return index - run_length + 1
+                return None
+
+            first = sustained_start(active)
+            last_reversed = sustained_start(active[::-1])
+            last = surface.height - last_reversed if last_reversed is not None else surface.height
+            if (
+                first is not None
+                and last - first >= int(round(surface.height * 0.65))
+            ):
+                content_top = float(first)
+                content_bottom = float(last)
+
+    def map_css_bbox(css_bbox: Sequence[float]) -> list[int]:
+        if full_source_roi:
+            x0 = float(css_bbox[0]) / viewport_width * float(surface.width)
+            x1 = float(css_bbox[2]) / viewport_width * float(surface.width)
+            active_height = max(1.0, content_bottom - content_top)
+            y0 = content_top + float(css_bbox[1]) / viewport_height * active_height
+            y1 = content_top + float(css_bbox[3]) / viewport_height * active_height
+        else:
+            source_x0 = float(css_bbox[0]) / viewport_width * source_width
+            source_x1 = float(css_bbox[2]) / viewport_width * source_width
+            source_y0 = float(css_bbox[1]) / viewport_height * source_height
+            source_y1 = float(css_bbox[3]) / viewport_height * source_height
+            if (
+                source_x0 < roi_x - 2.0
+                or source_y0 < roi_y - 2.0
+                or source_x1 > roi_x + roi_width + 2.0
+                or source_y1 > roi_y + roi_height + 2.0
+            ):
+                return []
+            x0 = (source_x0 - roi_x) / roi_width * float(surface.width)
+            x1 = (source_x1 - roi_x) / roi_width * float(surface.width)
+            y0 = (source_y0 - roi_y) / roi_height * float(surface.height)
+            y1 = (source_y1 - roi_y) / roi_height * float(surface.height)
+        padding_x = max(2, int(round(surface.width * 0.002)))
+        padding_y = max(2, int(round(surface.height * 0.003)))
+        return _clip_bbox_to_image(
+            surface.size,
+            [
+                int(math.floor(x0)) - padding_x,
+                int(math.floor(y0)) - padding_y,
+                int(math.ceil(x1)) + padding_x,
+                int(math.ceil(y1)) + padding_y,
+            ],
+        )
+
+    market_bbox = map_css_bbox(before_market_bbox)
+    timeframe_bbox = map_css_bbox(before_timeframe_bbox)
+    if len(market_bbox) != 4 or len(timeframe_bbox) != 4:
+        return {}
+
+    def pixel_text_proof(bbox: Sequence[int]) -> tuple[bool, str, int]:
+        crop = surface.crop(tuple(int(item) for item in bbox[:4])).convert("L")
+        if crop.width < 3 or crop.height < 3:
+            return False, "", 0
+        grayscale = np.asarray(crop, dtype=np.uint8)
+        contrast = int(np.max(grayscale)) - int(np.min(grayscale))
+        threshold = max(105, int(round(float(np.mean(grayscale)) + 22.0)))
+        mask = grayscale >= min(220, threshold)
+        foreground = int(np.sum(mask))
+        minimum_foreground = max(4, int(round(mask.size * 0.002)))
+        if contrast < 18 or foreground < minimum_foreground:
+            return False, "", foreground
+        packed = np.packbits(mask.reshape(-1).astype(np.uint8)).tobytes()
+        return True, hashlib.sha256(packed).hexdigest()[:20], foreground
+
+    market_pixels_valid, market_pixel_hash, market_foreground = pixel_text_proof(
+        market_bbox
+    )
+    timeframe_pixels_valid, timeframe_pixel_hash, timeframe_foreground = (
+        pixel_text_proof(timeframe_bbox)
+    )
+    if not (market_pixels_valid and timeframe_pixels_valid):
+        return {}
+
+    selector_fingerprint = (
+        "selector_v3_"
+        + hashlib.sha256(before_market.encode("ascii", errors="ignore")).hexdigest()[:20]
+    )
+    return {
+        "schema_version": "PG_CHART_IDENTITY_PROBE_V3",
+        "detected_market": before_market,
+        "market_source": "broker_header_dom_bracket_pixel_mask",
+        "market_confidence": 0.99,
+        "market_bbox": market_bbox,
+        "detected_timeframe": before_timeframe,
+        "timeframe_source": "broker_timeframe_selector_dom_bracket_pixel_mask",
+        "timeframe_confidence": 0.99,
+        "timeframe_bbox": timeframe_bbox,
+        "identity_ready": True,
+        "identity_conflict": False,
+        "identity_probe_path": "edge_exact_capture_dom_bracket_pixel_verified",
+        "identity_probe_attempts": 0,
+        "identity_probe_recovered": False,
+        "identity_probe_error": "",
+        "identity_probe_rebuilt_caches": [],
+        "market_selector_visual_fingerprint": selector_fingerprint,
+        "market_selector_pixel_fingerprint_v3": market_pixel_hash,
+        "timeframe_selector_pixel_fingerprint_v3": timeframe_pixel_hash,
+        "market_selector_foreground_pixels": market_foreground,
+        "timeframe_selector_foreground_pixels": timeframe_foreground,
+        "capture_bracket_before_epoch": before_epoch,
+        "capture_bracket_capture_epoch": capture_epoch,
+        "capture_bracket_after_epoch": after_epoch,
+        "study_source_only": True,
+        "broker_click_safe": False,
+        "broker_surface_hash": _surface_signature(surface),
+    }
 
 
 def _artifact_frame_id_from_path(path: Path | str | None, default: int = 0) -> int:
@@ -7637,7 +8487,60 @@ def _stable_short_hash(payload: Mapping[str, Any]) -> str:
 
 
 def _locked_stream_source_token_v3(payload: Mapping[str, Any]) -> str:
-    """Return a bounded identity for one locked broker-window source."""
+    """Return a bounded identity for one causally continuous chart source.
+
+    A leased Edge/WGC source has no HWND in the API process.  Treating HWND as
+    mandatory therefore disabled closed-candle clock continuity for every
+    extension frame.  The capture lease is the external equivalent of the
+    locked-window identity: generation, selection and sequence changes each
+    establish a new causal stream and must never inherit the former stream's
+    timing state.
+    """
+
+    session_id = str(payload.get("session_id") or "").strip()
+    capture_source = _normalize_capture_source_v3(
+        payload.get("capture_source_v3", {})
+    )
+    external_contract = (
+        str(capture_source.get("source_type", "") or "").strip(),
+        str(capture_source.get("coordinate_space", "") or "").strip(),
+    )
+    if external_contract in {
+        ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+        ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+    }:
+        source_id = str(capture_source.get("source_id", "") or "").strip()
+        sequence_id = str(
+            capture_source.get("sequence_id", "") or ""
+        ).strip()
+        source_lease_id = str(
+            capture_source.get("source_lease_id", "") or ""
+        ).strip()
+        source_generation = int(
+            _float_or(capture_source.get("source_generation"), 0.0) or 0
+        )
+        if not (
+            session_id
+            and source_id
+            and sequence_id
+            and source_lease_id
+            and source_generation > 0
+        ):
+            return ""
+        return _stable_short_hash(
+            {
+                "session_id": session_id,
+                "source_id": source_id,
+                "source_type": external_contract[0],
+                "coordinate_space": external_contract[1],
+                "source_generation": source_generation,
+                "source_lease_id": source_lease_id,
+                "selection_id": str(
+                    capture_source.get("selection_id", "") or ""
+                ).strip(),
+                "sequence_id": sequence_id,
+            }
+        )
 
     locked = _mapping_to_dict(payload.get("locked_window", {}))
     try:
@@ -7647,7 +8550,6 @@ def _locked_stream_source_token_v3(payload: Mapping[str, Any]) -> str:
         )
     except (TypeError, ValueError, OverflowError):
         return ""
-    session_id = str(payload.get("session_id") or "").strip()
     if hwnd <= 0 or not session_id:
         return ""
     return _stable_short_hash(
@@ -13671,6 +14573,19 @@ class PhoenixGuardWindowTrackingAdapter:
         # precise enough to be geometry authority after a restart.
         self._live_candle_cache_lock = threading.RLock()
         self._live_candle_cache: dict[str, dict[str, Any]] = {}
+        # A transient OpenCV import/render failure must not leave a cached
+        # empty selector-template bank for the lifetime of the API process.
+        # Live startup performs model warmups concurrently, so retry an empty
+        # bank under a small instance lock on the next visual probe.
+        self._identity_template_bank_lock = threading.RLock()
+        # Pair and timeframe readers share cached OpenCV glyph banks.  The API
+        # can study one frame while the next extension upload is already being
+        # prepared, so keep the complete visual identity read single-flight on
+        # this long-lived adapter.  A re-entrant lock lets the public probe hold
+        # one atomic pair/timeframe read while the individual readers retain
+        # the same protection when called by the normal study path.
+        self._visual_identity_detection_lock = threading.RLock()
+        self._identity_probe_warning_monotonic = 0.0
         # Candle extraction can run from capture workers concurrently.  Keep
         # the lane-selection audit beside the calling thread instead of on one
         # shared "last result" attribute.
@@ -13681,6 +14596,7 @@ class PhoenixGuardWindowTrackingAdapter:
         self._scene_forecast_lock = threading.RLock()
         self._scene_forecast_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._scene_event_sequences: dict[tuple[str, str], tuple[str, int]] = {}
+        self._scene_source_tokens: dict[tuple[str, str], str] = {}
         self._scene_candle_identity_states: dict[
             tuple[str, str],
             dict[str, Any],
@@ -13830,21 +14746,149 @@ class PhoenixGuardWindowTrackingAdapter:
         surface = image.convert("RGB")
         source_row = _mapping_to_dict(source)
         metadata = _mapping_to_dict(source_row.get("metadata", {}))
+        bracket_identity = _edge_tab_bracket_identity_surface_v3(
+            surface,
+            source_row,
+        )
+        if bracket_identity:
+            # This exact-capture proof is constant-time relative to OCR and is
+            # already bound to the uploaded frame's pixels.  Returning here
+            # prevents duplicate template-bank work in the hot stream path.
+            return bracket_identity
         window_identity = _mapping_to_dict(metadata.get("window", {}))
-        try:
-            visual_timeframe = _mapping_to_dict(
-                self._detect_timeframe_selector(surface)
-            )
-            visual_market = _mapping_to_dict(
-                self._detect_market_selector(
-                    surface,
-                    timeframe_selector=visual_timeframe,
+        visual_timeframe: dict[str, Any] = {}
+        visual_market: dict[str, Any] = {}
+        identity_probe_attempts = 1
+        identity_probe_recovered = False
+        identity_probe_error = ""
+        identity_probe_rebuilt_caches: list[str] = []
+        with self._visual_identity_detection_lock:
+            try:
+                visual_timeframe = _mapping_to_dict(
+                    self._detect_timeframe_selector(surface)
                 )
-            )
-        except Exception:
-            LOGGER.debug("Chart identity visual probe failed.", exc_info=True)
-            visual_timeframe = {}
-            visual_market = {}
+            except Exception as exc:
+                identity_probe_error = type(exc).__name__
+                LOGGER.warning(
+                    "Chart timeframe visual probe failed on attempt 1; "
+                    "the same frame will receive one bounded recovery.",
+                    exc_info=True,
+                )
+
+            visual_timeframe_value = str(
+                visual_timeframe.get("value", "") or ""
+            ).strip().upper()
+            if visual_timeframe_value not in _TIMEFRAME_LABELS:
+                with self._identity_template_bank_lock:
+                    cached_timeframe_bank = self.__dict__.get(
+                        "_timeframe_template_bank"
+                    )
+                    cached_ocr_bank = self.__dict__.get(
+                        "_ocr_char_template_bank"
+                    )
+                    timeframe_bank_incomplete = bool(
+                        isinstance(cached_timeframe_bank, Mapping)
+                        and not all(
+                            cached_timeframe_bank.get(label)
+                            for label in _TIMEFRAME_LABELS
+                        )
+                    )
+                    ocr_bank_incomplete = bool(
+                        isinstance(cached_ocr_bank, Mapping)
+                        and not all(
+                            cached_ocr_bank.get(label)
+                            for label in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/.-"
+                        )
+                    )
+                # A legitimate chart-only crop may contain no selector at all.
+                # Do not rebuild thousands of healthy glyph templates on every
+                # streamed frame. Retry only a raised detector error or a
+                # demonstrably empty/incomplete process-local cache.
+                recovery_due = bool(
+                    identity_probe_error
+                    or timeframe_bank_incomplete
+                    or ocr_bank_incomplete
+                )
+                if recovery_due:
+                    with self._identity_template_bank_lock:
+                        # ``cached_property`` preserves a value for the whole
+                        # API lifetime.  Rebuild only the two visual glyph
+                        # banks; model, candle, forecast, and Pair DNA state are
+                        # deliberately untouched.
+                        if timeframe_bank_incomplete:
+                            self.__dict__.pop("_timeframe_template_bank", None)
+                            identity_probe_rebuilt_caches.append("timeframe")
+                        if ocr_bank_incomplete:
+                            self.__dict__.pop("_ocr_char_template_bank", None)
+                            identity_probe_rebuilt_caches.append("ocr")
+                    identity_probe_attempts = 2
+                    retry_surface = surface.copy()
+                    try:
+                        visual_timeframe = _mapping_to_dict(
+                            self._detect_timeframe_selector(retry_surface)
+                        )
+                    except Exception as exc:
+                        identity_probe_error = type(exc).__name__
+                        visual_timeframe = {}
+                        LOGGER.warning(
+                            "Chart timeframe visual probe recovery failed on "
+                            "attempt 2; identity remains unconfirmed.",
+                            exc_info=True,
+                        )
+                    finally:
+                        retry_surface.close()
+                    recovered_value = str(
+                        visual_timeframe.get("value", "") or ""
+                    ).strip().upper()
+                    identity_probe_recovered = recovered_value in _TIMEFRAME_LABELS
+
+            try:
+                visual_market = _mapping_to_dict(
+                    self._detect_market_selector(
+                        surface,
+                        timeframe_selector=visual_timeframe,
+                    )
+                )
+            except Exception as exc:
+                identity_probe_error = identity_probe_error or type(exc).__name__
+                LOGGER.warning(
+                    "Chart market visual probe failed; timeframe evidence was "
+                    "preserved and market identity remains unconfirmed.",
+                    exc_info=True,
+                )
+                visual_market = {}
+
+            final_timeframe_value = str(
+                visual_timeframe.get("value", "") or ""
+            ).strip().upper()
+            if final_timeframe_value not in _TIMEFRAME_LABELS:
+                now_monotonic = time.monotonic()
+                if (
+                    now_monotonic
+                    - float(self._identity_probe_warning_monotonic or 0.0)
+                    >= 30.0
+                ):
+                    self._identity_probe_warning_monotonic = now_monotonic
+                    cached_bank = self.__dict__.get("_timeframe_template_bank", {})
+                    template_counts = (
+                        {
+                            label: len(cast(Mapping[str, Any], cached_bank).get(label, []))
+                            for label in _TIMEFRAME_LABELS
+                        }
+                        if isinstance(cached_bank, Mapping)
+                        else {}
+                    )
+                    LOGGER.warning(
+                        "Chart timeframe visual probe returned no recognized "
+                        "selector after %s attempt(s): image=%sx%s "
+                        "source_type=%r coordinate_space=%r template_counts=%s",
+                        identity_probe_attempts,
+                        surface.width,
+                        surface.height,
+                        str(source_row.get("source_type", "") or ""),
+                        str(source_row.get("coordinate_space", "") or ""),
+                        template_counts,
+                    )
 
         visual_market_value = _complete_fx_market_candidate_v3(
             visual_market.get("value", "")
@@ -13949,8 +14993,17 @@ class PhoenixGuardWindowTrackingAdapter:
                 not identity_conflict and market_value and timeframe_value
             ),
             "identity_conflict": identity_conflict,
+            "identity_probe_attempts": identity_probe_attempts,
+            "identity_probe_recovered": identity_probe_recovered,
+            "identity_probe_error": identity_probe_error,
+            "identity_probe_rebuilt_caches": identity_probe_rebuilt_caches,
             "study_source_only": True,
             "broker_click_safe": False,
+            "market_selector_visual_fingerprint": (
+                _market_selector_visual_fingerprint(surface)
+                if visual_market_value and not identity_conflict
+                else ""
+            ),
             "broker_surface_hash": _surface_signature(surface),
         }
 
@@ -14051,7 +15104,12 @@ class PhoenixGuardWindowTrackingAdapter:
             return np.zeros((1, 1), dtype=np.uint8)
         return (mask > 0).astype(np.uint8)
 
-    def _rank_ocr_characters(self, mask: ArrayND) -> list[tuple[str, float]]:
+    def _rank_ocr_characters(
+        self,
+        mask: ArrayND,
+        *,
+        allowed_labels: Sequence[str] | None = None,
+    ) -> list[tuple[str, float]]:
         normalized = self._normalize_binary_mask(mask)
         if normalized.size == 0 or int(np.sum(normalized > 0)) < 8:
             return []
@@ -14060,8 +15118,15 @@ class PhoenixGuardWindowTrackingAdapter:
         except Exception:
             return []
 
+        allowed = {
+            str(label or "").strip().upper()
+            for label in cast(Sequence[Any], allowed_labels or [])
+            if str(label or "").strip()
+        }
         rankings: list[tuple[str, float]] = []
         for label, templates in self._ocr_char_template_bank.items():
+            if allowed and label not in allowed:
+                continue
             label_best = 0.0
             for template in templates:
                 resized = cv2.resize(
@@ -14167,10 +15232,107 @@ class PhoenixGuardWindowTrackingAdapter:
             white_mask = np.where(gray >= 178, 255, 0).astype(np.uint8)
         return white_mask
 
+    def _split_market_wide_components(
+        self,
+        mask: ArrayND,
+        components: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Split a bounded touching-glyph contour at its vertical valley.
+
+        The live compact broker font can join adjacent ``CA`` pixels at the
+        baseline.  Treat only a component substantially wider than the median
+        glyph as a split candidate, and require two glyph-sized halves plus a
+        sparse central valley.  This keeps naturally wide single letters and
+        toolbar shapes intact.
+        """
+
+        rows = [_mapping_to_dict(row) for row in components]
+        widths = [
+            max(1, int(cast(Sequence[Any], row.get("bbox", []))[2]) - int(cast(Sequence[Any], row.get("bbox", []))[0]))
+            for row in rows
+            if len(cast(Sequence[Any], row.get("bbox", []))) >= 4
+        ]
+        if len(widths) < 3:
+            return rows
+        median_width = float(np.median(np.asarray(widths, dtype=np.float32)))
+        minimum_half = max(3, int(round(median_width * 0.52)))
+        split_threshold = max(12, int(round(median_width * 1.65)))
+
+        def split_row(
+            row: Mapping[str, Any],
+            *,
+            depth: int = 0,
+        ) -> list[dict[str, Any]]:
+            bbox = cast(Sequence[Any], row.get("bbox", []))
+            if len(bbox) < 4:
+                return []
+            x0, y0, x1, y1 = [int(value) for value in bbox[:4]]
+            box_width = max(1, x1 - x0)
+            box_height = max(1, y1 - y0)
+            if box_width < split_threshold:
+                return [_mapping_to_dict(row)]
+            crop = np.asarray(mask[y0:y1, x0:x1], dtype=np.uint8)
+            if crop.ndim != 2 or crop.size == 0 or box_width < minimum_half * 2:
+                return [_mapping_to_dict(row)]
+            projection = np.count_nonzero(crop, axis=0)
+            candidate_indexes = range(minimum_half, box_width - minimum_half + 1)
+            split_index = min(
+                candidate_indexes,
+                key=lambda index: (int(projection[index]), abs(float(index) - box_width / 2.0)),
+            )
+            valley_height = int(projection[split_index])
+            maximum_valley_height = max(2, int(round(box_height * 0.35)))
+            left_foreground = int(np.count_nonzero(crop[:, :split_index]))
+            right_foreground = int(np.count_nonzero(crop[:, split_index:]))
+            if (
+                valley_height > maximum_valley_height
+                or left_foreground < box_height
+                or right_foreground < box_height
+            ):
+                return [_mapping_to_dict(row)]
+            children = [
+                {
+                    "bbox": [x0, y0, x0 + split_index, y1],
+                    "split_from_wide_component": True,
+                },
+                {
+                    "bbox": [x0 + split_index, y0, x1, y1],
+                    "split_from_wide_component": True,
+                },
+            ]
+            # A compact three-letter currency code can arrive as one contour
+            # (for example CAD with both CA and AD touching at the baseline).
+            # One split leaves a two-letter child and produces a nine-glyph
+            # sequence that the strict FX decoder correctly refuses. Re-run
+            # the same bounded valley proof on children, at most twice; this
+            # remains deterministic and cannot fan out beyond four pieces.
+            if depth >= 2:
+                return children
+            result: list[dict[str, Any]] = []
+            for child in children:
+                result.extend(split_row(child, depth=depth + 1))
+            return result
+
+        split_rows: list[dict[str, Any]] = []
+        for row in rows:
+            split_rows.extend(split_row(row))
+        return split_rows
+
     def _normalize_market_candidate(self, text: str) -> str:
         return _normalize_fx_market_candidate(text)
 
     def _detect_market_selector(
+        self,
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self._visual_identity_detection_lock:
+            return self._detect_market_selector_unlocked(
+                image,
+                timeframe_selector=timeframe_selector,
+            )
+
+    def _detect_market_selector_unlocked(
         self,
         image: Image.Image,
         timeframe_selector: Mapping[str, Any] | None = None,
@@ -14238,10 +15400,9 @@ class PhoenixGuardWindowTrackingAdapter:
         # y=0 mixed both rows into one OCR stream and produced garbled symbols.
         # Use the same stable selector lane as the visual fingerprint so only
         # the active pair can become chart identity authority.
-        roi_x0 = max(0, min(width - 2, int(round(width * 0.055))))
-        roi_y0 = max(0, min(height - 2, int(round(height * 0.10))))
-        roi_x1 = min(width, max(roi_x0 + 120, int(round(width * 0.21))))
-        roi_y1 = min(height, max(roi_y0 + 36, int(round(height * 0.19))))
+        roi_x0, roi_y0, roi_x1, roi_y1, selector_layout = _market_selector_lane_bounds(image)
+        roi_x1 = min(width, max(roi_x0 + 120, roi_x1))
+        roi_y1 = min(height, max(roi_y0 + 36, roi_y1))
         timeframe_bbox = cast(Sequence[Any], _mapping_to_dict(timeframe_selector).get("bbox", []))
         if len(timeframe_bbox) >= 4:
             try:
@@ -14273,6 +15434,7 @@ class PhoenixGuardWindowTrackingAdapter:
         if len(components) < 3:
             return {}
 
+        components = self._split_market_wide_components(mask, components)
         components.sort(key=lambda item: int(cast(Sequence[Any], item["bbox"])[0]))
         median_height = float(
             np.median(
@@ -14312,14 +15474,35 @@ class PhoenixGuardWindowTrackingAdapter:
         character_rankings: list[list[tuple[str, float]]] = []
         previous_right = -1
         overall_bbox = [width, height, 0, 0]
-        for row in filtered:
+        glyph_count = len(filtered)
+        for glyph_index, row in enumerate(filtered):
             bbox = cast(Sequence[Any], row["bbox"])
             x0, y0, x1, y1 = [int(value) for value in bbox[:4]]
             # Contours already bound the complete anti-aliased glyph.  Adding
             # a one-pixel dark border made compact UI letters such as P look
             # like punctuation after template resizing (GBP -> GB.).
             crop = mask[max(0, y0): min(mask.shape[0], y1), max(0, x0): min(mask.shape[1], x1)]
-            rankings = self._rank_ocr_characters(crop)
+            allowed_labels: list[str] = []
+            if glyph_count in {7, 10}:
+                if glyph_index == 3:
+                    allowed_labels = ["/"]
+                elif glyph_count == 10 and glyph_index >= 7:
+                    allowed_labels = ["OTC"[glyph_index - 7]]
+                elif glyph_index in {0, 1, 2, 4, 5, 6}:
+                    currency_position = (
+                        glyph_index if glyph_index < 3 else glyph_index - 4
+                    )
+                    allowed_labels = sorted(
+                        {
+                            code[currency_position]
+                            for code in _FX_CURRENCY_CODES
+                            if len(code) == 3
+                        }
+                    )
+            rankings = self._rank_ocr_characters(
+                crop,
+                allowed_labels=allowed_labels,
+            )
             if not rankings:
                 continue
             label, best_score = rankings[0]
@@ -14367,12 +15550,59 @@ class PhoenixGuardWindowTrackingAdapter:
             "domain_corrected": domain_corrected,
             "domain_score": round(float(domain_score), 4),
             "domain_margin": round(float(domain_margin), 4),
+            "selector_layout": selector_layout,
         }
 
     def study(self, image: Image.Image, *, session_payload: Mapping[str, Any] | None = None) -> TrackingStudy:
+        study_session_payload = (
+            _mapping_to_dict(session_payload)
+            if session_payload is not None
+            else {}
+        )
         study_started_at = time.monotonic()
+        study_call_started_at = _float_or(
+            study_session_payload.get("_study_call_started_monotonic_v3"),
+            0.0,
+        )
+        study_deadline = _float_or(
+            study_session_payload.get("_study_deadline_monotonic_v3"),
+            0.0,
+        )
+        study_budget_sec = max(
+            0.0,
+            _float_or(
+                study_session_payload.get("_study_live_latency_budget_sec_v3"),
+                0.0,
+            ),
+        )
+        study_budget_enforced = bool(
+            study_session_payload.get("_study_latency_budget_enforced_v3") is True
+            and study_call_started_at > 0.0
+            and study_deadline > study_call_started_at
+            and study_budget_sec > 0.0
+        )
+        adapter_entry_delay_sec = (
+            max(0.0, study_started_at - study_call_started_at)
+            if study_call_started_at > 0.0
+            else 0.0
+        )
         study_stage_timings: list[dict[str, Any]] = []
         last_study_mark = study_started_at
+
+        def enforce_live_study_budget(stage: str, *, now_mark: float | None = None) -> None:
+            if not study_budget_enforced:
+                return
+            checked_at = float(
+                now_mark if now_mark is not None else time.monotonic()
+            )
+            if checked_at <= study_deadline:
+                return
+            raise LiveStudyLatencyBudgetExceeded(
+                stage=stage,
+                elapsed_sec=max(0.0, checked_at - study_call_started_at),
+                budget_sec=study_budget_sec,
+                adapter_entry_delay_sec=adapter_entry_delay_sec,
+            )
 
         def mark_study_stage(stage: str) -> None:
             nonlocal last_study_mark
@@ -14386,13 +15616,22 @@ class PhoenixGuardWindowTrackingAdapter:
             )
             last_study_mark = now_mark
 
+            enforce_live_study_budget(stage, now_mark=now_mark)
+
+        # The caller stamps the deadline immediately before dispatch. If this
+        # worker was starved by another CPU-bound model thread for minutes, do
+        # not begin image conversion and later publish an already-stale study.
+        enforce_live_study_budget("adapter_entry", now_mark=study_started_at)
         surface = image.convert("RGB")
         mark_study_stage("convert_surface")
         fast_selectors = (
             session_payload is not None
             and str(os.getenv("PHOENIXGUARD_LIVE_FAST_SELECTORS", "1") or "").strip().lower() not in {"0", "false", "off", "no"}
         )
-        selector_session_payload = _mapping_to_dict(session_payload) if session_payload is not None else {}
+        selector_session_payload = study_session_payload
+        source_binding_token_v3 = _locked_stream_source_token_v3(
+            selector_session_payload
+        )
         selector_execution_controls = _normalize_execution_controls(
             _mapping_to_dict(selector_session_payload.get("execution_controls", {}))
             if session_payload is not None
@@ -14415,17 +15654,77 @@ class PhoenixGuardWindowTrackingAdapter:
             "PHOENIXGUARD_LIVE_SKIP_MISSING_MARKET_SELECTOR",
             True,
         )
-        scan_selector_when_unknown = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_WHEN_UNKNOWN", False)
+        # Unknown identity must be actively resolved.  The former False default
+        # made the fast path persist ``selector_identity_rebind_pending``
+        # forever after one missed read.
+        scan_selector_when_unknown = _env_bool(
+            "PHOENIXGUARD_LIVE_SCAN_SELECTOR_WHEN_UNKNOWN",
+            True,
+        )
         previous_tracking: dict[str, Any] = {}
         previous_signal: dict[str, Any] = {}
-        market_selector_fingerprint = _market_selector_visual_fingerprint(surface)
+        attested_market_selector, attested_timeframe_selector = (
+            _reconcile_wgc_broker_identity_attestation_v3(
+                {},
+                {},
+                selector_session_payload,
+                selector_execution_controls,
+            )
+        )
+        attested_identity_ready = bool(
+            _complete_fx_market_candidate_v3(
+                attested_market_selector.get("value", "")
+            )
+            and str(attested_timeframe_selector.get("value", "") or "")
+            .strip()
+            .upper()
+            in _TIMEFRAME_LABELS
+        )
+        attested_market_fingerprint = str(
+            attested_market_selector.get(
+                "market_selector_visual_fingerprint",
+                "",
+            )
+            or ""
+        ).strip()
+        # The study plane is usually a candle-only crop.  Its top-left pixels
+        # are not the pair selector and must never drive pair-switch state.
+        # Prefer the fingerprint proven on this frame's full broker surface.
+        market_selector_fingerprint = (
+            attested_market_fingerprint
+            or _market_selector_visual_fingerprint(surface)
+        )
         previous_market_selector_fingerprint = ""
         market_selector_visual_changed = False
         market_selector_rebind_required = False
         previous_market_selector_rebind_pending = False
+        previous_source_binding_token_v3 = ""
+        source_binding_changed_v3 = False
         if fast_selectors:
             previous_tracking = _mapping_to_dict(selector_session_payload.get("tracking_summary", {}))
             previous_signal = _mapping_to_dict(selector_session_payload.get("latest_signal", {}))
+            previous_source_binding_token_v3 = str(
+                previous_signal.get(
+                    "source_binding_token_v3",
+                    previous_tracking.get("source_binding_token_v3", ""),
+                )
+                or ""
+            ).strip()
+            previous_study_present = bool(
+                previous_source_binding_token_v3
+                or previous_tracking.get("chart_valid", False)
+                or previous_tracking.get("market_identity_confirmed", False)
+                or previous_tracking.get("timeframe_identity_confirmed", False)
+            )
+            source_binding_changed_v3 = bool(
+                source_binding_token_v3
+                and source_binding_token_v3
+                != previous_source_binding_token_v3
+                and previous_study_present
+            )
+            force_market_selector_scan = bool(
+                force_market_selector_scan or source_binding_changed_v3
+            )
             previous_market_normalizer_version = str(
                 previous_signal.get(
                     "market_normalizer_version",
@@ -14486,6 +15785,15 @@ class PhoenixGuardWindowTrackingAdapter:
             cached_market = _normalize_fx_market_candidate(
                 previous_signal.get("market", previous_tracking.get("detected_market", selector_session_payload.get("market", "")))
             )
+            attested_market = _complete_fx_market_candidate_v3(
+                attested_market_selector.get("value", "")
+            )
+            attested_pair_changed = bool(
+                attested_identity_ready
+                and cached_market
+                and attested_market
+                and cached_market != attested_market
+            )
             cached_market_reusable = bool(
                 cached_market
                 and previous_market_selector_fingerprint
@@ -14495,6 +15803,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 and not force_market_selector_scan
             )
             timeframe_selector: dict[str, Any] = (
+                dict(attested_timeframe_selector)
+                if attested_identity_ready
+                else
                 {
                     "value": cached_timeframe,
                     "source": "live_cached_selector",
@@ -14504,6 +15815,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 else {}
             )
             market_selector: dict[str, Any] = (
+                dict(attested_market_selector)
+                if attested_identity_ready
+                else
                 {
                     "value": cached_market,
                     "source": "live_cached_selector",
@@ -14515,6 +15829,24 @@ class PhoenixGuardWindowTrackingAdapter:
                 if cached_market_reusable
                 else {}
             )
+            if attested_identity_ready:
+                market_selector.update(
+                    {
+                        "market_selector_visual_fingerprint": market_selector_fingerprint,
+                        "previous_market_selector_visual_fingerprint": previous_market_selector_fingerprint,
+                        "market_selector_visual_changed": bool(
+                            market_selector_visual_changed or attested_pair_changed
+                        ),
+                        "market_selector_rebind_required": False,
+                        "studying_new_pair": False,
+                        "market_selector_identity_rebound": bool(
+                            attested_pair_changed
+                            or previous_market_selector_rebind_pending
+                            or not cached_market
+                        ),
+                        "market_selector_pair_changed": attested_pair_changed,
+                    }
+                )
             if not timeframe_selector:
                 timeframe_selector = self._detect_timeframe_selector(surface)
             if not market_selector:
@@ -14670,8 +16002,19 @@ class PhoenixGuardWindowTrackingAdapter:
                 market_selector["market_selector_visual_changed"] = bool(market_selector_visual_changed)
                 market_selector["market_selector_rebind_required"] = bool(market_selector_rebind_required)
         else:
-            timeframe_selector = self._detect_timeframe_selector(surface)
-            market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
+            timeframe_selector = (
+                dict(attested_timeframe_selector)
+                if attested_identity_ready
+                else self._detect_timeframe_selector(surface)
+            )
+            market_selector = (
+                dict(attested_market_selector)
+                if attested_identity_ready
+                else self._detect_market_selector(
+                    surface,
+                    timeframe_selector=timeframe_selector,
+                )
+            )
             if market_selector:
                 market_selector["market_selector_visual_fingerprint"] = market_selector_fingerprint
                 market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
@@ -14690,13 +16033,34 @@ class PhoenixGuardWindowTrackingAdapter:
         cached_chart_bbox_enabled = (
             fast_selectors
             and fast_locked_context
+            and not source_binding_changed_v3
             and str(os.getenv("PHOENIXGUARD_LIVE_CACHED_CHART_BBOX", "1") or "").strip().lower() not in {"0", "false", "off", "no"}
         )
         cached_chart_region = _mapping_to_dict(previous_tracking.get("chart_region", previous_tracking.get("display_region", {})))
         cached_bbox_raw = cached_chart_region.get("pixel_bbox", [])
+        study_focus_region = _mapping_to_dict(
+            selector_session_payload.get("_study_focus_region", {})
+        )
+        authoritative_edge_tab_roi = (
+            str(study_focus_region.get("study_surface_contract", "") or "")
+            .strip()
+            .lower()
+            == "authoritative_edge_tab_roi_v1"
+        )
         chart_bbox: tuple[int, int, int, int] | list[int]
         chart_confidence: float
-        if (
+        if authoritative_edge_tab_roi:
+            # Edge already cropped this frame to the operator-selected chart
+            # plane and the service preserved that exact plane. Re-running the
+            # candle-based chart detector here costs several seconds and can
+            # infer a narrow sub-region during a pair transition, which then
+            # cramps public overlay geometry. Broker controls remain excluded
+            # later by _chart_space_broker_exclusion_boxes; this only removes
+            # a redundant second crop.
+            chart_bbox = [0, 0, int(surface.width), int(surface.height)]
+            chart_confidence = 1.0
+            mark_study_stage("authoritative_edge_tab_roi")
+        elif (
             cached_chart_bbox_enabled
             and isinstance(cached_bbox_raw, Sequence)
             and not isinstance(cached_bbox_raw, (str, bytes, bytearray))
@@ -14771,13 +16135,12 @@ class PhoenixGuardWindowTrackingAdapter:
             "enabled": False,
             "history_reused": False,
             "edge_recomputed": False,
-            "full_refresh_reason": "not_live_resized",
+            "full_refresh_reason": "incremental_disabled",
             "reuse_count": 0,
         }
         incremental_cache_key = ""
         incremental_enabled = bool(
             fast_locked_context
-            and candle_image_resized
             and _env_bool("PHOENIXGUARD_LIVE_INCREMENTAL_CANDLE_EXTRACTION", True)
         )
         if incremental_enabled:
@@ -14885,6 +16248,16 @@ class PhoenixGuardWindowTrackingAdapter:
             session_payload=session_payload,
             broker_exclusion_boxes=broker_exclusion_boxes,
         )
+        for identity_payload in (tracking_summary, latest_signal):
+            identity_payload["source_binding_token_v3"] = (
+                source_binding_token_v3
+            )
+            identity_payload["previous_source_binding_token_v3"] = (
+                previous_source_binding_token_v3
+            )
+            identity_payload["source_binding_changed_v3"] = bool(
+                source_binding_changed_v3
+            )
         candle_extraction_summary = {
             "mode": candle_extraction_mode,
             "fast_locked_context": bool(fast_locked_context),
@@ -14913,6 +16286,21 @@ class PhoenixGuardWindowTrackingAdapter:
         mark_study_stage("render_overlay")
         tracking_summary["study_stage_timings"] = study_stage_timings
         latest_signal["study_stage_timings"] = study_stage_timings
+        study_timing_contract_v3 = {
+            "schema_version": "PG_LIVE_STUDY_TIMING_V3",
+            "budget_enforced": study_budget_enforced,
+            "budget_sec": round(study_budget_sec, 3),
+            "adapter_entry_delay_sec": round(adapter_entry_delay_sec, 3),
+            "adapter_internal_elapsed_sec": round(
+                max(0.0, time.monotonic() - study_started_at), 3
+            ),
+            "status": "COMPLETED_WITHIN_BUDGET",
+            "study_authority": False,
+            "decision_authority": False,
+            "execution_authority": False,
+        }
+        tracking_summary["study_timing_contract_v3"] = dict(study_timing_contract_v3)
+        latest_signal["study_timing_contract_v3"] = dict(study_timing_contract_v3)
         tracking_summary["chart_region"] = chart_region
         tracking_summary["display_region"] = chart_region
         return TrackingStudy(
@@ -18195,13 +19583,28 @@ class PhoenixGuardWindowTrackingAdapter:
     ) -> str:
         session = _mapping_to_dict(session_payload)
         session_id = str(session.get("session_id", "") or "").strip()
+        source_binding_token = _locked_stream_source_token_v3(session)
+        capture_source = _normalize_capture_source_v3(
+            session.get("capture_source_v3", {})
+        )
+        leased_external_source = (
+            str(capture_source.get("source_type", "") or "").strip(),
+            str(capture_source.get("coordinate_space", "") or "").strip(),
+        ) in {
+            ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+            ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+        }
         selector_fingerprint = str(
             market_selector.get("market_selector_visual_fingerprint", "") or ""
         ).strip()
-        # Only the stable selector-v2 fingerprint is pair authority.  Older
+        # Only stable selector-v2/v3 fingerprints are pair authority.  Older
         # hashes included moving chart/payout pixels and could accidentally
         # reuse one pair's candle field for another.
-        if not session_id or not selector_fingerprint.startswith("selector_v2_"):
+        if not session_id or not selector_fingerprint.startswith(
+            ("selector_v2_", "selector_v3_")
+        ):
+            return ""
+        if leased_external_source and not source_binding_token:
             return ""
         if bool(session.get("_force_market_selector_scan_once", False)):
             return ""
@@ -18211,15 +19614,18 @@ class PhoenixGuardWindowTrackingAdapter:
             return ""
         timeframe = str(timeframe_selector.get("value", "") or "M5").strip().upper()
         market = _normalize_fx_market_candidate(market_selector.get("value", "")) or "UNKNOWN"
-        return "|".join(
+        identity_parts = [session_id]
+        if source_binding_token:
+            identity_parts.append(source_binding_token)
+        identity_parts.extend(
             (
-                session_id,
                 timeframe,
                 market,
                 selector_fingerprint,
                 f"{int(image_size[0])}x{int(image_size[1])}",
             )
         )
+        return "|".join(identity_parts)
 
     def _remember_live_candle_field(
         self,
@@ -20593,6 +21999,39 @@ class PhoenixGuardWindowTrackingAdapter:
         timeframe_key = str(timeframe or "M5").strip().upper()
         with self._scene_forecast_lock:
             context_key = (pair, timeframe_key)
+            normalized_source_token = str(stream_source_token or "").strip()
+            previous_source_token = str(
+                self._scene_source_tokens.get(context_key, "") or ""
+            ).strip()
+            source_binding_changed = bool(
+                normalized_source_token
+                and previous_source_token
+                and normalized_source_token != previous_source_token
+            )
+            if source_binding_changed:
+                # A new capture lease/selection is a new causal observation
+                # stream even when it displays the same pair and timeframe.
+                # Remove only process-local live state; durable Pair DNA stays
+                # available as historical study and cannot become current
+                # overlay/timing authority without fresh closed candles.
+                self._scene_candle_identity_states.pop(context_key, None)
+                self._scene_event_sequences.pop(context_key, None)
+                for stale_key in [
+                    key
+                    for key in self._scene_forecast_cache
+                    if key[:2] == context_key
+                ]:
+                    self._scene_forecast_cache.pop(stale_key, None)
+                self._scene_belief_tracker.reset(
+                    pair=pair,
+                    timeframe=timeframe_key,
+                    reason="CAPTURE_SOURCE_BINDING_CHANGED",
+                    observed_at_epoch=capture_epoch,
+                    source_id=normalized_source_token,
+                    frame_id=max(0, int(frame_id)),
+                )
+            if normalized_source_token:
+                self._scene_source_tokens[context_key] = normalized_source_token
             previous_key, previous_sequence = self._scene_event_sequences.get(
                 context_key,
                 ("", -1),
@@ -21089,6 +22528,8 @@ class PhoenixGuardWindowTrackingAdapter:
                         or 0.0
                     ),
                     "belief_tracker_checkpoint": self._scene_belief_checkpoint(),
+                    "stream_source_token_v3": normalized_source_token,
+                    "source_binding_changed_v3": source_binding_changed,
                     "cache_hit": False,
                 }
             )
@@ -25516,6 +26957,17 @@ class PhoenixGuardWindowTrackingAdapter:
         overlay_geometry = _mapping_to_dict(tracking_summary.get("overlay_geometry", {}))
         layer_visibility = _mapping_to_dict(overlay_geometry.get("layer_visibility", {}))
         diagnostics_visible = bool(layer_visibility.get("diagnostics", False)) or bool(overlay_geometry.get("debug_enabled", False))
+
+        # The operator workspace owns the canonical, toggleable semantic
+        # overlay plane.  Keeping a second set of support, structure, and H*
+        # diagnostics permanently painted into the broker raster makes those
+        # marks impossible to hide and duplicates stale geometry after an
+        # instrument switch.  Preserve the broker pixels exactly for normal
+        # live use; the legacy renderer remains available only when an
+        # explicit diagnostics/debug layer is requested.
+        if not diagnostics_visible:
+            return surface_image.convert("RGB")
+
         chart_width = max(1, int(chart_box[2] - chart_box[0]))
         chart_height = max(1, int(chart_box[3] - chart_box[1]))
         chart_radius = max(12, min(20, int(round(min(chart_width, chart_height) * 0.018))))
@@ -26325,11 +27777,45 @@ class PhoenixGuardWindowTrackingAdapter:
         )
 
     def _detect_timeframe_selector(self, image: Image.Image) -> dict[str, Any]:
+        with self._visual_identity_detection_lock:
+            return self._detect_timeframe_selector_unlocked(image)
+
+    def _detect_timeframe_selector_unlocked(
+        self,
+        image: Image.Image,
+    ) -> dict[str, Any]:
         arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
         if arr.ndim != 3:
             return {}
         height, width = int(arr.shape[0]), int(arr.shape[1])
         if height < 80 or width < 120:
+            return {}
+
+        with self._identity_template_bank_lock:
+            template_bank = self._timeframe_template_bank
+            template_bank_ready = bool(
+                template_bank
+                and all(template_bank.get(label) for label in _TIMEFRAME_LABELS)
+            )
+            if not template_bank_ready:
+                # ``cached_property`` also caches an empty dict returned after
+                # a transient initialization error. Remove only that failed
+                # value and retry once; a genuine dependency failure remains
+                # fail-closed and is retried by a later streamed frame.
+                self.__dict__.pop("_timeframe_template_bank", None)
+                template_bank = self._timeframe_template_bank
+                template_bank_ready = bool(
+                    template_bank
+                    and all(
+                        template_bank.get(label)
+                        for label in _TIMEFRAME_LABELS
+                    )
+                )
+        if not template_bank_ready:
+            LOGGER.warning(
+                "Timeframe selector template bank is unavailable; "
+                "the current frame remains identity-unconfirmed."
+            )
             return {}
 
         roi_x1 = min(width, max(112, int(round(width * 0.42))))
@@ -26339,6 +27825,7 @@ class PhoenixGuardWindowTrackingAdapter:
         # through the live M5 chip before OCR could inspect it.
         roi_y1 = min(height, max(56, int(round(height * 0.34))))
         roi = arr[:roi_y1, :roi_x1]
+        _lane_x0, lane_y0, _lane_x1, lane_y1, selector_layout = _market_selector_lane_bounds(image)
         candidates: list[dict[str, Any]] = []
         min_confidence_by_label: dict[str, float] = {
             "M1": 0.56,
@@ -26355,19 +27842,83 @@ class PhoenixGuardWindowTrackingAdapter:
             import cv2  # type: ignore[import-not-found]
 
             hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
-            blue_mask = np.where(
+            blue_pixels = (
                 (hsv[:, :, 0] >= 88)
                 & (hsv[:, :, 0] <= 132)
                 & (hsv[:, :, 1] >= 100)
-                & (hsv[:, :, 2] >= 90),
-                255,
-                0,
-            ).astype(np.uint8)
+                & (hsv[:, :, 2] >= 90)
+            )
+            if selector_layout == "edge_letterboxed_tab":
+                # Edge tabCapture supplies the first-generation JPEG raster.
+                # Re-encoding that same frame for the dashboard can raise the
+                # tiny selector chip above the strict saturation threshold,
+                # which made saved-artifact replay pass while the live probe
+                # failed. Accept lower saturation only inside the proven
+                # selector lane; exact glyph topology and anchor scoring still
+                # have to identify the timeframe before this becomes evidence.
+                relaxed_blue = (
+                    (hsv[:, :, 0] >= 80)
+                    & (hsv[:, :, 0] <= 145)
+                    & (hsv[:, :, 1] >= 45)
+                    # Keep the desaturated live chip, but never absorb the
+                    # low-brightness blue toolbar behind it.  Merging those
+                    # pixels into one wide contour hid the exact M5 glyph on
+                    # a full-viewport Edge capture even though its strict-blue
+                    # component was valid and anchored correctly.
+                    & (hsv[:, :, 2] >= 90)
+                )
+                selector_lane_mask = np.zeros_like(relaxed_blue, dtype=bool)
+                relaxed_x0 = max(0, int(round(float(roi.shape[1]) * 0.28)))
+                relaxed_x1 = min(
+                    int(roi.shape[1]),
+                    max(relaxed_x0 + 1, int(round(float(roi.shape[1]) * 0.52))),
+                )
+                relaxed_y0 = max(0, int(lane_y0))
+                relaxed_y1 = min(
+                    int(roi.shape[0]),
+                    max(relaxed_y0 + 1, int(lane_y1)),
+                )
+                selector_lane_mask[
+                    relaxed_y0:relaxed_y1,
+                    relaxed_x0:relaxed_x1,
+                ] = True
+                blue_pixels = blue_pixels | (
+                    relaxed_blue & selector_lane_mask
+                )
+            blue_mask = np.where(blue_pixels, 255, 0).astype(np.uint8)
             kernel = np.ones((3, 3), dtype=np.uint8)
             blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
             contours, _hier = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            anchor_x = float(roi.shape[1]) * 0.46
-            anchor_ys = (float(height) * 0.13, float(height) * 0.255)
+            if selector_layout == "edge_letterboxed_tab":
+                # The active timeframe chip is the first compact blue control
+                # immediately after the selected-market control.  Notification
+                # badges farther right share the same blue/white palette and
+                # can resemble M3 after downsampling, but they are not chart
+                # identity.  Edge tab capture has a stable content coordinate
+                # contract, so require the proven selector anchor instead of
+                # letting those later badges compete on glyph score alone.
+                # The selected timeframe control sits immediately after the
+                # selected-pair box at about 18% of the full broker width. The
+                # OCR ROI is 42% of that width, so its stable local anchor is
+                # about 44%, not 33%. The older anchor landed on the pair box
+                # and rejected a clearly visible M5 chip in letterboxed Edge
+                # tabCapture frames before glyph scoring could publish it.
+                primary_anchor_x = float(roi.shape[1]) * 0.44
+                anchor_xs = (primary_anchor_x,)
+                trusted_anchor_tolerance_x = max(
+                    22.0,
+                    float(roi.shape[1]) * 0.035,
+                )
+                lane_height = max(1.0, float(lane_y1 - lane_y0))
+                anchor_ys = (
+                    float(lane_y0) + lane_height * 0.35,
+                    float(lane_y0) + lane_height * 0.50,
+                )
+            else:
+                primary_anchor_x = 0.0
+                trusted_anchor_tolerance_x = 0.0
+                anchor_xs = (float(roi.shape[1]) * 0.46,)
+                anchor_ys = (float(height) * 0.13, float(height) * 0.255)
             for contour in contours:
                 x, y, box_w, box_h = cv2.boundingRect(contour)
                 area = int(box_w * box_h)
@@ -26398,6 +27949,14 @@ class PhoenixGuardWindowTrackingAdapter:
                     continue
                 center_x = x + box_w * 0.5
                 center_y = y + box_h * 0.5
+                anchor_distance_x = min(
+                    abs(center_x - anchor_x) for anchor_x in anchor_xs
+                )
+                if (
+                    selector_layout == "edge_letterboxed_tab"
+                    and anchor_distance_x > trusted_anchor_tolerance_x
+                ):
+                    continue
                 position_score = max(
                     _clip01(
                         1.0
@@ -26407,6 +27966,7 @@ class PhoenixGuardWindowTrackingAdapter:
                         )
                         * 2.40
                     )
+                    for anchor_x in anchor_xs
                     for anchor_y in anchor_ys
                 )
                 if position_score < 0.42:
@@ -26420,6 +27980,10 @@ class PhoenixGuardWindowTrackingAdapter:
                         "confidence": score,
                         "bbox": [int(x), int(y), int(x + box_w), int(y + box_h)],
                         "source": "selector_chip",
+                        "selector_layout": selector_layout,
+                        "selector_anchor_distance_x": round(
+                            float(anchor_distance_x), 3
+                        ),
                     }
                 )
         except Exception:
@@ -26611,7 +28175,14 @@ class PhoenixGuardWindowTrackingAdapter:
         def side_stroke(rows: NDArray[np.uint8], *, right: bool) -> float:
             if rows.size == 0:
                 return 0.0
-            edge_width = min(2, int(rows.shape[1]))
+            # A live 1080p Pocket Option digit is commonly only three pixels
+            # wide after JPEG antialiasing.  Treating two of those columns as
+            # the "right edge" makes the horizontal top bar of a real 5 look
+            # like the upper-right vertical stroke of 3.  Use a single edge
+            # column for three/four-pixel digits; wider rendered labels retain
+            # the two-column tolerance needed for font antialiasing.
+            digit_columns = int(rows.shape[1])
+            edge_width = 1 if digit_columns <= 4 else min(2, digit_columns)
             edge = rows[:, -edge_width:] if right else rows[:, :edge_width]
             return _array_mean_float(np.any(edge > 0, axis=1))
 
@@ -26664,6 +28235,22 @@ class PhoenixGuardWindowTrackingAdapter:
 
         if int(np.sum(text_mask > 0)) < 14:
             return "", 0.0
+
+        # The live Pocket Option M1/M3/M5 chip is only about five to seven
+        # pixels high.  Its audited bar/stroke topology is more informative
+        # than thousands of resized font comparisons, and it does not depend
+        # on a process-global OpenCV glyph bank.  Resolve only these genuinely
+        # tiny masks here; larger labels continue through the full template
+        # ensemble below.
+        shape_label, shape_confidence = self._compact_timeframe_shape_hint(
+            text_mask
+        )
+        if (
+            shape_label
+            and int(text_mask.shape[0]) <= 9
+            and int(text_mask.shape[1]) <= 20
+        ):
+            return shape_label, shape_confidence
 
         best_label = ""
         best_score = 0.0
@@ -26801,7 +28388,6 @@ class PhoenixGuardWindowTrackingAdapter:
                 second_best = label_best
         margin = max(0.0, best_score - second_best)
         confidence = _clip01(0.76 * best_score + 0.34 * margin)
-        shape_label, shape_confidence = self._compact_timeframe_shape_hint(text_mask)
         if shape_label and shape_confidence > confidence:
             return shape_label, shape_confidence
         return best_label, confidence
@@ -26918,6 +28504,22 @@ class ContinuousWindowTrackerService:
         self._cpu_stream_observer_factory = cpu_stream_observer_factory
         self._next_capture_epoch: dict[str, float] = {}
         self._last_capture_time: dict[str, float] = {}
+        # Source transport heartbeats are deliberately process-local and tiny.
+        # Rewriting the multi-megabyte session snapshot every few seconds would
+        # make liveness compete with model publication.  The current lease tuple
+        # fences each entry, and public payload construction overlays only a
+        # matching, still-fresh heartbeat.
+        self._external_source_transport_heartbeats: dict[str, dict[str, Any]] = {}
+        # Hot lease validation must not parse the multi-megabyte session on
+        # every extension heartbeat.  Entries are fenced by the authoritative
+        # session file stat and mirrored in a tiny restart-safe sidecar.
+        #
+        # This cache has its own lock because session commits refresh it after
+        # taking the per-session commit lock.  Reusing the service-wide lock
+        # here creates an AB/BA deadlock when a source-control request holds the
+        # service lock while loading that same session.
+        self._external_source_lease_cache_lock_v3 = threading.RLock()
+        self._external_source_lease_cache_v3: dict[str, dict[str, Any]] = {}
         self._model_councils: dict[str, ModelCouncilV3] = {}
         self._signal_theses: dict[str, dict[str, Any]] = {}
         self._active_studies: set[str] = set()
@@ -29501,6 +31103,9 @@ class ContinuousWindowTrackerService:
             "decision_valid_until_epoch": _float_or(raw.get("decision_valid_until_epoch", 0.0), 0.0),
             "cpu_stream_v3": _mapping_to_dict(raw.get("cpu_stream_v3", {})),
             "capture_source_v3": capture_source_v3,
+            "current_chart_identity_v3": _mapping_to_dict(
+                raw.get("current_chart_identity_v3", {})
+            ),
             "external_frame_feed": _mapping_to_dict(raw.get("external_frame_feed", {})),
             "external_evidence_lineage_v3": _mapping_to_dict(
                 raw.get("external_evidence_lineage_v3", {})
@@ -29930,7 +31535,12 @@ class ContinuousWindowTrackerService:
             payload = self._require_session(normalized_session_id)
             previous = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
             if conditional_claim:
-                current_public = _public_capture_source_v3(previous)
+                current_public = _public_capture_source_v3(
+                    self._capture_source_with_transport_heartbeat_v3(
+                        normalized_session_id,
+                        previous,
+                    )
+                )
                 expected_state = str(expected_source.get("state", "") or "").strip().upper()
                 if expected_state == "KILLED":
                     raise ExternalSourceLeaseError(
@@ -30027,6 +31637,10 @@ class ContinuousWindowTrackerService:
             payload["external_frame_feed"] = {}
             payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
             payload["__control_write_v3"] = True
+            self._external_source_transport_heartbeats.pop(
+                normalized_session_id,
+                None,
+            )
             try:
                 self._display_state_path(normalized_session_id).unlink(missing_ok=True)
             except OSError:
@@ -30043,8 +31657,7 @@ class ContinuousWindowTrackerService:
         source_generation: int,
         source_lease_id: str,
     ) -> dict[str, Any]:
-        payload = self._require_session(session_id)
-        source = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+        source = self._external_source_lease_snapshot_v3(session_id)
         state = str(source.get("state", "NO_SOURCE") or "NO_SOURCE").upper()
         if state == "KILLED":
             return {
@@ -30135,6 +31748,394 @@ class ContinuousWindowTrackerService:
                 reason_code="SOURCE_SUPERSEDED",
                 message="This frame belongs to an old, mismatched, or inactive chart source.",
             )
+
+    @staticmethod
+    def _transport_heartbeat_matches_source_v3(
+        heartbeat: Mapping[str, Any],
+        source: Mapping[str, Any],
+    ) -> bool:
+        row = _mapping_to_dict(heartbeat)
+        current = _normalize_capture_source_v3(source)
+        return bool(
+            row
+            and str(row.get("source_id", "") or "")
+            == str(current.get("source_id", "") or "")
+            and str(row.get("sequence_id", "") or "")
+            == str(current.get("sequence_id", "") or "")
+            and int(row.get("source_generation", 0) or 0)
+            == int(current.get("source_generation", 0) or 0)
+            and str(row.get("source_lease_id", "") or "")
+            and secrets.compare_digest(
+                str(row.get("source_lease_id", "") or ""),
+                str(current.get("source_lease_id", "") or ""),
+            )
+        )
+
+    def _capture_source_with_transport_heartbeat_v3(
+        self,
+        session_id: str,
+        source: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Overlay bounded transport liveness without promoting old analysis."""
+
+        current = _normalize_capture_source_v3(source)
+        with self._lock:
+            heartbeat = dict(
+                self._external_source_transport_heartbeats.get(
+                    str(session_id or ""),
+                    {},
+                )
+            )
+        if not self._transport_heartbeat_matches_source_v3(heartbeat, current):
+            return current
+        heartbeat_epoch = _float_or(heartbeat.get("received_epoch", 0.0), 0.0)
+        stale_after_sec = _env_float(
+            "PHOENIXGUARD_SELECTED_SOURCE_STALE_SEC",
+            20.0,
+            5.0,
+        )
+        heartbeat_age_sec = (
+            max(0.0, _now_epoch() - heartbeat_epoch)
+            if heartbeat_epoch > 0.0
+            else float("inf")
+        )
+        if heartbeat_age_sec > stale_after_sec:
+            return current
+
+        stream = _mapping_to_dict(current.get("stream", {}))
+        stream.update(
+            {
+                "transport_heartbeat_count": int(
+                    heartbeat.get("heartbeat_count", 0) or 0
+                ),
+                "last_transport_heartbeat_epoch": heartbeat_epoch,
+                "last_transport_capture_epoch": _float_or(
+                    heartbeat.get("capture_epoch", 0.0),
+                    0.0,
+                ),
+                "transport_frame_age_ms": int(
+                    heartbeat.get("transport_frame_age_ms", 0) or 0
+                ),
+                "decoder_frame_age_ms": int(
+                    heartbeat.get("decoder_frame_age_ms", 0) or 0
+                ),
+                "capture_health_reason": str(
+                    heartbeat.get("capture_health_reason", "") or ""
+                ),
+                "capture_status": str(
+                    heartbeat.get("capture_status", "") or ""
+                ),
+                "presented_frames": int(
+                    heartbeat.get("presented_frames", 0) or 0
+                ),
+                "media_time": _float_or(heartbeat.get("media_time", 0.0), 0.0),
+                "material_change_pending": bool(
+                    heartbeat.get("material_change_pending", False)
+                ),
+                "pending_capture_epoch": _float_or(
+                    heartbeat.get("pending_capture_epoch", 0.0),
+                    0.0,
+                ),
+            }
+        )
+        revocation_identity = _mapping_to_dict(
+            heartbeat.get("revocation_identity_observation_v3", {})
+        )
+        if revocation_identity:
+            stream["revocation_identity_observation_v3"] = revocation_identity
+        else:
+            stream.pop("revocation_identity_observation_v3", None)
+        roi = _mapping_to_dict(current.get("roi", {}))
+        normalized_roi = _normalize_external_source_roi_v3(
+            heartbeat.get("roi_normalized", [])
+        )
+        if normalized_roi:
+            roi["normalized_bbox"] = normalized_roi
+        roi_source_pixels = _mapping_to_dict(
+            heartbeat.get("roi_source_pixels", {})
+        )
+        if roi_source_pixels:
+            roi["source_pixels"] = roi_source_pixels
+        source_width = int(heartbeat.get("source_surface_width", 0) or 0)
+        source_height = int(heartbeat.get("source_surface_height", 0) or 0)
+        if source_width > 0:
+            roi["bound_width"] = source_width
+        if source_height > 0:
+            roi["bound_height"] = source_height
+
+        current.update(
+            {
+                "updated_at": heartbeat_epoch,
+                "last_frame_epoch": heartbeat_epoch,
+                "roi": roi,
+                "stream": stream,
+            }
+        )
+        if heartbeat.get("source_render_fresh") is not True:
+            current.update(
+                {
+                    "state": "STALE",
+                    "decision_usable": False,
+                    "fresh": False,
+                    "reason_code": "SOURCE_TRANSPORT_UNHEALTHY",
+                    "message": (
+                        "The selected chart lease is alive, but its browser "
+                        "capture transport is not presenting a fresh frame."
+                    ),
+                }
+            )
+        elif bool(heartbeat.get("material_change_pending", False)):
+            current.update(
+                {
+                    "state": "VALIDATING",
+                    "decision_usable": False,
+                    "fresh": True,
+                    "reason_code": "FRAME_PENDING",
+                    "message": (
+                        "A newer changed chart frame is queued behind the "
+                        "single analysis worker. The previous decision is not current."
+                    ),
+                }
+            )
+        elif bool(stream.get("processing", False)):
+            current.update(
+                {
+                    "state": "VALIDATING",
+                    "decision_usable": False,
+                    "fresh": True,
+                    "reason_code": "FRAME_PROCESSING",
+                    "message": (
+                        "The chart transport is live and the latest accepted "
+                        "frame is still being studied."
+                    ),
+                }
+            )
+        else:
+            current["fresh"] = True
+        return current
+
+    def capture_source_runtime_snapshot_v3(
+        self,
+        session_id: str,
+        source: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Overlay the current process-local transport pulse on a cached source.
+
+        Compact live-state and operator projections deliberately outlive a
+        single transport pulse.  Their cached public source may no longer carry
+        the private lease, so validate its immutable public ownership tuple
+        against the already lease-fenced heartbeat before temporarily restoring
+        that lease for the internal overlay.  No session document is read or
+        written on this polling path.
+        """
+
+        normalized_session_id = _slugify(
+            str(session_id or "").strip(),
+            "external-frame-feed",
+        )
+        current = _normalize_capture_source_v3(source)
+        with self._lock:
+            heartbeat = dict(
+                self._external_source_transport_heartbeats.get(
+                    normalized_session_id,
+                    {},
+                )
+            )
+        if heartbeat and not self._transport_heartbeat_matches_source_v3(
+            heartbeat,
+            current,
+        ):
+            public_owner_matches = bool(
+                str(heartbeat.get("source_id", "") or "")
+                == str(current.get("source_id", "") or "")
+                and str(heartbeat.get("sequence_id", "") or "")
+                == str(current.get("sequence_id", "") or "")
+                and int(heartbeat.get("source_generation", 0) or 0)
+                == int(current.get("source_generation", 0) or 0)
+                and str(heartbeat.get("source_type", "") or "")
+                == str(current.get("source_type", "") or "")
+                and str(heartbeat.get("coordinate_space", "") or "")
+                == str(current.get("coordinate_space", "") or "")
+            )
+            if public_owner_matches:
+                # The heartbeat entered this map only after the complete lease
+                # tuple was accepted.  Restoring it to this private copy lets a
+                # cached public DTO receive that exact owner's current pulse.
+                current["source_lease_id"] = str(
+                    heartbeat.get("source_lease_id", "") or ""
+                )
+        overlaid = self._capture_source_with_transport_heartbeat_v3(
+            normalized_session_id,
+            current,
+        )
+        return _public_capture_source_v3(overlaid)
+
+    def heartbeat_external_source(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+        capture_epoch_ms: int,
+        source_render_fresh: bool,
+        material_change_pending: bool = False,
+        roi_normalized: Any = None,
+        roi_source_pixels: Mapping[str, Any] | None = None,
+        source_surface_width: int = 0,
+        source_surface_height: int = 0,
+        transport_frame_age_ms: int = 0,
+        decoder_frame_age_ms: int = 0,
+        capture_health_reason: str = "",
+        capture_status: str = "",
+        presented_frames: int = 0,
+        media_time: float = 0.0,
+        identity_observation_v3: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a lease-fenced liveness pulse independently of model work."""
+
+        normalized_session_id = _slugify(
+            str(session_id or "").strip(),
+            "external-frame-feed",
+        )
+        now_epoch = _now_epoch()
+        capture_epoch = (
+            float(capture_epoch_ms) / 1000.0
+            if int(capture_epoch_ms or 0) > 0
+            else now_epoch
+        )
+        if capture_epoch > now_epoch + 5.0:
+            raise ValueError("Source heartbeat capture time is in the future.")
+        max_age_sec = _env_float(
+            "PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC",
+            180.0,
+            5.0,
+        )
+        if now_epoch - capture_epoch > max_age_sec:
+            raise ValueError("Source heartbeat is older than the ingest freshness window.")
+
+        with self._lock:
+            source = self._external_source_lease_snapshot_v3(
+                normalized_session_id
+            )
+            source_type = str(source.get("source_type", "") or "").strip()
+            coordinate_space = str(
+                source.get("coordinate_space", "") or ""
+            ).strip()
+            self._require_external_ingest_lease(
+                source,
+                source_id=str(source_id or "").strip(),
+                sequence_id=str(sequence_id or "").strip(),
+                source_generation=int(source_generation or 0),
+                source_lease_id=str(source_lease_id or "").strip(),
+                source_type=source_type,
+                coordinate_space=coordinate_space,
+            )
+            previous = _mapping_to_dict(
+                self._external_source_transport_heartbeats.get(
+                    normalized_session_id,
+                    {},
+                )
+            )
+            same_lease = self._transport_heartbeat_matches_source_v3(
+                previous,
+                source,
+            )
+            sticky_pending = bool(
+                material_change_pending
+                or (same_lease and previous.get("material_change_pending") is True)
+            )
+            pending_capture_epoch = 0.0
+            if same_lease and previous.get("material_change_pending") is True:
+                pending_capture_epoch = _float_or(
+                    previous.get("pending_capture_epoch", 0.0),
+                    0.0,
+                )
+            if material_change_pending:
+                pending_capture_epoch = max(pending_capture_epoch, capture_epoch)
+            revocation_identity = _revocation_identity_observation_v3(
+                identity_observation_v3,
+                source_id=str(source_id or "").strip(),
+                sequence_id=str(sequence_id or "").strip(),
+                source_generation=int(source_generation or 0),
+                source_type=source_type,
+                coordinate_space=coordinate_space,
+                capture_epoch=capture_epoch,
+                received_epoch=now_epoch,
+            )
+            if not revocation_identity and same_lease:
+                previous_identity = _mapping_to_dict(
+                    previous.get("revocation_identity_observation_v3", {})
+                )
+                previous_received_epoch = _float_or(
+                    previous_identity.get("received_epoch", 0.0),
+                    0.0,
+                )
+                identity_sticky_sec = _env_float(
+                    "PHOENIXGUARD_HEARTBEAT_IDENTITY_MAX_AGE_SEC",
+                    20.0,
+                    5.0,
+                )
+                if (
+                    previous_identity.get("lease_fenced") is True
+                    and previous_identity.get("revocation_only") is True
+                    and previous_received_epoch > 0.0
+                    and now_epoch - previous_received_epoch <= identity_sticky_sec
+                ):
+                    revocation_identity = previous_identity
+            heartbeat = {
+                "source_id": str(source_id or "").strip(),
+                "sequence_id": str(sequence_id or "").strip(),
+                "source_generation": int(source_generation or 0),
+                "source_lease_id": str(source_lease_id or "").strip(),
+                "source_type": source_type,
+                "coordinate_space": coordinate_space,
+                "received_epoch": now_epoch,
+                "capture_epoch": max(
+                    capture_epoch,
+                    _float_or(previous.get("capture_epoch", 0.0), 0.0)
+                    if same_lease
+                    else 0.0,
+                ),
+                "source_render_fresh": bool(source_render_fresh),
+                "material_change_pending": sticky_pending,
+                "pending_capture_epoch": pending_capture_epoch,
+                "heartbeat_count": (
+                    int(previous.get("heartbeat_count", 0) or 0) + 1
+                    if same_lease
+                    else 1
+                ),
+                "roi_normalized": _normalize_external_source_roi_v3(
+                    roi_normalized
+                ),
+                "roi_source_pixels": _mapping_to_dict(roi_source_pixels or {}),
+                "source_surface_width": max(0, int(source_surface_width or 0)),
+                "source_surface_height": max(0, int(source_surface_height or 0)),
+                "transport_frame_age_ms": max(
+                    0,
+                    int(transport_frame_age_ms or 0),
+                ),
+                "decoder_frame_age_ms": max(
+                    0,
+                    int(decoder_frame_age_ms or 0),
+                ),
+                "capture_health_reason": str(
+                    capture_health_reason or ""
+                ).strip()[:96],
+                "capture_status": str(capture_status or "").strip()[:48],
+                "presented_frames": max(0, int(presented_frames or 0)),
+                "media_time": max(0.0, float(media_time or 0.0)),
+                "revocation_identity_observation_v3": revocation_identity,
+            }
+            self._external_source_transport_heartbeats[
+                normalized_session_id
+            ] = heartbeat
+            overlaid = self._capture_source_with_transport_heartbeat_v3(
+                normalized_session_id,
+                source,
+            )
+        return _public_capture_source_v3(overlaid)
 
     def kill_external_source(
         self,
@@ -30229,6 +32230,10 @@ class ContinuousWindowTrackerService:
             )
             payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
             payload["__control_write_v3"] = True
+            self._external_source_transport_heartbeats.pop(
+                normalized_session_id,
+                None,
+            )
             self._save_session(payload)
         self._stop_worker(normalized_session_id)
         return _public_capture_source_v3(killed)
@@ -30271,6 +32276,19 @@ class ContinuousWindowTrackerService:
             metadata_payload.get("coordinate_space", "external_frame_v1")
             or "external_frame_v1"
         ).strip()
+        visual_identity_contract = (
+            (normalized_source_type, coordinate_space)
+            in {
+                ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+                ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+            }
+        )
+        if visual_identity_contract:
+            identity_hints_ignored = bool(normalized_symbol or normalized_timeframe)
+            normalized_symbol = ""
+            normalized_timeframe = ""
+            metadata_payload["identity_hint_policy"] = "visual_reproof_required"
+            metadata_payload["identity_hints_ignored"] = identity_hints_ignored
         source_generation = max(
             0,
             int(_float_or(metadata_payload.get("source_generation"), 0.0) or 0),
@@ -30308,6 +32326,22 @@ class ContinuousWindowTrackerService:
             "source_generation": source_generation,
             "metadata": metadata_payload,
         }
+        prevalidated_identity_surface: dict[str, Any] = {}
+        if (
+            normalized_source_type == "browser_tab_roi_capture"
+            and coordinate_space == "edge_tab_roi_v1"
+            and metadata_payload.get("identity_observation_v3")
+        ):
+            prevalidated_identity_surface = (
+                _edge_tab_bracket_identity_surface_v3(image, source_payload)
+            )
+            if prevalidated_identity_surface:
+                # Private handoff to the same synchronous study call.  It is
+                # never client authority and is re-bound to the source lock and
+                # exact surface signature before attestation below.
+                source_payload["_prevalidated_identity_surface_v3"] = dict(
+                    prevalidated_identity_surface
+                )
 
         try:
             self._require_session(normalized_session_id)
@@ -30357,13 +32391,99 @@ class ContinuousWindowTrackerService:
                 raise ValueError("External frame_id did not advance for this source/sequence.")
             if same_feed_sequence and capture_did_not_advance:
                 raise ValueError("External frame capture time did not advance for this source/sequence.")
+            if coordinate_space in leased_coordinate_spaces:
+                capture_source = _normalize_capture_source_v3(
+                    payload.get("capture_source_v3", {})
+                )
+                source_stream = _mapping_to_dict(
+                    capture_source.get("stream", {})
+                )
+                source_stream.update(
+                    {
+                        "received_frames": int(
+                            source_stream.get("received_frames", 0) or 0
+                        )
+                        + 1,
+                        "processing": True,
+                        "processing_frame_id": int(frame_id or 0),
+                        "processing_started_epoch": now_epoch,
+                        "last_received_epoch": now_epoch,
+                        "last_capture_epoch": capture_epoch,
+                        "last_error": "",
+                    }
+                )
+                roi = _mapping_to_dict(capture_source.get("roi", {}))
+                normalized_roi = _normalize_external_source_roi_v3(
+                    metadata_payload.get("roi_normalized", [])
+                )
+                if normalized_roi:
+                    roi["normalized_bbox"] = normalized_roi
+                roi.update(
+                    {
+                        "coordinate_space": coordinate_space,
+                        "source_pixels": _mapping_to_dict(
+                            metadata_payload.get("roi_source_pixels", {})
+                        ),
+                        "bound_width": int(
+                            _float_or(
+                                metadata_payload.get("source_surface_width"),
+                                0.0,
+                            )
+                            or 0
+                        ),
+                        "bound_height": int(
+                            _float_or(
+                                metadata_payload.get("source_surface_height"),
+                                0.0,
+                            )
+                            or 0
+                        ),
+                    }
+                )
+                capture_source.update(
+                    {
+                        "state_revision": int(
+                            capture_source.get("state_revision", 0) or 0
+                        )
+                        + 1,
+                        "state": "VALIDATING",
+                        "selection_state": "IDLE",
+                        "decision_usable": False,
+                        "fresh": True,
+                        "reason_code": "FRAME_PROCESSING",
+                        "message": (
+                            "A fresh chart frame was received and is being studied. "
+                            "The prior decision is not current-frame authority."
+                        ),
+                        "updated_at": now_epoch,
+                        # Source freshness is a transport heartbeat. The exact
+                        # chart capture epoch remains separately preserved in
+                        # stream.last_capture_epoch and model lineage.
+                        "last_frame_epoch": now_epoch,
+                        "last_frame_id": int(frame_id or 0),
+                        "roi": roi,
+                        "stream": source_stream,
+                    }
+                )
+                payload["capture_source_v3"] = capture_source
             payload["window_query"] = "External Frame Feed"
             payload["layout_profile"] = "external_frame_feed"
             payload["effective_layout_profile"] = "external_frame_feed"
             payload["status"] = "external_frame_feed"
             payload["tracking_enabled"] = False
+            fast_identity_market = _complete_fx_market_candidate_v3(
+                prevalidated_identity_surface.get("detected_market", "")
+            )
+            fast_identity_timeframe = str(
+                prevalidated_identity_surface.get("detected_timeframe", "") or ""
+            ).strip().upper()
+            previous_payload_market = _complete_fx_market_candidate_v3(
+                payload.get("market", "")
+            )
             if normalized_symbol:
                 payload["market"] = normalized_symbol
+            elif fast_identity_market:
+                payload["market"] = fast_identity_market
             elif normalized_source_type in {
                 "browser_extension_capture",
                 "browser_tab_roi_capture",
@@ -30374,6 +32494,99 @@ class ContinuousWindowTrackerService:
                 # pair as if it were verified; the visual selector must prove
                 # the current chart identity again.
                 payload["market"] = ""
+            if fast_identity_market and fast_identity_timeframe in _TIMEFRAME_LABELS:
+                previous_tracking_identity = _mapping_to_dict(
+                    payload.get("tracking_summary", {})
+                )
+                previous_market_identity = _complete_fx_market_candidate_v3(
+                    previous_tracking_identity.get(
+                        "detected_market",
+                        previous_payload_market,
+                    )
+                )
+                pair_changed = bool(
+                    previous_market_identity
+                    and previous_market_identity != fast_identity_market
+                )
+                payload["current_chart_identity_v3"] = {
+                    "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+                    "state": "FRAME_IDENTITY_VERIFIED",
+                    "symbol": fast_identity_market,
+                    "timeframe": fast_identity_timeframe,
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_confidence": _clip01(
+                        prevalidated_identity_surface.get(
+                            "market_confidence",
+                            0.0,
+                        )
+                    ),
+                    "timeframe_confidence": _clip01(
+                        prevalidated_identity_surface.get(
+                            "timeframe_confidence",
+                            0.0,
+                        )
+                    ),
+                    "market_selector_visual_fingerprint": str(
+                        prevalidated_identity_surface.get(
+                            "market_selector_visual_fingerprint",
+                            "",
+                        )
+                        or ""
+                    ),
+                    "pair_changed": pair_changed,
+                    "frame_id": int(frame_id or 0),
+                    "source_frame_id": int(frame_id or 0),
+                    "capture_epoch": capture_epoch,
+                    "source_id": normalized_source_id,
+                    "market_source": str(
+                        prevalidated_identity_surface.get("market_source", "")
+                        or ""
+                    ),
+                    "timeframe_source": str(
+                        prevalidated_identity_surface.get("timeframe_source", "")
+                        or ""
+                    ),
+                    "sequence_id": str(sequence_id or "").strip(),
+                    "source_generation": source_generation,
+                    "study_pending": True,
+                    "decision_authority": False,
+                    "study_source_only": True,
+                    "broker_click_safe": False,
+                }
+            elif visual_identity_contract:
+                # Explicitly veto the prior pair/timeframe on the new source
+                # frame.  Leaving the old verified row in place allowed the
+                # display fast path to relabel it with this frame id and made a
+                # switched chart look confirmed before OCR had read it.
+                payload["current_chart_identity_v3"] = {
+                    "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+                    "state": "FRAME_IDENTITY_PENDING",
+                    "symbol": "",
+                    "timeframe": "",
+                    "market_identity_confirmed": False,
+                    "timeframe_identity_confirmed": False,
+                    "market_confidence": 0.0,
+                    "timeframe_confidence": 0.0,
+                    "market_source": "same_frame_visual_reproof_pending",
+                    "timeframe_source": "same_frame_visual_reproof_pending",
+                    "market_selector_visual_fingerprint": "",
+                    "pair_changed": False,
+                    "prior_identity_invalidated": bool(
+                        previous_payload_market
+                        or payload.get("current_chart_identity_v3")
+                    ),
+                    "frame_id": int(frame_id or 0),
+                    "source_frame_id": int(frame_id or 0),
+                    "capture_epoch": capture_epoch,
+                    "source_id": normalized_source_id,
+                    "sequence_id": str(sequence_id or "").strip(),
+                    "source_generation": source_generation,
+                    "study_pending": True,
+                    "decision_authority": False,
+                    "study_source_only": True,
+                    "broker_click_safe": False,
+                }
             payload["manual_focus_region"] = {
                 "enabled": True,
                 "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
@@ -30411,11 +32624,9 @@ class ContinuousWindowTrackerService:
                         or 0
                     ),
                     "source_generation": source_generation,
-                    "roi_normalized": list(
-                        cast(Sequence[Any], metadata_payload.get("roi_normalized", []))
-                    )[:4]
-                    if isinstance(metadata_payload.get("roi_normalized"), list | tuple)
-                    else [],
+                    "roi_normalized": _normalize_external_source_roi_v3(
+                        metadata_payload.get("roi_normalized", [])
+                    ),
                     "roi_source_pixels": _mapping_to_dict(metadata_payload.get("roi_source_pixels", {})),
                     "source_surface_width": int(
                         _float_or(metadata_payload.get("source_surface_width"), 0.0) or 0
@@ -30436,6 +32647,9 @@ class ContinuousWindowTrackerService:
                 "last_capture_epoch": capture_epoch,
                 "last_ingest_at": _epoch_to_utc_iso(now_epoch),
                 "study_source_only": True,
+                "current_identity_v3": _mapping_to_dict(
+                    payload.get("current_chart_identity_v3", {})
+                ),
             }
             payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
             self._save_session(payload)
@@ -30448,6 +32662,7 @@ class ContinuousWindowTrackerService:
             external_capture_epoch=capture_epoch,
         )
         if accepted and coordinate_space in leased_coordinate_spaces:
+            analysis_completed_epoch = _now_epoch()
             with self._lock:
                 current = self._require_session(normalized_session_id)
                 lease_validation = self.validate_external_source_lease(
@@ -30465,15 +32680,52 @@ class ContinuousWindowTrackerService:
                 stream["last_error"] = ""
                 stream["last_frame_id"] = int(frame_id or 0)
                 stream["last_capture_epoch"] = capture_epoch
+                stream["last_analysis_completed_epoch"] = (
+                    analysis_completed_epoch
+                )
+                stream["processing"] = False
+                stream["processing_frame_id"] = 0
+                heartbeat = _mapping_to_dict(
+                    self._external_source_transport_heartbeats.get(
+                        normalized_session_id,
+                        {},
+                    )
+                )
+                heartbeat_matches = self._transport_heartbeat_matches_source_v3(
+                    heartbeat,
+                    capture_source,
+                )
+                pending_capture_epoch = (
+                    _float_or(heartbeat.get("pending_capture_epoch", 0.0), 0.0)
+                    if heartbeat_matches
+                    and heartbeat.get("material_change_pending") is True
+                    else 0.0
+                )
+                newer_material_frame_pending = bool(
+                    pending_capture_epoch > capture_epoch + 0.001
+                )
+                if heartbeat_matches and not newer_material_frame_pending:
+                    heartbeat["material_change_pending"] = False
+                    heartbeat["pending_capture_epoch"] = 0.0
+                    self._external_source_transport_heartbeats[
+                        normalized_session_id
+                    ] = heartbeat
+                stream["material_change_pending"] = newer_material_frame_pending
+                stream["pending_capture_epoch"] = (
+                    pending_capture_epoch if newer_material_frame_pending else 0.0
+                )
                 roi = _mapping_to_dict(capture_source.get("roi", {}))
                 roi.update(
                     {
                         "coordinate_space": coordinate_space,
-                        "normalized_bbox": list(
-                            cast(Sequence[Any], metadata_payload.get("roi_normalized", []))
-                        )[:4]
-                        if isinstance(metadata_payload.get("roi_normalized"), list | tuple)
-                        else list(cast(Sequence[Any], roi.get("normalized_bbox", []))),
+                        "normalized_bbox": (
+                            _normalize_external_source_roi_v3(
+                                metadata_payload.get("roi_normalized", [])
+                            )
+                            or _normalize_external_source_roi_v3(
+                                roi.get("normalized_bbox", [])
+                            )
+                        ),
                         "source_pixels": _mapping_to_dict(metadata_payload.get("roi_source_pixels", {})),
                         "bound_width": int(_float_or(metadata_payload.get("source_surface_width"), 0.0) or 0),
                         "bound_height": int(_float_or(metadata_payload.get("source_surface_height"), 0.0) or 0),
@@ -30486,25 +32738,77 @@ class ContinuousWindowTrackerService:
                         ),
                     }
                 )
+                completed_source_state = {
+                    "state": "LIVE",
+                    "decision_usable": True,
+                    "reason_code": "SOURCE_LIVE",
+                    "message": f"{str(capture_source.get('display_name', '') or 'Selected chart')} is streaming in the background.",
+                }
+                if newer_material_frame_pending:
+                    completed_source_state = {
+                        "state": "VALIDATING",
+                        "decision_usable": False,
+                        "reason_code": "FRAME_PENDING",
+                        "message": (
+                            "A newer changed chart frame arrived while this "
+                            "study was running. The completed result remains "
+                            "historical until that newer frame is studied."
+                        ),
+                    }
                 capture_source.update(
                     {
                         "state_revision": int(capture_source.get("state_revision", 0) or 0) + 1,
-                        "state": "LIVE",
+                        **completed_source_state,
                         "selection_state": "IDLE",
-                        "decision_usable": True,
                         "fresh": True,
-                        "reason_code": "SOURCE_LIVE",
-                        "message": f"{str(capture_source.get('display_name', '') or 'Selected chart')} is streaming in the background.",
-                        "updated_at": now_epoch,
-                        "last_frame_epoch": capture_epoch,
+                        "updated_at": analysis_completed_epoch,
+                        "last_frame_epoch": analysis_completed_epoch,
                         "last_frame_id": int(frame_id or 0),
                         "roi": roi,
                         "stream": stream,
                     }
                 )
                 current["capture_source_v3"] = capture_source
-                current["status"] = "external_frame_feed"
-                current["updated_at"] = _epoch_to_utc_iso(now_epoch)
+                current["status"] = (
+                    "external_source_validating"
+                    if newer_material_frame_pending
+                    else "external_frame_feed"
+                )
+                current["updated_at"] = _epoch_to_utc_iso(
+                    analysis_completed_epoch
+                )
+                self._save_session(current)
+        elif coordinate_space in leased_coordinate_spaces:
+            failed_epoch = _now_epoch()
+            with self._lock:
+                current = self._require_session(normalized_session_id)
+                capture_source = _normalize_capture_source_v3(
+                    current.get("capture_source_v3", {})
+                )
+                stream = _mapping_to_dict(capture_source.get("stream", {}))
+                stream["processing"] = False
+                stream["processing_frame_id"] = 0
+                stream["last_error"] = (
+                    "The received frame could not enter the study pipeline."
+                )
+                capture_source.update(
+                    {
+                        "state_revision": int(
+                            capture_source.get("state_revision", 0) or 0
+                        )
+                        + 1,
+                        "state": "ERROR",
+                        "decision_usable": False,
+                        "fresh": False,
+                        "reason_code": "FRAME_STUDY_NOT_ACCEPTED",
+                        "message": str(stream["last_error"]),
+                        "updated_at": failed_epoch,
+                        "stream": stream,
+                    }
+                )
+                current["capture_source_v3"] = capture_source
+                current["status"] = "external_source_error"
+                current["updated_at"] = _epoch_to_utc_iso(failed_epoch)
                 self._save_session(current)
         snapshot = self.get_session_snapshot(normalized_session_id)
         snapshot["frame_ingest"] = {
@@ -32409,6 +34713,7 @@ class ContinuousWindowTrackerService:
             for session_id, stream in cpu_streams:
                 if not stream.thread.is_alive():
                     self._cpu_streams.pop(session_id, None)
+            self._external_source_transport_heartbeats.clear()
         alive = [session_id for session_id, worker in workers if worker.thread.is_alive()]
         if alive:
             LOGGER.warning(
@@ -33281,6 +35586,89 @@ class ContinuousWindowTrackerService:
             yield current
         finally:
             control.lock.release()
+
+    @contextmanager
+    def _external_source_publication_guard_v3(
+        self,
+        session_id: str,
+        source: Mapping[str, Any],
+        *,
+        capture_epoch: float,
+    ) -> Any:
+        """Fence leased-source publication against source rebinds.
+
+        Model work runs outside the tracker lock so transport heartbeats and a
+        newly selected chart remain responsive. Publication must therefore
+        re-prove the exact lease while holding that lock. A newer material
+        capture on the same lease does not discard completed work: heartbeat
+        state keeps that result non-authoritative as ``FRAME_PENDING`` until
+        the newer frame is studied. This avoids starvation on moving charts.
+        """
+
+        row = _mapping_to_dict(source)
+        coordinate_space = str(
+            row.get("coordinate_space", "") or ""
+        ).strip()
+        if coordinate_space not in {"edge_tab_roi_v1", "wgc_hwnd_roi_v1"}:
+            yield True
+            return
+
+        metadata = _mapping_to_dict(row.get("metadata", {}))
+        expected_source_id = str(row.get("source_id", "") or "").strip()
+        expected_sequence_id = str(row.get("sequence_id", "") or "").strip()
+        expected_source_type = str(row.get("source_type", "") or "").strip()
+        expected_generation = int(
+            _float_or(row.get("source_generation"), 0.0) or 0
+        )
+        expected_lease_id = str(
+            metadata.get("source_lease_id", "") or ""
+        ).strip()
+
+        self._lock.acquire()
+        try:
+            persisted = _mapping_to_dict(
+                _read_json(self._session_path(session_id), {})
+            )
+            current = _normalize_capture_source_v3(
+                persisted.get("capture_source_v3", {})
+            )
+            current_state = str(
+                current.get("state", "NO_SOURCE") or "NO_SOURCE"
+            ).upper()
+            lease_current = bool(
+                expected_source_id
+                and expected_sequence_id
+                and expected_generation > 0
+                and expected_lease_id
+                and current_state in {"VALIDATING", "LIVE", "STALE"}
+                and str(current.get("source_id", "") or "")
+                == expected_source_id
+                and str(current.get("sequence_id", "") or "")
+                == expected_sequence_id
+                and int(current.get("source_generation", 0) or 0)
+                == expected_generation
+                and secrets.compare_digest(
+                    str(current.get("source_lease_id", "") or ""),
+                    expected_lease_id,
+                )
+                and str(current.get("source_type", "") or "")
+                == expected_source_type
+                and str(current.get("coordinate_space", "") or "")
+                == coordinate_space
+            )
+            publication_current = lease_current
+            if not publication_current:
+                LOGGER.info(
+                    "Dropped superseded external study publication for %s "
+                    "(source=%s generation=%s study_capture_epoch=%.3f).",
+                    session_id,
+                    expected_source_id,
+                    expected_generation,
+                    float(capture_epoch or 0.0),
+                )
+            yield publication_current
+        finally:
+            self._lock.release()
 
     def _record_cpu_stream_duplicate_v3(
         self,
@@ -36076,7 +38464,14 @@ class ContinuousWindowTrackerService:
         except CaptureSurfaceUnavailableError as exc:
             message = str(exc) or "Pocket Option capture did not include the broker/chart surface."
             _safe_worker_log(logging.DEBUG, "Capture source unavailable for session %s: %s", session_id, message)
-            self._mark_capture_surface_unavailable(session_id, message)
+            with self._external_source_publication_guard_v3(
+                session_id,
+                _mapping_to_dict(external_source or {}),
+                capture_epoch=float(external_capture_epoch or 0.0),
+            ) as external_source_current:
+                if not external_source_current:
+                    return True
+                self._mark_capture_surface_unavailable(session_id, message)
             return False
         finally:
             self._finish_study_gate(session_id)
@@ -36246,6 +38641,18 @@ class ContinuousWindowTrackerService:
             and external_frame_source.get("local_cpu_stream_v3") is True
             and str(external_frame_source.get("source_type", "") or "")
             == "local_cpu_window_stream_v3"
+        )
+        external_frame_contract = (
+            str(external_frame_source.get("source_type", "") or "").strip(),
+            str(
+                external_frame_source.get("coordinate_space", "") or ""
+            ).strip(),
+        )
+        authoritative_edge_tab_roi = bool(
+            using_external_frame
+            and not using_local_cpu_stream_frame
+            and external_frame_contract
+            == ("browser_tab_roi_capture", "edge_tab_roi_v1")
         )
         cpu_stream_lineage = _mapping_to_dict(
             external_frame_source.get("cpu_stream_lineage_v3", {})
@@ -36526,11 +38933,25 @@ class ContinuousWindowTrackerService:
             window_signature = _surface_signature(window_image)
             mark_stage("capture_window")
         surface_image, focus_meta = _crop_normalized_bbox(window_image, cast(Sequence[Any], manual_focus.get("normalized_bbox", [])))
-        study_surface_image, study_focus_meta = self._derive_study_surface(
-            window_image=window_image,
-            selected_surface=surface_image,
-            selected_focus_meta=focus_meta,
-        )
+        if authoritative_edge_tab_roi:
+            # The extension lease defines the exact selected coordinate plane.
+            # Cropping that plane again here caused overlays to be measured on
+            # a small inferred chart bbox and then composed onto the full ROI,
+            # which produced the cramped/drifting geometry seen after a pair
+            # switch.  The adapter may derive an internal analysis bbox, but
+            # every public artifact remains in this authoritative ROI plane.
+            study_surface_image = surface_image
+            study_focus_meta = {
+                **focus_meta,
+                "study_surface_contract": "authoritative_edge_tab_roi_v1",
+                "geometry_authority": "external_source_lease",
+            }
+        else:
+            study_surface_image, study_focus_meta = self._derive_study_surface(
+                window_image=window_image,
+                selected_surface=surface_image,
+                selected_focus_meta=focus_meta,
+            )
         study_surface_signature = _surface_signature(study_surface_image)
         mark_stage("derive_study_surface")
         with self._lock:
@@ -36691,9 +39112,16 @@ class ContinuousWindowTrackerService:
                 if using_external_frame
                 else _VISUAL_OBSERVATION_WAITING
             )
-            self._publish_duplicate_visual_wait(
+            with self._external_source_publication_guard_v3(
                 str(payload["session_id"]),
-                observation={
+                external_frame_source,
+                capture_epoch=capture_started_epoch,
+            ) as external_source_current:
+                if not external_source_current:
+                    return
+                self._publish_duplicate_visual_wait(
+                    str(payload["session_id"]),
+                    observation={
                     "schema_version": _VISUAL_OBSERVATION_SCHEMA_VERSION,
                     "status": observation_status,
                     "message": (
@@ -36717,9 +39145,9 @@ class ContinuousWindowTrackerService:
                     "recovery_attempted": recovery_attempted,
                     "recovery_succeeded": False,
                     "last_recovery_attempt_epoch": last_recovery_attempt_epoch,
-                    "cpu_stream_lineage_v3": dict(cpu_stream_lineage),
-                },
-            )
+                        "cpu_stream_lineage_v3": dict(cpu_stream_lineage),
+                    },
+                )
             return
 
         payload["visual_observation_v3"] = {
@@ -36791,6 +39219,37 @@ class ContinuousWindowTrackerService:
                 display_payload["display_snapshot_only_v3"] = True
                 display_payload["frame_bundle_complete_v3"] = False
                 display_payload["frame_bundle_pending_reason_v3"] = "display_artifact_ready_before_overlay_model_bundle"
+                current_chart_identity_v3 = _mapping_to_dict(
+                    payload.get("current_chart_identity_v3", {})
+                )
+                if not current_chart_identity_v3:
+                    current_chart_identity_v3 = {
+                        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+                        "state": "FRAME_IDENTITY_PENDING",
+                        "symbol": "",
+                        "timeframe": "",
+                        "market_identity_confirmed": False,
+                        "timeframe_identity_confirmed": False,
+                        "market_confidence": 0.0,
+                        "timeframe_confidence": 0.0,
+                    }
+                current_chart_identity_v3.update(
+                    {
+                        "frame_id": display_frame_id,
+                        "display_frame_id": display_frame_id,
+                        "capture_epoch": capture_started_epoch,
+                        "study_pending": True,
+                        "decision_authority": False,
+                        "study_source_only": True,
+                        "broker_click_safe": False,
+                    }
+                )
+                display_payload["current_chart_identity_v3"] = dict(
+                    current_chart_identity_v3
+                )
+                payload["current_chart_identity_v3"] = dict(
+                    current_chart_identity_v3
+                )
                 display_payload["last_display_window_path"] = str(window_path)
                 display_payload["last_window_path"] = str(window_path)
                 display_payload["last_frame_path"] = str(window_path)
@@ -36866,20 +39325,30 @@ class ContinuousWindowTrackerService:
                 study_source_expected=source_lock_study_source_expected,
             )
         broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
+        broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
         broker_source_summary: dict[str, Any] = {
             "lock_id": str(broker_source_lock.get("viewport_fingerprint") or broker_source_lock.get("broker_pixel_fingerprint") or ""),
             "valid": bool(broker_source_lock.get("valid", False)),
             "status": str(broker_source_lock.get("status", "")),
             "wrong_surface": not bool(broker_source_lock.get("valid", False)),
-            "url_valid": bool(_mapping_to_dict(broker_source_lock.get("evidence", {})).get("candidates", [])),
-            "title_valid": True,
+            "url_valid": bool(
+                broker_source_evidence.get(
+                    "url_valid",
+                    bool(broker_source_evidence.get("candidates", [])),
+                )
+            ),
+            "title_valid": bool(
+                broker_source_evidence.get(
+                    "title_valid",
+                    bool(broker_source_evidence.get("candidates", [])),
+                )
+            ),
             "pixel_fingerprint_valid": bool(broker_source_lock.get("valid", False)),
             "study_source_only": broker_source_study_only,
             "broker_click_safe": bool(broker_source_lock.get("valid", False)) and not broker_source_study_only,
             "reason": str(broker_source_lock.get("reason", "") or ""),
         }
         broker_guard_invalid = self._pocket_option_surface_guard_enabled(payload) and not bool(broker_source_lock.get("valid", False))
-        broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
         surface_guard_evidence = _mapping_to_dict(
             _mapping_to_dict(broker_source_lock.get("surface_guard", {})).get("evidence", {})
         )
@@ -36979,12 +39448,17 @@ class ContinuousWindowTrackerService:
             latest_signal["freshness_window_sec"] = _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC
             latest_signal["pipeline_timing"] = guard_timing
             with (
+                self._external_source_publication_guard_v3(
+                    str(payload["session_id"]),
+                    external_frame_source,
+                    capture_epoch=capture_started_epoch,
+                ) as external_source_current,
                 self._cpu_stream_publication_guard_v3(
                     str(payload["session_id"]), cpu_stream_lineage
                 ) as stream_generation_current,
                 self._session_commit_lock_for(str(payload["session_id"])),
             ):
-                if not stream_generation_current:
+                if not external_source_current or not stream_generation_current:
                     return
                 guarded_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
@@ -37042,13 +39516,15 @@ class ContinuousWindowTrackerService:
             self._prune_session_artifacts(artifact_dir)
             return
         prestudy_broker_identity_attestation: dict[str, Any] = {}
+        external_identity_contract = external_frame_contract
         if (
             using_external_frame
             and not using_local_cpu_stream_frame
-            and str(external_frame_source.get("source_type", "") or "")
-            == "windows_graphics_capture_roi"
-            and str(external_frame_source.get("coordinate_space", "") or "")
-            == "wgc_hwnd_roi_v1"
+            and external_identity_contract
+            in {
+                ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+                ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+            }
         ):
             previous_tracking_identity = _mapping_to_dict(
                 payload.get("tracking_summary", {})
@@ -37094,42 +39570,287 @@ class ContinuousWindowTrackerService:
                 or not timeframe_confirmations
                 or not all(timeframe_confirmations)
             )
-            if identity_pending:
+            # The derived study plane can intentionally exclude the broker
+            # header. A previous frame's confirmation is not authority for the
+            # current accepted frame (and would miss a pair switch), so every
+            # exact leased Edge/WGC frame must carry its own same-frame proof.
+            if identity_pending or external_identity_contract in {
+                ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+                ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+            }:
+                identity_probe_image = window_image
+                identity_probe_image_owned = False
+                identity_probe_derivation = ""
+                identity_surface: dict[str, Any] = {
+                    "schema_version": "PG_CHART_IDENTITY_PROBE_V3",
+                    "detected_market": "",
+                    "market_confidence": 0.0,
+                    "detected_timeframe": "",
+                    "timeframe_confidence": 0.0,
+                    "identity_ready": False,
+                    "identity_conflict": False,
+                    "broker_surface_hash": window_signature,
+                }
                 try:
-                    identity_surface = self.tracking_adapter.probe_chart_identity_v3(
-                        window_image,
-                        source=external_frame_source,
-                    )
-                    prestudy_broker_identity_attestation = (
-                        _external_wgc_broker_identity_attestation_v3(
-                            external_frame_source,
-                            broker_source_lock,
-                            identity_surface,
-                            window_signature=window_signature,
-                            capture_epoch=capture_started_epoch,
+                    prevalidated_identity = _mapping_to_dict(
+                        external_frame_source.get(
+                            "_prevalidated_identity_surface_v3",
+                            {},
                         )
                     )
-                    if prestudy_broker_identity_attestation:
-                        identity_surface["broker_source_lock"] = dict(
-                            broker_source_lock
+                    prevalidated_surface_hash = str(
+                        prevalidated_identity.get("broker_surface_hash", "")
+                        or ""
+                    ).strip()
+                    if (
+                        prevalidated_identity.get("identity_ready") is True
+                        and prevalidated_surface_hash
+                        and prevalidated_surface_hash == window_signature
+                    ):
+                        identity_surface = dict(prevalidated_identity)
+                    elif (
+                        external_identity_contract
+                        == ("browser_tab_roi_capture", "edge_tab_roi_v1")
+                        and window_path.is_file()
+                    ):
+                        # The dashboard artifact is synchronously encoded from
+                        # this exact accepted frame above. Edge's first JPEG
+                        # raster can straddle tiny color thresholds while the
+                        # displayed artifact remains visually unambiguous. Read
+                        # identity from that current, same-size raster and bind
+                        # both its hash and its raw parent hash in attestation.
+                        with Image.open(window_path) as encoded_window:
+                            identity_probe_image = encoded_window.convert("RGB")
+                        identity_probe_image_owned = True
+                        identity_probe_derivation = (
+                            "same_frame_window_artifact_raster_v1"
                         )
-                        identity_surface["broker_source"] = dict(
-                            broker_source_summary
+                    if not prevalidated_identity or identity_surface.get(
+                        "identity_ready"
+                    ) is not True:
+                        identity_surface = self.tracking_adapter.probe_chart_identity_v3(
+                            identity_probe_image,
+                            source=external_frame_source,
                         )
-                        identity_surface["state"] = "study_source_only"
-                        identity_surface["study_source_only"] = True
-                        identity_surface["broker_click_safe"] = False
-                        identity_surface["controls_ready"] = False
-                        payload["broker_surface"] = identity_surface
+                    if identity_probe_derivation:
+                        identity_probe_raster_hash = str(
+                            identity_surface.get("broker_surface_hash", "") or ""
+                        ).strip() or _surface_signature(identity_probe_image)
+                        identity_surface["identity_probe_derivation"] = (
+                            identity_probe_derivation
+                        )
+                        identity_surface[
+                            "identity_probe_parent_surface_hash"
+                        ] = window_signature
+                        identity_surface["identity_probe_raster_hash"] = (
+                            identity_probe_raster_hash
+                        )
+                    identity_attestor = (
+                        _external_wgc_broker_identity_attestation_v3
+                        if external_identity_contract
+                        == ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1")
+                        else _external_edge_tab_broker_identity_attestation_v3
+                    )
+                    prestudy_broker_identity_attestation = identity_attestor(
+                        external_frame_source,
+                        broker_source_lock,
+                        identity_surface,
+                        window_signature=window_signature,
+                        capture_epoch=capture_started_epoch,
+                    )
                 except Exception:
                     LOGGER.debug(
-                        "Same-frame WGC broker identity probe failed for %s.",
+                        "Same-frame external broker identity probe failed for %s.",
                         session_id,
                         exc_info=True,
                     )
-                mark_stage("prestudy_wgc_broker_identity")
+                finally:
+                    if identity_probe_image_owned:
+                        identity_probe_image.close()
+                # Replace the broker surface on every accepted external frame.
+                # Keeping the previous frame here leaked CHF/JPY while the
+                # current full surface visibly showed USD/CAD.  An unconfirmed
+                # current probe is safer and more truthful than a stale pair.
+                identity_surface["broker_source_lock"] = dict(
+                    broker_source_lock
+                )
+                identity_surface["broker_source"] = dict(
+                    broker_source_summary
+                )
+                identity_surface["state"] = "study_source_only"
+                identity_surface["study_source_only"] = True
+                identity_surface["broker_click_safe"] = False
+                identity_surface["controls_ready"] = False
+                payload["broker_surface"] = identity_surface
+                if prestudy_broker_identity_attestation:
+                    attested_market = _complete_fx_market_candidate_v3(
+                        prestudy_broker_identity_attestation.get("market", "")
+                    )
+                    attested_timeframe = str(
+                        prestudy_broker_identity_attestation.get(
+                            "timeframe",
+                            "",
+                        )
+                        or ""
+                    ).strip().upper()
+                    if attested_market and attested_timeframe in _TIMEFRAME_LABELS:
+                        previous_current_identity = _mapping_to_dict(
+                            payload.get("current_chart_identity_v3", {})
+                        )
+                        previous_study_identity = _mapping_to_dict(
+                            payload.get("tracking_summary", {})
+                        )
+                        previous_market = _complete_fx_market_candidate_v3(
+                            previous_current_identity.get(
+                                "symbol",
+                                previous_study_identity.get(
+                                    "detected_market",
+                                    "",
+                                ),
+                            )
+                        )
+                        if not previous_market:
+                            previous_market = _complete_fx_market_candidate_v3(
+                                previous_study_identity.get(
+                                    "detected_market",
+                                    "",
+                                )
+                            )
+                        current_chart_identity_v3 = {
+                            "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+                            "state": "PRESTUDY_IDENTITY_CONFIRMED",
+                            "symbol": attested_market,
+                            "timeframe": attested_timeframe,
+                            "market_identity_confirmed": True,
+                            "timeframe_identity_confirmed": True,
+                            "market_confidence": _clip01(
+                                prestudy_broker_identity_attestation.get(
+                                    "market_confidence",
+                                    0.0,
+                                )
+                            ),
+                            "timeframe_confidence": _clip01(
+                                prestudy_broker_identity_attestation.get(
+                                    "timeframe_confidence",
+                                    0.0,
+                                )
+                            ),
+                            "market_source": str(
+                                prestudy_broker_identity_attestation.get(
+                                    "market_source",
+                                    "",
+                                )
+                                or ""
+                            ),
+                            "timeframe_source": str(
+                                prestudy_broker_identity_attestation.get(
+                                    "timeframe_source",
+                                    "",
+                                )
+                                or ""
+                            ),
+                            "market_selector_visual_fingerprint": str(
+                                prestudy_broker_identity_attestation.get(
+                                    "market_selector_visual_fingerprint",
+                                    "",
+                                )
+                                or ""
+                            ),
+                            "pair_changed": bool(
+                                previous_market
+                                and previous_market != attested_market
+                            ),
+                            "frame_id": display_frame_id,
+                            "display_frame_id": display_frame_id,
+                            "source_frame_id": int(
+                                _float_or(
+                                    external_frame_source.get("frame_id"),
+                                    0.0,
+                                )
+                                or 0
+                            ),
+                            "capture_epoch": capture_started_epoch,
+                            "source_id": str(
+                                external_frame_source.get("source_id", "")
+                                or ""
+                            ),
+                            "sequence_id": str(
+                                external_frame_source.get("sequence_id", "")
+                                or ""
+                            ),
+                            "source_generation": int(
+                                _float_or(
+                                    external_frame_source.get(
+                                        "source_generation",
+                                        0,
+                                    ),
+                                    0.0,
+                                )
+                                or 0
+                            ),
+                            "study_pending": True,
+                            "decision_authority": False,
+                            "study_source_only": True,
+                            "broker_click_safe": False,
+                        }
+                        payload["current_chart_identity_v3"] = dict(
+                            current_chart_identity_v3
+                        )
+                        with self._lock:
+                            identity_display_payload = self._merge_display_state(
+                                payload,
+                                str(payload["session_id"]),
+                            )
+                            if (
+                                int(
+                                    identity_display_payload.get(
+                                        "display_frame_id",
+                                        0,
+                                    )
+                                    or 0
+                                )
+                                == display_frame_id
+                            ):
+                                identity_display_payload[
+                                    "current_chart_identity_v3"
+                                ] = dict(current_chart_identity_v3)
+                                self._write_display_state(
+                                    str(payload["session_id"]),
+                                    identity_display_payload,
+                                )
+                mark_stage("prestudy_external_broker_identity")
         study: TrackingStudy | None = None
         error_message = ""
+        live_study_budget_sec = min(
+            120.0,
+            max(
+                10.0,
+                _env_float(
+                    "PHOENIXGUARD_LIVE_TRACKER_STUDY_BUDGET_SEC",
+                    45.0,
+                    10.0,
+                ),
+            ),
+        )
+        live_study_budget_enforced = bool(
+            using_external_frame
+            and not using_local_cpu_stream_frame
+            and external_identity_contract
+            in {
+                ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+                ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+            }
+        )
+        study_timing_contract_v3: dict[str, Any] = {
+            "schema_version": "PG_LIVE_STUDY_TIMING_V3",
+            "budget_enforced": live_study_budget_enforced,
+            "budget_sec": round(live_study_budget_sec, 3),
+            "status": "NOT_STARTED",
+            "study_authority": False,
+            "decision_authority": False,
+            "execution_authority": False,
+        }
+        study_call_started_monotonic = 0.0
         try:
             study_payload = dict(payload)
             study_payload["_study_focus_region"] = dict(study_focus_meta)
@@ -37142,11 +39863,112 @@ class ContinuousWindowTrackerService:
                 study_payload["_broker_identity_attestation_v3"] = dict(
                     prestudy_broker_identity_attestation
                 )
+            mark_stage("tracker_study_dispatch")
+            study_call_started_monotonic = time.monotonic()
+            study_payload["_study_call_started_monotonic_v3"] = (
+                study_call_started_monotonic
+            )
+            study_payload["_study_deadline_monotonic_v3"] = (
+                study_call_started_monotonic + live_study_budget_sec
+            )
+            study_payload["_study_live_latency_budget_sec_v3"] = (
+                live_study_budget_sec
+            )
+            study_payload["_study_latency_budget_enforced_v3"] = (
+                live_study_budget_enforced
+            )
             study = self.tracking_adapter.study(study_surface_image, session_payload=study_payload)
+            study_call_elapsed_sec = max(
+                0.0,
+                time.monotonic() - study_call_started_monotonic,
+            )
+            adapter_contract = _mapping_to_dict(
+                study.tracking_summary.get("study_timing_contract_v3", {})
+            )
+            adapter_entry_delay_sec = _float_or(
+                adapter_contract.get("adapter_entry_delay_sec"),
+                0.0,
+            )
+            if (
+                live_study_budget_enforced
+                and study_call_elapsed_sec > live_study_budget_sec
+            ):
+                raise LiveStudyLatencyBudgetExceeded(
+                    stage="adapter_return",
+                    elapsed_sec=study_call_elapsed_sec,
+                    budget_sec=live_study_budget_sec,
+                    adapter_entry_delay_sec=adapter_entry_delay_sec,
+                )
+            adapter_internal_elapsed_sec = _float_or(
+                adapter_contract.get("adapter_internal_elapsed_sec"),
+                0.0,
+            )
+            study_timing_contract_v3 = {
+                **study_timing_contract_v3,
+                **adapter_contract,
+                "status": "COMPLETED_WITHIN_BUDGET",
+                "outer_call_elapsed_sec": round(study_call_elapsed_sec, 3),
+                "unattributed_elapsed_sec": round(
+                    max(
+                        0.0,
+                        study_call_elapsed_sec
+                        - adapter_entry_delay_sec
+                        - adapter_internal_elapsed_sec,
+                    ),
+                    3,
+                ),
+            }
+            study.tracking_summary["study_timing_contract_v3"] = dict(
+                study_timing_contract_v3
+            )
+            study.latest_signal["study_timing_contract_v3"] = dict(
+                study_timing_contract_v3
+            )
             mark_stage("tracker_study")
+        except LiveStudyLatencyBudgetExceeded as exc:
+            LOGGER.warning(
+                "Discarded over-budget live study for session %s: %s",
+                session_id,
+                exc,
+            )
+            error_message = str(exc)
+            study = None
+            outer_call_elapsed_sec = (
+                max(0.0, time.monotonic() - study_call_started_monotonic)
+                if study_call_started_monotonic > 0.0
+                else exc.elapsed_sec
+            )
+            study_timing_contract_v3.update(
+                {
+                    "status": "BUDGET_EXCEEDED",
+                    "expired_stage": exc.stage,
+                    "outer_call_elapsed_sec": round(outer_call_elapsed_sec, 3),
+                    "adapter_entry_delay_sec": round(
+                        exc.adapter_entry_delay_sec,
+                        3,
+                    ),
+                    "result_discarded": True,
+                }
+            )
+            mark_stage("tracker_study_budget_exceeded")
         except Exception as exc:
             LOGGER.exception("Tracker study failed for session %s.", session_id)
             error_message = f"Tracker study failed: {exc}"
+            study_timing_contract_v3.update(
+                {
+                    "status": "ERROR",
+                    "outer_call_elapsed_sec": round(
+                        max(
+                            0.0,
+                            time.monotonic() - study_call_started_monotonic,
+                        ),
+                        3,
+                    )
+                    if study_call_started_monotonic > 0.0
+                    else 0.0,
+                    "result_discarded": True,
+                }
+            )
             mark_stage("tracker_study_error")
         if study is not None:
             integrity_error = _study_plane_integrity_error(study, study_surface_image.size)
@@ -37209,6 +40031,12 @@ class ContinuousWindowTrackerService:
             latest_signal = _default_signal(
                 message=error_message or "Tracker study failed.",
                 status="error",
+            )
+            tracking_summary["study_timing_contract_v3"] = dict(
+                study_timing_contract_v3
+            )
+            latest_signal["study_timing_contract_v3"] = dict(
+                study_timing_contract_v3
             )
         else:
             chart_image = study.chart_image.convert("RGB")
@@ -37362,12 +40190,17 @@ class ContinuousWindowTrackerService:
             latest_signal["freshness_window_sec"] = visual_ready_freshness_window_sec
             latest_signal["pipeline_timing"] = visual_ready_timing
             with (
+                self._external_source_publication_guard_v3(
+                    str(payload["session_id"]),
+                    external_frame_source,
+                    capture_epoch=capture_started_epoch,
+                ) as external_source_current,
                 self._cpu_stream_publication_guard_v3(
                     str(payload["session_id"]), cpu_stream_lineage
                 ) as stream_generation_current,
                 self._session_commit_lock_for(str(payload["session_id"])),
             ):
-                if not stream_generation_current:
+                if not external_source_current or not stream_generation_current:
                     return
                 visual_ready_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
@@ -37525,13 +40358,21 @@ class ContinuousWindowTrackerService:
             )
 
         fast_visual_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
+        external_study_only_fast_path = bool(
+            using_external_frame
+            and not using_local_cpu_stream_frame
+            and broker_source_study_only
+        )
         fast_visual_only_when_blocked = (
-            not model_council_packet
-            and capture_started_with_tracking_enabled
-            and bool(fast_visual_controls.get("live_execution_enabled", False))
-            and str(fast_visual_controls.get("execution_mode", "shadow") or "shadow") == "live"
-            and str(os.getenv("PHOENIXGUARD_FAST_VISUAL_ONLY_WHEN_NOT_EXECUTABLE", "1") or "1").strip().lower()
-            not in {"0", "false", "off", "no"}
+            external_study_only_fast_path
+            or (
+                not model_council_packet
+                and capture_started_with_tracking_enabled
+                and bool(fast_visual_controls.get("live_execution_enabled", False))
+                and str(fast_visual_controls.get("execution_mode", "shadow") or "shadow") == "live"
+                and str(os.getenv("PHOENIXGUARD_FAST_VISUAL_ONLY_WHEN_NOT_EXECUTABLE", "1") or "1").strip().lower()
+                not in {"0", "false", "off", "no"}
+            )
         )
         fast_blocked_surface: dict[str, Any] | None = None
         fast_blocked_state: dict[str, Any] | None = None
@@ -37554,7 +40395,7 @@ class ContinuousWindowTrackerService:
                 fallback="waiting for executable Model Council packet",
             )
             fast_packet_validation = validate_execution_packet_v3(
-                None,
+                model_council_packet if external_study_only_fast_path else None,
                 expected_session_id=str(payload.get("session_id", "")),
                 now_epoch=_now_epoch(),
                 require_executable=True,
@@ -37608,9 +40449,17 @@ class ContinuousWindowTrackerService:
                 and previous_fast_surface_source != "unread"
                 and not bool(previous_fast_surface.get("scan_skipped", False))
             )
-            scan_blocked_surface = str(
-                os.getenv("PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE", "0") or "0"
-            ).strip().lower() not in {"0", "false", "off", "no"}
+            scan_blocked_surface = bool(
+                not external_study_only_fast_path
+                and str(
+                    os.getenv(
+                        "PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE",
+                        "0",
+                    )
+                    or "0"
+                ).strip().lower()
+                not in {"0", "false", "off", "no"}
+            )
             can_reuse_identity_surface = bool(
                 previous_fast_surface
                 and str(previous_fast_surface.get("broker_surface_hash", "") or "").strip()
@@ -37625,7 +40474,11 @@ class ContinuousWindowTrackerService:
                 fast_blocked_surface["cache_used_epoch"] = surface_now_epoch
                 fast_blocked_surface["read_epoch"] = surface_now_epoch
                 fast_blocked_surface["scan_skipped"] = True
-                fast_blocked_surface["scan_skip_reason"] = "model_council_packet_not_executable"
+                fast_blocked_surface["scan_skip_reason"] = (
+                    "external_study_source_never_scans_broker_controls"
+                    if external_study_only_fast_path
+                    else "model_council_packet_not_executable"
+                )
                 fast_blocked_surface["broker_surface_hash"] = str(
                     previous_fast_surface.get("broker_surface_hash", "") or _surface_signature(window_image)
                 )
@@ -37678,7 +40531,11 @@ class ContinuousWindowTrackerService:
                 fast_blocked_surface.get("broker_surface_hash", "") or _surface_signature(window_image)
             )
             if not str(fast_blocked_surface.get("scan_skip_reason", "") or "").strip():
-                fast_blocked_surface["scan_skip_reason"] = "model_council_packet_not_executable"
+                fast_blocked_surface["scan_skip_reason"] = (
+                    "external_study_source_never_scans_broker_controls"
+                    if external_study_only_fast_path
+                    else "model_council_packet_not_executable"
+                )
             fast_blocked_surface["broker_source_lock"] = broker_source_lock
             fast_blocked_surface["broker_source"] = dict(broker_source_summary)
             if broker_source_study_only:
@@ -37687,12 +40544,32 @@ class ContinuousWindowTrackerService:
                 fast_blocked_surface["broker_click_safe"] = False
                 fast_blocked_surface["controls_ready"] = False
             fast_blocked_state = _normalize_broker_execution_state(payload.get("broker_execution_state", {}))
+            fast_status = (
+                "study_source_only"
+                if external_study_only_fast_path
+                else "blocked_by_runtime"
+            )
+            if external_study_only_fast_path:
+                packet_summary = (
+                    "The Model Council study packet is present"
+                    if model_council_packet
+                    else f"No executable Model Council packet was produced: {fast_wait_reason}"
+                )
+                fast_message = (
+                    f"{packet_summary}. The leased external chart is study-only; "
+                    "broker control scanning and clicks are disabled."
+                )
+            else:
+                fast_message = (
+                    "Model Council V3 executable packet required before any live click: "
+                    f"{fast_wait_reason}."
+                )
             fast_blocked_state.update(
                 {
                     "enabled": bool(fast_visual_controls.get("live_execution_enabled", False)),
                     "mode": str(fast_visual_controls.get("execution_mode", "shadow") or "shadow"),
-                    "status": "blocked_by_runtime",
-                    "message": f"Model Council V3 executable packet required before any live click: {fast_wait_reason}.",
+                    "status": fast_status,
+                    "message": fast_message,
                     "side": fast_side,
                     "lane": fast_lane,
                     "expiry_seconds": fast_expiry_seconds,
@@ -37703,11 +40580,26 @@ class ContinuousWindowTrackerService:
                     "last_attempt_at": _now_iso(),
                     "broker_surface": fast_blocked_surface,
                     "model_council_packet_validation": fast_packet_validation,
-                    "model_council_packet_id": "",
-                    "runtime_integrity_category": "RUNTIME_INTEGRITY",
+                    "model_council_packet_id": str(
+                        _mapping_to_dict(model_council_packet).get("packet_id", "")
+                        or ""
+                    ),
+                    "runtime_integrity_category": (
+                        "STUDY_SOURCE_ISOLATION"
+                        if external_study_only_fast_path
+                        else "RUNTIME_INTEGRITY"
+                    ),
+                    "execution_authority": "NONE",
+                    "model_packet_present": bool(model_council_packet),
                 }
             )
-            self._apply_broker_identity(tracking_summary, latest_signal, fast_blocked_surface, payload)
+            if not external_study_only_fast_path:
+                self._apply_broker_identity(
+                    tracking_summary,
+                    latest_signal,
+                    fast_blocked_surface,
+                    payload,
+                )
             tracking_summary["broker_surface"] = fast_blocked_surface
             tracking_summary["broker_execution_state"] = fast_blocked_state
             latest_signal["broker_execution_state"] = fast_blocked_state
@@ -37732,7 +40624,11 @@ class ContinuousWindowTrackerService:
             "freshness_window_sec": visual_freshness_window_sec,
             "stages": list(stage_timings),
             "partial_publish": True,
-            "partial_publish_reason": "visual_model_ready_before_broker_execution",
+            "partial_publish_reason": (
+                "external_study_source_model_ready_broker_execution_skipped"
+                if external_study_only_fast_path
+                else "visual_model_ready_before_broker_execution"
+            ),
         }
         tracking_summary["pipeline_timing"] = visual_pipeline_timing
         latest_signal["timestamp"] = visual_published_at
@@ -37746,12 +40642,17 @@ class ContinuousWindowTrackerService:
         latest_signal["freshness_window_sec"] = visual_freshness_window_sec
         latest_signal["pipeline_timing"] = visual_pipeline_timing
         with (
+            self._external_source_publication_guard_v3(
+                str(payload["session_id"]),
+                external_frame_source,
+                capture_epoch=capture_started_epoch,
+            ) as external_source_current,
             self._cpu_stream_publication_guard_v3(
                 str(payload["session_id"]), cpu_stream_lineage
             ) as stream_generation_current,
             self._session_commit_lock_for(str(payload["session_id"])),
         ):
-            if not stream_generation_current:
+            if not external_source_current or not stream_generation_current:
                 return
             visual_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
             visual_display_window_path = str(window_path)
@@ -37872,7 +40773,11 @@ class ContinuousWindowTrackerService:
                 "scenario_analysis": _mapping_to_dict(tracking_summary.get("scenario_analysis", {})),
                 "model_council_result": blocked_decision_model_council_result,
                 "model_council": _compact_persisted_council_payload(_mapping_to_dict(model_council_result.get("model_council"))),
-                "decision_artifact_state": "visual_only_blocked_no_execution_packet",
+                "decision_artifact_state": (
+                    "external_study_source_model_published_no_execution_authority"
+                    if external_study_only_fast_path
+                    else "visual_only_blocked_no_execution_packet"
+                ),
             }
             if blocked_forecast_snapshot:
                 blocked_decision_payload["forecast_snapshot_v3"] = blocked_forecast_snapshot
@@ -37886,7 +40791,11 @@ class ContinuousWindowTrackerService:
                 blocked_decision_payload = _compact_persisted_decision_payload(blocked_decision_payload)
             _write_json_atomic(decision_path, blocked_decision_payload)
             mark_stage("decision_write")
-            mark_stage("fast_blocked_return")
+            mark_stage(
+                "external_study_source_fast_return"
+                if external_study_only_fast_path
+                else "fast_blocked_return"
+            )
             self._write_session_event_log(
                 str(payload["session_id"]),
                 "capture_visual_model_published",
@@ -38041,8 +40950,13 @@ class ContinuousWindowTrackerService:
             "valid": bool(broker_source_lock.get("valid", False)),
             "status": str(broker_source_lock.get("status", "")),
             "wrong_surface": bool(broker_source_guard.get("wrong_surface", False)),
-            "url_valid": True,
-            "title_valid": bool(broker_source_evidence.get("candidates", [])),
+            "url_valid": bool(broker_source_evidence.get("url_valid", True)),
+            "title_valid": bool(
+                broker_source_evidence.get(
+                    "title_valid",
+                    bool(broker_source_evidence.get("candidates", [])),
+                )
+            ),
             "pixel_fingerprint_valid": bool(broker_source_lock.get("broker_pixel_fingerprint") or broker_source_lock.get("broker_control_fingerprint")),
             "study_source_only": broker_source_study_only,
             "broker_click_safe": bool(broker_source_lock.get("valid", False)) and not broker_source_study_only,
@@ -38203,12 +41117,17 @@ class ContinuousWindowTrackerService:
         history = history[:24]
 
         with (
+            self._external_source_publication_guard_v3(
+                str(payload["session_id"]),
+                external_frame_source,
+                capture_epoch=capture_started_epoch,
+            ) as external_source_current,
             self._cpu_stream_publication_guard_v3(
                 str(payload["session_id"]), cpu_stream_lineage
             ) as stream_generation_current,
             self._session_commit_lock_for(str(payload["session_id"])),
         ):
-            if not stream_generation_current:
+            if not external_source_current or not stream_generation_current:
                 return
             persisted_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {}))
             persisted_last_capture_epoch = _float_or(persisted_payload.get("last_capture_epoch", 0.0), 0.0)
@@ -38307,6 +41226,77 @@ class ContinuousWindowTrackerService:
             payload["last_decision_path"] = str(decision_path)
             payload["tracking_summary"] = tracking_summary
             payload["latest_signal"] = latest_signal
+            completed_identity_market = _complete_fx_market_candidate_v3(
+                tracking_summary.get(
+                    "detected_market",
+                    latest_signal.get("market", ""),
+                )
+            )
+            completed_identity_timeframe = str(
+                tracking_summary.get(
+                    "detected_timeframe",
+                    latest_signal.get("focus_timeframe", ""),
+                )
+                or ""
+            ).strip().upper()
+            if (
+                completed_identity_market
+                and completed_identity_timeframe in _TIMEFRAME_LABELS
+                and tracking_summary.get("market_identity_confirmed") is True
+                and tracking_summary.get("timeframe_identity_confirmed") is True
+            ):
+                current_chart_identity_v3 = _mapping_to_dict(
+                    payload.get(
+                        "current_chart_identity_v3",
+                        persisted_payload.get("current_chart_identity_v3", {}),
+                    )
+                )
+                current_chart_identity_v3.update(
+                    {
+                        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+                        "state": "STUDY_IDENTITY_CONFIRMED",
+                        "symbol": completed_identity_market,
+                        "timeframe": completed_identity_timeframe,
+                        "market_identity_confirmed": True,
+                        "timeframe_identity_confirmed": True,
+                        "market_confidence": _clip01(
+                            tracking_summary.get("market_confidence", 0.0)
+                        ),
+                        "timeframe_confidence": _clip01(
+                            tracking_summary.get("timeframe_confidence", 0.0)
+                        ),
+                        "market_source": str(
+                            tracking_summary.get("market_source", "") or ""
+                        ),
+                        "timeframe_source": str(
+                            tracking_summary.get("timeframe_source", "") or ""
+                        ),
+                        "market_selector_visual_fingerprint": str(
+                            tracking_summary.get(
+                                "market_selector_visual_fingerprint",
+                                "",
+                            )
+                            or ""
+                        ),
+                        "pair_changed": bool(
+                            tracking_summary.get(
+                                "market_selector_pair_changed",
+                                current_chart_identity_v3.get(
+                                    "pair_changed",
+                                    False,
+                                ),
+                            )
+                        ),
+                        "frame_id": display_frame_id,
+                        "display_frame_id": display_frame_id,
+                        "capture_epoch": capture_started_epoch,
+                        "study_pending": False,
+                        "decision_authority": False,
+                        "study_source_only": True,
+                        "broker_click_safe": False,
+                    }
+                )
+                payload["current_chart_identity_v3"] = current_chart_identity_v3
             payload["broker_surface"] = broker_surface
             payload["broker_execution_state"] = broker_execution_state
             payload["scenario_analysis"] = scenario_analysis
@@ -38684,6 +41674,146 @@ class ContinuousWindowTrackerService:
     def _compact_live_state_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "compact_live_state.json"
 
+    def _external_source_lease_sidecar_path_v3(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "external_source_lease_v3.json"
+
+    @staticmethod
+    def _external_source_lease_sidecar_source_v3(
+        source: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        current = _normalize_capture_source_v3(source)
+        allowed = (
+            "schema_version",
+            "state_revision",
+            "state",
+            "selection_state",
+            "source_id",
+            "source_generation",
+            "source_lease_id",
+            "source_type",
+            "source_kind",
+            "transport",
+            "display_name",
+            "coordinate_space",
+            "selection_id",
+            "sequence_id",
+            "reason_code",
+            "message",
+            "updated_at",
+        )
+        return {key: current.get(key) for key in allowed if key in current}
+
+    def _cache_external_source_lease_v3(
+        self,
+        session_id: str,
+        source: Mapping[str, Any],
+        *,
+        persist: bool,
+    ) -> dict[str, Any]:
+        normalized_session_id = _slugify(str(session_id or "").strip(), "session")
+        current = _normalize_capture_source_v3(source)
+        session_path = self._session_path(normalized_session_id)
+        try:
+            stat = session_path.stat()
+            session_mtime_ns = int(stat.st_mtime_ns)
+            session_size = int(stat.st_size)
+        except OSError:
+            session_mtime_ns = 0
+            session_size = 0
+        cache_row = {
+            "schema_version": "PG_EXTERNAL_SOURCE_LEASE_SIDECAR_V3",
+            "session_id": normalized_session_id,
+            "session_file_mtime_ns": session_mtime_ns,
+            "session_file_size": session_size,
+            "capture_source_v3": dict(current),
+        }
+        with self._external_source_lease_cache_lock_v3:
+            self._external_source_lease_cache_v3[normalized_session_id] = dict(
+                cache_row
+            )
+        if persist and session_mtime_ns > 0 and session_size > 0:
+            sidecar = dict(cache_row)
+            sidecar["capture_source_v3"] = (
+                self._external_source_lease_sidecar_source_v3(current)
+            )
+            _write_json_atomic(
+                self._external_source_lease_sidecar_path_v3(
+                    normalized_session_id
+                ),
+                sidecar,
+            )
+        return current
+
+    def _external_source_lease_snapshot_v3(
+        self,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Return the current lease without reparsing the full session hot path."""
+
+        normalized_session_id = _slugify(str(session_id or "").strip(), "session")
+        session_path = self._session_path(normalized_session_id)
+        try:
+            stat = session_path.stat()
+            session_mtime_ns = int(stat.st_mtime_ns)
+            session_size = int(stat.st_size)
+        except OSError:
+            session_mtime_ns = 0
+            session_size = 0
+
+        with self._external_source_lease_cache_lock_v3:
+            cached = _mapping_to_dict(
+                self._external_source_lease_cache_v3.get(
+                    normalized_session_id,
+                    {},
+                )
+            )
+        if (
+            cached.get("schema_version")
+            == "PG_EXTERNAL_SOURCE_LEASE_SIDECAR_V3"
+            and int(cached.get("session_file_mtime_ns", 0) or 0)
+            == session_mtime_ns
+            and int(cached.get("session_file_size", 0) or 0) == session_size
+        ):
+            cached_source = _mapping_to_dict(cached.get("capture_source_v3", {}))
+            if cached_source:
+                return _normalize_capture_source_v3(cached_source)
+
+        sidecar = _mapping_to_dict(
+            _read_json(
+                self._external_source_lease_sidecar_path_v3(
+                    normalized_session_id
+                ),
+                {},
+            )
+        )
+        if (
+            sidecar.get("schema_version")
+            == "PG_EXTERNAL_SOURCE_LEASE_SIDECAR_V3"
+            and str(sidecar.get("session_id", "") or "")
+            == normalized_session_id
+            and int(sidecar.get("session_file_mtime_ns", 0) or 0)
+            == session_mtime_ns
+            and int(sidecar.get("session_file_size", 0) or 0) == session_size
+        ):
+            sidecar_source = _mapping_to_dict(
+                sidecar.get("capture_source_v3", {})
+            )
+            if sidecar_source:
+                return self._cache_external_source_lease_v3(
+                    normalized_session_id,
+                    sidecar_source,
+                    persist=False,
+                )
+
+        # Cold start, corrupt sidecar, or an interrupted write: recover once
+        # from the authoritative session, then repair the bounded sidecar.
+        payload = self._require_session(normalized_session_id)
+        return self._cache_external_source_lease_v3(
+            normalized_session_id,
+            _mapping_to_dict(payload.get("capture_source_v3", {})),
+            persist=True,
+        )
+
     def _cpu_stream_status_path_v3(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "cpu_stream_v3.json"
 
@@ -38818,8 +41948,11 @@ class ContinuousWindowTrackerService:
         if not raw:
             return {}
         normalized = self._normalize_session_payload(raw, session_id_hint=session_id)
-        if normalized != raw and not self._load_display_state(session_id):
-            self._save_session(normalized)
+        # Reads must remain side-effect free.  Persisting schema normalization
+        # here made every dashboard poll a possible writer and could deadlock
+        # against an in-flight source claim (service lock -> commit lock versus
+        # commit lock -> source-cache lock).  Normalized values are committed by
+        # the next explicit control/capture write instead.
         return self._merge_display_state(normalized, session_id)
 
     def _require_session(self, session_id: str) -> dict[str, Any]:
@@ -38990,6 +42123,11 @@ class ContinuousWindowTrackerService:
         prepared_payload = _compact_session_persisted_payload(prepared_payload)
         _write_json_atomic(session_path, prepared_payload)
         _write_json_atomic(self._compact_live_state_path(session_id), _compact_live_state_sidecar_payload(prepared_payload))
+        self._cache_external_source_lease_v3(
+            session_id,
+            _mapping_to_dict(prepared_payload.get("capture_source_v3", {})),
+            persist=True,
+        )
         if any(
             str(prepared_payload.get(key, "") or "").strip()
             for key in ("last_display_window_path", "last_window_path", "last_chart_path", "last_overlay_path", "last_full_overlay_path")
@@ -39000,7 +42138,12 @@ class ContinuousWindowTrackerService:
         public = _synchronize_session_versions(payload)
         session_id = str(public.get("session_id", "") or "")
         public["cpu_stream_v3"] = self._cpu_stream_public_health_v3(session_id, public)
-        capture_source = _public_capture_source_v3(public.get("capture_source_v3", {}))
+        capture_source = _public_capture_source_v3(
+            self._capture_source_with_transport_heartbeat_v3(
+                session_id,
+                _mapping_to_dict(public.get("capture_source_v3", {})),
+            )
+        )
         public["capture_source_v3"] = capture_source
         public["manual_focus_region"] = _public_manual_focus_region(public.get("manual_focus_region", {}))
         public["event_log_path"] = str(self._event_log_path(session_id)) if session_id else ""

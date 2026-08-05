@@ -459,6 +459,64 @@ def _frame_id(*values: object) -> int | str | None:
     return None
 
 
+def _aligned_current_chart_identity_v3(
+    source: Mapping[str, object],
+    display_frame: object,
+) -> Mapping[str, Any]:
+    """Return the current frame's identity row, including a pending row.
+
+    A same-frame pending row is an explicit namespace veto: it proves that the
+    producer has started classifying this new chart frame, so older selector or
+    study identity must not be used as a fallback while confirmation is in
+    progress.
+    """
+
+    identity = _mapping(source.get("current_chart_identity_v3"))
+    if not identity:
+        return {}
+    identity_frame = _frame_id(
+        identity.get("display_frame_id"),
+        identity.get("frame_id"),
+    )
+    current_frame = _frame_id(display_frame)
+    if (
+        _text(identity.get("schema_version"), "").upper()
+        != "PG_CURRENT_CHART_IDENTITY_V3"
+        or _explicit_bool(identity.get("decision_authority")) is not False
+        or current_frame is None
+        or identity_frame is None
+        or not _frame_matches(identity_frame, current_frame)
+    ):
+        return {}
+    return identity
+
+
+def _current_chart_identity_v3(
+    source: Mapping[str, object],
+    display_frame: object,
+) -> Mapping[str, Any]:
+    """Return only a same-frame, explicitly confirmed fast chart identity.
+
+    The extension/fast selector lane can identify the selected pair before the
+    heavier candle study completes.  That identity may name the current
+    surface, but it never supplies direction, timing, or entry permission.
+    """
+
+    identity = _aligned_current_chart_identity_v3(source, display_frame)
+    if not identity:
+        return {}
+    symbol = _text(identity.get("symbol") or identity.get("market"), "")
+    timeframe = _text(identity.get("timeframe"), "").upper()
+    if (
+        not symbol
+        or not timeframe
+        or _explicit_bool(identity.get("market_identity_confirmed")) is not True
+        or _explicit_bool(identity.get("timeframe_identity_confirmed")) is not True
+    ):
+        return {}
+    return identity
+
+
 def _explicit_bool(value: object) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -1992,6 +2050,12 @@ def _overlay_identity_and_revisions(
             "source": stable_source,
             "type": public_overlay.get("type"),
             "family": public_overlay.get("family"),
+            # Detector/track identifiers are only stable inside one market
+            # namespace.  A broker may reuse the same row id immediately
+            # after a pair switch, so the public reconciliation id must own
+            # the proven pair/timeframe as well as the source row.
+            "symbol": public_overlay.get("symbol"),
+            "timeframe": public_overlay.get("timeframe"),
         },
         prefix="sem",
     )
@@ -2075,6 +2139,20 @@ def _surface_overlay_revision_contract(
                 "SURFACE",
                 limit=160,
             ),
+            # Unknown is a transition state, not a reusable market.  Give an
+            # unclassified display frame its own namespace so an old pair's
+            # DOM nodes and geometry can never survive a second pair switch
+            # merely because both responses read ``Unknown · M5``.
+            "unclassified_frame": (
+                _frame_id(
+                    source.get("display_frame_id"),
+                    source.get("chart_frame_id"),
+                    source.get("frame_id"),
+                )
+                if _text(market.get("symbol"), "UNKNOWN").upper()
+                in {"", "UNKNOWN"}
+                else None
+            ),
         },
         prefix="surface",
     )
@@ -2107,6 +2185,14 @@ def _surface_overlay_revision_contract(
 
 
 def _overlay_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    # The compact public live-state contract publishes already-bounded overlay
+    # rows directly as a top-level list.  The full tracker snapshot uses an
+    # ``{"objects": [...]}`` container.  Accept both representations: treating
+    # the public list as a mapping silently dropped every frame-matched mark on
+    # the operator endpoint even while its surface version advertised 59 rows.
+    direct_rows = _rows(payload.get("overlays"))
+    if direct_rows:
+        return direct_rows
     candidates = (
         _mapping(payload.get("overlays")),
         _mapping(_mapping(payload.get("live_visual_state")).get("overlays")),
@@ -2630,23 +2716,43 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
     artifacts = _mapping(payload.get("artifacts"))
     tracking_summary = _mapping(payload.get("tracking_summary"))
     latest_signal = _mapping(payload.get("latest_signal"))
+    aligned_chart_identity = _aligned_current_chart_identity_v3(
+        payload, display_frame_id
+    )
+    current_chart_identity = _current_chart_identity_v3(payload, display_frame_id)
+    if aligned_chart_identity and not current_chart_identity:
+        # The producer has explicitly opened a new same-frame identity row but
+        # has not confirmed it yet.  This is a hard pair-switch boundary: no
+        # overlay from an older selector, study, or detector namespace may be
+        # projected onto the new bitmap while the pair is being identified.
+        return []
     current_symbol = _text(
-        payload.get("symbol")
+        current_chart_identity.get("symbol")
+        or current_chart_identity.get("market")
+        or payload.get("symbol")
         or latest_signal.get("market")
         or latest_signal.get("symbol")
         or tracking_summary.get("detected_market")
     ).upper()
     current_timeframe = _text(
-        payload.get("timeframe")
+        current_chart_identity.get("timeframe")
+        or payload.get("timeframe")
         or latest_signal.get("focus_timeframe")
         or latest_signal.get("timeframe")
         or tracking_summary.get("detected_timeframe")
     ).upper()
     current_selector_fingerprint = _text(
-        payload.get("market_selector_visual_fingerprint")
+        current_chart_identity.get("market_selector_visual_fingerprint")
+        or payload.get("market_selector_visual_fingerprint")
         or latest_signal.get("market_selector_visual_fingerprint")
         or tracking_summary.get("market_selector_visual_fingerprint")
     )
+
+    def canonical_instrument_token(value: object) -> str:
+        return "".join(
+            character for character in _text(value).upper() if character.isalnum()
+        )
+
     selector_identity_locked = bool(
         _text(payload.get("instrument_identity_status")).upper() == "LOCKED"
         and _explicit_bool(payload.get("market_identity_confirmed")) is True
@@ -2655,6 +2761,7 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         and bool(current_timeframe)
         and current_selector_fingerprint.startswith("selector_v2_")
     )
+    fast_chart_identity_locked = bool(current_chart_identity)
     wgc_identity_locked_without_selector = (
         _wgc_study_source_proves_identity_without_selector_v3(
             payload,
@@ -2664,8 +2771,41 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             selector_fingerprint=current_selector_fingerprint,
         )
     )
+    compact_overlay_contract = _mapping(payload.get("overlays"))
+    compact_overlay_identity_locked = bool(
+        compact_overlay_contract
+        and _text(payload.get("instrument_identity_status")).upper() == "LOCKED"
+        and _explicit_bool(payload.get("market_identity_confirmed")) is True
+        and _explicit_bool(payload.get("timeframe_identity_confirmed")) is True
+        and _text(
+            compact_overlay_contract.get("instrument_identity_status")
+        ).upper()
+        == "LOCKED"
+        and canonical_instrument_token(
+            compact_overlay_contract.get("symbol")
+        )
+        == canonical_instrument_token(current_symbol)
+        and _text(compact_overlay_contract.get("timeframe")).upper()
+        == current_timeframe
+        and _explicit_bool(
+            compact_overlay_contract.get("artifact_frame_aligned")
+        )
+        is True
+        and _frame_id(
+            compact_overlay_contract.get("overlay_object_frame_id")
+        )
+        == display_frame_id
+        and _frame_id(compact_overlay_contract.get("artifact_frame_id"))
+        == display_frame_id
+        and _frame_id(payload.get("overlay_frame_id")) == display_frame_id
+        and _frame_id(payload.get("overlay_object_frame_id"))
+        == display_frame_id
+    )
     current_identity_locked = bool(
-        selector_identity_locked or wgc_identity_locked_without_selector
+        selector_identity_locked
+        or fast_chart_identity_locked
+        or wgc_identity_locked_without_selector
+        or compact_overlay_identity_locked
     )
     enforce_instrument_identity_contract = any(
         key in payload
@@ -2676,9 +2816,6 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             "market_selector_visual_fingerprint",
         )
     )
-
-    def canonical_instrument_token(value: object) -> str:
-        return "".join(character for character in _text(value).upper() if character.isalnum())
 
     artifact_integrity = _mapping(tracking_summary.get("artifact_integrity"))
     scene_graph = _mapping(
@@ -2775,8 +2912,24 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 and overlay_selector_fingerprint == current_selector_fingerprint
             )
             or (
+                fast_chart_identity_locked
+                and (
+                    not overlay_selector_fingerprint
+                    or overlay_selector_fingerprint
+                    == current_selector_fingerprint
+                )
+            )
+            or (
                 wgc_identity_locked_without_selector
                 and not overlay_selector_fingerprint
+            )
+            or (
+                compact_overlay_identity_locked
+                and (
+                    not overlay_selector_fingerprint
+                    or overlay_selector_fingerprint
+                    == current_selector_fingerprint
+                )
             )
         )
         if enforce_instrument_identity_contract and not (
@@ -3918,6 +4071,184 @@ def _forward_timing_forecast_contract_v3(value: object) -> dict[str, object]:
     return result
 
 
+def _path_clock_replay_score_contract_v3(value: object) -> dict[str, object]:
+    """Keep only bounded four-axis replay evidence for the operator surface."""
+
+    source = _mapping(value)
+    if not source:
+        return {}
+    result: dict[str, object] = {}
+    for key in (
+        "audited_replay_count",
+        "eligible_replay_count",
+        "excluded_early_move_count",
+        "sweep_outcome_count",
+    ):
+        if _number(source.get(key)) is not None:
+            result[key] = _integer(source.get(key))
+    metrics = _mapping(source.get("metrics")) or source
+    safe_metrics: dict[str, object] = {}
+    for key in (
+        "directional_accuracy",
+        "timing_accuracy",
+        "sweep_survival_rate",
+        "calibration_score",
+        "expected_calibration_error",
+        "brier_score",
+    ):
+        numeric = _number(metrics.get(key))
+        if numeric is not None:
+            safe_metrics[key] = round(max(0.0, min(1.0, numeric)), 6)
+    if safe_metrics:
+        result["metrics"] = safe_metrics
+    return result
+
+
+def _passive_prediction_audit_contract_v3(value: object) -> dict[str, object]:
+    """Expose prediction-vs-outcome evidence while retaining no trade authority."""
+
+    source = _mapping(value)
+    if (
+        not source
+        or _safe_public_text(source.get("schema_version"), "", limit=96).upper()
+        != "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3"
+        or source.get("study_only") is not True
+        or source.get("execution_authority") is not False
+        or source.get("places_trades") is not False
+    ):
+        return {}
+
+    result: dict[str, object] = {
+        "schema_version": "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3",
+        "status": _safe_public_text(
+            source.get("status"), "BUILDING_FORECAST_SUPPORT", limit=64
+        ).upper(),
+        "symbol": _safe_public_text(source.get("symbol"), "", limit=64),
+        "timeframe": _safe_public_text(
+            source.get("timeframe"), "", limit=32
+        ).upper(),
+        "frozen_forecast_count": _integer(source.get("frozen_forecast_count")),
+        "pending_outcome_count": _integer(source.get("pending_outcome_count")),
+        "matured_outcome_count": _integer(source.get("matured_outcome_count")),
+        "minimum_promotion_replays": _integer(
+            source.get("minimum_promotion_replays")
+        ),
+        "tracks_market_outcomes_only": True,
+        "places_trades": False,
+        "study_only": True,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+    }
+
+    frozen = _mapping(source.get("latest_frozen_forecast"))
+    if frozen:
+        frozen_window = _mapping(frozen.get("timing_window_seconds"))
+        public_frozen: dict[str, object] = {
+            "closed_candle_key": _safe_identifier(
+                frozen.get("closed_candle_key"), ""
+            ),
+            "predicted_direction": _path_clock_direction_side_v3(
+                frozen.get("predicted_direction")
+            ),
+            "horizon_seconds": _integer(frozen.get("horizon_seconds")),
+            "sweep_scenario_count": _integer(
+                frozen.get("sweep_scenario_count")
+            ),
+            "frozen_on_closed_candle": (
+                _explicit_bool(frozen.get("frozen_on_closed_candle")) is True
+            ),
+            "future_leakage_detected": (
+                _explicit_bool(frozen.get("future_leakage_detected")) is not False
+            ),
+        }
+        closed_at = _number(frozen.get("closed_at_seconds"))
+        if closed_at is not None:
+            public_frozen["closed_at_seconds"] = round(closed_at, 6)
+        for key in ("stop_distance_mru", "move_size_mru"):
+            numeric = _number(frozen.get(key))
+            if numeric is not None:
+                public_frozen[key] = round(numeric, 6)
+        if frozen_window:
+            public_frozen["timing_window_seconds"] = {
+                "start": _integer(frozen_window.get("start")),
+                "end": _integer(frozen_window.get("end")),
+            }
+        result["latest_frozen_forecast"] = public_frozen
+
+    outcome = _mapping(source.get("latest_matured_outcome"))
+    if outcome:
+        outcome_window = _mapping(outcome.get("timing_window_seconds"))
+        public_outcome: dict[str, object] = {
+            "closed_candle_key": _safe_identifier(
+                outcome.get("closed_candle_key"), ""
+            ),
+            "horizon_seconds": _integer(outcome.get("horizon_seconds")),
+            "predicted_direction": _path_clock_direction_side_v3(
+                outcome.get("predicted_direction")
+            ),
+            "observed_direction": _safe_public_text(
+                outcome.get("observed_direction"), "", limit=8
+            ).upper(),
+            "direction_correct": (
+                _explicit_bool(outcome.get("direction_correct")) is True
+            ),
+            "observed_move_occurred": (
+                _explicit_bool(outcome.get("observed_move_occurred")) is True
+            ),
+            "observed_move_time_seconds": _integer(
+                outcome.get("observed_move_time_seconds")
+            ),
+            "timing_correct": (
+                _explicit_bool(outcome.get("timing_correct")) is True
+            ),
+            "sweep_scenario_count": _integer(
+                outcome.get("sweep_scenario_count")
+            ),
+            "sweep_survived_count": _integer(
+                outcome.get("sweep_survived_count")
+            ),
+            "frozen_on_closed_candle": (
+                _explicit_bool(outcome.get("frozen_on_closed_candle")) is True
+            ),
+            "future_leakage_detected": (
+                _explicit_bool(outcome.get("future_leakage_detected")) is not False
+            ),
+        }
+        survival_rate = _number(outcome.get("sweep_survival_rate"))
+        if survival_rate is not None:
+            public_outcome["sweep_survival_rate"] = round(
+                max(0.0, min(1.0, survival_rate)), 6
+            )
+        if outcome_window:
+            public_outcome["timing_window_seconds"] = {
+                "start": _integer(outcome_window.get("start")),
+                "end": _integer(outcome_window.get("end")),
+            }
+        result["latest_matured_outcome"] = public_outcome
+
+    for source_key, public_key in (
+        ("candidate_metrics", "candidate_metrics"),
+        ("baseline_metrics", "baseline_metrics"),
+        ("axis_deltas", "axis_deltas"),
+    ):
+        metrics = _mapping(source.get(source_key))
+        safe_metrics: dict[str, object] = {}
+        for axis in (
+            "directional_accuracy",
+            "timing_accuracy",
+            "sweep_survival_rate",
+            "calibration_score",
+        ):
+            numeric = _number(metrics.get(axis))
+            if numeric is not None:
+                safe_metrics[axis] = round(
+                    max(-1.0, min(1.0, numeric)), 6
+                )
+        if safe_metrics:
+            result[public_key] = safe_metrics
+    return result
+
+
 def path_clock_liquidity_contract_v3(value: object) -> dict[str, object]:
     """Return the compact public JPCLF contract and discard trajectory internals.
 
@@ -4133,36 +4464,29 @@ def path_clock_liquidity_contract_v3(value: object) -> dict[str, object]:
 
     replay_source = (
         _mapping(source.get("replay_score"))
+        or _mapping(source.get("candidate_replay_score"))
         or _mapping(source.get("calibration"))
         or _mapping(source.get("replay_calibration"))
     )
     if replay_source:
-        metrics = _mapping(replay_source.get("metrics")) or replay_source
-        replay: dict[str, object] = {}
-        for key in (
-            "audited_replay_count",
-            "eligible_replay_count",
-            "excluded_early_move_count",
-            "sweep_outcome_count",
-        ):
-            if _number(replay_source.get(key)) is not None:
-                replay[key] = _integer(replay_source.get(key))
-        safe_metrics: dict[str, object] = {}
-        for key in (
-            "directional_accuracy",
-            "timing_accuracy",
-            "sweep_survival_rate",
-            "calibration_score",
-            "expected_calibration_error",
-            "brier_score",
-        ):
-            numeric = _number(metrics.get(key))
-            if numeric is not None:
-                safe_metrics[key] = round(numeric, 6)
-        if safe_metrics:
-            replay["metrics"] = safe_metrics
+        replay = _path_clock_replay_score_contract_v3(replay_source)
         if replay:
             result["replay_calibration"] = replay
+    baseline_replay = _path_clock_replay_score_contract_v3(
+        source.get("baseline_replay_score")
+    )
+    candidate_replay = _path_clock_replay_score_contract_v3(
+        source.get("candidate_replay_score")
+    )
+    if baseline_replay:
+        result["baseline_replay_calibration"] = baseline_replay
+    if candidate_replay:
+        result["candidate_replay_calibration"] = candidate_replay
+    passive_audit = _passive_prediction_audit_contract_v3(
+        source.get("passive_prediction_audit_v3")
+    )
+    if passive_audit:
+        result["passive_prediction_audit_v3"] = passive_audit
     forward_forecast = _forward_timing_forecast_contract_v3(
         source.get("forward_timing_forecast")
         or timing.get("forward_timing_forecast")
@@ -7256,6 +7580,156 @@ def _cpu_stream_freshness_budget_sec(
     )
 
 
+def _external_capture_stream_observation_v3(
+    source: Mapping[str, object],
+    *,
+    now_epoch: float,
+) -> dict[str, object]:
+    """Project a fresh leased capture heartbeat as observation-only liveness.
+
+    Browser/WGC capture has its own lease-fenced heartbeat and does not require
+    the legacy CPU observer to be running.  This adapter only establishes that
+    the selected pixels are arriving or being processed.  It deliberately
+    supplies no direction, completed-candle truth, or entry authority.
+    """
+
+    capture_source = _mapping(source.get("capture_source_v3"))
+    visual_observation = _mapping(source.get("visual_observation_v3"))
+    capture_stream = _mapping(capture_source.get("stream"))
+    source_state = _safe_public_text(
+        capture_source.get("state"), "", limit=32
+    ).upper()
+    reason_code = _safe_public_text(
+        capture_source.get("reason_code"), "", limit=48
+    ).upper()
+    visual_status = _safe_public_text(
+        visual_observation.get("status"), "", limit=48
+    ).upper()
+    study_update_state = _safe_public_text(
+        visual_observation.get("study_update_state"), "", limit=48
+    ).upper()
+
+    # A public source snapshot intentionally omits the private lease secret.
+    # Its immutable ownership tuple is still present and proves that a
+    # VALIDATING heartbeat belongs to a selected, lease-fenced transport.
+    public_lease_identity = bool(
+        _safe_identifier(capture_source.get("source_id"), "")
+        and _safe_identifier(capture_source.get("sequence_id"), "")
+        and _integer(capture_source.get("source_generation")) > 0
+    )
+    source_fresh = _explicit_bool(capture_source.get("fresh")) is True
+    processing_reason = reason_code in {
+        "FRAME_PROCESSING",
+        "FRAME_PENDING",
+        "WAITING_FOR_ANALYSIS",
+        "ANALYSIS_PENDING",
+    }
+    source_transport_live = bool(
+        source_fresh
+        and (
+            source_state == "LIVE"
+            or (
+                source_state == "VALIDATING"
+                and public_lease_identity
+                and (
+                    processing_reason
+                    or _explicit_bool(capture_stream.get("processing")) is True
+                    or _explicit_bool(
+                        capture_stream.get("material_change_pending")
+                    )
+                    is True
+                )
+            )
+        )
+    )
+    visual_transport_live = bool(
+        _safe_public_text(
+            visual_observation.get("transport_state"), "", limit=32
+        ).upper()
+        == "LIVE"
+        and _explicit_bool(visual_observation.get("transport_fresh")) is True
+    )
+    active = bool(source_transport_live or visual_transport_live)
+
+    processing = bool(
+        active
+        and (
+            processing_reason
+            or _explicit_bool(capture_stream.get("processing")) is True
+            or _explicit_bool(capture_stream.get("material_change_pending"))
+            is True
+            or visual_status
+            in {
+                "FRAME_PROCESSING",
+                "FRAME_PENDING",
+                "PROCESSING_FRAME",
+                "WAITING_FOR_ANALYSIS",
+                "ANALYSIS_PENDING",
+            }
+            or study_update_state in {"PROCESSING", "PENDING", "ANALYZING"}
+        )
+    )
+    unchanged = bool(
+        active
+        and not processing
+        and visual_status == "LIVE_FRAME_UNCHANGED"
+        and _explicit_bool(visual_observation.get("new_visual_evidence"))
+        is not True
+    )
+    activity_state = (
+        "ANALYZING" if processing else "UNCHANGED" if unchanged else "OBSERVING"
+    )
+    activity_summary = {
+        "ANALYZING": (
+            "External chart transport is live; Phoenix Guard is analyzing the "
+            "latest frame."
+        ),
+        "UNCHANGED": (
+            "External chart transport is live; the latest delivered pixels are "
+            "unchanged."
+        ),
+        "OBSERVING": "External chart transport is live and observing the selected chart.",
+    }[activity_state]
+    observed_at = _epoch(
+        capture_source.get("last_frame_epoch"),
+        capture_stream.get("last_capture_epoch"),
+        capture_stream.get("last_transport_capture_epoch"),
+        visual_observation.get("last_observed_epoch"),
+        visual_observation.get("attempted_epoch"),
+    )
+    heartbeat_at = _epoch(
+        capture_source.get("updated_at"),
+        capture_stream.get("last_transport_heartbeat_epoch"),
+        visual_observation.get("attempted_epoch"),
+        observed_at,
+    )
+    # `fresh` is already computed beside the lease-fenced source.  A minimal
+    # public snapshot may omit its private heartbeat time, so the projection
+    # time is safe to use as the bounded observation timestamp in that case.
+    if active and heartbeat_at is None:
+        heartbeat_at = now_epoch
+    if active and observed_at is None:
+        observed_at = heartbeat_at
+    return {
+        "active": active,
+        "state": activity_state,
+        "summary": activity_summary,
+        "observed_at": observed_at,
+        "heartbeat_at": heartbeat_at,
+        "reason": _safe_public_text(
+            capture_source.get("message")
+            or visual_observation.get("message")
+            or activity_summary,
+            activity_summary,
+            limit=160,
+        ),
+        "frame_seq": _bounded_stream_count(
+            capture_source.get("last_frame_id"),
+            capture_stream.get("presented_frames"),
+        ),
+    }
+
+
 def _cpu_stream_contract(
     source: Mapping[str, object],
     tracking_summary: Mapping[str, Any],
@@ -7347,6 +7821,31 @@ def _cpu_stream_contract(
         and -1.0 <= current_epoch - cast(float, last_frame_epoch)
         <= freshness_budget_sec
     )
+    cpu_stream_fresh = stream_fresh
+    external_observation = _external_capture_stream_observation_v3(
+        source,
+        now_epoch=current_epoch,
+    )
+    external_active = external_observation.get("active") is True
+    if external_active and not stream_fresh:
+        # The Edge/WGC lease is an independent live transport.  It replaces
+        # only the health/read portion of this legacy-named contract; all
+        # directional fields below remain neutral and completed-candle gated.
+        enabled = True
+        normalized_state = "RUNNING"
+        stream_fresh = True
+        heartbeat_epoch = _epoch(external_observation.get("heartbeat_at"))
+        last_frame_epoch = _epoch(external_observation.get("observed_at"))
+        heartbeat_age = (
+            round(max(0.0, current_epoch - heartbeat_epoch), 3)
+            if heartbeat_epoch is not None
+            else None
+        )
+        frame_age = (
+            round(max(0.0, current_epoch - last_frame_epoch), 3)
+            if last_frame_epoch is not None
+            else None
+        )
 
     raw_activity = _text(
         temporal.get("state") or motion.get("state") or observer.get("state"),
@@ -7364,7 +7863,11 @@ def _cpu_stream_contract(
         "KEYFRAME": "STARTING",
         "IDLE": "STARTING",
     }
-    if not stream or not enabled:
+    if external_active and not cpu_stream_fresh:
+        activity_state = _safe_public_text(
+            external_observation.get("state"), "OBSERVING", limit=32
+        ).upper()
+    elif not stream or not enabled:
         activity_state = "UNAVAILABLE"
     elif not stream_fresh:
         activity_state = "STARTING" if last_frame_epoch is None else "STALE"
@@ -7400,6 +7903,10 @@ def _cpu_stream_contract(
         "RESTING": "Live stream sees the chart resting now.",
         "UNCHANGED": "Live stream sees no material visual change right now.",
         "STARTING": "Live stream is establishing a current visual baseline.",
+        "ANALYZING": (
+            "External chart transport is live; Phoenix Guard is analyzing the "
+            "latest frame."
+        ),
         "STALE": "The last stream frame is too old to describe the chart now.",
         "UNAVAILABLE": "No current CPU stream observation is available.",
         "OBSERVING": "Live stream is observing the current chart.",
@@ -7415,7 +7922,10 @@ def _cpu_stream_contract(
         "heartbeat_age_seconds": heartbeat_age,
         "freshness_budget_seconds": freshness_budget_sec,
         "frame_seq": _bounded_stream_count(
-            temporal.get("frame_seq"), last_decision.get("frame_seq"), observer.get("frame_seq")
+            temporal.get("frame_seq"),
+            last_decision.get("frame_seq"),
+            observer.get("frame_seq"),
+            external_observation.get("frame_seq") if external_active else None,
         ),
         "stream_generation": _bounded_stream_count(
             temporal.get("stream_generation"),
@@ -7443,7 +7953,9 @@ def _cpu_stream_contract(
     }
 
     last_reason = _safe_public_text(
-        stream.get("last_reason")
+        external_observation.get("reason")
+        if external_active
+        else stream.get("last_reason")
         or lineage.get("accepted_reason")
         or stream.get("last_error"),
         "",
@@ -7525,6 +8037,7 @@ def _stream_activity_label(state: str) -> str:
         "MOVING": "moving",
         "RESTING": "resting",
         "UNCHANGED": "visually unchanged",
+        "ANALYZING": "analyzing the latest frame",
         "STARTING": "establishing its baseline",
         "OBSERVING": "being observed",
     }.get(state, "not current")
@@ -7612,7 +8125,9 @@ def _streaming_three_question_synthesis_v3(
             if part
         )
         studied["updated_at"] = heartbeat_epoch
-        studied["live_state"] = "STREAMING"
+        studied["live_state"] = (
+            "ANALYZING" if stream_state == "ANALYZING" else "STREAMING"
+        )
     else:
         studied["live_state"] = stream_state
     result["studied_direction_current"] = studied
@@ -7753,6 +8268,28 @@ def _streaming_three_question_synthesis_v3(
         timing_state = "TIMING_DELAY"
     elif timing_state == "ENTER_NOW" and not enter_now:
         timing_state = "FORMING" if stream_fresh else "STALE"
+    # No issued entry deadline is not the same thing as stale market truth.
+    # The closed-candle direction may be identity-proven while the independent
+    # entry contract has never opened a window, leaving its legacy freshness
+    # field UNKNOWN.  When the exact live stream is fresh, keep that condition
+    # visible as a current PREPARE/OBSERVE study instead of collapsing Q3 into
+    # the generic STAY OUT/STALE fallback.  Explicit stale, invalidated,
+    # conflicting, missed, and countertrend-stale evidence remains fail-closed.
+    current_study_without_issued_window = bool(
+        stream_fresh
+        and identity_matches
+        and timing_state == "STALE"
+        and _text(entry_evidence.get("freshness"), "UNKNOWN", limit=32).upper()
+        == "UNKNOWN"
+        and entry_evidence.get("directional_study_present") is True
+        and _text(
+            entry_evidence.get("countertrend_validation_state"),
+            "ABSENT",
+            limit=32,
+        ).upper()
+        not in {"STALE", "INVALIDATED"}
+        and studied_side in _DIRECTIONAL_SIDES
+    )
     market_origin = _mapping(result.get("market_origin_history"))
     market_origin_evidence = _mapping(market_origin.get("evidence"))
     major_side = _side(
@@ -7999,9 +8536,19 @@ def _streaming_three_question_synthesis_v3(
                 "there is no verified entry permission now."
             )
     elif stream_fresh:
-        best_action = "OBSERVE"
-        decision_state = "OBSERVING"
-        entry["headline"] = "OBSERVE — the stream is building the current read"
+        best_action = (
+            "ANALYZE_CURRENT_FRAME"
+            if stream_state == "ANALYZING"
+            else "OBSERVE"
+        )
+        decision_state = (
+            "ANALYZING" if stream_state == "ANALYZING" else "OBSERVING"
+        )
+        entry["headline"] = (
+            "ANALYZING CURRENT FRAME"
+            if stream_state == "ANALYZING"
+            else "OBSERVE — the stream is building the current read"
+        )
         entry["answer"] = (
             f"{stream_summary} Do not enter until completed-candle permission is current."
         )
@@ -8299,7 +8846,13 @@ def _streaming_three_question_synthesis_v3(
         )
     operator_action = _operator_action_contract_v3(
         enter_now=enter_now,
-        timing_state=("INVALIDATED" if identity_rebind_pending else timing_state),
+        timing_state=(
+            "INVALIDATED"
+            if identity_rebind_pending
+            else "FORMING"
+            if current_study_without_issued_window
+            else timing_state
+        ),
         timing_effect=timing_effect,
         studied_side=selected_side,
         behavior_state=stream_state,
@@ -8317,6 +8870,19 @@ def _streaming_three_question_synthesis_v3(
                     stream_instruction,
                     limit=320,
                 ),
+            }
+        )
+    elif (
+        stream_fresh
+        and stream_state == "ANALYZING"
+        and not identity_rebind_pending
+        and timing_state not in {"INVALIDATED", "CONFLICT"}
+    ):
+        operator_action.update(
+            {
+                "state": "ANALYZING",
+                "label": "ANALYZING",
+                "instruction": stream_instruction,
             }
         )
     elif (
@@ -8363,21 +8929,108 @@ def _streaming_three_question_synthesis_v3(
             )
         ),
     )
+    projection_timing_support_count = max(
+        0,
+        _integer(timing_forecast.get("timing_support_count")),
+    )
     projection_calibration_grade = _safe_public_text(
         timing_forecast.get("calibration_grade"), "UNRATED", limit=48
     ).upper()
     projection_calibrated = timing_forecast.get("calibrated") is True
-    projection_publishable = bool(
+    projection_basis = _safe_public_text(
+        timing_forecast.get("source"), "UNAVAILABLE", limit=64
+    ).upper()
+    projection_horizon_low = _number(
+        timing_forecast.get("horizon_seconds_low")
+    )
+    projection_horizon_high = _number(
+        timing_forecast.get("horizon_seconds_high")
+    )
+    calibrated_projection_publishable = bool(
         projection_calibrated
         and projection_support_count > 0
         and projection_calibration_grade not in {"", "UNKNOWN", "UNRATED"}
     )
-    if projection_publishable:
+    live_sequence_projection_publishable = bool(
+        not projection_calibrated
+        and _safe_public_text(
+            timing_forecast.get("status"), "", limit=48
+        ).upper()
+        == "FORECAST_AVAILABLE"
+        and projection_basis == "LIVE_M5_SEQUENCE"
+        and timing_forecast.get("forecast_lineage_matches") is True
+        and projection_side in _DIRECTIONAL_SIDES
+        and projection_horizon_low is not None
+        and projection_horizon_low
+        >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        and projection_horizon_high is not None
+        and projection_horizon_high >= projection_horizon_low
+    )
+    empirical_pair_projection_publishable = bool(
+        not projection_calibrated
+        and _safe_public_text(
+            timing_forecast.get("status"), "", limit=48
+        ).upper()
+        == "FORECAST_AVAILABLE"
+        and (
+            projection_basis == "PAIR"
+            or projection_basis.startswith("PAIR_")
+        )
+        and timing_forecast.get("timing_empirical") is True
+        and projection_timing_support_count > 0
+        and timing_forecast.get("forecast_lineage_matches") is True
+        and projection_side in _DIRECTIONAL_SIDES
+        and projection_horizon_low is not None
+        and projection_horizon_low
+        >= MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS
+        and projection_horizon_high is not None
+        and projection_horizon_high >= projection_horizon_low
+    )
+    uncalibrated_projection_publishable = bool(
+        live_sequence_projection_publishable
+        or empirical_pair_projection_publishable
+    )
+    projection_publishable = bool(
+        calibrated_projection_publishable
+        or uncalibrated_projection_publishable
+    )
+    if calibrated_projection_publishable:
         projection_headline = forecast_headline
         projection_summary = forecast_summary
         projection_horizon = _safe_public_text(
             timing_forecast.get("horizon_label"),
             "Calibrated timing range",
+            limit=180,
+        )
+    elif uncalibrated_projection_publishable:
+        projection_kind = (
+            "empirical pair"
+            if empirical_pair_projection_publishable
+            else "live-sequence"
+        )
+        projection_headline = _safe_public_text(
+            f"{forecast_headline} · uncalibrated {projection_kind} estimate",
+            f"Uncalibrated {projection_kind} timing estimate",
+            limit=240,
+        )
+        projection_summary = _safe_public_text(
+            (
+                "This is an uncalibrated empirical pair estimate from current "
+                "lineage-matched closed-candle history. Its bounded timing range "
+                "is visible, but it is not an event probability and cannot grant "
+                f"entry permission. {forecast_summary}"
+                if empirical_pair_projection_publishable
+                else "This is an uncalibrated live-sequence estimate from the current "
+                "lineage-matched closed-candle sequence. Its bounded timing range "
+                "is visible, but it supplies no event probability and cannot grant "
+                f"entry permission. {forecast_summary}"
+            ),
+            f"Uncalibrated {projection_kind} estimate; no probability or entry permission.",
+            limit=960,
+        )
+        projection_horizon = _safe_public_text(
+            timing_forecast.get("horizon_label"),
+            f"Uncalibrated {projection_kind} timing range",
             limit=180,
         )
     else:
@@ -8399,11 +9052,18 @@ def _streaming_three_question_synthesis_v3(
         "status": _safe_public_text(
             timing_forecast.get("status"), "RESEARCH_ONLY", limit=48
         ).upper()
-        if projection_publishable
+        if calibrated_projection_publishable
+        else "FORECAST_AVAILABLE_UNCALIBRATED"
+        if uncalibrated_projection_publishable
         else "RESEARCH_ONLY_UNCALIBRATED",
         "horizon_label": projection_horizon,
-        "support_count": projection_support_count,
+        "support_count": (
+            projection_timing_support_count
+            if empirical_pair_projection_publishable
+            else projection_support_count
+        ),
         "calibrated": projection_calibrated,
+        "basis": projection_basis,
         "calibration_grade": projection_calibration_grade,
         "timing_range_publishable": projection_publishable,
         "study_only": True,
@@ -8418,6 +9078,8 @@ def _streaming_three_question_synthesis_v3(
         action_headline = "WAIT FOR PULLBACK"
     elif action_state == "PREPARE":
         action_headline = "PREPARE"
+    elif action_state == "ANALYZING":
+        action_headline = "ANALYZING CURRENT FRAME"
     else:
         action_headline = "STAY OUT"
         operator_action["label"] = "STAY OUT"
@@ -8436,7 +9098,23 @@ def _streaming_three_question_synthesis_v3(
     entry["decision"] = best_action
     entry["decision_state"] = decision_state
     entry["timing_state"] = "ENTER_NOW" if enter_now else timing_state
-    entry["state"] = entry["timing_state"]
+    # ``timing_state`` describes the last completed-candle entry/timing
+    # contract.  During a fresh external-frame study that contract may still
+    # correctly be STALE while the operator's *current* state is ANALYZING.
+    # Publishing STALE as the card state made a healthy, advancing Edge stream
+    # look dead even though the action contract and headline were already
+    # processing the newest frame.  Keep both truths separate: retain the
+    # closed-candle timing state for audit consumers, and expose the live action
+    # state as the primary Q3 state.
+    entry["state"] = (
+        "ENTER_NOW"
+        if enter_now
+        else "ANALYZING"
+        if action_state == "ANALYZING"
+        else "OBSERVING"
+        if current_study_without_issued_window
+        else entry["timing_state"]
+    )
     entry["side"] = permission_side if enter_now else selected_side
     if stream_fresh and heartbeat_epoch is not None:
         entry["updated_at"] = heartbeat_epoch
@@ -8469,6 +9147,351 @@ def _streaming_three_question_synthesis_v3(
     return result
 
 
+def _capture_source_transport_read_v3(
+    capture_source: Mapping[str, object],
+) -> dict[str, object]:
+    """Project transport liveness separately from decision freshness."""
+
+    state = _text(capture_source.get("state"), "NO_SOURCE", limit=32).upper()
+    reason_code = _text(
+        capture_source.get("reason_code"),
+        state,
+        limit=48,
+    ).upper()
+    fresh = _explicit_bool(capture_source.get("fresh")) is True
+    processing = bool(
+        fresh
+        and state == "VALIDATING"
+        and reason_code in {"FRAME_PENDING", "FRAME_PROCESSING"}
+    )
+    active = bool(fresh and (state == "LIVE" or processing))
+    source_stream = _mapping(capture_source.get("stream"))
+    return {
+        "active": active,
+        "processing": processing,
+        "state": state,
+        "fresh": fresh,
+        "reason_code": reason_code,
+        "transport_heartbeat_count": max(
+            0,
+            _integer(source_stream.get("transport_heartbeat_count")),
+        ),
+        "last_transport_heartbeat_epoch": _epoch(
+            source_stream.get("last_transport_heartbeat_epoch")
+        ),
+    }
+
+
+def _heartbeat_revocation_identity_v3(
+    capture_source: Mapping[str, object],
+    *,
+    now_epoch: float,
+) -> dict[str, object]:
+    """Read a backend lease-fenced identity observation as revocation-only.
+
+    This deliberately reads only the backend-stamped schema. It cannot become
+    ``current_chart_identity_v3`` or completed-study/overlay authority.
+    """
+
+    source_stream = _mapping(capture_source.get("stream"))
+    row = _mapping(source_stream.get("revocation_identity_observation_v3"))
+    symbol = _safe_public_text(row.get("symbol"), "", limit=64).upper()
+    timeframe = _safe_public_text(row.get("timeframe"), "", limit=32).upper()
+    observed_epoch = _epoch(row.get("observed_epoch"))
+    received_epoch = _epoch(row.get("received_epoch"))
+    source_sequence = _safe_public_text(
+        capture_source.get("sequence_id"), "", limit=192
+    )
+    row_sequence = _safe_public_text(row.get("sequence_id"), "", limit=192)
+    source_generation = _integer(capture_source.get("source_generation"))
+    row_generation = _integer(row.get("source_generation"))
+    stale_after = _number(capture_source.get("stale_after_sec")) or 20.0
+    maximum_age = max(5.0, min(60.0, stale_after))
+    if (
+        _explicit_bool(capture_source.get("fresh")) is not True
+        or _safe_public_text(row.get("schema_version"), "", limit=64)
+        != "PG_REVOCATION_IDENTITY_OBSERVATION_V3"
+        or row.get("revocation_only") is not True
+        or row.get("lease_fenced") is not True
+        or row.get("study_authority") is not False
+        or row.get("overlay_authority") is not False
+        or row.get("decision_authority") is not False
+        or not re.fullmatch(r"[A-Z]{3}/[A-Z]{3}(?: OTC)?", symbol)
+        or not re.fullmatch(r"(?:M1|M3|M5|M15|M30|H1|H4|D1)", timeframe)
+        or not source_sequence
+        or row_sequence != source_sequence
+        or source_generation <= 0
+        or row_generation != source_generation
+        or observed_epoch is None
+        or received_epoch is None
+        or received_epoch < observed_epoch - 2.0
+        or now_epoch - received_epoch > maximum_age
+    ):
+        return {}
+    return {
+        "schema_version": "PG_REVOCATION_IDENTITY_OBSERVATION_V3",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "observed_epoch": observed_epoch,
+        "received_epoch": received_epoch,
+        "sequence_id": row_sequence,
+        "source_generation": row_generation,
+        "revocation_only": True,
+        "lease_fenced": True,
+        "study_authority": False,
+        "overlay_authority": False,
+        "decision_authority": False,
+    }
+
+
+def _heartbeat_identity_mismatches_published_namespace_v3(
+    observation: Mapping[str, object],
+    market_study: Mapping[str, object],
+    *,
+    published_market: Mapping[str, object] | None = None,
+    overlay_rows: object = None,
+) -> bool:
+    """Fail closed when a heartbeat differs from any published namespace.
+
+    A completed study is the strongest comparison target, but overlays can be
+    published before that study row reaches the compact operator payload.  In
+    that partial-publish interval an old pair's identity-locked geometry must
+    still be revoked immediately.  These fallback namespaces are used only to
+    invalidate old output; the heartbeat never gains positive study, overlay,
+    direction, or permission authority.
+    """
+
+    if not observation:
+        return False
+    namespaces: list[tuple[str, str]] = []
+
+    def remember_namespace(symbol_value: object, timeframe_value: object) -> None:
+        symbol = _safe_public_text(symbol_value, "", limit=64).upper()
+        timeframe = _safe_public_text(timeframe_value, "", limit=32).upper()
+        if (
+            re.fullmatch(r"[A-Z]{3}/[A-Z]{3}(?: OTC)?", symbol)
+            and re.fullmatch(r"(?:M1|M3|M5|M15|M30|H1|H4|D1)", timeframe)
+            and (symbol, timeframe) not in namespaces
+        ):
+            namespaces.append((symbol, timeframe))
+
+    if (
+        _safe_public_text(market_study.get("status"), "", limit=32).upper()
+        == "STUDIED"
+        and _safe_identifier(market_study.get("closed_candle_key"), "")
+    ):
+        remember_namespace(
+            market_study.get("symbol"),
+            market_study.get("timeframe"),
+        )
+    market = _mapping(published_market)
+    remember_namespace(market.get("symbol"), market.get("timeframe"))
+    for overlay in _rows(overlay_rows):
+        if (
+            _safe_public_text(
+                overlay.get("instrument_identity_status"),
+                "",
+                limit=32,
+            ).upper()
+            == "LOCKED"
+        ):
+            remember_namespace(overlay.get("symbol"), overlay.get("timeframe"))
+
+    observed_symbol = _instrument_token(observation.get("symbol"))
+    observed_timeframe = _safe_public_text(
+        observation.get("timeframe"), "", limit=32
+    ).upper()
+    return any(
+        _instrument_token(symbol) != observed_symbol
+        or timeframe != observed_timeframe
+        for symbol, timeframe in namespaces
+    )
+
+
+def _identity_rebind_permission_v3(
+    permission: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> dict[str, object]:
+    symbol = _safe_public_text(observation.get("symbol"), "current chart", limit=64)
+    timeframe = _safe_public_text(observation.get("timeframe"), "", limit=32)
+    row = dict(permission)
+    row.update(
+        {
+            "action": "WAIT",
+            "allowed": False,
+            "side": "NEUTRAL",
+            "message": (
+                f"Classifying {symbol} {timeframe}. The prior pair's decision was "
+                "revoked immediately and cannot authorize entry."
+            ).strip(),
+            "next_condition": (
+                "Wait for this pair and timeframe to own a new completed-candle "
+                "study and current overlay namespace."
+            ),
+            "expires_at": None,
+            "window_open": False,
+            "valid_for_seconds": 0.0,
+            "window_label": "Closed",
+        }
+    )
+    return row
+
+
+def _identity_rebind_questions_v3(
+    questions: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> dict[str, object]:
+    result = dict(questions)
+    symbol = _safe_public_text(observation.get("symbol"), "Unknown", limit=64)
+    timeframe = _safe_public_text(observation.get("timeframe"), "Unknown", limit=32)
+    updated_at = _epoch(
+        observation.get("received_epoch"), observation.get("observed_epoch")
+    )
+    evidence = {
+        "identity_rebind_pending": True,
+        "observed_symbol": symbol,
+        "observed_timeframe": timeframe,
+        "lease_fenced": True,
+        "revocation_only": True,
+        "study_authority": False,
+        "overlay_authority": False,
+        "decision_authority": False,
+    }
+    history = dict(_mapping(result.get("market_origin_history")))
+    history.update(
+        {
+            "question": "Where is the market from, and how did history behave?",
+            "headline": f"Classifying {symbol} · {timeframe}",
+            "answer": (
+                "The live chart identity changed. History from the previous pair "
+                "was cleared and will return only after a completed study belongs "
+                "to this exact pair and timeframe."
+            ),
+            "state": "IDENTITY_REBIND_PENDING",
+            "side": "NEUTRAL",
+            "confidence": 0.0,
+            "evidence": evidence,
+            "updated_at": updated_at,
+        }
+    )
+    directional = dict(_mapping(result.get("studied_direction_current")))
+    directional.update(
+        {
+            "question": "Which direction was studied, and what is being studied now?",
+            "headline": f"{symbol} · {timeframe} is being classified",
+            "answer": (
+                "No prior BUY or SELL study is current for this chart. The heartbeat "
+                "identity can revoke old evidence, but it cannot create direction."
+            ),
+            "state": "IDENTITY_REBIND_PENDING",
+            "side": "NEUTRAL",
+            "confidence": 0.0,
+            "evidence": evidence,
+            "updated_at": updated_at,
+        }
+    )
+    entry = dict(_mapping(result.get("entry_now")))
+    entry.update(
+        {
+            "question": "What is the best decision to do right now?",
+            "headline": "CLASSIFYING CURRENT CHART",
+            "answer": (
+                "Stay out while this pair and timeframe receive their own completed "
+                "study. The previous decision and entry window are revoked."
+            ),
+            "state": "INVALIDATED",
+            "side": "NEUTRAL",
+            "confidence": 0.0,
+            "evidence": evidence,
+            "updated_at": updated_at,
+            "enter_now": False,
+            "action": "DO_NOT_ENTER",
+            "reason": "The chart identity changed before the new completed study published.",
+            "next_trigger": "Wait for a new identity-matched completed-candle study.",
+            "timing_state": "INVALIDATED",
+            "permission_allowed": False,
+            "entry_permission_authorized": False,
+            "timing_supports_entry": False,
+            "timing_veto": False,
+            "timing_forecast": {
+                "status": "CLASSIFYING",
+                "study_only": True,
+                "execution_authority": False,
+                "can_grant_entry_permission": False,
+            },
+            "broker_expiry_v3": {},
+            "operator_action": {
+                "schema_version": "PG_OPERATOR_ACTION_V3",
+                "state": "AVOID",
+                "label": "STAY OUT",
+                "instruction": "Wait for the new pair's completed study.",
+                "enter_now": False,
+                "entry_permission_authorized": False,
+                "execution_authority": False,
+                "broker_click_authority": False,
+            },
+            "identity_rebind_pending": True,
+        }
+    )
+    result.update(
+        {
+            "schema_version": "PG_THREE_QUESTION_OPERATOR_BRIEF_V3",
+            "market_origin_history": history,
+            "studied_direction_current": directional,
+            "entry_now": entry,
+        }
+    )
+    return result
+
+
+def _apply_heartbeat_identity_veto_v3(
+    workspace: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> dict[str, object]:
+    result = dict(workspace)
+    if not observation:
+        return result
+    symbol = _safe_public_text(observation.get("symbol"), "Unknown", limit=64)
+    timeframe = _safe_public_text(observation.get("timeframe"), "Unknown", limit=32)
+    result["market"] = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "identity_status": "Classifying current chart",
+        "identity_pending": True,
+        "identity_authority": False,
+    }
+    result["overlays"] = []
+    result["history"] = []
+    surface_frame = _frame_id(_mapping(result.get("surface")).get("frame_id"))
+    result["current_move"] = _sanitize_event({}, surface_frame, pressure=False)
+    result["pressure_event"] = _sanitize_event({}, surface_frame, pressure=True)
+    result["permission"] = _identity_rebind_permission_v3(
+        _mapping(result.get("permission")), observation
+    )
+    tracking = dict(_mapping(result.get("tracking")))
+    tracking["history_count"] = 0
+    tracking["market_study_v3"] = {}
+    tracking["identity_rebind_pending"] = True
+    result["tracking"] = tracking
+    surface = dict(_mapping(result.get("surface")))
+    rebind_identity = _stable_public_digest(
+        {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "sequence_id": observation.get("sequence_id"),
+            "observed_epoch": observation.get("observed_epoch"),
+        },
+        prefix="classifying",
+    )
+    surface["semantic_identity"] = rebind_identity
+    surface["overlay_semantic_revision"] = rebind_identity
+    result["surface"] = surface
+    result["three_questions"] = _identity_rebind_questions_v3(
+        _mapping(result.get("three_questions")), observation
+    )
+    return result
+
+
 def refresh_operator_streaming_read_v3(
     workspace: Mapping[str, object],
     runtime_payload: Mapping[str, object],
@@ -8485,10 +9508,26 @@ def refresh_operator_streaming_read_v3(
     visual_observation = _mapping(runtime_payload.get("visual_observation_v3"))
     capture_source = _mapping(runtime_payload.get("capture_source_v3"))
     capture_source_present = bool(capture_source)
-    capture_source_live = bool(
-        _text(capture_source.get("state"), "", limit=32).upper() == "LIVE"
-        and _explicit_bool(capture_source.get("fresh")) is True
+    capture_transport = _capture_source_transport_read_v3(capture_source)
+    capture_source_live = bool(capture_transport["active"])
+    runtime_study = (
+        _mapping(tracking_summary.get("market_study_v3"))
+        or _mapping(latest_signal.get("market_study_v3"))
     )
+    heartbeat_identity = _heartbeat_revocation_identity_v3(
+        capture_source,
+        now_epoch=current_epoch,
+    )
+    cached_study = _mapping(_mapping(result.get("tracking")).get("market_study_v3"))
+    heartbeat_identity_mismatch = _heartbeat_identity_mismatches_published_namespace_v3(
+        heartbeat_identity,
+        runtime_study or cached_study,
+        published_market=cached_market,
+        overlay_rows=result.get("overlays"),
+    )
+    if heartbeat_identity_mismatch:
+        result = _apply_heartbeat_identity_veto_v3(result, heartbeat_identity)
+        cached_market = dict(_mapping(result.get("market")))
     live_frame_unchanged = bool(
         _text(visual_observation.get("status"), "", limit=48).upper()
         == "LIVE_FRAME_UNCHANGED"
@@ -8534,10 +9573,6 @@ def refresh_operator_streaming_read_v3(
         tracking_summary.get("frame_id"),
         latest_signal.get("frame_id"),
     )
-    runtime_study = (
-        _mapping(tracking_summary.get("market_study_v3"))
-        or _mapping(latest_signal.get("market_study_v3"))
-    )
     runtime_study_symbol = _safe_public_text(
         runtime_study.get("symbol"), "", limit=64
     )
@@ -8559,10 +9594,11 @@ def refresh_operator_streaming_read_v3(
         and runtime_study_timeframe == runtime_timeframe
     )
     identity_rebind_pending = bool(
-        identity_change_detected and not coherent_new_identity
+        (identity_change_detected and not coherent_new_identity)
+        or heartbeat_identity_mismatch
     )
-    identity_matches = not coherent_new_identity
-    if identity_change_detected:
+    identity_matches = not heartbeat_identity_mismatch and not coherent_new_identity
+    if identity_change_detected or heartbeat_identity_mismatch:
         # Compact OCR/sidecar identity can advance before the displayed frame.
         # Revoke permission immediately, but preserve the atomic market/forecast
         # bundle until a new display frame and completed study agree.
@@ -8587,11 +9623,21 @@ def refresh_operator_streaming_read_v3(
     tracking = dict(_mapping(result.get("tracking")))
     if coherent_new_identity:
         tracking["market_study_v3"] = _market_study_contract(runtime_study)
+    elif heartbeat_identity_mismatch:
+        tracking["market_study_v3"] = {}
+        tracking["history_count"] = 0
+        tracking["identity_rebind_pending"] = True
     stream = cpu_stream_tracking_contract_v3(
         runtime_payload,
         now_epoch=current_epoch,
     )
     tracking["stream"] = stream
+    if capture_source_present:
+        tracking["capture_source"] = capture_transport
+    if capture_source_live:
+        tracking["active"] = True
+        if capture_transport["processing"] is True:
+            tracking["state"] = "UPDATING"
     heartbeat_epoch = _epoch(stream.get("heartbeat_epoch"))
     if stream.get("fresh") is True and heartbeat_epoch is not None:
         tracking["updated_at"] = heartbeat_epoch
@@ -8653,6 +9699,8 @@ def refresh_operator_streaming_read_v3(
         identity_rebind_pending=identity_rebind_pending,
         now_epoch=current_epoch,
     )
+    if heartbeat_identity_mismatch:
+        result = _apply_heartbeat_identity_veto_v3(result, heartbeat_identity)
     return result
 
 
@@ -8717,11 +9765,9 @@ def build_operator_workspace_v1(
     tracking_summary = _mapping(source.get("tracking_summary"))
     capture_source = _mapping(source.get("capture_source_v3"))
     visual_observation = _mapping(source.get("visual_observation_v3"))
+    capture_transport = _capture_source_transport_read_v3(capture_source)
     external_capture_live = bool(
-        (
-            _text(capture_source.get("state"), "", limit=32).upper() == "LIVE"
-            and _explicit_bool(capture_source.get("fresh")) is True
-        )
+        capture_transport["active"] is True
         or (
             _text(visual_observation.get("transport_state"), "", limit=32).upper()
             == "LIVE"
@@ -8737,32 +9783,86 @@ def build_operator_workspace_v1(
         tracking_summary.get("market_study_v3")
         or _mapping(source.get("latest_signal")).get("market_study_v3")
     )
-    market = {
-        "symbol": _safe_public_text(
-            tracking_summary.get("detected_market")
-            or _mapping(source.get("latest_signal")).get("symbol")
-            or _mapping(source.get("latest_signal")).get("pair")
-            or source.get("market")
-            or market_study_v3.get("symbol")
+    aligned_chart_identity = _aligned_current_chart_identity_v3(
+        source, display_frame
+    )
+    current_chart_identity = _current_chart_identity_v3(source, display_frame)
+    heartbeat_identity = _heartbeat_revocation_identity_v3(
+        capture_source,
+        now_epoch=current_epoch,
+    )
+    heartbeat_identity_mismatch = _heartbeat_identity_mismatches_published_namespace_v3(
+        heartbeat_identity,
+        market_study_v3,
+        published_market=(
+            current_chart_identity
+            or {
+                "symbol": tracking_summary.get("detected_market"),
+                "timeframe": tracking_summary.get("detected_timeframe"),
+            }
         ),
-        "timeframe": _safe_public_text(
-            tracking_summary.get("detected_timeframe")
-            or _mapping(source.get("latest_signal")).get("timeframe")
-            or market_study_v3.get("timeframe"),
-            "Unknown",
-            limit=32,
-        ),
-    }
+        overlay_rows=overlays,
+    )
+    if heartbeat_identity_mismatch:
+        market = {
+            "symbol": _safe_public_text(
+                heartbeat_identity.get("symbol"), "Unknown", limit=64
+            ),
+            "timeframe": _safe_public_text(
+                heartbeat_identity.get("timeframe"), "Unknown", limit=32
+            ),
+            "identity_status": "Classifying current chart",
+            "identity_pending": True,
+            "identity_authority": False,
+        }
+    elif aligned_chart_identity and not current_chart_identity:
+        market = {
+            "symbol": "Unknown",
+            "timeframe": "Unknown",
+            "identity_status": "Identifying current chart",
+            "identity_pending": True,
+        }
+    else:
+        market = {
+            "symbol": _safe_public_text(
+                current_chart_identity.get("symbol")
+                or current_chart_identity.get("market")
+                or tracking_summary.get("detected_market")
+                or _mapping(source.get("latest_signal")).get("symbol")
+                or _mapping(source.get("latest_signal")).get("pair")
+                or source.get("market")
+                or market_study_v3.get("symbol")
+            ),
+            "timeframe": _safe_public_text(
+                current_chart_identity.get("timeframe")
+                or tracking_summary.get("detected_timeframe")
+                or _mapping(source.get("latest_signal")).get("timeframe")
+                or market_study_v3.get("timeframe"),
+                "Unknown",
+                limit=32,
+            ),
+        }
     history = _history_contract(
         source,
         current_symbol=str(market["symbol"]),
         current_timeframe=str(market["timeframe"]),
     )
+    if heartbeat_identity_mismatch:
+        overlays = []
+        history = []
+        current_move = _sanitize_event({}, display_frame, pressure=False)
+        pressure_event = _sanitize_event({}, display_frame, pressure=True)
+        permission = _identity_rebind_permission_v3(
+            permission,
+            heartbeat_identity,
+        )
     tracking_flag = _explicit_bool(source.get("tracking_enabled"))
     observation_active = bool(tracking_flag is True or external_capture_live)
     if observation_active:
         tracking_state = (
-            "LIVE"
+            "UPDATING"
+            if capture_transport["processing"] is True
+            else "LIVE"
             if freshness["state"] == "FRESH"
             else "DELAYED"
             if freshness["state"] == "STALE"
@@ -8818,6 +9918,18 @@ def build_operator_workspace_v1(
         overlay_viewports,
         overlays,
     )
+    # Bind every public row to the exact surface namespace it was projected
+    # for.  The browser verifies this again before counting or drawing the
+    # row; this is a defense against stale cache merges and pair switches that
+    # reuse a detector track id.
+    surface_semantic_identity = surface_revisions["semantic_identity"]
+    overlays = [
+        {
+            **overlay,
+            "surface_semantic_identity": surface_semantic_identity,
+        }
+        for overlay in overlays
+    ]
     result: dict[str, object] = {
         "schema_version": OPERATOR_WORKSPACE_SCHEMA_VERSION,
         "session_id": session_id,
@@ -8829,8 +9941,11 @@ def build_operator_workspace_v1(
             "state": tracking_state,
             "updated_at": observed_at,
             "history_count": len(history),
-            "market_study_v3": market_study_v3,
+            "market_study_v3": (
+                {} if heartbeat_identity_mismatch else market_study_v3
+            ),
             "stream": stream,
+            "capture_source": capture_transport,
         },
         "freshness": freshness,
         "current_move": current_move,
@@ -8846,6 +9961,33 @@ def build_operator_workspace_v1(
             "overlay_viewports": overlay_viewports,
             "frame_id": display_frame,
             "updated_at": observed_at,
+            # Keep the selector proof beside the bitmap and geometry it owns.
+            # The browser uses this value only as a fail-closed identity fence;
+            # it never grants study or decision authority.
+            "market_selector_visual_fingerprint": _safe_public_text(
+                current_chart_identity.get(
+                    "market_selector_visual_fingerprint"
+                )
+                or source.get("market_selector_visual_fingerprint")
+                or _mapping(source.get("latest_signal")).get(
+                    "market_selector_visual_fingerprint"
+                )
+                or tracking_summary.get(
+                    "market_selector_visual_fingerprint"
+                ),
+                "",
+                limit=80,
+            ),
+            "overlay_state_version": _safe_public_text(
+                source.get("overlay_state_version"),
+                "",
+                limit=160,
+            ),
+            "overlay_frame_state_version": _safe_public_text(
+                source.get("overlay_frame_state_version"),
+                "",
+                limit=160,
+            ),
             **surface_revisions,
         },
         "overlays": overlays,

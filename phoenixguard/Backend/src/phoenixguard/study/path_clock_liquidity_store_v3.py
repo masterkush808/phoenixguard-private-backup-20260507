@@ -45,6 +45,9 @@ PATH_CLOCK_LIQUIDITY_SIDE_STORE_SCHEMA_VERSION = (
 PATH_CLOCK_LIQUIDITY_PUBLIC_SCHEMA_VERSION = (
     "PG_PATH_CLOCK_LIQUIDITY_PUBLIC_STUDY_V3"
 )
+PASSIVE_PREDICTION_AUDIT_SCHEMA_VERSION = (
+    "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3"
+)
 PROVEN_CLOSED_CANDLE_TIME_SCHEMA_VERSION = "PG_PROVEN_CLOSED_CANDLE_TIME_V3"
 _COORDINATE_SPACE = "NORMALIZED_MEDIAN_RANGE"
 _ORDER_DOMAIN = "CLOSED_TIMESTAMP_V1"
@@ -960,6 +963,162 @@ class PathClockLiquiditySideStoreV3:
         return dict(baseline_score), dict(candidate_score), dict(gate)
 
     @staticmethod
+    def _passive_prediction_audit(
+        state: Mapping[str, Any],
+        *,
+        baseline_score: Mapping[str, Any],
+        candidate_score: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project frozen forecast outcomes without exposing path internals.
+
+        Only anchors that actually froze an admission prediction are counted as
+        pending forecasts.  Ordinary field snapshots are not mislabeled as
+        model decisions.  Matured rows are the same exact-horizon cohort used
+        by the four-axis replay scorer.
+        """
+
+        pending_anchors = [
+            row
+            for row in _rows(state.get("active_anchors"))
+            if _mapping(row.get("admission_prediction"))
+        ]
+        matured_rows = _rows(state.get("candidate_replays"))
+        latest_pending: dict[str, Any] = {}
+        if pending_anchors:
+            anchor = max(
+                pending_anchors,
+                key=lambda row: (
+                    float(row.get("anchor_timestamp_seconds", 0.0) or 0.0),
+                    str(row.get("anchor_closed_candle_key") or ""),
+                ),
+            )
+            prediction = _mapping(anchor.get("admission_prediction"))
+            timing_window = _mapping(prediction.get("timing_window_seconds"))
+            latest_pending = {
+                "closed_candle_key": str(
+                    anchor.get("anchor_closed_candle_key") or ""
+                ),
+                "closed_at_seconds": anchor.get("anchor_timestamp_seconds"),
+                "predicted_direction": str(
+                    anchor.get("studied_direction") or ""
+                ),
+                "horizon_seconds": int(
+                    anchor.get("duration_seconds", 0) or 0
+                ),
+                "timing_window_seconds": {
+                    "start": int(timing_window.get("start", 0) or 0),
+                    "end": int(timing_window.get("end", 0) or 0),
+                },
+                "stop_distance_mru": prediction.get(
+                    "selected_stop_distance_mru"
+                ),
+                "move_size_mru": prediction.get("selected_move_size_mru"),
+                "sweep_scenario_count": len(
+                    _rows(prediction.get("sweep_predictions"))
+                ),
+                "frozen_on_closed_candle": (
+                    prediction.get("frozen_on_closed_candle") is True
+                ),
+                "future_leakage_detected": (
+                    prediction.get("future_leakage_detected") is not False
+                ),
+            }
+
+        latest_outcome: dict[str, Any] = {}
+        if matured_rows:
+            row = matured_rows[-1]
+            timing_window = _mapping(row.get("timing_window_seconds"))
+            move_occurred = row.get("observed_move_occurred") is not False
+            observed_move_time = int(
+                row.get("observed_move_time_seconds", 0) or 0
+            )
+            timing_start = int(timing_window.get("start", 0) or 0)
+            timing_end = int(timing_window.get("end", 0) or 0)
+            sweep_rows = _rows(row.get("sweep_outcomes"))
+            sweep_survived = sum(
+                1 for sweep in sweep_rows if sweep.get("survived_until_move") is True
+            )
+            predicted_direction = str(row.get("predicted_direction") or "")
+            observed_direction = str(row.get("observed_direction") or "")
+            latest_outcome = {
+                "closed_candle_key": str(row.get("closed_candle_key") or ""),
+                "horizon_seconds": int(row.get("horizon_seconds", 0) or 0),
+                "predicted_direction": predicted_direction,
+                "observed_direction": observed_direction,
+                "direction_correct": bool(
+                    predicted_direction and predicted_direction == observed_direction
+                ),
+                "observed_move_occurred": move_occurred,
+                "observed_move_time_seconds": observed_move_time,
+                "timing_window_seconds": {
+                    "start": timing_start,
+                    "end": timing_end,
+                },
+                "timing_correct": bool(
+                    move_occurred
+                    and timing_start <= observed_move_time <= timing_end
+                ),
+                "sweep_scenario_count": len(sweep_rows),
+                "sweep_survived_count": sweep_survived,
+                "sweep_survival_rate": (
+                    round(sweep_survived / len(sweep_rows), 6)
+                    if sweep_rows
+                    else None
+                ),
+                "frozen_on_closed_candle": (
+                    row.get("frozen_on_closed_candle") is True
+                ),
+                "future_leakage_detected": (
+                    row.get("future_leakage_detected") is not False
+                ),
+            }
+
+        baseline_metrics = _mapping(baseline_score.get("metrics"))
+        candidate_metrics = _mapping(candidate_score.get("metrics"))
+        axis_deltas = {
+            axis: round(
+                float(candidate_metrics.get(axis, 0.0) or 0.0)
+                - float(baseline_metrics.get(axis, 0.0) or 0.0),
+                6,
+            )
+            for axis in (
+                "directional_accuracy",
+                "timing_accuracy",
+                "sweep_survival_rate",
+                "calibration_score",
+            )
+            if axis in baseline_metrics and axis in candidate_metrics
+        }
+        pending_count = len(pending_anchors)
+        matured_count = len(matured_rows)
+        return {
+            "schema_version": PASSIVE_PREDICTION_AUDIT_SCHEMA_VERSION,
+            "status": (
+                "AUDITED_OUTCOMES"
+                if candidate_metrics
+                else "OUTCOMES_MATURED"
+                if matured_count
+                else "AWAITING_OUTCOMES"
+                if pending_count
+                else "BUILDING_FORECAST_SUPPORT"
+            ),
+            "symbol": str(state.get("symbol") or ""),
+            "timeframe": str(state.get("timeframe") or ""),
+            "frozen_forecast_count": pending_count + matured_count,
+            "pending_outcome_count": pending_count,
+            "matured_outcome_count": matured_count,
+            "minimum_promotion_replays": _MINIMUM_PROMOTION_REPLAYS,
+            "latest_frozen_forecast": latest_pending,
+            "latest_matured_outcome": latest_outcome,
+            "candidate_metrics": deepcopy(candidate_metrics),
+            "baseline_metrics": deepcopy(baseline_metrics),
+            "axis_deltas": axis_deltas,
+            "tracks_market_outcomes_only": True,
+            "places_trades": False,
+            **_safety_contract(),
+        }
+
+    @staticmethod
     def _compact_public(
         state: Mapping[str, Any],
         field: JointPathClockLiquidityFieldV3,
@@ -1017,6 +1176,13 @@ class PathClockLiquiditySideStoreV3:
         )
         baseline_score, candidate_score, promotion_gate = (
             PathClockLiquiditySideStoreV3._promotion_evidence(state)
+        )
+        passive_prediction_audit = (
+            PathClockLiquiditySideStoreV3._passive_prediction_audit(
+                state,
+                baseline_score=baseline_score,
+                candidate_score=candidate_score,
+            )
         )
         context = _mapping(forecast_context)
         closed_candle_time_proof = _mapping(
@@ -1242,6 +1408,7 @@ class PathClockLiquiditySideStoreV3:
             "promotion_gate": promotion_gate,
             "baseline_replay_score": baseline_score,
             "candidate_replay_score": candidate_score,
+            "passive_prediction_audit_v3": passive_prediction_audit,
             "replay_support_count": len(_rows(state.get("candidate_replays"))),
             "minimum_eligible_duration_seconds": MIN_ELIGIBLE_DURATION_SECONDS,
             "maximum_studied_duration_seconds": MAX_STUDIED_DURATION_SECONDS,
@@ -1967,6 +2134,28 @@ def pending_path_clock_liquidity_v3(
             **_safety_contract(),
         },
         "pair_dna_partition": {},
+        "passive_prediction_audit_v3": {
+            "schema_version": PASSIVE_PREDICTION_AUDIT_SCHEMA_VERSION,
+            "status": "BUILDING_FORECAST_SUPPORT",
+            "symbol": " ".join(
+                str(lineage["symbol"] or "").strip().upper().split()
+            ),
+            "timeframe": " ".join(
+                str(lineage["timeframe"] or "").strip().upper().split()
+            ),
+            "frozen_forecast_count": 0,
+            "pending_outcome_count": 0,
+            "matured_outcome_count": 0,
+            "minimum_promotion_replays": _MINIMUM_PROMOTION_REPLAYS,
+            "latest_frozen_forecast": {},
+            "latest_matured_outcome": {},
+            "candidate_metrics": {},
+            "baseline_metrics": {},
+            "axis_deltas": {},
+            "tracks_market_outcomes_only": True,
+            "places_trades": False,
+            **_safety_contract(),
+        },
         "time_proof_audit": {},
         "persistence_contract": {
             "raw_trajectories_in_pair_dna_json": False,
@@ -1986,6 +2175,7 @@ def pending_path_clock_liquidity_v3(
 
 
 __all__ = [
+    "PASSIVE_PREDICTION_AUDIT_SCHEMA_VERSION",
     "PATH_CLOCK_LIQUIDITY_PUBLIC_SCHEMA_VERSION",
     "PATH_CLOCK_LIQUIDITY_SIDE_STORE_SCHEMA_VERSION",
     "PROVEN_CLOSED_CANDLE_TIME_SCHEMA_VERSION",

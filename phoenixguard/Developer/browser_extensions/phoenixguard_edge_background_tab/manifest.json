@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "PhoenixGuard Universal Chart Region",
-  "version": "0.3.0",
+  "version": "0.3.12",
   "description": "Streams one explicitly selected region of any HTTP(S) chart tab to local PhoenixGuard without activating or raising Edge.",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
+    "alarms",
     "offscreen",
     "scripting",
     "storage",
@@ -23,6 +24,14 @@
     "default_title": "PhoenixGuard: select or switch the active chart region"
   },
   "commands": {
+    "lock-full-viewport": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+7",
+        "linux": "Ctrl+Shift+7",
+        "mac": "Command+Shift+7"
+      },
+      "description": "Lock the active chart tab's full viewport without opening the region selector"
+    },
     "select-chart-region": {
       "suggested_key": {
         "windows": "Ctrl+Shift+8",

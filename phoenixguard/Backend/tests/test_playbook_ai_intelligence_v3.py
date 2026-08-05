@@ -135,6 +135,43 @@ def test_playbook_ai_scores_buy_and_sell_with_tradeable_horizon() -> None:
     assert "semantic_graph" not in summary
 
 
+def test_playbook_ai_never_publishes_sub_fifteen_minute_trade_horizon() -> None:
+    snapshot, market, book_strategy = _playbook_inputs("BUY")
+    candle_context = book_strategy["evidence"]["candle_movement_context_v3"]
+    candle_context["current_leg"]["candle_count"] = 4
+    candle_context["current_leg"]["opposing_force_room"][
+        "estimated_candles_to_force"
+    ] = 2
+    candle_context["opposing_force_room"]["estimated_candles_to_force"] = 2
+    overlay = book_strategy["evidence"]["overlay_suite_evidence_v3"]
+    overlay["expected_move_candles_from_projection"] = 2
+    plan = market["professional_trade_plan"]
+    plan["thesis_horizon"]["expected_candle_count"] = 2
+    plan["thesis_horizon"]["expected_duration_sec"] = 600
+    plan["thesis_horizon"]["estimated_candles_to_force"] = 2
+    book_strategy["professional_trade_plan"] = plan
+
+    result = build_playbook_ai_intelligence_v3(
+        snapshot,
+        market,
+        book_strategy,
+        "BUY",
+    )
+    selected = result["horizon"]["selected"]
+    summary = compact_playbook_ai_intelligence_v3(result)
+
+    assert selected["minimum_eligible_trade_duration_seconds"] == 900
+    assert selected["under_15_minutes_excluded"] is True
+    assert selected["optimized_duration_sec"] == 0
+    assert selected["optimized_candle_count"] == 0
+    assert selected["trade_duration_eligible"] is False
+    assert selected["observation_only"] is True
+    assert selected["observation_only_candidate"]["duration_sec"] == 600
+    assert summary["horizon"]["optimized_duration_sec"] == 0
+    assert summary["horizon"]["trade_duration_eligible"] is False
+    assert summary["horizon"]["observation_only"] is True
+
+
 def test_playbook_ai_detects_opposite_thesis_without_runtime_bypass() -> None:
     snapshot, market, book_strategy = _playbook_inputs("SELL")
 

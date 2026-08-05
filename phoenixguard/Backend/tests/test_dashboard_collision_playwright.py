@@ -50,7 +50,7 @@ def _operator_payload(
         if side == "SELL"
         else "Aim for a lower price inside the verified demand or retest area; do not chase highs."
     )
-    return {
+    payload: dict[str, Any] = {
         "schema_version": "PG_OPERATOR_WORKSPACE_V1",
         "session_id": "operator-test",
         "revision": 42,
@@ -304,6 +304,24 @@ def _operator_payload(
             },
         ],
     }
+    surface_identity = "surface-operator-test-eur-usd-m5"
+    cast(dict[str, Any], payload["surface"]).update(
+        {
+            "semantic_identity": surface_identity,
+            "market_selector_visual_fingerprint": "selector_v3_eur_usd",
+        }
+    )
+    for overlay in cast(list[dict[str, Any]], payload["overlays"]):
+        overlay.update(
+            {
+                "symbol": "EUR/USD",
+                "timeframe": "M5",
+                "market_selector_visual_fingerprint": "selector_v3_eur_usd",
+                "instrument_identity_status": "LOCKED",
+                "surface_semantic_identity": surface_identity,
+            }
+        )
+    return payload
 
 
 def _with_timing_forecast(
@@ -514,6 +532,20 @@ def _dashboard_page(
         window.__SESSION_PAYLOAD = {session_payload_json};
         window.__FETCH_URLS = [];
         window.__FETCH_REQUESTS = [];
+        window.__FRONTEND_HEARTBEAT_REQUESTS = [];
+        window.__PERFORMANCE_TRACE_PAYLOAD = {{
+          frame_id: Number(window.__OPERATOR_PAYLOAD?.surface?.frame_id || 0),
+          display_frame: {{
+            frame_id: Number(window.__OPERATOR_PAYLOAD?.surface?.frame_id || 0),
+          }},
+          overlay_state: {{
+            frame_id: Number(window.__OPERATOR_PAYLOAD?.surface?.frame_id || 0),
+            overlay_state_version: "ovlock_4_dashboardtest",
+            overlay_frame_state_version: "ov_42_4_dashboardtest",
+          }},
+          overlay_state_version: "ovlock_4_dashboardtest",
+          overlay_frame_state_version: "ov_42_4_dashboardtest",
+        }};
         window.__OPERATOR_FETCH_DELAY_MS = 0;
         {event_source_bootstrap}
         Object.defineProperty(window, "Worker", {{value: undefined, configurable: true}});
@@ -527,18 +559,32 @@ def _dashboard_page(
         window.fetch = (input, options = {{}}) => {{
           const href = typeof input === "string" ? input : String((input && input.url) || input || "");
           const method = String(options.method || "GET").toUpperCase();
-          window.__FETCH_URLS.push(href);
-          window.__FETCH_REQUESTS.push({{href, method}});
+          const isFrontendHeartbeat = href === "/v1/mobile/frontend/heartbeat/v3";
+          const isPerformanceTrace = href.includes("/v1/mobile/performance/trace/v3");
+          if (isFrontendHeartbeat || isPerformanceTrace) {{
+            window.__FRONTEND_HEARTBEAT_REQUESTS.push({{
+              href,
+              method,
+              body: options.body || null,
+            }});
+          }} else {{
+            window.__FETCH_URLS.push(href);
+            window.__FETCH_REQUESTS.push({{href, method}});
+          }}
           const isOperatorState = href.includes("/v1/mobile/operator/state/v1/");
           const isSessionState = href === "/v1/mobile/window-tracker/sessions/operator-test"
             && window.__SESSION_PAYLOAD !== null;
-          const body = isOperatorState
+          const body = isFrontendHeartbeat
+            ? {{schema_version: "PG_FRONTEND_HEARTBEAT_V3", status: "ALIVE"}}
+            : isPerformanceTrace
+            ? window.__PERFORMANCE_TRACE_PAYLOAD
+            : isOperatorState
             ? window.__OPERATOR_PAYLOAD
             : isSessionState
             ? window.__SESSION_PAYLOAD
             : {{detail: "not found"}};
           const respond = () => new Response(JSON.stringify(body), {{
-            status: isOperatorState || isSessionState ? 200 : 404,
+            status: isOperatorState || isSessionState || isFrontendHeartbeat || isPerformanceTrace ? 200 : 404,
             headers: {{"Content-Type": "application/json"}},
           }});
           const delay = isOperatorState
@@ -617,6 +663,376 @@ def test_live_session_stream_coalesces_updates_into_atomic_operator_refreshes(
         assert "Live stream delivered the newest decision state." in page.locator(
             "#beginner-next-read"
         ).inner_text()
+
+
+def test_rendered_dashboard_posts_bounded_frame_matched_frontend_heartbeat(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["surface"].update(
+        {
+            "overlay_state_version": "ovlock_4_dashboardtest",
+            "overlay_frame_state_version": "ov_42_4_dashboardtest",
+        }
+    )
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.wait_for_function(
+            """
+            () => window.__FRONTEND_HEARTBEAT_REQUESTS.some(
+              request => request.method === "POST"
+                && request.href === "/v1/mobile/frontend/heartbeat/v3"
+            )
+            """,
+            timeout=10_000,
+        )
+        heartbeat_requests = page.evaluate(
+            "window.__FRONTEND_HEARTBEAT_REQUESTS.slice()"
+        )
+        assert not any(
+            "/v1/mobile/performance/trace/v3" in request["href"]
+            for request in heartbeat_requests
+        )
+        post = next(
+            request
+            for request in reversed(heartbeat_requests)
+            if request["method"] == "POST"
+        )
+        heartbeat = json.loads(post["body"])
+        actual_visible_count = page.evaluate(
+            """
+            () => new Set([
+              ...document.querySelectorAll(
+                "#surface-line-svg > [data-overlay-id], #hotspot-layer > [data-overlay-id]"
+              ),
+            ].map(node => node.dataset.overlayId).filter(Boolean)).size
+            """
+        )
+
+        assert heartbeat["session_id"] == "operator-test"
+        assert heartbeat["surface_id"] == "dashboard"
+        assert heartbeat["route"] == "live"
+        assert heartbeat["overlay_mode"] == "CLEAN_LIVE"
+        assert heartbeat["rendered_frame_id"] == 42
+        assert heartbeat["display_frame_id"] == 42
+        assert heartbeat["overlay_render_frame_id"] == 42
+        assert heartbeat["overlay_state_version"] == "ovlock_4_dashboardtest"
+        assert heartbeat["overlay_count"] == 4
+        assert heartbeat["visible_overlay_count"] == actual_visible_count
+        assert heartbeat["visible_overlay_count"] == page.evaluate(
+            "window.PhoenixGuardDashboard.getState().visibleOverlayCount"
+        )
+        assert heartbeat["visible_overlay_count"] > 0
+        assert heartbeat["frontend_loaded_ms"] > 0
+        assert heartbeat["frontend_overlay_drawn_ms"] > 0
+        assert heartbeat["full_broker_surface_visible"] is True
+        assert page.evaluate(
+            "window.PhoenixGuardDashboard.getState().heartbeatTimerActive"
+        ) is True
+
+        page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        assert page.evaluate(
+            "window.PhoenixGuardDashboard.getState().heartbeatTimerActive"
+        ) is False
+
+
+def test_frontend_heartbeat_uses_frame_matched_trace_only_as_version_fallback(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+        page.wait_for_function(
+            """
+            () => window.__FRONTEND_HEARTBEAT_REQUESTS.some(
+              request => request.method === "POST"
+                && request.href === "/v1/mobile/frontend/heartbeat/v3"
+            )
+            """,
+            timeout=10_000,
+        )
+        requests = page.evaluate(
+            "window.__FRONTEND_HEARTBEAT_REQUESTS.slice()"
+        )
+        assert any(
+            request["method"] == "GET"
+            and "/v1/mobile/performance/trace/v3" in request["href"]
+            for request in requests
+        )
+        post = next(
+            request for request in reversed(requests) if request["method"] == "POST"
+        )
+        heartbeat = json.loads(post["body"])
+        assert heartbeat["rendered_frame_id"] == 42
+        assert heartbeat["overlay_state_version"] == "ovlock_4_dashboardtest"
+
+
+def test_selected_source_without_first_frame_fails_loud_instead_of_checking_forever(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["overlays"] = []
+    selected_at = time.time() - 90
+    source = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state": "VALIDATING",
+        "selection_state": "LOCKED",
+        "source_type": "browser_tab_roi_capture",
+        "transport": "EDGE_TAB_CAPTURE",
+        "display_name": "Controlled chart",
+        "decision_usable": False,
+        "fresh": False,
+        "selected_at": selected_at,
+        "updated_at": selected_at,
+        "last_frame_epoch": 0,
+        "last_frame_id": 0,
+        "stale_after_sec": 20,
+        "message": "Checking the selected chart.",
+        "stream": {
+            "accepted_frames": 0,
+            "duplicate_frames": 0,
+            "last_error": "",
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload={
+            "session_id": "operator-test",
+            "capture_source_v3": source,
+        },
+    ) as page:
+        page.wait_for_function(
+            "() => document.querySelector('#source-state')?.textContent.trim() === 'NO FRAMES'"
+        )
+
+        assert "received no picture" in page.locator("#source-message").inner_text()
+        assert page.locator("#connection-label").inner_text() == (
+            "Chart source sent no frames"
+        )
+        assert "No source frame received" in page.locator(
+            "#overlay-library-status"
+        ).inner_text()
+        assert page.locator(".surface-hotspot").count() == 0
+        assert page.locator("#visual-evidence-label").inner_text() == (
+            "No current chart frame · Current overlays unavailable"
+        )
+
+
+def _live_capture_source(*, last_frame_epoch: float | None = None) -> dict[str, Any]:
+    captured_at = time.time() if last_frame_epoch is None else last_frame_epoch
+    payload: dict[str, Any] = {
+        "schema_version": "PG_CAPTURE_SOURCE_V3",
+        "state_revision": 8,
+        "state": "LIVE",
+        "selection_state": "IDLE",
+        "source_generation": 2,
+        "source_type": "browser_tab_roi_capture",
+        "transport": "EDGE_TAB_CAPTURE",
+        "display_name": "Controlled chart",
+        "decision_usable": True,
+        "fresh": True,
+        "reason_code": "SOURCE_LIVE",
+        "selected_at": captured_at - 60,
+        "updated_at": captured_at,
+        "last_frame_epoch": captured_at,
+        "last_frame_id": 81,
+        "frame_age_sec": 0,
+        "stale_after_sec": 20,
+        "message": "Controlled chart is streaming in the background.",
+        "stream": {
+            "accepted_frames": 81,
+            "duplicate_frames": 0,
+            "last_frame_id": 81,
+            "last_capture_epoch": captured_at,
+            "last_error": "",
+        },
+    }
+    return payload
+
+
+def test_live_capture_confirming_identity_is_not_presented_as_stale_or_stay_out(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["overlays"] = []
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "label": "Updating on the next complete frame",
+            "valid_until": None,
+            "age_seconds": 83,
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": _live_capture_source(),
+        "tracking_summary": {
+            "detected_market": "NZD/JPY OTC",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": False,
+            "timeframe_identity_confirmed": False,
+            "broker_source_lock": {"status": "VALID"},
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#source-state").inner_text() == "LIVE"
+        assert page.locator("#connection-label").inner_text() == (
+            "Chart live · confirming pair/timeframe"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "CONFIRMING PAIR & TIMEFRAME"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
+        assert "Identifying NZD/JPY OTC · M5" in page.locator(
+            "#current-move-title"
+        ).inner_text()
+        assert "confirming NZD/JPY OTC · M5" in page.locator(
+            "#overlay-library-status"
+        ).inner_text()
+        assert "STAY OUT" not in page.locator(
+            "#question-entry-now"
+        ).inner_text()
+
+
+def test_live_capture_processing_latest_frame_is_not_called_a_stale_source(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["overlays"] = []
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "label": "Updating on the next complete frame",
+            "valid_until": None,
+            "age_seconds": 47,
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": _live_capture_source(),
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+            "broker_source_lock": {"status": "VALID"},
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#source-state").inner_text() == "LIVE"
+        assert page.locator("#connection-label").inner_text() == (
+            "Chart live · analyzing latest frame"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
+        assert "current overlay set is processing" in page.locator(
+            "#overlay-library-status"
+        ).inner_text()
+        assert page.locator("#connection-state").get_attribute("data-state") == "live"
+
+
+def test_frame_processing_heartbeat_is_active_analysis_not_stale_transport(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["overlays"] = []
+    payload["freshness"].update(
+        {
+            "state": "STALE",
+            "label": "Updating on the next complete frame",
+            "valid_until": None,
+            "age_seconds": 61,
+        }
+    )
+    source = _live_capture_source()
+    source.update(
+        {
+            "state": "VALIDATING",
+            "decision_usable": False,
+            "reason_code": "FRAME_PROCESSING",
+            "frame_age_sec": 999,
+            "message": "A fresh chart frame was received and is being studied.",
+        }
+    )
+    source["stream"].update(
+        {
+            "processing": True,
+            "processing_frame_id": 81,
+            "processing_started_epoch": time.time(),
+        }
+    )
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": source,
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#source-state").inner_text() == "ANALYZING"
+        assert page.locator("#connection-label").inner_text() == (
+            "Chart live · analyzing latest frame"
+        )
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "ANALYZING LATEST FRAME"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR CURRENT READ"
+        )
+        assert page.locator("#connection-state").get_attribute("data-state") == "live"
+
+
+def test_capture_source_uses_server_frame_age_instead_of_dashboard_clock(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    source = _live_capture_source(last_frame_epoch=time.time() - 3_600)
+    # The capture service measured this frame beside the source and explicitly
+    # reports it fresh. A dashboard clock skew must not rewrite that truth.
+    source["frame_age_sec"] = 0
+    source["updated_at"] = time.time()
+    session = {
+        "session_id": "operator-test",
+        "capture_source_v3": source,
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+            "market_identity_confirmed": True,
+            "timeframe_identity_confirmed": True,
+        },
+    }
+
+    with _dashboard_page(
+        chromium_browser,
+        payload,
+        session_payload=session,
+    ) as page:
+        assert page.locator("#source-state").inner_text() == "LIVE"
+        assert page.locator("#connection-state").get_attribute("data-state") == "live"
+        assert "stale" not in page.locator("#connection-label").inner_text().lower()
 
 
 def test_live_session_stream_updates_forming_read_and_completed_history_immediately(
@@ -990,6 +1406,50 @@ def test_show_all_and_labels_on_reveals_collision_and_policy_hidden_labels(
         assert decluttered["policyOpacity"] == 0
 
 
+def test_labels_on_reveals_every_visible_mark_label_in_any_overlay_view(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+        page.locator('button[data-overlay-view="live"]').click()
+        page.locator('button[data-label-mode="on"]').click()
+        result = page.evaluate(
+            """
+            () => {
+              const root = document.querySelector('#hotspot-layer');
+              root.innerHTML = '';
+              function add(priority, label, policyHidden = false) {
+                const button = document.createElement('button');
+                button.className = 'surface-hotspot' + (policyHidden ? ' label-policy-hidden' : '');
+                button.dataset.priority = String(priority);
+                const span = document.createElement('span');
+                span.textContent = label;
+                span.getBoundingClientRect = () => ({
+                  left: 20, top: 30, right: 120, bottom: 50, width: 100, height: 20,
+                });
+                button.appendChild(span);
+                root.appendChild(button);
+                return button;
+              }
+              const low = add(1, 'LOW');
+              const high = add(100, 'HIGH');
+              const policy = add(50, 'POLICY', true);
+              window.resolveLabelCollisions(root);
+              return {
+                bodyClass: document.body.className,
+                lowHidden: low.classList.contains('label-collision-hidden'),
+                highHidden: high.classList.contains('label-collision-hidden'),
+                policyOpacity: Number(getComputedStyle(policy.querySelector('span')).opacity),
+              };
+            }
+            """
+        )
+
+        assert "labels-show-all" in result["bodyClass"]
+        assert result["lowHidden"] is False
+        assert result["highHidden"] is False
+        assert result["policyOpacity"] > 0.5
+
+
 def test_market_story_and_history_prefer_v3_regression_study(
     chromium_browser: Browser,
 ) -> None:
@@ -1157,6 +1617,58 @@ def test_three_question_contract_is_the_plain_language_source_of_truth(
         assert page.locator(".evidence-details").get_attribute("open") is None
 
 
+def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="WAIT")
+    cast(dict[str, Any], payload["tracking"])["market_study_v3"] = {
+        "path_clock_liquidity_v3": {
+            "passive_prediction_audit_v3": {
+                "schema_version": "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3",
+                "status": "AUDITED_OUTCOMES",
+                "symbol": "EUR/USD",
+                "timeframe": "M5",
+                "frozen_forecast_count": 12,
+                "pending_outcome_count": 3,
+                "matured_outcome_count": 9,
+                "study_only": True,
+                "execution_authority": False,
+                "places_trades": False,
+                "can_grant_entry_permission": False,
+                "candidate_metrics": {
+                    "directional_accuracy": 0.78,
+                    "timing_accuracy": 0.67,
+                    "sweep_survival_rate": 0.56,
+                    "calibration_score": 0.71,
+                },
+                "latest_matured_outcome": {
+                    "predicted_direction": "UP",
+                    "direction_correct": True,
+                    "observed_move_occurred": True,
+                    "timing_correct": True,
+                    "sweep_survival_rate": 0.5,
+                },
+            }
+        }
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        strip = page.locator("#decision-audit-strip")
+        assert strip.get_attribute("data-state") == "measured"
+        assert page.locator("#decision-audit-status").inner_text() == "MEASURED"
+        assert page.locator("#decision-audit-counts").inner_text() == (
+            "12 frozen · 3 pending · 9 matured"
+        )
+        assert page.locator("#decision-audit-direction").inner_text() == "78%"
+        assert page.locator("#decision-audit-timing").inner_text() == "67%"
+        assert page.locator("#decision-audit-sweep").inner_text() == "56%"
+        assert page.locator("#decision-audit-calibration").inner_text() == "71%"
+        assert page.locator("#decision-audit-outcome").inner_text() == (
+            "latest BUY · direction correct · timing inside window · 50% sweep survival"
+        )
+        assert "never places trades" in strip.inner_text().lower()
+
+
 def test_q3_renders_timing_forecast_and_keeps_live_action_separate(
     chromium_browser: Browser,
 ) -> None:
@@ -1208,6 +1720,131 @@ def test_q3_renders_timing_forecast_and_keeps_live_action_separate(
         assert "pullback and sweep" in page.locator(
             "#beginner-instruction"
         ).inner_text()
+
+
+def _live_m5_sequence_timing_payload(
+    *,
+    horizon_seconds_low: int = 900,
+    horizon_seconds_high: int = 1_800,
+) -> dict[str, Any]:
+    payload = _with_timing_forecast(
+        _operator_payload(action="WAIT"),
+        side="BUY",
+        action_state="WAIT_FOR_PULLBACK",
+        enter_now=False,
+    )
+    forecast = payload["three_questions"]["entry_now"]["timing_forecast"]
+    forecast.update(
+        {
+            "status": "FORECAST_AVAILABLE",
+            "source": "LIVE_M5_SEQUENCE",
+            "source_label": "Current M5 closed-candle sequence",
+            "timing_evidence_label": (
+                "Current M5 closed-candle sequence · 54 current candles"
+            ),
+            "horizon_seconds_low": horizon_seconds_low,
+            "horizon_seconds_high": horizon_seconds_high,
+            "event_likelihood_support_count": 0,
+            "support_count": 0,
+            "estimated_likelihood": None,
+            "estimated_likelihood_label": (
+                "Event likelihood unavailable for swing completion"
+            ),
+            "evidence_confidence": None,
+            "evidence_confidence_label": "Evidence confidence unavailable",
+            "calibration_grade": "UNRATED",
+            "calibration_label": (
+                "Calibration UNRATED · not replay-calibrated"
+            ),
+            "calibrated": False,
+        }
+    )
+    return payload
+
+
+def test_live_m5_sequence_publishes_uncalibrated_closed_candle_timing_estimate(
+    chromium_browser: Browser,
+) -> None:
+    payload = _live_m5_sequence_timing_payload()
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        assert page.locator("#beginner-action-row").get_attribute(
+            "data-action"
+        ) == "wait_for_pullback"
+
+        projection = page.locator("#beginner-forecast-summary").inner_text()
+        assert "BUY uncalibrated closed-candle estimate" in projection
+        assert "3–6 completed M5 candles after the anchor close" in projection
+        assert "Current M5 closed-candle sequence estimate" in projection
+        assert "Event probability unavailable" in projection
+        assert "not replay-calibrated" in projection
+        assert "does not grant entry permission" in projection
+        assert "timing range withheld" not in projection
+        assert "68%" not in projection
+        assert page.locator("#beginner-confidence").inner_text() == (
+            "Entry closed · completed pullback confirmation required"
+        )
+
+
+def test_empirical_pair_timing_publishes_bounded_uncalibrated_estimate(
+    chromium_browser: Browser,
+) -> None:
+    payload = _live_m5_sequence_timing_payload(
+        horizon_seconds_low=900,
+        horizon_seconds_high=2_700,
+    )
+    forecast = payload["three_questions"]["entry_now"]["timing_forecast"]
+    forecast.update(
+        {
+            "source": "PAIR",
+            "source_label": "Pair behavior timing history",
+            "timing_evidence_label": "Pair behavior timing history · 3 timing observations",
+            "timing_empirical": True,
+            "timing_support_count": 3,
+            "horizon_label": "3–9 completed M5 candles after the anchor close",
+        }
+    )
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#beginner-decision-title").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+        projection = page.locator("#beginner-forecast-summary").inner_text()
+        assert "BUY uncalibrated closed-candle estimate" in projection
+        assert "3–9 completed M5 candles after the anchor close" in projection
+        assert "Empirical pair-history closed-candle estimate" in projection
+        assert "3 timing observations" in projection
+        assert "Event probability unavailable" in projection
+        assert "does not grant entry permission" in projection
+        assert "timing range withheld" not in projection
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
+
+
+def test_live_m5_sequence_below_fifteen_minutes_keeps_timing_range_withheld(
+    chromium_browser: Browser,
+) -> None:
+    payload = _live_m5_sequence_timing_payload(
+        horizon_seconds_low=600,
+        horizon_seconds_high=1_200,
+    )
+    forecast = payload["three_questions"]["entry_now"]["timing_forecast"]
+    forecast["horizon_label"] = "2–4 completed M5 candles after the anchor close"
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        projection = page.locator("#beginner-forecast-summary").inner_text()
+        assert "BUY direction studied · timing range withheld" in projection
+        assert "uncalibrated closed-candle estimate" not in projection
+        assert page.locator("#beginner-action-label").inner_text() == (
+            "WAIT FOR PULLBACK"
+        )
 
 
 def test_q3_explains_active_move_as_next_impulse_without_chase_language(
@@ -2961,6 +3598,34 @@ def test_full_broker_is_default_and_chart_overlays_project_into_its_viewport(
             assert abs(float(actual) - expected) <= 0.003
 
 
+def test_pixel_geometry_without_source_plane_dimensions_is_not_guessed(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    surface = cast(dict[str, Any], payload["surface"])
+    for viewport in cast(
+        dict[str, dict[str, Any]], surface.get("overlay_viewports", {})
+    ).values():
+        viewport.pop("source_bounds", None)
+    cast(dict[str, Any], surface["overlay_viewport"]).pop("source_bounds", None)
+    overlay = copy.deepcopy(
+        next(row for row in payload["overlays"] if row["id"] == "demand-current")
+    )
+    overlay.update(
+        {
+            "coordinate_space": "chart",
+            "coordinate_units": "pixels",
+            "bounds": [100.0, 200.0, 300.0, 400.0],
+        }
+    )
+    payload["overlays"] = [overlay]
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator("#layers-all").click()
+        assert page.locator('[data-overlay-id="demand-current"]').count() == 0
+        assert page.locator('[data-layer-count="supply_demand"]').inner_text() == "0"
+
+
 def test_exact_dual_target_contract_projects_chart_pixels_on_both_artifacts(
     chromium_browser: Browser,
 ) -> None:
@@ -3322,6 +3987,7 @@ def test_queued_same_image_viewport_refinement_projects_the_queued_geometry(
     )
     for overlay in pending["overlays"]:
         overlay["frame_id"] = 43
+        overlay["surface_semantic_identity"] = "surface-eur-usd-m5-frame-43"
 
     queued = copy.deepcopy(pending)
     queued["revision"] = 44
@@ -3542,11 +4208,186 @@ def test_pair_switch_clears_server_regression_rows_and_old_geometry(
         assert page.locator(".history-empty").count() == 1
 
 
+def test_pair_switch_rejects_old_pair_rows_even_if_server_surface_id_is_reused(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    initial["market"]["symbol"] = "EUR/USD"
+    initial["surface"]["semantic_identity"] = "incorrectly-reused-surface"
+    for row in initial["overlays"]:
+        row["symbol"] = "EUR/USD"
+        row["timeframe"] = "M5"
+        row["surface_semantic_identity"] = "incorrectly-reused-surface"
+
+    switched = copy.deepcopy(initial)
+    switched["revision"] = 43
+    switched["market"]["symbol"] = "GBP/USD"
+    switched["surface"].update(
+        {
+            # Reuse the bad server id deliberately. The market namespace and
+            # row identity checks must still prevent old-pair geometry.
+            "semantic_identity": "incorrectly-reused-surface",
+            "frame_id": 43,
+            "primary_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=43",
+            "fallback_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+            "focus_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43",
+        }
+    )
+    for row in switched["overlays"]:
+        row["frame_id"] = 43
+
+    with _dashboard_page(chromium_browser, initial) as page:
+        page.locator("#layers-all").click()
+        assert page.locator('[data-overlay-id="demand-current"]').count() == 1
+        transition = page.evaluate(
+            """
+            payload => {
+              window.renderOperatorState(payload);
+              return {
+                oldGeometry: document.querySelector('[data-overlay-id="demand-current"]') !== null,
+                count: document.querySelector('#overlay-library-status').textContent,
+              };
+            }
+            """,
+            switched,
+        )
+        assert transition["oldGeometry"] is False
+        page.wait_for_function(
+            "() => document.querySelector('#surface-canvas').getAttribute('aria-busy') === 'false'",
+            timeout=10_000,
+        )
+        assert page.locator('[data-overlay-id="demand-current"]').count() == 0
+        assert "0 visible marks" in page.locator("#overlay-library-status").inner_text()
+
+
+def test_current_surface_rejects_overlay_with_missing_identity_contract(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    malformed = copy.deepcopy(initial)
+    malformed["revision"] = 43
+    malformed["surface"]["frame_id"] = 43
+    malformed["surface"]["primary_url"] = (
+        "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=43"
+    )
+    malformed["surface"]["fallback_url"] = (
+        "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=43"
+    )
+    malformed["surface"]["focus_url"] = malformed["surface"]["fallback_url"]
+    for row in malformed["overlays"]:
+        row["frame_id"] = 43
+    demand = next(
+        row for row in malformed["overlays"] if row["id"] == "demand-current"
+    )
+    demand.pop("surface_semantic_identity")
+    demand.pop("instrument_identity_status")
+
+    with _dashboard_page(chromium_browser, initial) as page:
+        page.locator("#layers-all").click()
+        assert page.locator('[data-overlay-id="demand-current"]').count() == 1
+        page.evaluate("payload => window.renderOperatorState(payload)", malformed)
+        page.wait_for_function(
+            "() => document.querySelector('#surface-canvas').getAttribute('aria-busy') === 'false'",
+            timeout=10_000,
+        )
+        assert page.locator('[data-overlay-id="demand-current"]').count() == 0
+        assert page.locator('[data-overlay-id="council-current"]').count() == 1
+
+
+def test_every_overlay_identity_dimension_fails_closed_independently(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    mutations = (
+        ("missing symbol", "symbol", None),
+        ("wrong symbol", "symbol", "GBP/USD"),
+        ("missing timeframe", "timeframe", None),
+        ("wrong timeframe", "timeframe", "M1"),
+        ("missing frame", "frame_id", None),
+        ("wrong frame", "frame_id", 99),
+        (
+            "missing selector",
+            "market_selector_visual_fingerprint",
+            None,
+        ),
+        (
+            "wrong selector",
+            "market_selector_visual_fingerprint",
+            "selector_v3_gbp_usd",
+        ),
+        ("missing surface", "surface_semantic_identity", None),
+        ("wrong surface", "surface_semantic_identity", "surface-other"),
+        ("missing lock", "instrument_identity_status", None),
+        ("unlocked", "instrument_identity_status", "UNPROVEN"),
+    )
+
+    with _dashboard_page(chromium_browser, initial) as page:
+        page.locator("#layers-all").click()
+        assert page.locator('[data-overlay-id="demand-current"]').count() == 1
+        for label, key, value in mutations:
+            malformed = copy.deepcopy(initial)
+            demand = next(
+                row
+                for row in malformed["overlays"]
+                if row["id"] == "demand-current"
+            )
+            if value is None:
+                demand.pop(key)
+            else:
+                demand[key] = value
+            page.evaluate(
+                "payload => window.renderOperatorState(payload)", malformed
+            )
+            assert page.locator(
+                '[data-overlay-id="demand-current"]'
+            ).count() == 0, label
+            assert page.locator(
+                '[data-overlay-id="council-current"]'
+            ).count() == 1, label
+            page.evaluate(
+                "payload => window.renderOperatorState(payload)", initial
+            )
+            assert page.locator(
+                '[data-overlay-id="demand-current"]'
+            ).count() == 1, label
+
+
+def test_surface_selector_proof_missing_or_wrong_rejects_selector_bound_rows(
+    chromium_browser: Browser,
+) -> None:
+    initial = _operator_payload()
+    malformed_cases = []
+    missing = copy.deepcopy(initial)
+    missing["surface"].pop("market_selector_visual_fingerprint")
+    malformed_cases.append(("missing surface selector", missing))
+    wrong = copy.deepcopy(initial)
+    wrong["surface"]["market_selector_visual_fingerprint"] = (
+        "selector_v3_gbp_usd"
+    )
+    malformed_cases.append(("wrong surface selector", wrong))
+
+    with _dashboard_page(chromium_browser, initial) as page:
+        page.locator("#layers-all").click()
+        baseline_count = page.locator(".surface-hotspot").count()
+        assert baseline_count > 0
+        for label, malformed in malformed_cases:
+            page.evaluate(
+                "payload => window.renderOperatorState(payload)", malformed
+            )
+            assert page.locator(".surface-hotspot").count() == 0, label
+            page.evaluate(
+                "payload => window.renderOperatorState(payload)", initial
+            )
+            assert page.locator(".surface-hotspot").count() == baseline_count, label
+
+
 def test_pair_switch_supersedes_inflight_surface_and_clears_old_geometry(
     chromium_browser: Browser,
 ) -> None:
     initial = _operator_payload()
     initial["surface"]["semantic_identity"] = "surface-eur-usd-m5"
+    for overlay in initial["overlays"]:
+        overlay["surface_semantic_identity"] = "surface-eur-usd-m5"
 
     next_eur_frame = copy.deepcopy(initial)
     next_eur_frame["revision"] = 43
@@ -3571,6 +4412,7 @@ def test_pair_switch_supersedes_inflight_surface_and_clears_old_geometry(
     switched["surface"].update(
         {
             "semantic_identity": "surface-gbp-usd-m5",
+            "market_selector_visual_fingerprint": "selector_v3_gbp_usd",
             "frame_id": 44,
             "primary_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-window?frame_id=44",
             "fallback_url": "/v1/mobile/window-tracker/sessions/operator-test/artifacts/latest-chart?frame_id=44",
@@ -3579,6 +4421,9 @@ def test_pair_switch_supersedes_inflight_surface_and_clears_old_geometry(
     )
     for overlay in switched["overlays"]:
         overlay["frame_id"] = 44
+        overlay["symbol"] = "GBP/USD"
+        overlay["market_selector_visual_fingerprint"] = "selector_v3_gbp_usd"
+        overlay["surface_semantic_identity"] = "surface-gbp-usd-m5"
         if overlay["id"] == "eur-demand-frame-43":
             overlay.update(
                 {
@@ -3617,6 +4462,15 @@ def test_pair_switch_supersedes_inflight_surface_and_clears_old_geometry(
                 nextPairGeometryBeforeDecode: document.querySelector(
                   '[data-overlay-id="demand-current"]'
                 ) !== null,
+                decisionTitle: document.querySelector(
+                  '#beginner-decision-title'
+                ).textContent,
+                actionLabel: document.querySelector(
+                  '#beginner-action-label'
+                ).textContent,
+                overlayStatus: document.querySelector(
+                  '#overlay-library-status'
+                ).textContent,
               };
             }
             """,
@@ -3628,6 +4482,11 @@ def test_pair_switch_supersedes_inflight_surface_and_clears_old_geometry(
         assert transition["oldCommittedGeometry"] is False
         assert transition["supersededGeometry"] is False
         assert transition["nextPairGeometryBeforeDecode"] is False
+        assert transition["decisionTitle"] == "STUDYING THIS CHART"
+        assert transition["actionLabel"] == "WAIT FOR CURRENT READ"
+        assert "Loading overlays for the selected chart" in transition[
+            "overlayStatus"
+        ]
 
         page.wait_for_function(
             "() => document.querySelector('[data-overlay-id=\"demand-current\"]') !== null",

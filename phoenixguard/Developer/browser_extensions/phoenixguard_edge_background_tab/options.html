@@ -11,7 +11,7 @@
       <header>
         <p class="eyebrow">PHOENIXGUARD V3 · UNIVERSAL EDGE CHART SOURCE</p>
         <h1>Select the chart once.<br>Keep working anywhere.</h1>
-        <p class="lede">Show any HTTP(S) chart in Edge, press <strong>Ctrl+Shift+8</strong>, drag over the exact chart, and confirm. Press <strong>Ctrl+Shift+9</strong> at any time to kill capture.</p>
+        <p class="lede">Show any HTTP(S) chart in Edge. Press <strong>Ctrl+Shift+7</strong> to lock its full viewport immediately, or <strong>Ctrl+Shift+8</strong> to select an exact region. Press <strong>Ctrl+Shift+9</strong> at any time to kill capture.</p>
       </header>
 
       <section class="status" aria-labelledby="statusHeading">
@@ -21,7 +21,7 @@
             <span class="phase" id="phase">IDLE</span>
             <span class="pulse" id="pulse" aria-hidden="true"></span>
           </div>
-          <h2 id="message">Press Ctrl+Shift+8 on a chart tab to select a region.</h2>
+          <h2 id="message">Press Ctrl+Shift+7 for the full viewport or Ctrl+Shift+8 for an exact region.</h2>
         </div>
         <dl>
           <div><dt>Locked chart</dt><dd id="lockedTab">None</dd></div>
@@ -35,12 +35,13 @@
           <div><dt>Accepted</dt><dd id="acceptedFrames">0 frames</dd></div>
           <div><dt>Latest-frame replacements</dt><dd id="replacedFrames">0</dd></div>
           <div><dt>Last accepted</dt><dd id="lastAccepted">Never</dd></div>
+          <div><dt>Lock full viewport</dt><dd id="fullViewportShortcut">Ctrl+Shift+7</dd></div>
           <div><dt>Select / switch</dt><dd id="selectShortcut">Ctrl+Shift+8</dd></div>
           <div><dt>Kill capture</dt><dd id="killShortcut">Ctrl+Shift+9</dd></div>
         </dl>
         <p class="error" id="shortcutError" hidden></p>
         <p class="error" id="lastError" hidden></p>
-        <p class="focus-proof">The selected tab may be inactive or covered after <code>LIVE</code>. No tab activation, window restore, or focus API is used. A heartbeat never pretends frozen chart pixels are fresh.</p>
+        <p class="focus-proof">The selected tab may be inactive, covered, or minimized after <code>LIVE</code>. No tab activation, window restore, or focus API is used. Unchanged pixels remain valid only while decoded media continues advancing; a 90-second decoder stall fails closed.</p>
       </section>
 
       <section aria-labelledby="connectionHeading">
@@ -67,12 +68,7 @@
           <label class="wide">HMAC signing secret <span>optional unless PhoenixGuard requires it</span>
             <input id="signingSecret" type="password" autocomplete="off">
           </label>
-          <label>Symbol hint <span>optional; leave blank to re-prove</span>
-            <input id="symbol" placeholder="CHF/JPY OTC" spellcheck="false">
-          </label>
-          <label>Timeframe hint <span>optional; leave blank to re-prove</span>
-            <input id="timeframe" placeholder="M5" spellcheck="false">
-          </label>
+          <p class="wide">Pair and timeframe are read from each newly selected chart. PhoenixGuard never carries a saved identity hint into another tab or region.</p>
           <details class="wide">
             <summary>Capture tuning</summary>
             <div class="tuning-grid">

@@ -16,6 +16,7 @@ RUNTIME_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or EXPECTED_RUNTIME_DIR
 LEGACY_ARCHIVE_DIR = ROOT / "_archive"
 LEGACY_RUNTIME_BACKUP_DIR = (ROOT / "_archive" / "runtime_backup").resolve()
 PRESERVE_RUNTIME_FILES = {
+    "edge_tab_capture.token",
     "floating_window_v2.json",
 }
 PRESERVE_ROOT_FILES = {
@@ -75,7 +76,25 @@ def _assert_safe_delete_target(path: Path, *, exact_relative: str | None = None)
     try:
         lexical.relative_to(ROOT_RESOLVED)
     except ValueError as exc:
-        raise RuntimeError(f"Refusing to delete outside the PhoenixGuard root: {path}") from exc
+        # Transient live artifacts may use the one canonical LocalAppData
+        # runtime so OneDrive does not sit on the capture/API hot path.  Keep
+        # this exception deliberately narrower than the repository cleanup:
+        # only a direct child of the exact approved runtime root is deletable.
+        _assert_expected_runtime_dir()
+        if lexical == RUNTIME_DIR or lexical.parent != RUNTIME_DIR:
+            raise RuntimeError(
+                f"Refusing to delete outside the PhoenixGuard root or exact live runtime: {path}"
+            ) from exc
+        if _is_reparse_point(RUNTIME_DIR) or _is_reparse_point(lexical):
+            raise RuntimeError(
+                f"Refusing to follow a symlink or junction during runtime cleanup: {lexical}"
+            ) from exc
+        resolved = lexical.resolve(strict=False)
+        if resolved.parent != RUNTIME_DIR:
+            raise RuntimeError(
+                f"Refusing resolved runtime cleanup path outside the exact live runtime: {resolved}"
+            ) from exc
+        return lexical
     if lexical == ROOT_RESOLVED:
         raise RuntimeError("Refusing to delete the PhoenixGuard repository root")
     if exact_relative is not None and lexical != ROOT_RESOLVED / exact_relative:
@@ -96,11 +115,31 @@ def _assert_safe_delete_target(path: Path, *, exact_relative: str | None = None)
 
 
 def _assert_expected_runtime_dir() -> None:
-    if RUNTIME_DIR != EXPECTED_RUNTIME_DIR:
+    allowed_runtime_dirs = {EXPECTED_RUNTIME_DIR}
+    local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
+    if local_app_data:
+        allowed_runtime_dirs.add(
+            (Path(local_app_data) / "PhoenixGuard" / "runtime" / "live").resolve()
+        )
+    if RUNTIME_DIR not in allowed_runtime_dirs:
+        allowed = ", ".join(
+            str(path)
+            for path in sorted(
+                allowed_runtime_dirs,
+                key=lambda candidate: str(candidate).lower(),
+            )
+        )
         raise RuntimeError(
             "Refusing to clean runtime outside the canonical live runtime directory: "
-            f"PHOENIXGUARD_RUNTIME_DIR={RUNTIME_DIR}; expected={EXPECTED_RUNTIME_DIR}"
+            f"PHOENIXGUARD_RUNTIME_DIR={RUNTIME_DIR}; allowed={allowed}"
         )
+
+
+def _manifest_relative_path(path: Path) -> str:
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return f"runtime/{path.relative_to(RUNTIME_DIR).as_posix()}"
 
 
 def _remove_tree_or_file(path: Path) -> None:
@@ -145,10 +184,9 @@ def _contains_reparse_descendant(path: Path) -> bool:
 
 def delete_path(path: Path, moved: list[dict[str, str]], *, reason: str, apply: bool) -> None:
     path = _assert_safe_delete_target(path)
-    rel = path.relative_to(ROOT)
     moved.append(
         {
-            "original_path": rel.as_posix(),
+            "original_path": _manifest_relative_path(path),
             "new_path": "",
             "reason": reason,
             "classification": "safe to delete",
@@ -239,7 +277,7 @@ def main() -> int:
     for path, reason in collect_runtime_paths():
         if not path.exists():
             continue
-        rel_path = path.relative_to(ROOT).as_posix()
+        rel_path = _manifest_relative_path(path)
         if path.is_file() and (path.name in PRESERVE_ROOT_FILES or rel_path in PRESERVE_ROOT_FILES):
             continue
         delete_path(path, moved, reason=reason, apply=args.apply)

@@ -34,7 +34,7 @@ def test_dashboard_preserves_808fx_brand_identity_and_gold_visual_system() -> No
 def test_dashboard_defaults_to_simple_operator_workspace_without_technical_navigation() -> None:
     text = _dashboard_text()
 
-    assert '<body class="simple-view labels-on">' in text
+    assert '<body class="simple-view labels-hover">' in text
     assert 'id="beginner-decision-shell"' in text
     assert 'id="experience-mode-toggle" type="button" aria-pressed="false">Explore</button>' in text
     assert 'id="beginner-open-advanced" type="button">Explore the visual evidence</button>' in text
@@ -65,12 +65,25 @@ def test_dashboard_exposes_truthful_universal_chart_source_controls_before_decis
     assert 'function captureSourceContract(payload)' in text
     assert 'source.fresh === true' in text
     assert 'sourceState === "LIVE" && !fresh' in text
-    assert 'Historical frame retained · selected source is not live' in text
+    assert 'Historical frame retained · stream interrupted' in text
     assert '+ "/source-control/kill";' in text
     assert 'method: "POST"' in text
     assert 'function enforceCaptureSourceDecision(payload)' in text
     assert 'sourceGuideUntilEpoch: 0' in text
     assert 'const guideActive = state.sourceGuideUntilEpoch > Date.now() / 1000;' in text
+
+
+def test_dashboard_fails_loud_when_selected_source_never_sends_a_first_frame() -> None:
+    text = _dashboard_text()
+
+    assert "CAPTURE_SOURCE_FIRST_FRAME_TIMEOUT_FALLBACK_SECONDS" in text
+    assert 'sourceState === "VALIDATING"' in text
+    assert "lastFrameEpoch <= 0" in text
+    assert "acceptedFrames <= 0" in text
+    assert 'sourceState = "NO_FRAMES";' in text
+    assert 'NO_FRAMES: "NO FRAMES"' in text
+    assert "Phoenix Guard received no picture from it" in text
+    assert "No source frame received · Current overlays unavailable" in text
 
 
 def test_dashboard_consumes_only_the_public_operator_workspace_contract() -> None:
@@ -86,6 +99,30 @@ def test_dashboard_consumes_only_the_public_operator_workspace_contract() -> Non
     assert "FULL_HISTORY_READ" not in text
     assert "window.renderOperatorState = renderOperatorState;" in text
     assert "window.PhoenixGuardDashboard" in text
+
+
+def test_dashboard_posts_bounded_frame_matched_frontend_heartbeat() -> None:
+    text = _dashboard_text()
+
+    assert "const FRONTEND_HEARTBEAT_INTERVAL_MS = 5000;" in text
+    assert 'return "/v1/mobile/frontend/heartbeat/v3";' in text
+    assert 'return "/v1/mobile/performance/trace/v3?session_id="' in text
+    assert "async function resolveHeartbeatOverlayVersion" in text
+    assert "traceFrameId !== renderedFrameId" in text
+    assert "async function sendFrontendHeartbeat" in text
+    assert 'surface_id: "dashboard"' in text
+    assert 'route: "live"' in text
+    assert 'overlay_mode: "CLEAN_LIVE"' in text
+    assert "overlay_state_version: version.version" in text
+    assert "visible_overlay_count: current.visibleOverlayCount" in text
+    assert "state.lastRenderedOverlayCount = renderedOverlayCount;" in text
+    assert "if (state.heartbeatIntervalTimer)" in text
+    assert "window.setInterval(function ()" in text
+    assert "}, FRONTEND_HEARTBEAT_INTERVAL_MS);" in text
+    assert "queueFrontendHeartbeat(0);" in text
+    assert "stopFrontendHeartbeat();" in text
+    assert "sendFrontendHeartbeat();" in text
+    assert "await sendFrontendHeartbeat" not in text
 
 
 def test_dashboard_has_no_internal_telemetry_tuning_or_export_surfaces() -> None:
@@ -255,6 +292,26 @@ def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions
     assert '"Timing basis: " + timingBasisLabel' in text
     assert 'const actionContract = safeObject(entryContract.operator_action);' in text
     assert "const projectionTimingUnproven = forecastIdentityMatches" in text
+    assert (
+        "const uncalibratedClosedCandleEstimateAvailable = forecastIdentityMatches"
+        in text
+    )
+    assert 'timingForecastStatus === "FORECAST_AVAILABLE"' in text
+    assert 'timingSourceTier === "LIVE_M5_SEQUENCE"' in text
+    assert 'timingSourceTier === "PAIR" || timingSourceTier.startsWith("PAIR_")' in text
+    assert "timingForecast.timing_empirical === true" in text
+    assert "timingObservationSupportCount > 0" in text
+    assert 'currentTimeframe === "M5"' in text
+    assert "horizonSecondsLow >= 900" in text
+    assert "horizonSecondsHigh >= horizonSecondsLow" in text
+    assert (
+        'forecastSide + " uncalibrated closed-candle estimate · " + horizonLabel'
+        in text
+    )
+    assert "Current M5 closed-candle sequence estimate." in text
+    assert "Empirical pair-history closed-candle estimate" in text
+    assert "Event probability unavailable;" in text
+    assert "does not grant entry permission." in text
     assert 'forecastSide + " direction studied · timing range withheld"' in text
     assert "The candle range is not published and is not an entry signal." in text
     assert 'const actionHeadline = enterNow' in text
@@ -278,6 +335,25 @@ def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions
     assert "function completedCandleHistoryRows(payload)" in text
     assert "closed_candle_key" in text
     assert "function rememberCompletedStudyHistory(payload)" in text
+
+
+def test_dashboard_exposes_compact_passive_decision_accuracy_audit() -> None:
+    text = _dashboard_text()
+
+    assert 'id="decision-audit-strip" data-state="collecting"' in text
+    assert 'id="decision-audit-title">Decision accuracy · live audit</span>' in text
+    assert 'id="decision-audit-status">COLLECTING</strong>' in text
+    assert "0 frozen · 0 pending · 0 matured" in text
+    assert "Outcome measurement only · never places trades or opens entry permission." in text
+    assert "function passiveDecisionAudit(payload)" in text
+    assert "function renderPassiveDecisionAudit(payload)" in text
+    assert "audit.can_grant_entry_permission !== false" in text
+    assert "metrics.directional_accuracy" in text
+    assert "metrics.timing_accuracy" in text
+    assert "metrics.sweep_survival_rate" in text
+    assert "metrics.calibration_score" in text
+    assert 'measured ? "MEASURED" : "COLLECTING"' in text
+    assert "renderPassiveDecisionAudit(payload);" in text
 
 
 def test_dashboard_keeps_continuous_observation_restrained_and_non_authoritative() -> None:
@@ -406,7 +482,19 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
     assert "toggleOverlayKind(button.dataset.overlayKindControl);" in text
     assert "function overlayIsAvailableForControl(overlay)" in text
     assert "overlayKind(overlay) === token && overlayIsAvailableForControl(overlay)" in text
-    assert 'live: ["current_candles", "market_context", "council", "order_positioning"]' in text
+    live_preset = text[text.index("live: [") : text.index("market_context: [")]
+    for family in (
+        "current_candles",
+        "market_context",
+        "council",
+        "order_positioning",
+        "triggers",
+        "targets",
+        "invalidation",
+    ):
+        assert f'"{family}"' in live_preset
+    for generic_family in ("major_swings", "local_swings", "supply_demand", "history"):
+        assert f'"{generic_family}"' not in live_preset
     assert 'history: ["history", "major_swings", "local_swings", "order_positioning"]' in text
     assert "function orderPositioningContext(overlay)" in text
     assert "function orderOriginStudyOverlay(overlay)" in text
@@ -420,11 +508,13 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
     assert "Evidence only; entry permission remains separate." in text
 
 
-def test_show_all_with_labels_on_is_the_explicit_exhaustive_label_mode() -> None:
+def test_labels_on_is_the_explicit_exhaustive_label_mode() -> None:
     text = _dashboard_text()
 
+    assert 'labelMode: readStoredValue("phoenixguard.labels", "hover")' in text
+    assert 'data-label-mode="hover" aria-pressed="true">On hover</button>' in text
     assert "function exhaustiveLabelModeActive()" in text
-    assert 'state.labelMode === "on" && state.overlayView === "all"' in text
+    assert 'return state.labelMode === "on";' in text
     assert 'els.body.classList.toggle("labels-show-all", exhaustiveLabelModeActive());' in text
     assert "body.labels-on.labels-show-all .surface-hotspot.label-policy-hidden span" in text
     assert "body.labels-on.labels-show-all .surface-hotspot.label-collision-hidden span" in text
@@ -469,3 +559,24 @@ def test_dashboard_uses_backend_capture_source_stale_threshold() -> None:
     assert "CAPTURE_SOURCE_STALE_FALLBACK_SECONDS" in text
     assert "frameAge <= staleAfterSeconds" in text
     assert "frameAge <= CAPTURE_SOURCE_STALE_AFTER_SECONDS" not in text
+
+
+def test_dashboard_separates_live_capture_identity_and_analysis_readiness() -> None:
+    text = _dashboard_text()
+
+    assert "function chartIdentityView(payload)" in text
+    assert "function operatorReadinessView(payload, sourceOverride)" in text
+    assert 'state: "IDENTIFYING"' in text
+    assert 'state: "ANALYZING"' in text
+    assert '"CONFIRMING PAIR & TIMEFRAME"' in text
+    assert '"ANALYZING LATEST FRAME"' in text
+    assert '"STREAM INTERRUPTED"' in text
+    assert '"WAIT FOR CURRENT READ"' in text
+    assert '"DO NOT USE OLD SIGNAL"' in text
+    assert "captureSourceTruthEpoch" in text
+    assert 'reasonCode === "FRAME_PROCESSING"' in text
+    assert "stream.processing === true" in text
+    assert 'frameProcessing ? "ANALYZING"' in text
+    assert "sourceView.transportActive" in text
+    assert "Math.max(declaredAge" not in text
+    assert "? declaredAge\n        : measuredAge;" in text

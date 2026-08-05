@@ -872,6 +872,14 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "anchor_id",
         "overlay_semantic_revision",
         "overlay_geometry_revision",
+        # Public overlays remain bound to the exact confirmed chart identity
+        # all the way through the final API boundary.  Dropping these fields
+        # here would make a browser unable to fail closed after a pair switch.
+        "symbol",
+        "timeframe",
+        "market_selector_visual_fingerprint",
+        "instrument_identity_status",
+        "surface_semantic_identity",
         # These are presentation semantics, not execution telemetry. The
         # dashboard needs them to distinguish a mutable current reference from
         # a verified preview.
@@ -2831,6 +2839,24 @@ def _epoch_float(value: Any, default: float = 0.0) -> float:
     if parsed != parsed or parsed in {float("inf"), float("-inf")}:
         return float(default)
     return float(parsed)
+
+
+def _operator_entry_deadline_expired(
+    deadline_epoch: object,
+    *,
+    now_epoch: float | None = None,
+) -> bool:
+    """Return whether an actually issued operator entry deadline expired.
+
+    A zero deadline means no executable entry window was issued. It must not
+    relabel the still-current market study as an expired decision.
+    """
+
+    deadline = _epoch_float(deadline_epoch, 0.0)
+    return bool(
+        deadline > 0.0
+        and deadline <= (time.time() if now_epoch is None else float(now_epoch))
+    )
 
 
 def _payload_created_epoch(payload: Mapping[str, object]) -> float:
@@ -5222,11 +5248,56 @@ def create_app(
             app.state.window_tracker_service = market_window_tracker
         return cast(ContinuousWindowTrackerService, market_window_tracker)
 
+    def _with_runtime_capture_source(
+        payload: Mapping[str, object],
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        """Overlay process-local source liveness onto cached read projections."""
+
+        public = dict(payload)
+        resolved_session_id = str(
+            session_id or public.get("session_id") or ""
+        ).strip()
+        if not resolved_session_id:
+            return public
+        tracker_service = get_window_tracker_service()
+        source_getter = getattr(
+            tracker_service,
+            "capture_source_runtime_snapshot_v3",
+            None,
+        )
+        if not callable(source_getter):
+            return public
+
+        def overlay_source(container: dict[str, object]) -> None:
+            source = container.get("capture_source_v3")
+            if not isinstance(source, Mapping):
+                return
+            try:
+                container["capture_source_v3"] = source_getter(
+                    resolved_session_id,
+                    cast(Mapping[str, Any], source),
+                )
+            except Exception:
+                LOGGER.debug(
+                    "Unable to attach transport heartbeat source for %s.",
+                    resolved_session_id,
+                    exc_info=True,
+                )
+
+        overlay_source(public)
+        live_visual_state = public.get("live_visual_state")
+        if isinstance(live_visual_state, Mapping):
+            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            overlay_source(live_visual)
+            public["live_visual_state"] = live_visual
+        return public
+
     def read_window_tracker_session(session_id: str) -> dict[str, object]:
         tracker_service = get_window_tracker_service()
 
         def _with_cpu_stream_runtime(payload: Mapping[str, object]) -> dict[str, object]:
-            public = dict(payload)
+            public = _with_runtime_capture_source(payload, session_id)
             health_getter = getattr(tracker_service, "cpu_stream_health_v3", None)
             if callable(health_getter):
                 try:
@@ -5596,6 +5667,10 @@ def create_app(
                 display_path=path.with_name("display_state.json"),
                 require_complete_display_bundle=compact_public,
             )
+        session_payload = _with_runtime_capture_source(
+            session_payload,
+            requested_session_id,
+        )
         session_payload.setdefault(
             "effective_capture_interval_sec",
             session_payload.get("capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
@@ -6268,7 +6343,10 @@ def create_app(
         *,
         now_epoch: float,
     ) -> dict[str, object]:
-        refreshed: dict[str, object] = dict(cached_live_state)
+        refreshed = _with_runtime_capture_source(
+            cached_live_state,
+            requested_session_id,
+        )
         display_snapshot = _direct_window_tracker_display_snapshot(
             requested_session_id,
             require_overlay_model=False,
@@ -6497,7 +6575,6 @@ def create_app(
 
     def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
         public_payload = _strip_private_projection_snapshots(payload)
-        public_payload.pop("live_visual_state", None)
         # Geometry/model projections may remain cached while an external WGC
         # or tab-capture transport advances over identical chart pixels. Merge
         # only the bounded transport observation from the compact sidecar so
@@ -6522,6 +6599,13 @@ def create_app(
                         public_payload["visual_observation_v3"] = dict(
                             cast(Mapping[str, object], direct_observation)
                         )
+        # The compact sidecar is intentionally not rewritten for every browser
+        # heartbeat.  Overlay the bounded in-process pulse after any sidecar
+        # merge so even the hottest response-cache path reports current source
+        # freshness and queue state.  The helper also updates the nested live
+        # projection before that private duplicate is removed below.
+        public_payload = _with_runtime_capture_source(public_payload, session_id)
+        public_payload.pop("live_visual_state", None)
         capture_source = public_payload.get("capture_source_v3")
         if isinstance(capture_source, Mapping):
             # This also covers non-sidecar test/runtime paths and guarantees a
@@ -7098,7 +7182,10 @@ def create_app(
                             requested_session_id,
                             now_epoch=now_epoch,
                         )
-                    return cached_live_state
+                    return _with_runtime_capture_source(
+                        cached_live_state,
+                        requested_session_id,
+                    )
 
         def store_live_state_cache(live_state: Mapping[str, object]) -> None:
             if not cache_enabled:
@@ -7181,6 +7268,10 @@ def create_app(
                 **_mapping_to_plain_dict(live_state.get("provider_status")),
                 "live_state_source": "tracker_service",
             }
+            live_state = _with_runtime_capture_source(
+                live_state,
+                requested_session_id,
+            )
             store_live_state_cache(live_state)
             return live_state
         except KeyError as exc:
@@ -7500,9 +7591,14 @@ def create_app(
                 if str(overlay.get("family") or "").strip().lower()
                 in public_families
             ]
-        decision_expired = (
-            decision_valid_until_epoch <= 0.0
-            or decision_valid_until_epoch <= time.time()
+        # ``0`` is the canonical value when no executable entry window was
+        # issued.  It is not evidence that the completed market study itself
+        # expired.  Treating absence as expiry collapsed every non-actionable
+        # (but current) BUY/SELL study into the same generic WAIT/STALE answer.
+        # A positive deadline may expire an issued permission; a missing
+        # deadline leaves the independently derived permission unchanged.
+        decision_expired = _operator_entry_deadline_expired(
+            decision_valid_until_epoch
         )
         if stale_while_refreshing:
             freshness = _mapping_to_plain_dict(projected.get("freshness"))
@@ -7796,20 +7892,41 @@ def create_app(
         cache_revision: tuple[str, int, float] | None = None
         if (
             source_revision is not None
-            and final_source_revision is not None
-            and final_source_revision[0] == source_revision[0]
             and response_frame_number == source_revision[1]
         ):
-            # Cache only when every atomic source-revision field stayed
-            # unchanged for the whole projection.  A concurrent frame update
-            # must not let an in-flight old build repopulate the cache.
+            # The response is an internally atomic projection of the source
+            # revision captured at build start. Publish that completed frame
+            # even when a newer frame arrived during the expensive CPU build;
+            # otherwise a stream whose cadence is faster than projection time
+            # can starve the operator cache forever. Because the stored
+            # revision is still the build-start revision, the next poll sees
+            # the newer source and schedules another catch-up. The monotonic
+            # insertion guard below prevents an older in-flight build from
+            # replacing a newer completed surface, while the heartbeat
+            # identity veto clears any cross-pair surface before projection.
             cache_revision = source_revision
         if cache_revision is not None:
             with operator_projection_cache_lock:
-                operator_projection_cache[requested_session_id] = (
-                    cache_revision[0],
-                    dict(operator_state),
+                existing_projection = operator_projection_cache.get(
+                    requested_session_id
                 )
+                existing_frame_number = (
+                    int(
+                        _epoch_float(
+                            _mapping_to_plain_dict(
+                                existing_projection[1].get("surface")
+                            ).get("frame_id"),
+                            0.0,
+                        )
+                    )
+                    if existing_projection is not None
+                    else 0
+                )
+                if response_frame_number >= existing_frame_number:
+                    operator_projection_cache[requested_session_id] = (
+                        cache_revision[0],
+                        dict(operator_state),
+                    )
         return public_operator_projection_for_view(
             operator_state,
             operator_view,

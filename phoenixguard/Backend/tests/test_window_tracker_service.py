@@ -1206,6 +1206,251 @@ class _MismatchedPlaneTrackingAdapter:
         )
 
 
+@pytest.mark.parametrize("model_packet_present", [False, True])
+def test_external_study_source_publishes_model_without_broker_evaluation_or_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_packet_present: bool,
+) -> None:
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / f"external-study-fast-{int(model_packet_present)}",
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    session = tracker.create_session(
+        session_id=f"external-study-fast-{int(model_packet_present)}",
+        auto_start=False,
+    )
+    evaluation_calls: list[str] = []
+    scan_calls: list[str] = []
+
+    def forbid_broker_evaluation(*_args: Any, **_kwargs: Any) -> Any:
+        evaluation_calls.append("called")
+        raise AssertionError("study-only external frames must not evaluate broker execution")
+
+    def forbid_broker_scan(*_args: Any, **_kwargs: Any) -> Any:
+        scan_calls.append("called")
+        raise AssertionError("study-only external frames must not scan broker controls")
+
+    def publish_test_council(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_MODEL_COUNCIL_RESULT_V3",
+            "__external_fast_path_test_result": True,
+            "model_council": {"final_side": "BUY", "final_state": "READY"},
+            "model_council_study_packet": {
+                "schema_version": "PG_MODEL_COUNCIL_STUDY_PACKET_V3",
+                "side": "BUY",
+            },
+        }
+
+    def extract_test_packet(
+        value: Mapping[str, Any] | None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        row = dict(value or {})
+        if model_packet_present and row.get("__external_fast_path_test_result") is True:
+            return {
+                "schema_version": "PG_EXECUTION_PACKET_V3",
+                "packet_id": "test-study-packet",
+                "session_id": str(session["session_id"]),
+                "side": "BUY",
+                "action": "BUY",
+            }
+        return {}
+
+    monkeypatch.setattr(tracker, "_evaluate_broker_execution", forbid_broker_evaluation)
+    monkeypatch.setattr(tracker, "_read_broker_surface", forbid_broker_scan)
+    monkeypatch.setattr(tracker, "_publish_model_council_v3_state", publish_test_council)
+    monkeypatch.setattr(
+        window_tracker_module,
+        "_model_council_packet_from_payload",
+        extract_test_packet,
+    )
+
+    accepted = tracker._capture_and_analyze(  # pyright: ignore[reportPrivateUsage]
+        str(session["session_id"]),
+        force=True,
+        external_window_image=_surface(width=1280, height=720),
+        external_source={
+            "source_id": "external-study-feed",
+            "source_type": "external_frame_feed",
+            "coordinate_space": "external_frame_v1",
+            "sequence_id": "external-study-sequence",
+            "frame_id": 1,
+            "metadata": {"source_render_fresh": True},
+        },
+        external_capture_epoch=time.time(),
+    )
+
+    assert accepted is True
+    assert evaluation_calls == []
+    assert scan_calls == []
+    decision_paths = sorted(
+        (tracker.session_dir(str(session["session_id"])) / "artifacts").glob(
+            "*_decision.json"
+        )
+    )
+    assert len(decision_paths) == 1
+    decision = cast(
+        dict[str, Any],
+        json.loads(decision_paths[0].read_text(encoding="utf-8")),
+    )
+    execution = cast(dict[str, Any], decision["broker_execution_state"])
+    surface = cast(dict[str, Any], decision["broker_surface"])
+    assert execution["status"] == "study_source_only"
+    assert execution["actionable"] is False
+    assert execution["execution_authority"] == "NONE"
+    assert execution["model_packet_present"] is model_packet_present
+    assert surface["study_source_only"] is True
+    assert surface["broker_click_safe"] is False
+    assert surface["scan_skipped"] is True
+    assert surface["scan_skip_reason"] == (
+        "external_study_source_never_scans_broker_controls"
+    )
+    assert decision["latest_signal"]["pipeline_timing"][
+        "partial_publish_reason"
+    ] == "external_study_source_model_ready_broker_execution_skipped"
+    assert decision["decision_artifact_state"] == (
+        "external_study_source_model_published_no_execution_authority"
+    )
+
+
+def test_superseding_claim_during_external_study_drops_old_model_and_overlays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeTrackingAdapter("BUY")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "external-study-superseded",
+        tracking_adapter=adapter,
+    )
+    session_id = "external-study-superseded"
+    tracker.create_session(session_id=session_id, auto_start=False)
+    first = tracker.claim_external_source(
+        session_id,
+        source_id="edge-chart-a",
+        sequence_id="edge-sequence-a",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-selection-a",
+        display_name="Chart A",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    surface_signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )
+
+    def probe_identity(
+        image: Image.Image,
+        *,
+        source: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del source
+        return {
+            "detected_market": "CAD/JPY OTC",
+            "market_confidence": 0.95,
+            "market_source": "broker_header_text",
+            "market_bbox": [80, 60, 220, 92],
+            "detected_timeframe": "M5",
+            "timeframe_confidence": 0.96,
+            "timeframe_source": "broker_selector_chip",
+            "timeframe_bbox": [250, 60, 292, 92],
+            "broker_surface_hash": surface_signature(image),
+        }
+
+    monkeypatch.setattr(
+        adapter,
+        "probe_chart_identity_v3",
+        probe_identity,
+        raising=False,
+    )
+    second_claim: dict[str, Any] = {}
+
+    def supersede_before_model_publication(**_kwargs: Any) -> dict[str, Any]:
+        second_claim.update(
+            tracker.claim_external_source(
+                session_id,
+                source_id="edge-chart-b",
+                sequence_id="edge-sequence-b",
+                source_type="browser_tab_roi_capture",
+                selection_id="edge-selection-b",
+                display_name="Chart B",
+                coordinate_space="edge_tab_roi_v1",
+            )
+        )
+        return {
+            "schema_version": "PG_MODEL_COUNCIL_RESULT_V3",
+            "model_council": {"final_side": "BUY", "final_state": "READY"},
+            "model_council_study_packet": {
+                "schema_version": "PG_MODEL_COUNCIL_STUDY_PACKET_V3",
+                "side": "BUY",
+            },
+        }
+
+    monkeypatch.setattr(
+        tracker,
+        "_publish_model_council_v3_state",
+        supersede_before_model_publication,
+    )
+    try:
+        accepted = tracker._capture_and_analyze(  # pyright: ignore[reportPrivateUsage]
+            session_id,
+            force=True,
+            external_window_image=_surface(width=1280, height=720),
+            external_source={
+                "source_id": "edge-chart-a",
+                "source_type": "browser_tab_roi_capture",
+                "source_url": "https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+                "sequence_id": "edge-sequence-a",
+                "coordinate_space": "edge_tab_roi_v1",
+                "source_generation": int(first["source_generation"]),
+                "frame_id": 1,
+                "metadata": {
+                    "source_lease_id": str(first["source_lease_id"]),
+                    "source_render_fresh": True,
+                    "extension_id": "edge-extension-test",
+                    "locked_tab_id": "17",
+                    "locked_tab_title": "The Most Innovative Trading Platform",
+                    "locked_origin": "https://pocketoption.com",
+                },
+            },
+            external_capture_epoch=time.time(),
+        )
+
+        assert accepted is True
+        assert second_claim["source_generation"] == (
+            int(first["source_generation"]) + 1
+        )
+        persisted = tracker.load_session_payload(session_id)
+        current_source = cast(dict[str, Any], persisted["capture_source_v3"])
+        assert current_source["source_id"] == "edge-chart-b"
+        assert current_source["sequence_id"] == "edge-sequence-b"
+        assert current_source["source_generation"] == second_claim[
+            "source_generation"
+        ]
+        assert persisted["market"] == ""
+        assert persisted["last_chart_path"] == ""
+        assert persisted["last_overlay_path"] == ""
+        assert persisted["last_full_overlay_path"] == ""
+        council_result = cast(
+            dict[str, Any], persisted["model_council_result"]
+        )
+        assert council_result.get("model_council") in (None, {})
+        assert council_result["study_packet_present"] is False
+        assert council_result["execution_packet_present"] is False
+        assert persisted["model_council_study_packet"] == {}
+        latest = cast(dict[str, Any], persisted["latest_signal"])
+        assert latest["action"] == "HOLD"
+        assert latest["market_source"] == "unconfirmed"
+        assert "focus locked" in str(latest["summary"]).lower()
+        assert persisted["external_evidence_lineage_v3"] == {}
+        decision_paths = list(
+            (tracker.session_dir(session_id) / "artifacts").glob("*_decision.json")
+        )
+        assert decision_paths == []
+    finally:
+        tracker.shutdown()
+
+
 def _wait_for_capture_count(tracker: ContinuousWindowTrackerService, session_id: str, target: int) -> dict[str, Any]:
     deadline = time.time() + 3.0
     while time.time() < deadline:
@@ -3403,6 +3648,67 @@ def test_live_selector_lane_reads_pair_and_m5_despite_toolbar_clutter() -> None:
     assert str(market["raw_text"]).replace(" ", "") == "GBP/USDOTC"
 
 
+def test_market_selector_lane_tracks_letterboxed_edge_viewport_without_asset_tabs() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    width, content_height = 1628, 861
+
+    def broker_surface(asset_text: str) -> Image.Image:
+        pixels = np.full((content_height, width, 3), (21, 26, 38), dtype=np.uint8)
+        cv2.putText(
+            pixels,
+            asset_text,
+            (45, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.70,
+            (235, 240, 248),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(pixels, (90, 86), (269, 164), (29, 38, 58), -1)
+        cv2.putText(
+            pixels,
+            "GBP/USD OTC",
+            (105, 137),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (235, 240, 248),
+            2,
+            cv2.LINE_AA,
+        )
+        return Image.fromarray(pixels, mode="RGB")
+
+    focused = broker_surface("AUD/CHF NZD/JPY OTC")
+    changed_tabs = broker_surface("EUR/USD GBP/NZD OTC")
+    edge_viewport = Image.new("RGB", (width, content_height + 120), color=(0, 0, 0))
+    edge_viewport.paste(changed_tabs, (0, 60))
+
+    lane_bounds = cast(
+        Callable[[Image.Image], tuple[int, int, int, int, str]],
+        getattr(window_tracker_module, "_market_selector_lane_bounds"),
+    )
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    focused_lane = lane_bounds(focused)
+    viewport_lane = lane_bounds(edge_viewport)
+    assert focused_lane[4] == "focused_broker_surface"
+    assert viewport_lane[4] == "edge_letterboxed_tab"
+    assert viewport_lane[1] == focused_lane[1] + 60
+    assert viewport_lane[3] == focused_lane[3] + 60
+    assert fingerprint(focused) == fingerprint(edge_viewport)
+
+    focused_market = adapter._detect_market_selector(focused)  # noqa: SLF001
+    viewport_market = adapter._detect_market_selector(edge_viewport)  # noqa: SLF001
+    assert focused_market["value"] == "GBP/USD OTC"
+    assert viewport_market["value"] == "GBP/USD OTC"
+    assert viewport_market["selector_layout"] == "edge_letterboxed_tab"
+    viewport_bbox = cast(list[int], viewport_market["bbox"])
+    assert 0.18 <= float(viewport_bbox[1]) / float(edge_viewport.height) <= 0.21
+
+
 def test_live_selector_lane_reads_m5_below_full_browser_chrome() -> None:
     cv2: Any = pytest.importorskip("cv2")
     width, height = 1942, 1040
@@ -3464,12 +3770,8 @@ def test_live_selector_lane_reads_m5_below_full_browser_chrome() -> None:
     assert int(cast(list[int], timeframe["bbox"])[3]) >= int(height * 0.24) + 20
 
 
-def test_tiny_live_m5_glyph_uses_shape_topology_instead_of_m1_guess() -> None:
-    adapter = PhoenixGuardWindowTrackingAdapter()
-    # Exact seven-pixel topology observed in the live broker's antialiased M5
-    # selector.  The final four columns form a 5: top/middle/bottom bars,
-    # upper-left stroke, and lower-right stroke.
-    compact_m5 = np.asarray(
+def _compact_live_m5_glyph() -> NDArray[np.uint8]:
+    return np.asarray(
         [
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0],
             [1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0],
@@ -3481,6 +3783,367 @@ def test_tiny_live_m5_glyph_uses_shape_topology_instead_of_m1_guess() -> None:
         ],
         dtype=np.uint8,
     )
+
+
+def _compact_live_m5_jpeg_glyph() -> NDArray[np.uint8]:
+    """Five-row M5 topology captured from the live Edge tab JPEG.
+
+    The three-column 5 keeps its top and middle bars after compression, but a
+    two-column edge probe incorrectly counted the top bar as a 3 right stroke.
+    """
+
+    return np.asarray(
+        [
+            [1, 0, 0, 0, 1, 0, 0, 1, 1, 0],
+            [1, 1, 0, 1, 1, 0, 0, 1, 1, 0],
+            [1, 1, 0, 1, 1, 1, 0, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 0, 0, 1, 1],
+        ],
+        dtype=np.uint8,
+    )
+
+
+def test_compact_live_m5_jpeg_topology_does_not_become_m3() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    label, confidence = adapter._compact_timeframe_shape_hint(  # noqa: SLF001
+        _compact_live_m5_jpeg_glyph()
+    )
+
+    assert label == "M5"
+    assert confidence >= 0.68
+
+
+def test_letterboxed_edge_timeframe_anchor_accepts_live_m5_position() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    pixels = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    pixels[60:1020, :] = (21, 26, 38)
+    # Exact blue-chip geometry observed in live frame 71.  In the 806-pixel
+    # timeframe ROI its center is at 33%, not the focused layout's 46% anchor.
+    cv2.rectangle(pixels, (256, 193), (280, 215), (25, 110, 210), -1)
+    compact_m5 = _compact_live_m5_glyph()
+    glyph_y, glyph_x = np.nonzero(compact_m5)
+    pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    timeframe = adapter._detect_timeframe_selector(Image.fromarray(pixels, mode="RGB"))  # noqa: SLF001
+
+    assert timeframe["value"] == "M5"
+    assert timeframe["bbox"] == [256, 193, 281, 216]
+    assert timeframe["selector_layout"] == "edge_letterboxed_tab"
+    assert float(timeframe["confidence"]) >= 0.85
+
+
+def test_timeframe_selector_recovers_from_transient_empty_template_cache() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    pixels = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    pixels[60:1020, :] = (21, 26, 38)
+    cv2.rectangle(pixels, (256, 193), (280, 215), (25, 110, 210), -1)
+    compact_m5 = _compact_live_m5_glyph()
+    glyph_y, glyph_x = np.nonzero(compact_m5)
+    pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    # Reproduce the long-running API failure: cached_property had persisted an
+    # empty bank after a transient startup initialization error.
+    adapter.__dict__["_timeframe_template_bank"] = {}
+
+    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+        Image.fromarray(pixels, mode="RGB")
+    )
+
+    assert timeframe["value"] == "M5"
+    assert timeframe["bbox"] == [256, 193, 281, 216]
+    assert all(adapter._timeframe_template_bank.values())  # noqa: SLF001
+
+
+def test_letterboxed_edge_timeframe_accepts_desaturated_live_capture_chip() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    pixels = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    pixels[60:1020, :] = (21, 26, 38)
+    # First-generation tabCapture JPEGs can render this chip below the strict
+    # saturation lane even though its exact M5 glyph remains sharp.
+    cv2.rectangle(pixels, (256, 193), (280, 215), (78, 99, 126), -1)
+    compact_m5 = _compact_live_m5_glyph()
+    glyph_y, glyph_x = np.nonzero(compact_m5)
+    pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+        Image.fromarray(pixels, mode="RGB")
+    )
+
+    assert timeframe["value"] == "M5"
+    assert timeframe["bbox"] == [256, 193, 281, 216]
+    assert timeframe["selector_layout"] == "edge_letterboxed_tab"
+    assert float(timeframe["confidence"]) >= 0.85
+
+
+def test_letterboxed_edge_timeframe_keeps_m5_separate_from_dark_blue_toolbar() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    pixels = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    pixels[60:1020, :] = (21, 26, 38)
+    # Full-viewport Pocket Option renders the selector inside a broad dark-blue
+    # control lane.  That lane is blue enough for the relaxed saturation rule,
+    # but too dark to be part of the authoritative selector chip.
+    cv2.rectangle(pixels, (226, 195), (404, 272), (44, 49, 69), -1)
+    cv2.rectangle(pixels, (256, 193), (280, 215), (25, 110, 210), -1)
+    compact_m5 = _compact_live_m5_glyph()
+    glyph_y, glyph_x = np.nonzero(compact_m5)
+    pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+        Image.fromarray(pixels, mode="RGB")
+    )
+
+    assert timeframe["value"] == "M5"
+    assert timeframe["bbox"] == [256, 193, 281, 216]
+    assert timeframe["selector_layout"] == "edge_letterboxed_tab"
+    assert float(timeframe["confidence"]) >= 0.85
+
+
+def test_letterboxed_edge_timeframe_ignores_later_toolbar_notification_badges() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    pixels = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    pixels[60:1020, :] = (21, 26, 38)
+
+    # Current Pocket Option layout: the authoritative M5 selector is near
+    # x=270 while blue notification badges near x=310 and x=349 can resemble
+    # M3 after JPEG/downsample morphology. They must never compete as identity.
+    cv2.rectangle(pixels, (256, 193), (280, 215), (25, 110, 210), -1)
+    compact_m5 = _compact_live_m5_glyph()
+    glyph_y, glyph_x = np.nonzero(compact_m5)
+    pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
+    for left in (304, 340):
+        cv2.rectangle(
+            pixels,
+            (left, 193),
+            (left + 24, 217),
+            (25, 110, 210),
+            -1,
+        )
+        cv2.putText(
+            pixels,
+            "M3",
+            (left + 2, 211),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (248, 250, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+        Image.fromarray(pixels, mode="RGB")
+    )
+
+    assert timeframe["value"] == "M5"
+    assert timeframe["bbox"] == [256, 193, 281, 216]
+    assert int(timeframe["bbox"][0]) < 300
+    assert float(timeframe["selector_anchor_distance_x"]) < 10.0
+
+
+def test_chart_identity_probe_rebuilds_only_poisoned_ocr_template_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    healthy_timeframe_bank = adapter._timeframe_template_bank  # noqa: SLF001
+    poisoned_ocr_bank: dict[str, list[NDArray[np.uint8]]] = {}
+    adapter.__dict__["_ocr_char_template_bank"] = poisoned_ocr_bank
+    timeframe_calls = 0
+
+    def detect_timeframe(_image: Image.Image) -> dict[str, Any]:
+        nonlocal timeframe_calls
+        timeframe_calls += 1
+        ocr_bank = adapter._ocr_char_template_bank  # noqa: SLF001
+        if not ocr_bank or not all(ocr_bank.values()):
+            return {}
+        return {
+            "value": "M5",
+            "confidence": 0.91,
+            "source": "broker_selector_chip",
+            "bbox": [256, 193, 281, 216],
+        }
+
+    def detect_market(
+        _image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert timeframe_selector
+        return {
+            "value": "CAD/JPY OTC",
+            "confidence": 0.88,
+            "source": "visual_chart_header",
+            "bbox": [120, 213, 215, 227],
+        }
+
+    monkeypatch.setattr(
+        adapter,
+        "_detect_timeframe_selector_unlocked",
+        detect_timeframe,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector_unlocked",
+        detect_market,
+    )
+
+    result = adapter.probe_chart_identity_v3(Image.new("RGB", (640, 360)))
+
+    assert result["identity_ready"] is True
+    assert result["detected_timeframe"] == "M5"
+    assert result["identity_probe_attempts"] == 2
+    assert result["identity_probe_recovered"] is True
+    assert result["identity_probe_rebuilt_caches"] == ["ocr"]
+    assert timeframe_calls == 2
+    assert adapter.__dict__["_timeframe_template_bank"] is healthy_timeframe_bank
+    assert adapter.__dict__["_ocr_char_template_bank"] is not poisoned_ocr_bank
+    assert all(adapter._ocr_char_template_bank.values())  # noqa: SLF001
+
+
+def test_headerless_identity_probe_preserves_complete_template_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    healthy_timeframe_bank = adapter._timeframe_template_bank  # noqa: SLF001
+    healthy_ocr_bank = adapter._ocr_char_template_bank  # noqa: SLF001
+    timeframe_calls = 0
+
+    def detect_timeframe(_image: Image.Image) -> dict[str, Any]:
+        nonlocal timeframe_calls
+        timeframe_calls += 1
+        return {}
+
+    def detect_market(
+        _image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert not timeframe_selector
+        return {}
+
+    monkeypatch.setattr(
+        adapter,
+        "_detect_timeframe_selector_unlocked",
+        detect_timeframe,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector_unlocked",
+        detect_market,
+    )
+
+    result = adapter.probe_chart_identity_v3(Image.new("RGB", (640, 360)))
+
+    assert result["identity_ready"] is False
+    assert result["detected_timeframe"] == ""
+    assert result["identity_probe_attempts"] == 1
+    assert result["identity_probe_recovered"] is False
+    assert result["identity_probe_rebuilt_caches"] == []
+    assert timeframe_calls == 1
+    assert adapter.__dict__["_timeframe_template_bank"] is healthy_timeframe_bank
+    assert adapter.__dict__["_ocr_char_template_bank"] is healthy_ocr_bank
+
+
+def test_chart_identity_probe_serializes_and_recovers_transient_detector_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    state_lock = threading.Lock()
+    state = {"active": 0, "maximum_active": 0, "timeframe_calls": 0}
+
+    def enter_detector() -> None:
+        with state_lock:
+            state["active"] += 1
+            state["maximum_active"] = max(
+                state["maximum_active"],
+                state["active"],
+            )
+
+    def leave_detector() -> None:
+        with state_lock:
+            state["active"] -= 1
+
+    def detect_timeframe(_image: Image.Image) -> dict[str, Any]:
+        enter_detector()
+        try:
+            time.sleep(0.01)
+            with state_lock:
+                state["timeframe_calls"] += 1
+                call_number = state["timeframe_calls"]
+            if call_number == 1:
+                raise RuntimeError("transient visual detector failure")
+            return {
+                "value": "M5",
+                "confidence": 0.91,
+                "source": "broker_selector_chip",
+                "bbox": [256, 193, 281, 216],
+            }
+        finally:
+            leave_detector()
+
+    def detect_market(
+        _image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        enter_detector()
+        try:
+            time.sleep(0.01)
+            assert timeframe_selector
+            return {
+                "value": "CAD/JPY OTC",
+                "confidence": 0.88,
+                "source": "visual_chart_header",
+                "bbox": [120, 213, 215, 227],
+            }
+        finally:
+            leave_detector()
+
+    monkeypatch.setattr(
+        adapter,
+        "_detect_timeframe_selector_unlocked",
+        detect_timeframe,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector_unlocked",
+        detect_market,
+    )
+
+    def probe(_index: int) -> dict[str, Any]:
+        return adapter.probe_chart_identity_v3(Image.new("RGB", (640, 360)))
+
+    with caplog.at_level("WARNING"):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(probe, range(4)))
+
+    assert state["maximum_active"] == 1
+    assert state["timeframe_calls"] == 5
+    assert all(row["identity_ready"] is True for row in results)
+    assert all(row["detected_timeframe"] == "M5" for row in results)
+    assert sum(bool(row["identity_probe_recovered"]) for row in results) == 1
+    assert sorted(int(row["identity_probe_attempts"]) for row in results) == [1, 1, 1, 2]
+    assert "Chart timeframe visual probe failed on attempt 1" in caplog.text
+
+
+def test_tiny_live_m5_glyph_uses_shape_topology_instead_of_m1_guess() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    # Exact seven-pixel topology observed in the live broker's antialiased M5
+    # selector.  The final four columns form a 5: top/middle/bottom bars,
+    # upper-left stroke, and lower-right stroke.
+    compact_m5 = _compact_live_m5_glyph()
+
+    class UnexpectedTemplateAccess(dict[str, object]):
+        def items(self):  # type: ignore[override]
+            raise AssertionError("tiny M5 topology must bypass template banks")
+
+        def get(self, *_args: Any, **_kwargs: Any) -> Any:  # type: ignore[override]
+            raise AssertionError("tiny M5 topology must bypass template banks")
+
+    adapter.__dict__["_timeframe_template_bank"] = UnexpectedTemplateAccess()
+    adapter.__dict__["_ocr_char_template_bank"] = UnexpectedTemplateAccess()
 
     score_timeframe = cast(
         Callable[[NDArray[np.uint8]], tuple[str, float]],
@@ -3514,6 +4177,36 @@ def test_market_ocr_domain_decoder_repairs_ambiguous_currency_glyphs_only() -> N
     assert margin >= 0.012
     ambiguous = [[("X", 0.55), ("/", 0.54), ("O", 0.54), ("T", 0.54), ("C", 0.54)]] * 10
     assert decode(ambiguous)[0] == ""
+
+
+def test_live_compact_cad_selector_splits_touching_ca_at_bounded_valley() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    # Exact per-column foreground counts from the merged ``CA`` contour in
+    # live frame 71.  The baseline joins both glyphs, but the x=8 valley is
+    # sparse enough to prove two median-sized characters without guessing.
+    projection = [7, 9, 8, 4, 4, 4, 4, 4, 2, 3, 5, 7, 8, 6, 6, 8, 7, 6, 3]
+    mask = np.zeros((11, 120), dtype=np.uint8)
+    for x, count in enumerate(projection):
+        mask[11 - count :, x] = 255
+    components = [
+        {"bbox": [0, 0, 19, 11]},
+        {"bbox": [24, 0, 34, 11]},
+        {"bbox": [36, 0, 41, 11]},
+        {"bbox": [43, 0, 48, 11]},
+        {"bbox": [50, 0, 58, 11]},
+        {"bbox": [60, 0, 69, 11]},
+        {"bbox": [71, 0, 82, 11]},
+        {"bbox": [84, 0, 92, 11]},
+        {"bbox": [94, 0, 103, 11]},
+    ]
+
+    split = adapter._split_market_wide_components(mask, components)  # noqa: SLF001
+
+    assert len(split) == 10
+    assert split[0]["bbox"] == [0, 0, 8, 11]
+    assert split[1]["bbox"] == [8, 0, 19, 11]
+    assert split[0]["split_from_wide_component"] is True
+    assert split[1]["split_from_wide_component"] is True
 
 
 def test_market_selector_fingerprint_ignores_live_candle_motion() -> None:
@@ -3812,6 +4505,921 @@ def _wgc_identity_attestation(
         window_signature=signature,
         capture_epoch=capture_epoch,
     )
+
+
+def _edge_tab_identity_attestation(
+    image: Image.Image,
+    *,
+    market: str = "CAD/JPY OTC",
+    timeframe: str = "M5",
+    capture_epoch: float,
+) -> dict[str, Any]:
+    signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )(image)
+    source = {
+        "source_id": "edge-chart-region-v3",
+        "source_type": "browser_tab_roi_capture",
+        "source_url": "https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        "sequence_id": "edge-roi-17-sequence",
+        "coordinate_space": "edge_tab_roi_v1",
+        "source_generation": 4,
+        "frame_id": 11,
+        "metadata": {
+            "source_lease_id": "edge-lease-secret-4",
+            "source_render_fresh": True,
+            "extension_id": "edge-extension-id",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    }
+    source_lock = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+    )(source, image, window_signature=signature)
+    return cast(
+        Callable[..., dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_external_edge_tab_broker_identity_attestation_v3",
+        ),
+    )(
+        source,
+        source_lock,
+        {
+            "detected_market": market,
+            "market_confidence": 0.91,
+            "market_source": "broker_header_text",
+            "market_bbox": [120, 213, 215, 227],
+            "market_selector_visual_fingerprint": "selector_v3_cad_jpy_otc",
+            "detected_timeframe": timeframe,
+            "timeframe_confidence": 0.93,
+            "timeframe_source": "broker_selector_chip",
+            "timeframe_bbox": [256, 193, 281, 216],
+            "broker_surface_hash": signature,
+        },
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    )
+
+
+def test_edge_exact_capture_identity_bracket_binds_pair_without_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    surface = Image.new("RGB", (1000, 600), color=(0, 0, 0))
+    draw = ImageDraw.Draw(surface)
+    draw.rectangle((0, 50, 999, 549), fill=(20, 27, 41))
+    market_bbox_css = [80.0, 90.0, 220.0, 125.0]
+    timeframe_bbox_css = [250.0, 90.0, 300.0, 125.0]
+    draw.text((88, 145), "USD/CAD OTC", fill=(244, 246, 250))
+    draw.text((258, 145), "M5", fill=(244, 246, 250))
+    capture_epoch_ms = int(time.time() * 1000.0)
+    observation = {
+        "schema_version": "PG_EDGE_TAB_IDENTITY_OBSERVATION_V3",
+        "capture_bracket_consistent": True,
+        "locked_tab_id": 17,
+        "locked_origin": "https://pocketoption.com",
+        "sequence_id": "edge-roi-17-sequence",
+        "before": {
+            "symbol": "USD/CAD OTC",
+            "timeframe": "M5",
+            "market_bbox_css": market_bbox_css,
+            "timeframe_bbox_css": timeframe_bbox_css,
+            "viewport_css": {"width": 1000, "height": 500},
+            "observed_epoch": capture_epoch_ms - 10,
+        },
+        "after": {
+            "symbol": "USD/CAD OTC",
+            "timeframe": "M5",
+            "market_bbox_css": market_bbox_css,
+            "timeframe_bbox_css": timeframe_bbox_css,
+            "viewport_css": {"width": 1000, "height": 500},
+            "observed_epoch": capture_epoch_ms + 10,
+        },
+    }
+    source = {
+        "source_type": "browser_tab_roi_capture",
+        "coordinate_space": "edge_tab_roi_v1",
+        "sequence_id": "edge-roi-17-sequence",
+        "capture_epoch_ms": capture_epoch_ms,
+        "metadata": {
+            "locked_tab_id": "17",
+            "locked_origin": "https://pocketoption.com",
+            "source_surface_width": 1000,
+            "source_surface_height": 600,
+            "roi_source_pixels": {
+                "x": 0,
+                "y": 0,
+                "width": 1000,
+                "height": 600,
+                "sourceWidth": 1000,
+                "sourceHeight": 600,
+            },
+            "identity_observation_v3": observation,
+        },
+    }
+    identity_reader = cast(
+        Callable[[Image.Image, Mapping[str, Any]], dict[str, Any]],
+        getattr(window_tracker_module, "_edge_tab_bracket_identity_surface_v3"),
+    )
+
+    identity = identity_reader(surface, source)
+
+    assert identity["detected_market"] == "USD/CAD OTC"
+    assert identity["detected_timeframe"] == "M5"
+    assert identity["identity_ready"] is True
+    assert identity["identity_probe_path"] == (
+        "edge_exact_capture_dom_bracket_pixel_verified"
+    )
+    assert identity["market_selector_visual_fingerprint"].startswith(
+        "selector_v3_"
+    )
+    assert 130 <= int(identity["market_bbox"][1]) <= 150
+    adapter = PhoenixGuardWindowTrackingAdapter()
+
+    def unexpected_visual_ocr(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("exact-capture bracket fell through to visual OCR")
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", unexpected_visual_ocr)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", unexpected_visual_ocr)
+    probed = adapter.probe_chart_identity_v3(surface, source=source)
+    assert probed["detected_market"] == "USD/CAD OTC"
+    assert probed["detected_timeframe"] == "M5"
+
+    tampered = copy.deepcopy(source)
+    cast(dict[str, Any], cast(dict[str, Any], tampered["metadata"])["identity_observation_v3"])[
+        "after"
+    ]["symbol"] = "CHF/JPY OTC"
+    assert identity_reader(surface, tampered) == {}
+
+
+def test_legacy_edge_visual_ocr_rebinds_chf_jpy_to_usd_cad_m5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installed pre-DOM extension must still re-prove the visible pair.
+
+    This models the operator's failure exactly: the preceding completed study
+    belongs to CHF/JPY, while the next letterboxed Edge frame visibly selects
+    USD/CAD OTC on M5.  The watch-list deliberately still contains CHF/JPY so
+    neither the old study nor an unrelated tab label can be reused.
+    """
+
+    cv2: Any = pytest.importorskip("cv2")
+    width, content_height = 1628, 861
+    pixels = np.full((content_height, width, 3), (21, 26, 38), dtype=np.uint8)
+    cv2.putText(
+        pixels,
+        "CHF/JPY OTC CAD/JPY OTC",
+        (45, 48),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.70,
+        (235, 240, 248),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.rectangle(pixels, (90, 86), (269, 164), (29, 38, 58), -1)
+    cv2.putText(
+        pixels,
+        "USD/CAD OTC",
+        (105, 137),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (235, 240, 248),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.rectangle(pixels, (263, 98), (335, 140), (25, 110, 210), -1)
+    cv2.rectangle(pixels, (270, 104), (328, 136), (29, 38, 58), -1)
+    cv2.rectangle(pixels, (297, 99), (323, 119), (25, 110, 210), -1)
+    cv2.putText(
+        pixels,
+        "M5",
+        (299, 115),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (248, 250, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.circle(pixels, (284, 126), 8, (248, 250, 255), 2, cv2.LINE_AA)
+    broker_surface = Image.fromarray(pixels, mode="RGB")
+    surface = Image.new("RGB", (width, content_height + 120), color=(0, 0, 0))
+    surface.paste(broker_surface, (0, 60))
+
+    capture_epoch = time.time()
+    source = {
+        "source_id": "edge-chart-region-v3",
+        "source_type": "browser_tab_roi_capture",
+        "source_url": "https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        "sequence_id": "edge-legacy-ocr-sequence",
+        "coordinate_space": "edge_tab_roi_v1",
+        "source_generation": 4,
+        "frame_id": 12,
+        "metadata": {
+            "source_lease_id": "edge-legacy-ocr-lease",
+            "source_render_fresh": True,
+            "extension_id": "edge-extension-id",
+            "extension_version": "0.3.9",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    }
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    identity = adapter.probe_chart_identity_v3(surface, source=source)
+
+    assert identity["detected_market"] == "USD/CAD OTC"
+    assert identity["detected_timeframe"] == "M5"
+    assert identity["identity_ready"] is True
+    assert "header" in str(identity["market_source"])
+    assert "selector" in str(identity["timeframe_source"])
+
+    signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )(surface)
+    source_lock = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+    )(source, surface, window_signature=signature)
+    attestation = cast(
+        Callable[..., dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_external_edge_tab_broker_identity_attestation_v3",
+        ),
+    )(
+        source,
+        source_lock,
+        identity,
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    )
+    assert attestation["market"] == "USD/CAD OTC"
+    assert attestation["timeframe"] == "M5"
+
+    def unexpected_cropped_selector_scan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("same-frame full-surface OCR must own the cropped study")
+
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector",
+        unexpected_cropped_selector_scan,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_timeframe_selector",
+        unexpected_cropped_selector_scan,
+    )
+    result = adapter.study(
+        _synthetic_chart_surface("sell", width=900, height=520),
+        session_payload={
+            "session_id": "edge-legacy-ocr-pair-switch",
+            "manual_focus_region": {"enabled": True},
+            "_capture_started_epoch_v3": capture_epoch,
+            "_broker_identity_attestation_v3": attestation,
+            "tracking_summary": {
+                "detected_market": "CHF/JPY OTC",
+                "market_confidence": 0.94,
+                "market_identity_confirmed": True,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.94,
+                "timeframe_identity_confirmed": True,
+                "market_selector_visual_fingerprint": "selector_v3_chf_jpy_otc",
+            },
+            "latest_signal": {
+                "market": "CHF/JPY OTC",
+                "market_confidence": 0.94,
+                "market_identity_confirmed": True,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.94,
+                "timeframe_identity_confirmed": True,
+                "market_selector_visual_fingerprint": "selector_v3_chf_jpy_otc",
+            },
+        },
+    )
+
+    assert result.latest_signal["market"] == "USD/CAD OTC"
+    assert result.latest_signal["focus_timeframe"] == "M5"
+    assert result.latest_signal["market_selector_pair_changed"] is True
+    assert result.latest_signal["market_selector_rebind_required"] is False
+    assert result.latest_signal["market_identity_confirmed"] is True
+    assert result.latest_signal["timeframe_identity_confirmed"] is True
+
+
+def test_new_external_frame_pending_identity_invalidates_prior_verified_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pair switch can never inherit the preceding frame's verified identity."""
+
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "identity-veto")
+    session_id = "identity-veto"
+    tracker.create_session(session_id=session_id)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-identity-veto-sequence",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-identity-veto-selection",
+        display_name="Pocket Option chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    seeded = tracker.load_session_payload(session_id)
+    seeded["market"] = "CHF/JPY OTC"
+    seeded["current_chart_identity_v3"] = {
+        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+        "state": "STUDY_IDENTITY_CONFIRMED",
+        "symbol": "CHF/JPY OTC",
+        "timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "market_confidence": 0.96,
+        "timeframe_confidence": 0.96,
+        "frame_id": 41,
+    }
+    seeded["tracking_summary"] = {
+        "detected_market": "CHF/JPY OTC",
+        "detected_timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+    }
+    seeded["latest_signal"] = {
+        "market": "CHF/JPY OTC",
+        "focus_timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+    }
+    save_session = cast(
+        Callable[[dict[str, Any]], None],
+        getattr(tracker, "_save_session"),
+    )
+    save_session(seeded)
+    observed: dict[str, Any] = {}
+
+    def inspect_pending_identity(*_args: Any, **_kwargs: Any) -> bool:
+        during_ingest = tracker.load_session_payload(session_id)
+        observed.update(
+            cast(dict[str, Any], during_ingest["current_chart_identity_v3"])
+        )
+        assert during_ingest["market"] == ""
+        return True
+
+    monkeypatch.setattr(tracker, "_capture_and_analyze", inspect_pending_identity)
+    tracker.ingest_external_frame(
+        session_id,
+        Image.new("RGB", (1280, 720), color=(21, 26, 38)),
+        source_id="edge-chart-region-v3",
+        source_url="https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        sequence_id="edge-identity-veto-sequence",
+        capture_epoch_ms=int(time.time() * 1000.0),
+        frame_id=42,
+        metadata={
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "selection_id": "edge-identity-veto-selection",
+            "extension_id": "edge-extension-id",
+            "extension_version": "0.3.9",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    )
+
+    assert observed["state"] == "FRAME_IDENTITY_PENDING"
+    assert observed["symbol"] == ""
+    assert observed["timeframe"] == ""
+    assert observed["market_identity_confirmed"] is False
+    assert observed["timeframe_identity_confirmed"] is False
+    assert observed["prior_identity_invalidated"] is True
+    assert observed["source_frame_id"] == 42
+    assert observed["decision_authority"] is False
+    assert "CHF/JPY" not in str(observed)
+
+
+def test_external_source_heartbeat_uses_restart_safe_lease_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_dir = tmp_path / "lease-sidecar"
+    session_id = "lease-sidecar-session"
+    service = ContinuousWindowTrackerService(root_dir=root_dir)
+    service.create_session(session_id=session_id)
+    claim = service.claim_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-sequence-lease-sidecar",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-selection-lease-sidecar",
+        display_name="Pocket Option chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    sidecar_path = (
+        root_dir
+        / "sessions"
+        / session_id
+        / "external_source_lease_v3.json"
+    )
+    assert sidecar_path.is_file()
+
+    def unexpected_full_session_read(_session_id: str) -> dict[str, Any]:
+        raise AssertionError("heartbeat hot path parsed the full session")
+
+    monkeypatch.setattr(service, "_require_session", unexpected_full_session_read)
+    heartbeat = service.heartbeat_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-sequence-lease-sidecar",
+        source_generation=int(claim["source_generation"]),
+        source_lease_id=str(claim["source_lease_id"]),
+        capture_epoch_ms=int(time.time() * 1000.0),
+        source_render_fresh=True,
+    )
+    assert heartbeat["source_id"] == "edge-chart-region-v3"
+
+    restarted = ContinuousWindowTrackerService(root_dir=root_dir)
+    monkeypatch.setattr(restarted, "_require_session", unexpected_full_session_read)
+    restarted_heartbeat = restarted.heartbeat_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-sequence-lease-sidecar",
+        source_generation=int(claim["source_generation"]),
+        source_lease_id=str(claim["source_lease_id"]),
+        capture_epoch_ms=int(time.time() * 1000.0),
+        source_render_fresh=True,
+    )
+    assert restarted_heartbeat["source_generation"] == int(
+        claim["source_generation"]
+    )
+
+    with pytest.raises(window_tracker_module.ExternalSourceLeaseError) as rejected:
+        restarted.heartbeat_external_source(
+            session_id,
+            source_id="edge-chart-region-v3",
+            sequence_id="edge-sequence-lease-sidecar",
+            source_generation=int(claim["source_generation"]),
+            source_lease_id="superseded-lease",
+            capture_epoch_ms=int(time.time() * 1000.0),
+            source_render_fresh=True,
+        )
+    assert rejected.value.reason_code == "SOURCE_SUPERSEDED"
+
+
+def test_same_frame_verified_edge_tab_identity_unblocks_cropped_chart_study(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    capture_epoch = time.time()
+    attestation = _edge_tab_identity_attestation(
+        surface,
+        capture_epoch=capture_epoch,
+    )
+    assert attestation["schema_version"] == "PG_EDGE_TAB_BROKER_IDENTITY_ATTESTATION_V3"
+    assert attestation["browser_tab_identity_verified"] is True
+    assert attestation["broker_click_safe"] is False
+
+    def unexpected_selector_scan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("same-frame attestation must bypass chart-crop OCR")
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", unexpected_selector_scan)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", unexpected_selector_scan)
+    result = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "edge-roi-live",
+            "manual_focus_region": {"enabled": True},
+            "_capture_started_epoch_v3": capture_epoch,
+            "_broker_identity_attestation_v3": attestation,
+            "tracking_summary": {
+                "detected_market": "CHF/JPY OTC",
+                "market_confidence": 0.92,
+                "market_identity_confirmed": True,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.93,
+                "timeframe_identity_confirmed": True,
+                "market_selector_visual_fingerprint": "selector_v3_chf_jpy_otc",
+            },
+            "latest_signal": {
+                "market": "CHF/JPY OTC",
+                "market_confidence": 0.92,
+                "market_identity_confirmed": True,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.93,
+                "timeframe_identity_confirmed": True,
+                "market_selector_visual_fingerprint": "selector_v3_chf_jpy_otc",
+            },
+        },
+    )
+
+    assert result.latest_signal["market"] == "CAD/JPY OTC"
+    assert result.latest_signal["focus_timeframe"] == "M5"
+    assert (
+        result.latest_signal["market_source"]
+        == "same_frame_edge_tab_broker_identity"
+    )
+    assert result.latest_signal["market_selector_rebind_required"] is False
+    assert result.latest_signal["market_selector_pair_changed"] is True
+    assert result.latest_signal["market_selector_visual_fingerprint"] == (
+        "selector_v3_cad_jpy_otc"
+    )
+    assert result.latest_signal["market_identity_confirmed"] is True
+    assert result.latest_signal["timeframe_identity_confirmed"] is True
+
+
+def test_edge_tab_ingest_preserves_authoritative_roi_for_identity_and_study(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy", width=1920, height=1080)
+    probe_sizes: list[tuple[int, int]] = []
+    study_sizes: list[tuple[int, int]] = []
+    study_attestations: list[dict[str, Any]] = []
+
+    def probe_identity(
+        image: Image.Image,
+        *,
+        source: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del source
+        probe_sizes.append(image.size)
+        signature = cast(
+            Callable[[Image.Image], str],
+            getattr(window_tracker_module, "_surface_signature"),
+        )(image)
+        return {
+            "schema_version": "PG_CHART_IDENTITY_PROBE_V3",
+            "detected_market": "CAD/JPY OTC",
+            "market_source": "broker_header_text",
+            "market_confidence": 0.91,
+            "market_bbox": [120, 213, 215, 227],
+            "detected_timeframe": "M5",
+            "timeframe_source": "broker_selector_chip",
+            "timeframe_confidence": 0.93,
+            "timeframe_bbox": [256, 193, 281, 216],
+            "identity_ready": True,
+            "identity_conflict": False,
+            "study_source_only": True,
+            "broker_click_safe": False,
+            "broker_surface_hash": signature,
+        }
+
+    original_study = adapter.study
+
+    def record_study(
+        image: Image.Image,
+        *,
+        session_payload: Mapping[str, Any] | None = None,
+    ) -> TrackingStudy:
+        study_sizes.append(image.size)
+        attestation = (session_payload or {}).get(
+            "_broker_identity_attestation_v3",
+            {},
+        )
+        study_attestations.append(
+            dict(cast(Mapping[str, Any], attestation))
+            if isinstance(attestation, Mapping)
+            else {}
+        )
+        return original_study(image, session_payload=session_payload)
+
+    monkeypatch.setattr(adapter, "probe_chart_identity_v3", probe_identity)
+    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "study", record_study)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "edge-full-frame-identity",
+        tracking_adapter=adapter,
+    )
+
+    def reject_secondary_chart_plane_crop(**_kwargs: Any) -> Any:
+        raise AssertionError(
+            "a leased Edge ROI is already the authoritative geometry plane"
+        )
+
+    monkeypatch.setattr(
+        tracker,
+        "_derive_study_surface",
+        reject_secondary_chart_plane_crop,
+    )
+    session_id = "edge-full-frame-identity"
+    tracker.create_session(session_id=session_id)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-roi-17-sequence",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-selection-17",
+        display_name="The Most Innovative Trading Platform",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    capture_epoch = time.time()
+    result = tracker.ingest_external_frame(
+        session_id,
+        surface,
+        source_id="edge-chart-region-v3",
+        source_url="https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        sequence_id="edge-roi-17-sequence",
+        capture_epoch_ms=int(capture_epoch * 1000.0),
+        frame_id=1,
+        metadata={
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "selection_id": "edge-selection-17",
+            "extension_id": "edge-extension-id",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    )
+
+    assert result["frame_ingest"]["accepted"] is True
+    assert probe_sizes == [(1920, 1080)]
+    assert study_sizes == [(1920, 1080)]
+    assert study_attestations[0]["schema_version"] == (
+        "PG_EDGE_TAB_BROKER_IDENTITY_ATTESTATION_V3"
+    )
+    assert study_attestations[0]["identity_probe_derivation"] == (
+        "same_frame_window_artifact_raster_v1"
+    )
+    assert study_attestations[0]["identity_probe_parent_surface_hash"]
+    assert study_attestations[0]["identity_probe_raster_hash"]
+    session = tracker.get_session(session_id)
+    integrity = cast(
+        Mapping[str, Any],
+        session["tracking_summary"]["artifact_integrity"],
+    )
+    assert integrity["selected_plane"] == {"width": 1920, "height": 1080}
+    assert integrity["study_plane"] == {"width": 1920, "height": 1080}
+    assert integrity["matches_selected_plane"] is True
+    assert session["tracking_summary"]["focus_region"][
+        "study_surface_contract"
+    ] == "authoritative_edge_tab_roi_v1"
+    assert session["latest_signal"]["market"] == "CAD/JPY OTC"
+    assert session["latest_signal"]["focus_timeframe"] == "M5"
+    assert session["latest_signal"]["market_source"] == (
+        "same_frame_edge_tab_broker_identity"
+    )
+    assert session["latest_signal"]["timeframe_identity_confirmed"] is True
+    assert session["broker_surface"]["broker_click_safe"] is False
+
+    second_surface = surface.copy()
+    second_surface.putpixel((1000, 700), (245, 245, 245))
+    second_result = tracker.ingest_external_frame(
+        session_id,
+        second_surface,
+        source_id="edge-chart-region-v3",
+        source_url="https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        sequence_id="edge-roi-17-sequence",
+        capture_epoch_ms=int(time.time() * 1000.0),
+        frame_id=2,
+        metadata={
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "selection_id": "edge-selection-17",
+            "extension_id": "edge-extension-id",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    )
+
+    assert second_result["frame_ingest"]["accepted"] is True
+    assert probe_sizes == [(1920, 1080), (1920, 1080)]
+    assert study_sizes == [(1920, 1080), (1920, 1080)]
+    assert len(study_attestations) == 2
+    assert all(
+        row["schema_version"] == "PG_EDGE_TAB_BROKER_IDENTITY_ATTESTATION_V3"
+        for row in study_attestations
+    )
+    second_session = tracker.get_session(session_id)
+    assert second_session["latest_signal"]["timeframe_identity_confirmed"] is True
+    assert second_session["latest_signal"]["market_identity_confirmed"] is True
+
+
+def test_external_frame_receipt_reports_processing_without_false_stale_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "edge-processing-heartbeat",
+    )
+    session_id = "edge-processing-heartbeat"
+    tracker.create_session(session_id=session_id)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-processing-sequence",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-processing-selection",
+        display_name="Pocket Option chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    observed_during_analysis: dict[str, Any] = {}
+
+    def inspect_processing_state(*_args: Any, **_kwargs: Any) -> bool:
+        observed_during_analysis.update(
+            tracker.get_session_snapshot(session_id)["capture_source_v3"]
+        )
+        return True
+
+    monkeypatch.setattr(tracker, "_capture_and_analyze", inspect_processing_state)
+    result = tracker.ingest_external_frame(
+        session_id,
+        Image.new("RGB", (640, 360), color=(21, 26, 38)),
+        source_id="edge-chart-region-v3",
+        source_url="https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        sequence_id="edge-processing-sequence",
+        capture_epoch_ms=int(time.time() * 1000.0),
+        frame_id=1,
+        metadata={
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "source_render_fresh": True,
+            "selection_id": "edge-processing-selection",
+        },
+    )
+
+    assert observed_during_analysis["state"] == "VALIDATING"
+    assert observed_during_analysis["reason_code"] == "FRAME_PROCESSING"
+    assert observed_during_analysis["fresh"] is True
+    assert observed_during_analysis["decision_usable"] is False
+    assert observed_during_analysis["stream"]["processing"] is True
+    completed = result["capture_source_v3"]
+    assert completed["state"] == "LIVE"
+    assert completed["fresh"] is True
+    assert completed["decision_usable"] is True
+    assert completed["stream"]["processing"] is False
+    assert completed["stream"]["last_analysis_completed_epoch"] > 0.0
+
+
+def test_edge_tab_identity_attestation_fails_closed_on_contract_mutations() -> None:
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    signature = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_surface_signature"),
+    )(surface)
+    capture_epoch = time.time()
+    source = {
+        "source_id": "edge-chart-region-v3",
+        "source_type": "browser_tab_roi_capture",
+        "source_url": "https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+        "sequence_id": "edge-roi-17-sequence",
+        "coordinate_space": "edge_tab_roi_v1",
+        "source_generation": 4,
+        "frame_id": 11,
+        "metadata": {
+            "source_lease_id": "edge-lease-secret-4",
+            "source_render_fresh": True,
+            "extension_id": "edge-extension-id",
+            "locked_tab_id": "17",
+            "locked_tab_title": "The Most Innovative Trading Platform",
+            "locked_origin": "https://pocketoption.com",
+        },
+    }
+    build_lock = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+    )
+    build_attestation = cast(
+        Callable[..., dict[str, Any]],
+        getattr(
+            window_tracker_module,
+            "_external_edge_tab_broker_identity_attestation_v3",
+        ),
+    )
+    lock = build_lock(source, surface, window_signature=signature)
+    identity_surface = {
+        "detected_market": "CAD/JPY OTC",
+        "market_confidence": 0.91,
+        "market_source": "broker_header_text",
+        "market_bbox": [120, 213, 215, 227],
+        "detected_timeframe": "M5",
+        "timeframe_confidence": 0.93,
+        "timeframe_source": "broker_selector_chip",
+        "timeframe_bbox": [256, 193, 281, 216],
+        "broker_surface_hash": signature,
+    }
+
+    assert build_attestation(
+        source,
+        lock,
+        identity_surface,
+        window_signature=signature,
+        capture_epoch=capture_epoch,
+    )
+    invalid_contracts: list[
+        tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]
+    ] = []
+
+    for evidence_key, invalid_value in (
+        ("title_valid", False),
+        ("url_valid", False),
+        ("origin_matches", False),
+        ("study_source_only", False),
+        ("broker_click_safe", True),
+    ):
+        mutated_lock = copy.deepcopy(lock)
+        cast(dict[str, Any], mutated_lock["evidence"])[evidence_key] = invalid_value
+        invalid_contracts.append(
+            (copy.deepcopy(source), mutated_lock, copy.deepcopy(identity_surface), evidence_key)
+        )
+
+    wrong_origin_source = copy.deepcopy(source)
+    cast(dict[str, Any], wrong_origin_source["metadata"])["locked_origin"] = (
+        "https://example.invalid"
+    )
+    invalid_contracts.append(
+        (
+            wrong_origin_source,
+            build_lock(wrong_origin_source, surface, window_signature=signature),
+            copy.deepcopy(identity_surface),
+            "origin_mismatch",
+        )
+    )
+
+    missing_lease_source = copy.deepcopy(source)
+    cast(dict[str, Any], missing_lease_source["metadata"])["source_lease_id"] = ""
+    invalid_contracts.append(
+        (missing_lease_source, copy.deepcopy(lock), copy.deepcopy(identity_surface), "lease")
+    )
+
+    stale_source = copy.deepcopy(source)
+    cast(dict[str, Any], stale_source["metadata"])["source_render_fresh"] = False
+    invalid_contracts.append(
+        (stale_source, copy.deepcopy(lock), copy.deepcopy(identity_surface), "freshness")
+    )
+
+    missing_extension_source = copy.deepcopy(source)
+    missing_extension_lock = copy.deepcopy(lock)
+    cast(dict[str, Any], missing_extension_lock["evidence"])["extension_id"] = ""
+    invalid_contracts.append(
+        (
+            missing_extension_source,
+            missing_extension_lock,
+            copy.deepcopy(identity_surface),
+            "extension",
+        )
+    )
+
+    missing_tab_lock = copy.deepcopy(lock)
+    cast(dict[str, Any], missing_tab_lock["evidence"])["locked_tab_id"] = ""
+    invalid_contracts.append(
+        (copy.deepcopy(source), missing_tab_lock, copy.deepcopy(identity_surface), "tab")
+    )
+
+    missing_frame_source = copy.deepcopy(source)
+    missing_frame_source["frame_id"] = 0
+    invalid_contracts.append(
+        (missing_frame_source, copy.deepcopy(lock), copy.deepcopy(identity_surface), "frame_id")
+    )
+
+    wrong_contract_source = copy.deepcopy(source)
+    wrong_contract_source["coordinate_space"] = "edge_tab_content_v1"
+    invalid_contracts.append(
+        (wrong_contract_source, copy.deepcopy(lock), copy.deepcopy(identity_surface), "space")
+    )
+
+    wrong_source_type = copy.deepcopy(source)
+    wrong_source_type["source_type"] = "browser_extension_capture"
+    invalid_contracts.append(
+        (wrong_source_type, copy.deepcopy(lock), copy.deepcopy(identity_surface), "source_type")
+    )
+
+    wrong_frame_identity = copy.deepcopy(identity_surface)
+    wrong_frame_identity["broker_surface_hash"] = "different-frame-signature"
+    invalid_contracts.append(
+        (copy.deepcopy(source), copy.deepcopy(lock), wrong_frame_identity, "frame_hash")
+    )
+
+    missing_visual_bbox = copy.deepcopy(identity_surface)
+    missing_visual_bbox["timeframe_bbox"] = []
+    invalid_contracts.append(
+        (copy.deepcopy(source), copy.deepcopy(lock), missing_visual_bbox, "visual_bbox")
+    )
+
+    for candidate_source, candidate_lock, candidate_identity, case in invalid_contracts:
+        assert build_attestation(
+            candidate_source,
+            candidate_lock,
+            candidate_identity,
+            window_signature=signature,
+            capture_epoch=capture_epoch,
+        ) == {}, case
 
 
 def test_same_frame_wgc_identity_attestation_unblocks_cropped_chart_study(
@@ -12269,7 +13877,28 @@ def test_live_incremental_extraction_reuses_static_history_but_refreshes_latest_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
-    cache_key = "pocket-live|M5|EUR/JPY OTC|selector_v2_pair_a|960x508"
+    cache_identity = cast(
+        Callable[
+            [
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Mapping[str, Any],
+                tuple[int, int],
+            ],
+            str,
+        ],
+        getattr(adapter, "_live_candle_cache_identity"),
+    )
+    cache_key = cache_identity(
+        _leased_edge_source_payload(),
+        {"value": "M5"},
+        {
+            "value": "EUR/JPY OTC",
+            "market_selector_visual_fingerprint": "selector_v3_eur_jpy_otc",
+        },
+        (960, 508),
+    )
+    assert cache_key
     generation = {"value": 0}
     extraction_widths: list[int] = []
     absolute_x_values = [120 + index * 20 for index in range(24)]
@@ -12318,7 +13947,9 @@ def test_live_incremental_extraction_reuses_static_history_but_refreshes_latest_
     )
 
     assert len(first_rows) == len(second_rows) == 24
+    assert first_meta["enabled"] is True
     assert first_meta["history_reused"] is False
+    assert first_meta["full_refresh_reason"] == "cold_cache"
     assert second_meta["history_reused"] is True
     assert second_meta["edge_recomputed"] is True
     assert extraction_widths[0] == 960
@@ -12378,7 +14009,7 @@ def test_live_candle_cache_identity_isolated_by_pair_and_timeframe() -> None:
     }
     pair_b = {
         "value": "CAD/JPY OTC",
-        "market_selector_visual_fingerprint": "selector_v2_pair_b",
+        "market_selector_visual_fingerprint": "selector_v3_pair_b",
     }
 
     cache_identity = cast(
@@ -12396,8 +14027,463 @@ def test_live_candle_cache_identity_isolated_by_pair_and_timeframe() -> None:
     )
 
     assert key_a_m5
+    assert key_b_m5
+    assert "selector_v3_pair_b" in key_b_m5
     assert len({key_a_m5, key_b_m5, key_a_m1}) == 3
     assert legacy_key == ""
+
+
+def _leased_edge_source_payload(
+    *,
+    generation: int = 4,
+    selection_id: str = "selection-17",
+    sequence_id: str = "sequence-17",
+) -> dict[str, Any]:
+    return {
+        "session_id": "pocket-live",
+        "capture_source_v3": {
+            "state": "LIVE",
+            "source_id": "edge-chart-region-v3",
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": generation,
+            "source_lease_id": f"lease-{generation}-{selection_id}",
+            "selection_id": selection_id,
+            "sequence_id": sequence_id,
+        },
+    }
+
+
+def test_live_study_budget_rejects_starved_adapter_entry() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    call_started = time.monotonic() - 2.0
+
+    with pytest.raises(
+        window_tracker_module.LiveStudyLatencyBudgetExceeded
+    ) as raised:
+        adapter.study(
+            Image.new("RGB", (640, 360), color=(20, 26, 38)),
+            session_payload={
+                "_study_call_started_monotonic_v3": call_started,
+                "_study_deadline_monotonic_v3": call_started + 1.0,
+                "_study_live_latency_budget_sec_v3": 1.0,
+                "_study_latency_budget_enforced_v3": True,
+            },
+        )
+
+    assert raised.value.stage == "adapter_entry"
+    assert raised.value.elapsed_sec >= 2.0
+    assert raised.value.budget_sec == 1.0
+
+
+def test_external_live_study_budget_failure_is_published_as_discarded(
+    tmp_path: Path,
+) -> None:
+    class _ExpiredStudyAdapter(_FakeTrackingAdapter):
+        def study(
+            self,
+            image: Image.Image,
+            *,
+            session_payload: Mapping[str, Any] | None = None,
+        ) -> TrackingStudy:
+            del image, session_payload
+            raise window_tracker_module.LiveStudyLatencyBudgetExceeded(
+                stage="adapter_entry",
+                elapsed_sec=46.0,
+                budget_sec=45.0,
+                adapter_entry_delay_sec=46.0,
+            )
+
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path / "expired-live-study",
+        tracking_adapter=_ExpiredStudyAdapter("BUY"),
+    )
+    session_id = "expired-live-study"
+    tracker.create_session(session_id=session_id, auto_start=False)
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id="edge-chart-region-v3",
+        sequence_id="edge-expired-study-sequence",
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-expired-study-selection",
+        display_name="Pocket Option chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+
+    accepted = tracker._capture_and_analyze(  # pyright: ignore[reportPrivateUsage]
+        session_id,
+        force=True,
+        external_window_image=_surface(width=1280, height=720),
+        external_source={
+            "source_id": "edge-chart-region-v3",
+            "source_type": "browser_tab_roi_capture",
+            "source_url": "https://pocketoption.com/en/cabinet/demo-quick-high-low/",
+            "sequence_id": "edge-expired-study-sequence",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": int(claim["source_generation"]),
+            "frame_id": 1,
+            "metadata": {
+                "source_lease_id": str(claim["source_lease_id"]),
+                "source_render_fresh": True,
+                "extension_id": "edge-extension-test",
+                "locked_tab_id": "17",
+                "locked_tab_title": "The Most Innovative Trading Platform",
+                "locked_origin": "https://pocketoption.com",
+            },
+        },
+        external_capture_epoch=time.time(),
+    )
+
+    assert accepted is True
+    persisted = tracker.load_session_payload(session_id)
+    timing = cast(
+        Mapping[str, Any],
+        persisted["tracking_summary"]["study_timing_contract_v3"],
+    )
+    assert timing["budget_enforced"] is True
+    assert timing["status"] == "BUDGET_EXCEEDED"
+    assert timing["expired_stage"] == "adapter_entry"
+    assert timing["result_discarded"] is True
+    assert persisted["latest_signal"]["study_timing_contract_v3"] == timing
+
+
+def test_live_chart_resolution_path_uses_incremental_candle_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy", width=640, height=360)
+    source_payload = _leased_edge_source_payload()
+    source_token = str(
+        getattr(window_tracker_module, "_locked_stream_source_token_v3")(
+            source_payload
+        )
+    )
+    selector_fingerprint = "selector_v3_cad_jpy_otc"
+    incremental_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "4096")
+    monkeypatch.setattr(
+        window_tracker_module,
+        "_market_selector_visual_fingerprint",
+        lambda _image: selector_fingerprint,
+    )
+
+    def incremental_extract(
+        candle_image: Image.Image,
+        *,
+        cache_key: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        assert cache_key
+        incremental_calls.append(candle_image.size)
+        return (
+            [],
+            {
+                "enabled": True,
+                "history_reused": False,
+                "edge_recomputed": True,
+                "full_refresh_reason": "cold_cache",
+                "reuse_count": 0,
+                "causal_lane_selection": {},
+            },
+        )
+
+    monkeypatch.setattr(
+        adapter,
+        "_extract_live_candle_tracks_incremental",
+        incremental_extract,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_extract_candle_tracks",
+        lambda _image: pytest.fail(
+            "locked chart-resolution frames must use the incremental path"
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_chart_bbox",
+        lambda _image: pytest.fail(
+            "an authoritative Edge chart ROI must not be detected or cropped again"
+        ),
+    )
+    result = adapter.study(
+        image,
+        session_payload={
+            **source_payload,
+            "_study_focus_region": {
+                "pixel_bbox": [0, 0, image.width, image.height],
+                "study_surface_contract": "authoritative_edge_tab_roi_v1",
+                "geometry_authority": "external_source_lease",
+            },
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            },
+            "tracking_summary": {
+                "chart_valid": True,
+                "chart_region": {
+                    "pixel_bbox": [0, 0, image.width, image.height],
+                    "confidence": 0.90,
+                },
+                "detected_market": "CAD/JPY OTC",
+                "market_confidence": 0.93,
+                "market_identity_confirmed": True,
+                "market_normalizer_version": getattr(
+                    window_tracker_module,
+                    "_FX_MARKET_NORMALIZER_VERSION",
+                ),
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.94,
+                "timeframe_identity_confirmed": True,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+                "source_binding_token_v3": source_token,
+            },
+            "latest_signal": {
+                "market": "CAD/JPY OTC",
+                "market_confidence": 0.93,
+                "market_identity_confirmed": True,
+                "market_normalizer_version": getattr(
+                    window_tracker_module,
+                    "_FX_MARKET_NORMALIZER_VERSION",
+                ),
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.94,
+                "timeframe_identity_confirmed": True,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+                "source_binding_token_v3": source_token,
+            },
+        },
+    )
+
+    extraction = cast(
+        Mapping[str, Any],
+        result.tracking_summary["candle_extraction"],
+    )
+    assert incremental_calls == [(640, 360)]
+    assert extraction["mode"] == "chart_resolution"
+    assert extraction["incremental_history"]["enabled"] is True
+    assert result.chart_image.size == image.size
+    assert result.chart_region["pixel_bbox"] == [0, 0, 640, 360]
+    assert result.latest_signal["market"] == "CAD/JPY OTC"
+    assert result.latest_signal["focus_timeframe"] == "M5"
+    stages = [
+        str(row.get("stage", ""))
+        for row in result.tracking_summary["study_stage_timings"]
+    ]
+    assert "authoritative_edge_tab_roi" in stages
+    assert "detect_chart_bbox" not in stages
+
+
+def test_local_locked_focus_still_uses_chart_bbox_detector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy", width=640, height=360)
+    detector_calls: list[tuple[int, int]] = []
+    expected_bbox = [18, 16, 622, 352]
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "_market_selector_visual_fingerprint",
+        lambda _image: "selector_v3_local_cad_jpy",
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_timeframe_selector",
+        lambda _image: {"value": "M5", "confidence": 0.94},
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector",
+        lambda _image, **_kwargs: {
+            "value": "CAD/JPY OTC",
+            "confidence": 0.93,
+        },
+    )
+
+    def detect_chart_bbox(chart_surface: Image.Image) -> tuple[list[int], float]:
+        detector_calls.append(chart_surface.size)
+        return list(expected_bbox), 0.91
+
+    monkeypatch.setattr(adapter, "_detect_chart_bbox", detect_chart_bbox)
+    monkeypatch.setattr(
+        adapter,
+        "_extract_live_candle_tracks_incremental",
+        lambda _image, *, cache_key: (
+            [],
+            {
+                "enabled": True,
+                "history_reused": False,
+                "edge_recomputed": True,
+                "full_refresh_reason": "cold_cache",
+                "reuse_count": 0,
+                "causal_lane_selection": {},
+            },
+        ),
+    )
+
+    result = adapter.study(
+        image,
+        session_payload={
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            }
+        },
+    )
+
+    assert detector_calls == [image.size]
+    assert result.chart_region["pixel_bbox"] == expected_bbox
+    stages = [
+        str(row.get("stage", ""))
+        for row in result.tracking_summary["study_stage_timings"]
+    ]
+    assert "detect_chart_bbox" in stages
+    assert "authoritative_edge_tab_roi" not in stages
+
+
+def test_edge_stream_identity_changes_for_generation_selection_and_sequence() -> None:
+    source_token = cast(
+        Callable[[Mapping[str, Any]], str],
+        getattr(window_tracker_module, "_locked_stream_source_token_v3"),
+    )
+    baseline = source_token(_leased_edge_source_payload())
+    changed_generation = source_token(_leased_edge_source_payload(generation=5))
+    changed_selection = source_token(
+        _leased_edge_source_payload(selection_id="selection-18")
+    )
+    changed_sequence = source_token(
+        _leased_edge_source_payload(sequence_id="sequence-18")
+    )
+    missing_lease = _leased_edge_source_payload()
+    cast(dict[str, Any], missing_lease["capture_source_v3"])[
+        "source_lease_id"
+    ] = ""
+
+    assert baseline
+    assert len(
+        {baseline, changed_generation, changed_selection, changed_sequence}
+    ) == 4
+    assert source_token(missing_lease) == ""
+
+
+def test_live_candle_cache_identity_isolated_by_external_source_binding() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    selector = {
+        "value": "CAD/JPY OTC",
+        "market_selector_visual_fingerprint": "selector_v3_pair_cad_jpy",
+    }
+    timeframe = {"value": "M5"}
+    cache_identity = cast(
+        Callable[
+            [
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Mapping[str, Any],
+                tuple[int, int],
+            ],
+            str,
+        ],
+        getattr(adapter, "_live_candle_cache_identity"),
+    )
+
+    first = cache_identity(
+        _leased_edge_source_payload(), timeframe, selector, (960, 508)
+    )
+    second = cache_identity(
+        _leased_edge_source_payload(generation=5),
+        timeframe,
+        selector,
+        (960, 508),
+    )
+
+    assert first
+    assert second
+    assert first != second
+
+
+def test_external_source_binding_change_forces_identity_and_geometry_reproof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = _synthetic_chart_surface("buy")
+    _paint_realistic_market_selector(surface, "CAD/JPY OTC")
+    previous_source = _leased_edge_source_payload(generation=4)
+    current_source = _leased_edge_source_payload(generation=5)
+    source_token = cast(
+        Callable[[Mapping[str, Any]], str],
+        getattr(window_tracker_module, "_locked_stream_source_token_v3"),
+    )
+    previous_token = source_token(previous_source)
+    timeframe_reads = 0
+    market_reads = 0
+
+    def read_timeframe(_image: Image.Image) -> dict[str, Any]:
+        nonlocal timeframe_reads
+        timeframe_reads += 1
+        return {
+            "value": "M5",
+            "source": "selector_chip",
+            "confidence": 0.94,
+            "bbox": [256, 193, 281, 216],
+        }
+
+    def read_market(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal market_reads
+        market_reads += 1
+        return {
+            "value": "CAD/JPY OTC",
+            "source": "header_text",
+            "confidence": 0.92,
+            "bbox": [90, 86, 269, 164],
+        }
+
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", read_timeframe)
+    monkeypatch.setattr(adapter, "_detect_market_selector", read_market)
+    result = adapter.study(
+        surface,
+        session_payload={
+            **current_source,
+            "manual_focus_region": {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            },
+            "tracking_summary": {
+                "chart_valid": True,
+                "detected_market": "CAD/JPY OTC",
+                "market_confidence": 0.92,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.94,
+                "market_identity_confirmed": True,
+                "timeframe_identity_confirmed": True,
+                "source_binding_token_v3": previous_token,
+                "chart_region": {
+                    "pixel_bbox": [0, 0, surface.width, surface.height],
+                    "confidence": 0.90,
+                },
+            },
+            "latest_signal": {
+                "market": "CAD/JPY OTC",
+                "market_confidence": 0.92,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.94,
+                "source_binding_token_v3": previous_token,
+            },
+        },
+    )
+
+    stages = [
+        str(row.get("stage", ""))
+        for row in result.tracking_summary["study_stage_timings"]
+    ]
+    assert timeframe_reads == 1
+    assert market_reads == 1
+    assert "detect_chart_bbox" in stages
+    assert "cached_chart_bbox" not in stages
+    assert result.latest_signal["source_binding_changed_v3"] is True
+    assert result.latest_signal["source_binding_token_v3"] != previous_token
+    assert result.latest_signal["market"] == "CAD/JPY OTC"
+    assert result.latest_signal["focus_timeframe"] == "M5"
 
 
 def test_real_tracking_adapter_visual_delta_requires_confirmed_pair_change(
@@ -12953,3 +15039,37 @@ def test_real_tracking_adapter_holds_on_blank_surface() -> None:
     assert result.tracking_summary["chart_valid"] is False
     assert result.latest_signal["action"] == "HOLD"
     assert result.latest_signal["status"] == "warming"
+
+
+def test_session_snapshot_read_does_not_wait_for_session_commit_lock(
+    tmp_path: Path,
+) -> None:
+    """Dashboard polling stays live while another worker is committing state."""
+
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "tracker")
+    session_id = "read-while-writing"
+    session_dir = tracker.session_dir(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # Deliberately incomplete persisted state forces in-memory normalization.
+    # A read must not try to persist that normalization.
+    write_json_atomic(
+        session_dir / "session.json",
+        {
+            "session_id": session_id,
+            "tracking_enabled": False,
+            "status": "awaiting_focus",
+        },
+    )
+
+    commit_lock = tracker._session_commit_lock_for(session_id)  # noqa: SLF001
+    executor = ThreadPoolExecutor(max_workers=1)
+    commit_lock.acquire()
+    try:
+        future = executor.submit(tracker.get_session_snapshot, session_id)
+        snapshot = future.result(timeout=3.0)
+    finally:
+        commit_lock.release()
+        executor.shutdown(wait=True)
+
+    assert snapshot["session_id"] == session_id
+    assert snapshot["status"] == "awaiting_focus"

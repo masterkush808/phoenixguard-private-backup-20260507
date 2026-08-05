@@ -1,21 +1,31 @@
 import {
+  DECODER_PROGRESS_TIMEOUT_MS,
   SAMPLE_FPS,
   SAMPLE_INTERVAL_MS,
   SELECTION_TIMEOUT_MS,
-  SOURCE_FREEZE_TIMEOUT_MS,
+  TRANSPORT_HEARTBEAT_INTERVAL_MS,
   canonicalFrameSignaturePayload,
+  captureHealthCheckDue,
+  captureTransportDecision,
   frameIngestConfigEndpoint,
   frameIngestEndpoint,
   initialStatus,
+  leaseHeartbeatDue,
   mapNormalizedRegionToPixels,
   mediaPlaybackAdvanced,
   meanAbsoluteDifference,
   normalizeConfig,
   normalizeRegionSelection,
+  normalizedRoiVector,
+  ownerlessSourceRecoveryFence,
+  remainingUploadStartDelayMs,
   sanitizeSourceUrl,
   sourceControlClaimEndpoint,
+  sourceControlHeartbeatEndpoint,
+  sourceControlHeartbeatPayload,
   sourceControlKillEndpoint,
   sourceControlKillPayload,
+  sourceControlStatusEndpoint,
   sourceOrigin
 } from "./common.js";
 
@@ -37,10 +47,26 @@ let pendingFrame = null;
 let previousQueuedProbe = null;
 let lastQueuedAt = 0;
 let lastAcceptedAtMs = 0;
+let lastUploadStartedAtMs = 0;
+let lastTransportHeartbeatStartedAtMs = 0;
 let lastVisualChangeAtMs = 0;
+let transportHeartbeatInFlight = false;
+let sourceRecoveryInFlight = null;
 let serverArmed = false;
 let signatureRequired = false;
 let status = initialStatus();
+
+function emptyCaptureHealth() {
+  return {
+    checkedAtMs: 0,
+    lastConfirmedAtMs: 0,
+    captureStatus: "unknown",
+    tabDiscarded: false,
+    tabFrozen: false,
+    tabStatus: "",
+    lastError: ""
+  };
+}
 
 function clearTimer(handle) {
   if (handle) clearTimeout(handle);
@@ -61,6 +87,68 @@ function currentVideoAge(session = activeSession) {
   refreshMediaPlayback(session);
   if (!session?.lastVideoFrameAtMs) return -1;
   return Math.max(0, Date.now() - session.lastVideoFrameAtMs);
+}
+
+function captureDecision(session = activeSession, nowMs = Date.now()) {
+  refreshMediaPlayback(session, nowMs);
+  const track = session?.stream?.getVideoTracks?.()[0] || null;
+  const decoderProgressAgeMs = session?.lastVideoFrameAtMs
+    ? Math.max(0, Number(nowMs) - session.lastVideoFrameAtMs)
+    : -1;
+  return captureTransportDecision({
+    ...(session?.captureHealth || emptyCaptureHealth()),
+    trackReadyState: track?.readyState || "ended",
+    trackMuted: track?.muted === true,
+    decoderProgressAgeMs
+  }, nowMs);
+}
+
+async function refreshCaptureHealth(session = activeSession, force = false) {
+  if (!session || session.stopped || session !== activeSession) return captureDecision(session);
+  const now = Date.now();
+  if (!force && !captureHealthCheckDue(now, session.captureHealth?.checkedAtMs)) {
+    return captureDecision(session, now);
+  }
+
+  // Mark the attempt before messaging. If the MV3 worker is restarting, this
+  // bounds retry pressure while the last positive attestation remains valid.
+  session.captureHealth.checkedAtMs = now;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "CAPTURE_HEALTH_CHECK_V1",
+      tabId: session.tab.id,
+      sequenceId: session.sequenceId
+    });
+    if (session.stopped || session !== activeSession) return captureDecision(session);
+    const checkedAtMs = Number(response?.checkedAtMs || Date.now());
+    const captureStatus = String(response?.captureStatus || (response?.ok ? "missing" : "unknown")).toLowerCase();
+    const healthyAttestation = response?.ok === true &&
+      ["active", "pending"].includes(captureStatus) &&
+      response?.tabDiscarded !== true &&
+      response?.tabFrozen !== true;
+    session.captureHealth = {
+      ...session.captureHealth,
+      checkedAtMs,
+      lastConfirmedAtMs: healthyAttestation
+        ? checkedAtMs
+        : Number(session.captureHealth.lastConfirmedAtMs || 0),
+      captureStatus,
+      tabDiscarded: response?.tabDiscarded === true,
+      tabFrozen: response?.tabFrozen === true,
+      tabStatus: String(response?.tabStatus || ""),
+      lastError: response?.ok === true ? "" : errorText(response?.error || "Capture health was not confirmed.")
+    };
+    if (response?.ok === true && response.tabOrigin === session.tab.origin) {
+      session.tab.title = String(response.tabTitle || session.tab.title).slice(0, 180);
+      session.tab.url = sanitizeSourceUrl(response.tabUrl || session.tab.url).slice(0, 2048);
+    }
+  } catch (error) {
+    if (!session.stopped && session === activeSession) {
+      session.captureHealth.captureStatus = "unknown";
+      session.captureHealth.lastError = errorText(error);
+    }
+  }
+  return captureDecision(session);
 }
 
 function refreshMediaPlayback(session, nowMs = Date.now()) {
@@ -86,14 +174,7 @@ function refreshMediaPlayback(session, nowMs = Date.now()) {
 }
 
 function activeFresh() {
-  const age = currentVideoAge();
-  const track = activeSession?.stream?.getVideoTracks?.()[0] || null;
-  return Boolean(
-    activeSession &&
-    track?.readyState === "live" &&
-    track.muted !== true &&
-    age >= 0 && age <= SOURCE_FREEZE_TIMEOUT_MS
-  );
+  return Boolean(activeSession && captureDecision(activeSession).healthy);
 }
 
 function statusIdentity(update = {}) {
@@ -122,12 +203,16 @@ async function notifyStatus(update = {}) {
     effectiveUpdate.phase = "selecting";
     effectiveUpdate.message = "Select the exact chart rectangle. Candidate pixels are not being uploaded.";
   }
-  const videoAge = currentVideoAge();
+  const decoderFrameAgeMs = currentVideoAge();
+  const transport = captureDecision(activeSession);
   status = initialStatus({
     ...status,
     ...statusIdentity(effectiveUpdate),
     ...effectiveUpdate,
-    transportFrameAgeMs: videoAge,
+    transportFrameAgeMs: transport.confirmationAgeMs,
+    decoderFrameAgeMs,
+    captureHealthReason: transport.reason,
+    captureStatus: activeSession?.captureHealth?.captureStatus || "unknown",
     visualChangeAgeMs: lastVisualChangeAtMs > 0 ? Math.max(0, Date.now() - lastVisualChangeAtMs) : -1,
     sourceRenderFresh: activeFresh(),
     lastVideoFrameAt: activeSession?.lastVideoFrameAtMs
@@ -257,6 +342,7 @@ async function createCapturedSession(message) {
     },
     selectionId: String(message.selectionId || ""),
     sequenceId: String(message.sequenceId || ""),
+    extensionVersion: String(message.extensionVersion || "unknown").slice(0, 32),
     region: null,
     config: normalizeConfig(message.config),
     stopped: false,
@@ -268,7 +354,8 @@ async function createCapturedSession(message) {
     frameCallbackId: 0,
     reusesActive: false,
     sourceGeneration: 0,
-    sourceLeaseId: ""
+    sourceLeaseId: "",
+    captureHealth: emptyCaptureHealth()
   };
   try {
     session.stream = await navigator.mediaDevices.getUserMedia({
@@ -321,21 +408,25 @@ async function createCapturedSession(message) {
   }
 }
 
-async function claimSource(session) {
+async function claimSource(session, expectedSourceControl = null) {
+  const body = {
+    source_id: session.config.sourceId,
+    sequence_id: session.sequenceId,
+    source_type: "browser_tab_roi_capture",
+    selection_id: session.selectionId,
+    display_name: String(session.tab.title || "Selected Edge chart").slice(0, 180),
+    coordinate_space: "edge_tab_roi_v1"
+  };
+  if (expectedSourceControl && typeof expectedSourceControl === "object") {
+    body.expected_source_control = {...expectedSourceControl};
+  }
   const response = await fetch(sourceControlClaimEndpoint(session.config), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${session.config.token}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      source_id: session.config.sourceId,
-      sequence_id: session.sequenceId,
-      source_type: "browser_tab_roi_capture",
-      selection_id: session.selectionId,
-      display_name: String(session.tab.title || "Selected Edge chart").slice(0, 180),
-      coordinate_space: "edge_tab_roi_v1"
-    }),
+    body: JSON.stringify(body),
     cache: "no-store"
   });
   const payload = await response.json().catch(() => ({}));
@@ -352,6 +443,174 @@ async function claimSource(session) {
   session.sourceGeneration = generation;
   session.sourceLeaseId = leaseId;
   return payload;
+}
+
+async function fetchSourceControl(session) {
+  const response = await fetch(sourceControlStatusEndpoint(session.config), {
+    method: "GET",
+    headers: {Authorization: `Bearer ${session.config.token}`},
+    cache: "no-store"
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(errorText(payload.detail || payload.message || `Source status returned HTTP ${response.status}.`));
+    error.httpStatus = response.status;
+    throw error;
+  }
+  return payload?.source_control && typeof payload.source_control === "object"
+    ? payload.source_control
+    : {};
+}
+
+async function reclaimSourceAfterOwnerlessApiRestartOnce(session) {
+  if (!session || session.stopped || session !== activeSession) return false;
+  const source = await fetchSourceControl(session);
+  const recovery = ownerlessSourceRecoveryFence(source);
+  if (!recovery.ok || !recovery.expectedSourceControl) return false;
+  if (session.stopped || session !== activeSession) return false;
+
+  await claimSource(session, recovery.expectedSourceControl);
+  if (session.stopped || session !== activeSession) {
+    // A concurrent operator selection won after the conditional claim. The
+    // lease-scoped kill cannot affect that newer owner if it already replaced
+    // this exact recovery lease.
+    await killSource(session, "ownerless_recovery_not_committed");
+    return false;
+  }
+
+  status.frameId = 0;
+  lastAcceptedAtMs = 0;
+  lastQueuedAt = 0;
+  lastUploadStartedAtMs = 0;
+  previousQueuedProbe = null;
+  pendingFrame = null;
+  serverArmed = true;
+  await notifyStatus({
+    phase: "starting",
+    message: "PhoenixGuard restarted; the already-authorized Edge chart stream was reclaimed without opening or focusing a tab.",
+    lastError: ""
+  });
+  if (!sampleTimer) sampleTimer = setTimeout(sampleFrame, 150);
+  return true;
+}
+
+async function reclaimSourceAfterOwnerlessApiRestart(session) {
+  if (!sourceRecoveryInFlight) {
+    sourceRecoveryInFlight = reclaimSourceAfterOwnerlessApiRestartOnce(session).finally(() => {
+      sourceRecoveryInFlight = null;
+    });
+  }
+  return Boolean(await sourceRecoveryInFlight);
+}
+
+async function recoverOrStopSupersededSession(session, reason) {
+  let recovered = false;
+  try {
+    recovered = await reclaimSourceAfterOwnerlessApiRestart(session);
+  } catch (error) {
+    console.debug("Ownerless chart-source recovery was not accepted.", error);
+  }
+  if (!recovered && activeSession === session && !session.stopped) {
+    await stopAllCapture(reason, true, false);
+  }
+  return recovered;
+}
+
+async function heartbeatSource(session, evidence = {}) {
+  const now = Date.now();
+  if (
+    !session ||
+    session.stopped ||
+    session !== activeSession ||
+    !session.sourceLeaseId ||
+    transportHeartbeatInFlight ||
+    now - lastTransportHeartbeatStartedAtMs < TRANSPORT_HEARTBEAT_INTERVAL_MS
+  ) return;
+
+  transportHeartbeatInFlight = true;
+  lastTransportHeartbeatStartedAtMs = now;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    // This DOM observation rides the light source heartbeat and is independent
+    // of JPEG upload/model work. The backend may use it only to revoke an old
+    // pair namespace while the exact captured frame is still being studied.
+    const observedIdentity = await observeLockedTabIdentity(session);
+    if (!activeSession || activeSession !== session || session.stopped) return;
+    const identityObservationV3 = observedIdentity ? {
+      schema_version: "PG_EDGE_TAB_IDENTITY_HEARTBEAT_V3",
+      revocation_only: true,
+      symbol: observedIdentity.symbol,
+      timeframe: observedIdentity.timeframe,
+      sequence_id: session.sequenceId,
+      locked_tab_id: session.tab.id,
+      locked_origin: session.tab.origin,
+      observed_epoch_ms: observedIdentity.observed_epoch,
+      study_authority: false,
+      overlay_authority: false,
+      decision_authority: false
+    } : null;
+    const response = await fetch(sourceControlHeartbeatEndpoint(session.config), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.config.token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(sourceControlHeartbeatPayload({
+        sourceId: session.config.sourceId,
+        sequenceId: session.sequenceId,
+        sourceGeneration: session.sourceGeneration,
+        sourceLeaseId: session.sourceLeaseId,
+        captureEpochMs: evidence.captureEpochMs,
+        sourceRenderFresh: evidence.transportHealthy === true,
+        materialChangePending: evidence.materialChangePending === true,
+        roiNormalized: session.region?.normalized,
+        roiSourcePixels: evidence.crop,
+        sourceSurfaceWidth: evidence.crop?.sourceWidth,
+        sourceSurfaceHeight: evidence.crop?.sourceHeight,
+        transportFrameAgeMs: evidence.transportFrameAgeMs,
+        decoderFrameAgeMs: evidence.decoderFrameAgeMs,
+        captureHealthReason: evidence.captureHealthReason,
+        captureStatus: evidence.captureStatus,
+        presentedFrames: evidence.presentedFrames,
+        mediaTime: evidence.mediaTime,
+        identityObservationV3
+      })),
+      cache: "no-store",
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) return;
+    const detail = errorText(payload.detail || payload.message || `HTTP ${response.status}`);
+    if (response.status === 409) {
+      await recoverOrStopSupersededSession(
+        session,
+        "Another source now owns PhoenixGuard; the older Edge chart stream was stopped."
+      );
+      return;
+    }
+    if (response.status === 410) {
+      if (activeSession === session && !session.stopped) {
+        await stopAllCapture("The PhoenixGuard source was explicitly stopped; select the chart again to resume.", true, false);
+      }
+      return;
+    }
+    if (response.status === 401 || response.status === 403) {
+      serverArmed = false;
+      await notifyStatus({
+        phase: "configuration_required",
+        message: "Source heartbeat rejected the token or source scope. Fix options, then reselect the chart.",
+        lastError: detail
+      });
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      console.debug("PhoenixGuard source heartbeat is temporarily unavailable.", error);
+    }
+  } finally {
+    clearTimeout(timeout);
+    transportHeartbeatInFlight = false;
+  }
 }
 
 async function killSource(session, reason) {
@@ -400,7 +659,10 @@ function resetFramePipeline() {
   previousQueuedProbe = null;
   lastQueuedAt = 0;
   lastAcceptedAtMs = 0;
+  lastUploadStartedAtMs = 0;
+  lastTransportHeartbeatStartedAtMs = 0;
   lastVisualChangeAtMs = 0;
+  transportHeartbeatInFlight = false;
   serverArmed = false;
   signatureRequired = false;
   status = initialStatus({
@@ -443,14 +705,22 @@ async function refreshServerContract() {
       contractTimer = setTimeout(refreshServerContract, 30_000);
       return;
     }
+    const session = activeSession;
+    const transport = await refreshCaptureHealth(session);
+    if (!activeSession || activeSession !== session || samplingPausedForSelector) return;
     await notifyStatus({
-      phase: status.acceptedFrames > 0 ? "live" : "starting",
-      message: status.acceptedFrames > 0
-        ? "The selected chart region is streaming in the background."
-        : "The chart region is locked; waiting for the first accepted frame.",
-      lastError: ""
+      phase: transport.healthy ? status.acceptedFrames > 0 ? "live" : "starting" : "source_frozen",
+      message: transport.healthy
+        ? status.acceptedFrames > 0
+          ? "The selected chart region is streaming in the background."
+          : "The chart region is locked; waiting for the first accepted frame."
+        : "PhoenixGuard ingest is armed, but the locked tab-capture transport is not currently healthy.",
+      lastError: transport.healthy
+        ? ""
+        : activeSession.captureHealth?.lastError || `Capture transport is ${transport.reason}.`
     });
-    void drainLatestFrame();
+    if (transport.healthy) void drainLatestFrame();
+    contractTimer = setTimeout(refreshServerContract, 30_000);
   } catch (error) {
     serverArmed = false;
     await notifyStatus({
@@ -472,16 +742,63 @@ function captureProbe() {
   return grayscale;
 }
 
+async function observeLockedTabIdentity(session) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "OBSERVE_LOCKED_TAB_IDENTITY_V3",
+      tabId: session.tab.id,
+      sequenceId: session.sequenceId
+    });
+    if (
+      response?.ok !== true ||
+      Number(response.tabId || 0) !== Number(session.tab.id) ||
+      String(response.sequenceId || "") !== String(session.sequenceId || "") ||
+      String(response.origin || "") !== String(session.tab.origin || "")
+    ) return null;
+    return response.observation && typeof response.observation === "object"
+      ? response.observation
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function bracketedIdentityObservation(session, before, after) {
+  if (!before || !after) return null;
+  const stableKeys = ["symbol", "timeframe", "market_bbox_css", "timeframe_bbox_css", "viewport_css"];
+  if (stableKeys.some((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]))) return null;
+  if (!/^[A-Z]{3}\/[A-Z]{3}(?: OTC)?$/.test(String(before.symbol || ""))) return null;
+  if (!/^(?:S\d+|M\d+|H\d+|D1|W1)$/.test(String(before.timeframe || ""))) return null;
+  if (!Array.isArray(before.market_bbox_css) || before.market_bbox_css.length !== 4) return null;
+  if (!Array.isArray(before.timeframe_bbox_css) || before.timeframe_bbox_css.length !== 4) return null;
+  return {
+    schema_version: "PG_EDGE_TAB_IDENTITY_OBSERVATION_V3",
+    capture_bracket_consistent: true,
+    locked_tab_id: session.tab.id,
+    locked_origin: session.tab.origin,
+    sequence_id: session.sequenceId,
+    before,
+    after
+  };
+}
+
 async function sampleFrame() {
   sampleTimer = clearTimer(sampleTimer);
   if (!activeSession || samplingPausedForSelector) return;
   try {
-    if (!activeFresh()) {
+    const session = activeSession;
+    const transport = await refreshCaptureHealth(session);
+    if (!activeSession || activeSession !== session || samplingPausedForSelector) return;
+    if (!transport.healthy) {
       pendingFrame = null;
       await notifyStatus({
         phase: "source_frozen",
-        message: "The tab stream is connected, but Edge has not presented a fresh chart frame. Upload is paused.",
-        lastError: "No freshly presented tab video frame inside the bounded freshness window."
+        message: transport.reason === "tab_frozen"
+          ? "Edge froze the locked chart tab. Capture remains attached and will resume without raising the browser."
+          : transport.reason === "decoder_stalled"
+            ? `The tab capture is registered, but decoded media stopped advancing for more than ${Math.round(DECODER_PROGRESS_TIMEOUT_MS / 1000)} seconds. Upload is paused.`
+            : "The locked tab-capture transport is not currently healthy. Upload is paused without switching or focusing tabs.",
+        lastError: activeSession.captureHealth?.lastError || `Capture transport is ${transport.reason}.`
       });
       return;
     }
@@ -510,31 +827,72 @@ async function sampleFrame() {
     const probe = captureProbe();
     const materialDelta = meanAbsoluteDifference(previousQueuedProbe, probe);
     const now = Date.now();
-    const heartbeatDue = now - lastQueuedAt >= activeSession.config.heartbeatSec * 1000;
+    const heartbeatDue = leaseHeartbeatDue(
+      now,
+      lastAcceptedAtMs,
+      lastQueuedAt,
+      activeSession.config.heartbeatSec
+    );
     const materialChange = !previousQueuedProbe || materialDelta >= activeSession.config.materialDeltaThreshold;
     status.sampledFrames += 1;
     status.cropPixels = crop;
     if (materialChange) lastVisualChangeAtMs = now;
 
+    // Start the light identity/lease pulse before any blob encoding or upload
+    // work, so a pair switch can veto the previous namespace immediately.
+    void heartbeatSource(session, {
+      captureEpochMs: now,
+      materialChangePending: materialChange || pendingFrame?.materialChange === true,
+      crop,
+      transportFrameAgeMs: transport.confirmationAgeMs,
+      decoderFrameAgeMs: currentVideoAge(),
+      captureHealthReason: transport.reason,
+      captureStatus: activeSession.captureHealth?.captureStatus || "unknown",
+      transportHealthy: transport.healthy,
+      presentedFrames: activeSession.presentedFrames,
+      mediaTime: activeSession.mediaTime
+    });
+
     if (materialChange || heartbeatDue) {
+      const identityBefore = await observeLockedTabIdentity(session);
+      // Re-sample the tab video after the first DOM observation so the image
+      // actually uploaded is bracketed by the two identity observations.
+      frameContext.drawImage(
+        activeSession.video,
+        crop.x,
+        crop.y,
+        crop.width,
+        crop.height,
+        0,
+        0,
+        width,
+        height
+      );
+      const capturedEpochMs = Date.now();
       const blob = await canvasBlob(frameCanvas, "image/jpeg", activeSession.config.jpegQuality);
+      const identityAfter = await observeLockedTabIdentity(session);
       if (pendingFrame) status.replacedFrames += 1;
       pendingFrame = {
         blob,
-        captureEpochMs: now,
+        captureEpochMs: capturedEpochMs,
         width,
         height,
         crop,
         materialDelta,
         materialChange,
         heartbeatDue,
-        transportFrameAgeMs: currentVideoAge(),
-        visualChangeAgeMs: lastVisualChangeAtMs ? now - lastVisualChangeAtMs : -1,
+        transportFrameAgeMs: transport.confirmationAgeMs,
+        decoderFrameAgeMs: currentVideoAge(),
+        captureHealthReason: transport.reason,
+        captureStatus: activeSession.captureHealth?.captureStatus || "unknown",
+        transportHealthy: transport.healthy,
+        visualChangeAgeMs: lastVisualChangeAtMs ? capturedEpochMs - lastVisualChangeAtMs : -1,
         presentedFrames: activeSession.presentedFrames,
-        mediaTime: activeSession.mediaTime
+        mediaTime: activeSession.mediaTime,
+        identityObservationV3: bracketedIdentityObservation(session, identityBefore, identityAfter)
       };
       previousQueuedProbe = probe;
-      lastQueuedAt = now;
+      lastQueuedAt = capturedEpochMs;
       status.queuedFrames += 1;
       void drainLatestFrame();
     }
@@ -567,8 +925,10 @@ async function uploadFrame(frame) {
   form.append("frame", frame.blob, `edge_roi_${String(frameId).padStart(8, "0")}.jpg`);
   form.append("source_id", config.sourceId);
   form.append("source_url", sanitizeSourceUrl(session.tab.url));
-  form.append("symbol", config.symbol);
-  form.append("timeframe", config.timeframe);
+  // Identity is visual evidence bound to this exact selection, never a
+  // persisted option inherited from a previously selected chart.
+  form.append("symbol", "");
+  form.append("timeframe", "");
   form.append("sequence_id", session.sequenceId);
   form.append("capture_epoch_ms", String(frame.captureEpochMs));
   form.append("frame_id", String(frameId));
@@ -578,7 +938,7 @@ async function uploadFrame(frame) {
     source_type: "browser_tab_roi_capture",
     browser: "Microsoft Edge",
     extension_id: chrome.runtime.id,
-    extension_version: chrome.runtime.getManifest().version,
+    extension_version: session.extensionVersion,
     capture_mode: "tabCapture_offscreen_roi",
     coordinate_space: "edge_tab_roi_v1",
     browser_chrome_included: false,
@@ -589,7 +949,7 @@ async function uploadFrame(frame) {
     region_revision: session.sequenceId,
     source_generation: session.sourceGeneration,
     source_lease_id: session.sourceLeaseId,
-    roi_normalized: session.region.normalized,
+    roi_normalized: normalizedRoiVector(session.region.normalized),
     roi_css: session.region.rectCss,
     roi_source_pixels: frame.crop,
     source_surface_width: frame.crop.sourceWidth,
@@ -602,8 +962,13 @@ async function uploadFrame(frame) {
     locked_tab_id: session.tab.id,
     locked_tab_title: session.tab.title,
     locked_origin: session.tab.origin,
-    source_render_fresh: frame.transportFrameAgeMs <= SOURCE_FREEZE_TIMEOUT_MS,
+    source_render_fresh: frame.transportHealthy === true,
+    identity_hint_policy: "visual_reproof_required",
+    identity_observation_v3: frame.identityObservationV3 || null,
     transport_frame_age_ms: frame.transportFrameAgeMs,
+    decoder_frame_age_ms: frame.decoderFrameAgeMs,
+    capture_health_reason: frame.captureHealthReason,
+    capture_status: frame.captureStatus,
     visual_change_age_ms: frame.visualChangeAgeMs,
     presented_frames: frame.presentedFrames,
     media_time: frame.mediaTime
@@ -647,20 +1012,31 @@ async function uploadFrame(frame) {
 async function drainLatestFrame() {
   uploadTimer = clearTimer(uploadTimer);
   if (!activeSession || samplingPausedForSelector || uploadInFlight || !pendingFrame || !serverArmed) return;
-  if (!activeFresh()) {
+  const session = activeSession;
+  const transport = await refreshCaptureHealth(session);
+  if (!activeSession || activeSession !== session || samplingPausedForSelector) return;
+  if (!transport.healthy) {
     pendingFrame = null;
-    await notifyStatus({phase: "source_frozen", message: "A stale rendered frame was blocked before upload."});
+    await notifyStatus({
+      phase: "source_frozen",
+      message: "An unconfirmed tab-capture transport frame was blocked before upload.",
+      lastError: activeSession.captureHealth?.lastError || `Capture transport is ${transport.reason}.`
+    });
     return;
   }
   const minIntervalMs = Math.max(SAMPLE_INTERVAL_MS, Number(status.uploadMinIntervalSec || 10) * 1000);
-  const elapsed = Date.now() - lastAcceptedAtMs;
-  if (lastAcceptedAtMs > 0 && elapsed < minIntervalMs) {
-    scheduleUpload(minIntervalMs - elapsed);
+  const startDelayMs = remainingUploadStartDelayMs(Date.now(), lastUploadStartedAtMs, minIntervalMs);
+  if (startDelayMs > 0) {
+    scheduleUpload(startDelayMs);
     return;
   }
   const frame = pendingFrame;
   pendingFrame = null;
   uploadInFlight = true;
+  // Pace from request start, not response completion. Analysis can take longer
+  // than the advertised interval; one in-flight request plus latest-frame
+  // replacement keeps CPU bounded without adding a second idle cooldown.
+  lastUploadStartedAtMs = Date.now();
   try {
     await uploadFrame(frame);
     lastAcceptedAtMs = Date.now();
@@ -674,8 +1050,15 @@ async function drainLatestFrame() {
   } catch (error) {
     status.rejectedFrames += 1;
     const httpStatus = Number(error?.httpStatus || 0);
-    if (httpStatus === 409 || httpStatus === 410) {
-      await stopAllCapture("PhoenixGuard rejected this superseded or killed chart-source lease.", true, false);
+    if (httpStatus === 409) {
+      await recoverOrStopSupersededSession(
+        session,
+        "Another source now owns PhoenixGuard; the older Edge chart stream was stopped."
+      );
+    } else if (httpStatus === 410) {
+      if (activeSession === session && !session.stopped) {
+        await stopAllCapture("The PhoenixGuard source was explicitly stopped; select the chart again to resume.", true, false);
+      }
     } else if (httpStatus === 401 || httpStatus === 403) {
       serverArmed = false;
       await notifyStatus({
@@ -702,7 +1085,7 @@ async function drainLatestFrame() {
   } finally {
     uploadInFlight = false;
     if (activeSession && pendingFrame && serverArmed && !samplingPausedForSelector) {
-      scheduleUpload(Math.max(0, minIntervalMs - (Date.now() - lastAcceptedAtMs)));
+      scheduleUpload(remainingUploadStartDelayMs(Date.now(), lastUploadStartedAtMs, minIntervalMs));
     }
   }
 }
@@ -721,6 +1104,7 @@ async function prepareCandidate(message) {
         tab: {...activeSession.tab},
         selectionId,
         sequenceId: String(message.sequenceId || ""),
+        extensionVersion: String(message.extensionVersion || activeSession.extensionVersion || "unknown").slice(0, 32),
         config: normalizeConfig(message.config),
         reusesActive: true,
         stopped: false
@@ -861,13 +1245,41 @@ async function stopAllCapture(reason = "Chart capture stopped.", announce = true
   previousQueuedProbe = null;
   lastQueuedAt = 0;
   lastAcceptedAtMs = 0;
+  lastUploadStartedAtMs = 0;
+  lastTransportHeartbeatStartedAtMs = 0;
   lastVisualChangeAtMs = 0;
+  transportHeartbeatInFlight = false;
   serverArmed = false;
   signatureRequired = false;
   if (announce) {
     status = initialStatus({phase: "stopped", message: reason});
     await notifyStatus({phase: "stopped", message: reason, sourceRenderFresh: false});
   }
+  return {ok: true, status};
+}
+
+async function updateLockedTabMetadata(message = {}) {
+  const tabId = Number(message.tabId || 0);
+  const sequenceId = String(message.sequenceId || "");
+  if (
+    !activeSession ||
+    activeSession.stopped ||
+    activeSession.tab.id !== tabId ||
+    activeSession.sequenceId !== sequenceId
+  ) {
+    return {ok: false, error: "The locked chart lineage changed before its metadata update arrived."};
+  }
+  const nextOrigin = sourceOrigin(message.tab?.url || message.tab?.origin || "");
+  if (!nextOrigin || nextOrigin !== activeSession.tab.origin) {
+    return {ok: false, error: "A cross-origin tab change cannot reuse the locked chart stream."};
+  }
+  activeSession.tab = {
+    ...activeSession.tab,
+    title: String(message.tab?.title || activeSession.tab.title).slice(0, 180),
+    url: sanitizeSourceUrl(message.tab?.url || activeSession.tab.url).slice(0, 2048),
+    origin: nextOrigin
+  };
+  await notifyStatus({lastError: ""});
   return {ok: true, status};
 }
 
@@ -891,6 +1303,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === "STOP_ALL_CAPTURE_V1") {
     void stopAllCapture(message.reason || "Chart capture stopped.").then(sendResponse);
+    return true;
+  }
+  if (message.type === "UPDATE_LOCKED_TAB_METADATA_V1") {
+    void updateLockedTabMetadata(message).then(sendResponse);
     return true;
   }
   if (message.type === "GET_STATUS") {

@@ -6,6 +6,7 @@ from typing import Any, Mapping, Sequence, cast
 
 PG_PLAYBOOK_AI_INTELLIGENCE_SCHEMA_VERSION = "PG_PLAYBOOK_AI_INTELLIGENCE_V3"
 SIDES: tuple[str, str] = ("BUY", "SELL")
+MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS = 15 * 60
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -1216,6 +1217,20 @@ def _build_horizon(
     meta_by_side = _mapping(meta_label.get("by_side"))
     timeframe = str(candle_context.get("timeframe") or "M5").upper()
     timeframe_seconds = max(1, _int(candle_context.get("timeframe_seconds"), 300) or 300)
+    minimum_eligible_duration_sec = max(
+        MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+        _int(
+            candle_context.get("minimum_eligible_trade_duration_seconds"),
+            MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+        ),
+    )
+    minimum_eligible_candles = max(
+        1,
+        (
+            minimum_eligible_duration_sec + timeframe_seconds - 1
+        )
+        // timeframe_seconds,
+    )
     selected_side = _side(meta_label.get("selected_side"))
     route = _upper(regime_router.get("route"))
     by_side: dict[str, Any] = {}
@@ -1229,7 +1244,14 @@ def _build_horizon(
             professional_plan,
             candle_context,
         )
-        best = candidates[0] if candidates else {"basis": "none", "candle_count": 0, "score": 0.0}
+        raw_best = candidates[0] if candidates else {"basis": "none", "candle_count": 0, "score": 0.0}
+        eligible_candidates = [
+            row
+            for row in candidates
+            if _int(row.get("duration_sec"), 0)
+            >= minimum_eligible_duration_sec
+        ]
+        best = eligible_candidates[0] if eligible_candidates else raw_best
         probability = _clip01(side_meta.get("target_before_invalidation_probability"), 0.0)
         optimized_count = _int(best.get("candle_count"), 0)
         room = _mapping(side_meta.get("room"))
@@ -1239,15 +1261,35 @@ def _build_horizon(
         if probability < 0.44:
             optimized_count = 0
         elif probability < 0.54:
-            optimized_count = min(optimized_count, 1)
+            optimized_count = 0
         optimized_count = max(0, optimized_count)
+        if 0 < optimized_count < minimum_eligible_candles:
+            optimized_count = 0
+        optimized_duration_sec = int(optimized_count * timeframe_seconds)
+        observation_only = bool(
+            optimized_duration_sec < minimum_eligible_duration_sec
+            and
+            _int(raw_best.get("candle_count"), 0) > 0
+            and _int(raw_best.get("duration_sec"), 0)
+            < minimum_eligible_duration_sec
+        )
         by_side[side] = {
             "optimized_candle_count": optimized_count,
-            "optimized_duration_sec": int(optimized_count * timeframe_seconds),
-            "optimized_duration_text": _duration_text(int(optimized_count * timeframe_seconds)),
+            "optimized_duration_sec": optimized_duration_sec,
+            "optimized_duration_text": _duration_text(optimized_duration_sec),
             "horizon_class": _horizon_class(optimized_count),
             "basis": str(best.get("basis") or "none"),
             "target_before_invalidation_probability": _round4(probability),
+            "minimum_eligible_trade_duration_seconds": minimum_eligible_duration_sec,
+            "minimum_eligible_candle_count": minimum_eligible_candles,
+            "under_15_minutes_excluded": True,
+            "trade_duration_eligible": bool(
+                optimized_duration_sec >= minimum_eligible_duration_sec
+            ),
+            "observation_only": observation_only,
+            "observation_only_candidate": dict(raw_best)
+            if observation_only
+            else {},
             "candidates": candidates,
         }
 
@@ -1260,6 +1302,12 @@ def _build_horizon(
             "horizon_class": "WAIT_FOR_CONFIRMATION",
             "basis": "regime_router_wait_state",
             "target_before_invalidation_probability": 0.0,
+            "minimum_eligible_trade_duration_seconds": minimum_eligible_duration_sec,
+            "minimum_eligible_candle_count": minimum_eligible_candles,
+            "under_15_minutes_excluded": True,
+            "trade_duration_eligible": False,
+            "observation_only": False,
+            "observation_only_candidate": {},
             "candidates": list[dict[str, Any]](),
         }
 
@@ -1267,6 +1315,9 @@ def _build_horizon(
         "schema_version": "PG_PLAYBOOK_HORIZON_OPTIMIZER_V3",
         "timeframe": timeframe,
         "timeframe_seconds": timeframe_seconds,
+        "minimum_eligible_trade_duration_seconds": minimum_eligible_duration_sec,
+        "minimum_eligible_candle_count": minimum_eligible_candles,
+        "under_15_minutes_excluded": True,
         "selected_side": selected_side if selected_side in SIDES else "HOLD",
         "selected": selected,
         "by_side": by_side,
@@ -1275,6 +1326,7 @@ def _build_horizon(
             "use_overlay_projection_expected_move_when_professional_horizon_is_absent",
             "cap_horizon_by_opposing_force_room_when_available",
             "collapse_to_wait_when_meta_label_favors_invalidation_first",
+            "exclude_trade_horizons_shorter_than_fifteen_minutes",
         ],
     }
 
@@ -1550,6 +1602,35 @@ def compact_playbook_ai_intelligence_v3(value: Mapping[str, Any] | None) -> dict
             "optimized_duration_text": str(selected_horizon.get("optimized_duration_text") or ""),
             "horizon_class": str(selected_horizon.get("horizon_class") or ""),
             "basis": str(selected_horizon.get("basis") or ""),
+            "minimum_eligible_trade_duration_seconds": _int(
+                selected_horizon.get(
+                    "minimum_eligible_trade_duration_seconds",
+                    horizon.get(
+                        "minimum_eligible_trade_duration_seconds",
+                        MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+                    ),
+                ),
+                MINIMUM_ELIGIBLE_TRADE_DURATION_SECONDS,
+            ),
+            "minimum_eligible_candle_count": _int(
+                selected_horizon.get(
+                    "minimum_eligible_candle_count",
+                    horizon.get("minimum_eligible_candle_count"),
+                ),
+                0,
+            ),
+            "under_15_minutes_excluded": _bool(
+                selected_horizon.get("under_15_minutes_excluded"), True
+            ),
+            "trade_duration_eligible": _bool(
+                selected_horizon.get("trade_duration_eligible")
+            ),
+            "observation_only": _bool(
+                selected_horizon.get("observation_only")
+            ),
+            "observation_only_candidate": _mapping(
+                selected_horizon.get("observation_only_candidate")
+            ),
             "target_before_invalidation_probability": _round4(
                 selected_horizon.get("target_before_invalidation_probability")
             ),

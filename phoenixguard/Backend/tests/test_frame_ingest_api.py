@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 from io import BytesIO
@@ -10,6 +11,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
 from phoenixguard.mobile_api.app import create_app
@@ -24,6 +26,7 @@ def _client(tracker: _FakeFrameTracker | None = None) -> TestClient:
 class _FakeFrameTracker:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.heartbeat_calls: list[dict[str, Any]] = []
         self.capture_source_v3: dict[str, Any] = {
             "schema_version": "PG_CAPTURE_SOURCE_V3",
             "state": "NO_SOURCE",
@@ -117,6 +120,43 @@ class _FakeFrameTracker:
                 "source_lease_id": "",
                 "reason_code": "SOURCE_KILLED",
                 "message": reason,
+            }
+        )
+        return dict(self.capture_source_v3)
+
+    def heartbeat_external_source(
+        self,
+        session_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        validation = self.validate_external_source_lease(
+            session_id,
+            source_id=str(kwargs.get("source_id", "") or ""),
+            sequence_id=str(kwargs.get("sequence_id", "") or ""),
+            source_generation=int(kwargs.get("source_generation", 0) or 0),
+            source_lease_id=str(kwargs.get("source_lease_id", "") or ""),
+        )
+        if not bool(validation.get("allowed", False)):
+            raise _FakeSourceLeaseError(
+                int(validation.get("status_code", 409) or 409),
+                str(
+                    validation.get("reason_code", "SOURCE_SUPERSEDED")
+                    or "SOURCE_SUPERSEDED"
+                ),
+            )
+        call = {"session_id": session_id, **kwargs}
+        self.heartbeat_calls.append(call)
+        self.capture_source_v3.update(
+            {
+                "state": "VALIDATING",
+                "fresh": kwargs.get("source_render_fresh") is True,
+                "decision_usable": False,
+                "reason_code": "FRAME_PENDING"
+                if kwargs.get("material_change_pending") is True
+                else "FRAME_PROCESSING",
+                "roi": {
+                    "normalized_bbox": list(kwargs.get("roi_normalized", []))
+                },
             }
         )
         return dict(self.capture_source_v3)
@@ -396,6 +436,8 @@ def test_leased_browser_roi_source_claim_accepts_only_current_generation(monkeyp
         files={"frame": ("chart.png", _png_bytes(), "image/png")},
         data={
             "source_id": "edge-roi",
+            "symbol": "CHF/JPY OTC",
+            "timeframe": "M5",
             "sequence_id": "edge-roi-seq-1",
             "capture_epoch_ms": str(now_ms),
             "frame_id": "1",
@@ -411,8 +453,174 @@ def test_leased_browser_roi_source_claim_accepts_only_current_generation(monkeyp
         },
     )
     assert accepted.status_code == 202
+    assert tracker.calls[-1]["symbol"] == ""
+    assert tracker.calls[-1]["timeframe"] == ""
+    assert tracker.calls[-1]["metadata"]["identity_hint_policy"] == "visual_reproof_required"
+    assert tracker.calls[-1]["metadata"]["identity_hints_ignored"] is True
     assert tracker.calls[-1]["metadata"]["source_generation"] == 1
     assert tracker.calls[-1]["metadata"]["source_lease_id"] == "lease-1"
+
+
+def test_source_control_heartbeat_is_lease_fenced_and_does_not_run_analysis(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    tracker = _FakeFrameTracker()
+    client = _client(tracker)
+    claim = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/source-control/claim",
+        headers={"Authorization": "Bearer secret-token"},
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "edge-roi-heartbeat",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "selection-heartbeat",
+            "display_name": "Pocket Option chart",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    ).json()
+    heartbeat_body = {
+        "source_id": "edge-roi",
+        "sequence_id": "edge-roi-heartbeat",
+        "source_generation": claim["source_generation"],
+        "source_lease_id": claim["source_lease_id"],
+        "capture_epoch_ms": int(time.time() * 1000),
+        "source_render_fresh": True,
+        "material_change_pending": True,
+        "roi_normalized": [0.0, 0.0, 1.0, 1.0],
+        "roi_source_pixels": {
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080,
+        },
+        "source_surface_width": 1920,
+        "source_surface_height": 1080,
+        "transport_frame_age_ms": 10,
+        "decoder_frame_age_ms": 20,
+        "capture_health_reason": "capture_confirmed",
+        "capture_status": "active",
+        "presented_frames": 808,
+        "media_time": 42.5,
+    }
+
+    accepted = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/source-control/heartbeat",
+        headers={"Authorization": "Bearer secret-token"},
+        json=heartbeat_body,
+    )
+
+    assert accepted.status_code == 200
+    body = accepted.json()
+    assert body["accepted"] is True
+    assert body["source_control"]["state"] == "VALIDATING"
+    assert body["source_control"]["decision_usable"] is False
+    assert body["source_control"]["roi"]["normalized_bbox"] == [0.0, 0.0, 1.0, 1.0]
+    assert tracker.calls == []
+    assert len(tracker.heartbeat_calls) == 1
+
+    superseded = dict(heartbeat_body)
+    superseded["source_lease_id"] = "old-lease"
+    rejected = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/source-control/heartbeat",
+        headers={"Authorization": "Bearer secret-token"},
+        json=superseded,
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["reason_code"] == "SOURCE_SUPERSEDED"
+    assert len(tracker.heartbeat_calls) == 1
+
+    malformed = dict(heartbeat_body)
+    malformed["source_surface_width"] = []
+    invalid = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/source-control/heartbeat",
+        headers={"Authorization": "Bearer secret-token"},
+        json=malformed,
+    )
+    assert invalid.status_code == 400
+    assert len(tracker.heartbeat_calls) == 1
+
+
+def test_source_heartbeat_remains_responsive_while_frame_analysis_is_blocked(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "60")
+    reset_frame_ingest_runtime_state_for_tests()
+    tracker = _BlockingFrameTracker()
+    app = create_app(window_tracker_service=tracker)
+
+    async def exercise() -> None:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            claim_response = await client.post(
+                "/v1/mobile/frame-ingest/sessions/external-live/source-control/claim",
+                headers={"Authorization": "Bearer secret-token"},
+                json={
+                    "source_id": "edge-roi",
+                    "sequence_id": "edge-blocked-analysis",
+                    "source_type": "browser_tab_roi_capture",
+                    "selection_id": "selection-blocked-analysis",
+                    "display_name": "Pocket Option chart",
+                    "coordinate_space": "edge_tab_roi_v1",
+                },
+            )
+            assert claim_response.status_code == 201
+            claim = claim_response.json()
+            now_ms = int(time.time() * 1000)
+            ingest_task = asyncio.create_task(
+                client.post(
+                    "/v1/mobile/frame-ingest/sessions/external-live/frames",
+                    headers={"Authorization": "Bearer secret-token"},
+                    files={"frame": ("chart.png", _png_bytes(), "image/png")},
+                    data={
+                        "source_id": "edge-roi",
+                        "sequence_id": "edge-blocked-analysis",
+                        "capture_epoch_ms": str(now_ms),
+                        "frame_id": "1",
+                        "source_generation": str(claim["source_generation"]),
+                        "source_lease_id": claim["source_lease_id"],
+                        "metadata_json": json.dumps(
+                            {
+                                "source_type": "browser_tab_roi_capture",
+                                "coordinate_space": "edge_tab_roi_v1",
+                                "source_render_fresh": True,
+                            }
+                        ),
+                    },
+                )
+            )
+            try:
+                entered = await asyncio.to_thread(tracker.entered.wait, 3.0)
+                assert entered is True
+                heartbeat = await asyncio.wait_for(
+                    client.post(
+                        "/v1/mobile/frame-ingest/sessions/external-live/source-control/heartbeat",
+                        headers={"Authorization": "Bearer secret-token"},
+                        json={
+                            "source_id": "edge-roi",
+                            "sequence_id": "edge-blocked-analysis",
+                            "source_generation": claim["source_generation"],
+                            "source_lease_id": claim["source_lease_id"],
+                            "capture_epoch_ms": int(time.time() * 1000),
+                            "source_render_fresh": True,
+                            "material_change_pending": True,
+                            "roi_normalized": [0.0, 0.0, 1.0, 1.0],
+                        },
+                    ),
+                    timeout=1.0,
+                )
+                assert heartbeat.status_code == 200
+                assert heartbeat.json()["accepted"] is True
+                assert len(tracker.heartbeat_calls) == 1
+            finally:
+                tracker.release.set()
+            ingest_response = await asyncio.wait_for(ingest_task, timeout=3.0)
+            assert ingest_response.status_code == 202
+
+    asyncio.run(exercise())
 
 
 def test_active_claim_rejects_frame_that_omits_lease_contract_before_tracker_call(monkeypatch: Any) -> None:
@@ -961,6 +1169,49 @@ def test_frame_ingest_reservation_blocks_concurrent_preflight_race(monkeypatch: 
     assert second.status_code == 429
     assert not worker.is_alive()
     assert first_result["response"].status_code == 202
+
+
+def test_frame_ingest_analysis_does_not_block_status_requests(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "60")
+    reset_frame_ingest_runtime_state_for_tests()
+    tracker = _BlockingFrameTracker()
+    app = create_app(window_tracker_service=tracker)
+
+    async def exercise() -> None:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            ingest_task = asyncio.create_task(
+                client.post(
+                    "/v1/mobile/frame-ingest/sessions/external-live/frames",
+                    headers={"Authorization": "Bearer secret-token"},
+                    files={"frame": ("chart.png", _png_bytes(), "image/png")},
+                    data={
+                        "source_id": "edge-agent",
+                        "sequence_id": "sequence-1",
+                        "capture_epoch_ms": "1780000000000",
+                        "frame_id": "1",
+                    },
+                )
+            )
+            try:
+                entered = await asyncio.to_thread(tracker.entered.wait, 3.0)
+                assert entered is True
+                status_response = await asyncio.wait_for(
+                    client.get(
+                        "/v1/mobile/frame-ingest/sessions/external-live/status",
+                        headers={"Authorization": "Bearer secret-token"},
+                    ),
+                    timeout=1.0,
+                )
+                assert status_response.status_code == 200
+            finally:
+                tracker.release.set()
+            ingest_response = await asyncio.wait_for(ingest_task, timeout=3.0)
+            assert ingest_response.status_code == 202
+
+    asyncio.run(exercise())
 
 
 def test_frame_ingest_preserves_late_tracker_source_lease_hard_stop(monkeypatch: Any) -> None:

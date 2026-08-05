@@ -379,6 +379,49 @@ def test_live_overlay_does_not_draw_prediction_path(monkeypatch: Any) -> None:
     adapter.render_overlay(image, [0, 0, 320, 220], tracking_summary, {"action": "SELL"})  # noqa: SLF001
 
 
+def test_live_overlay_keeps_broker_raster_clean_until_diagnostics_are_explicit() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = Image.new("RGB", (320, 220), (8, 12, 18))
+    tracking_summary: dict[str, Any] = {
+        "support_resistance_zones": [
+            {
+                "key": "legacy_resistance",
+                "role": "resistance",
+                "label": "NEAREST RESISTANCE",
+                "bbox": [40, 30, 250, 60],
+                "line_y": 45,
+                "line_x0": 40,
+                "line_x1": 250,
+                "confidence": 0.91,
+            }
+        ],
+        "structure_boxes": [
+            {
+                "key": "global",
+                "layer": "major_swings",
+                "bbox": [30, 20, 280, 190],
+            }
+        ],
+        "overlay_geometry": {
+            "layer_visibility": {
+                "supply_demand": True,
+                "major_swings": True,
+                "diagnostics": False,
+            }
+        },
+    }
+
+    rendered = adapter.render_overlay(  # noqa: SLF001
+        image,
+        [0, 0, 320, 220],
+        tracking_summary,
+        {"action": "SELL"},
+    )
+
+    assert rendered.mode == "RGB"
+    assert rendered.tobytes() == image.tobytes()
+
+
 def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypatch: Any) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = Image.new("RGB", (320, 220), (8, 12, 18))

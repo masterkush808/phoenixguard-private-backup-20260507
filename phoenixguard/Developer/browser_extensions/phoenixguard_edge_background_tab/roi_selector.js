@@ -44,13 +44,14 @@
 
     const root = document.createElement("div");
     root.id = ROOT_ID;
+    root.tabIndex = -1;
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-label", "Select the chart region PhoenixGuard should study");
     root.innerHTML = `
       <div class="pg-roi-instructions">
         <strong>Select the exact chart area</strong>
         <span>Drag over candles and price geometry. Minimum ${MIN_WIDTH} × ${MIN_HEIGHT}px.</span>
-        <span class="pg-roi-keys">Enter confirms · Esc cancels · R resets</span>
+        <span class="pg-roi-keys">Enter confirms · F selects full viewport · Esc cancels · R resets</span>
       </div>
       <div class="pg-roi-box" hidden><span class="pg-roi-size"></span></div>
       <div class="pg-roi-actions">
@@ -132,6 +133,10 @@
         event.preventDefault();
         event.stopImmediatePropagation();
         void commit();
+      } else if (event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setRect(0, 0, window.innerWidth, window.innerHeight);
       } else if (event.key.toLowerCase() === "r") {
         event.preventDefault();
         event.stopImmediatePropagation();

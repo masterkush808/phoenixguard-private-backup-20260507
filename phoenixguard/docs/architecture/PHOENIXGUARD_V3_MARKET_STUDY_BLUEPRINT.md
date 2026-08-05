@@ -807,6 +807,22 @@ operator_workspace.tracking.market_study_v3
 Do not introduce a V4 route or an extra unversioned top-level market-study key. The frontend may
 read the tracking study first and use a latest-signal copy only as a compatibility fallback.
 
+`PG_CURRENT_CHART_IDENTITY_V3` is the current-frame fence between capture and operator
+projection. A row may name the surface only when its frame matches the exact displayed frame,
+pair and timeframe are both confirmed, and `decision_authority=false`. It never contributes a
+direction, timing read, permission, or trade action. A same-frame pending row is stronger than
+older cached text: it forces `Unknown / Unknown`, publishes `Identifying current chart`, removes
+all overlays, and forbids fallback to a prior tracking summary, signal, or market study. A row
+from a different frame is ignored.
+
+The public surface semantic identity is pair/timeframe scoped; unclassified surfaces are also
+frame scoped. Each overlay repeats that exact surface identity plus its frame and instrument
+lineage. The browser rejects any mismatch and, on a namespace change, clears regression history,
+overlay nodes, geometry caches, and the selected inspector before committing the new exact-frame
+image and rows. Pixel geometry may cross a chart/window ROI only when the source plane supplies
+exact `source_bounds`; normalized coordinates remain self-describing. Missing source bounds are
+not inferred from the target span and the mark is not drawn.
+
 ### 12.3 Continuous closed-candle history
 
 History rows are not a list of permission decisions and do not depend on an operator-created study
@@ -840,10 +856,22 @@ The V3 dashboard is a chart-led study workspace:
 - current movement/rest/continuation is described without turning it into permission;
 - entry permission remains a separate compact block;
 - history is titled and rendered as a continuous candle-by-candle regression study;
+- the default `Live read` preset shows only current semantic operator evidence: current price,
+  reaction map, combined analysis, order areas, entry triggers, targets, and risk/invalidation;
+  semantic structure, zones, trendlines, and replay geometry require an explicit Structure, Zones,
+  History, or All selection, while legacy H-level and broad diagnostic support/resistance marks are
+  not painted into the ordinary broker raster at all;
+- layer badges count only drawable, current-namespace geometry; study evidence without an exact
+  chart anchor does not advertise a synthetic visual mark;
 - `Show all` plus `Labels on` activates `labels-show-all`: collision solving is bypassed and both
   `label-collision-hidden` and `label-policy-hidden` labels are forced visible even when they overlap
   or cluster;
-- hover and reduced-label modes remain available when the operator wants less clutter.
+- hover is the default restrained label mode, while reduced-label and labels-off modes remain
+  available when the operator wants less clutter;
+- the compact `Decision accuracy · live audit` strip is pair/timeframe scoped and shows
+  `COLLECTING` or `MEASURED`, frozen/pending/matured counts, the latest matured outcome, and the
+  four candidate accuracy axes when available; it explicitly states that it measures outcomes only
+  and cannot place trades or open entry permission.
 
 The dashboard may derive a readable fallback from history and overlays during warm-up, but server
 study fields take precedence once `PG_MARKET_STUDY_V3` is available.
@@ -1347,6 +1375,25 @@ and each sweep outcome binds the same stop distance and move size on both sides.
 scenario mismatch fails promotion rather than allowing stop widening to masquerade as model
 improvement.
 
+The public study also carries `passive_prediction_audit_v3`. This is an
+outcome ledger, not an execution log. It counts only anchors that actually
+froze a model forecast, separates forecasts still awaiting their exact horizon
+from matured outcomes, and publishes the latest bounded direction, timing, and
+sweep result. Candidate and registered-baseline values for all four axes, plus
+their deltas, are exposed without raw candles, paths, neighbours, calibration
+bins, or private digests. An ordinary field snapshot is never counted as a
+prediction. This ledger observes how published study forecasts performed
+against later closed market movement; it never places a trade, clicks a broker,
+or grants entry permission.
+
+The operator accepts this audit only from
+`operator_workspace.tracking.market_study_v3.path_clock_liquidity_v3` and only
+when its symbol/timeframe match the current proven surface. During a pair switch
+or pending identity state the old audit is not carried forward: the strip returns
+to `COLLECTING` with no borrowed metrics. `MEASURED` means that at least one
+frozen forecast reached a matured market outcome; it does not mean profitable,
+entry-ready, or authorized.
+
 ### 17.6 Persistence and Pair DNA boundary
 
 Raw normalized paths and frozen replay states live in a dedicated atomic side store under
@@ -1368,10 +1415,12 @@ atomically replaced. A corrupted or oversized snapshot is rejected rather than p
 
 ### 17.7 Public timing and the independent permission contract
 
-The public allowlist exposes only the current bounded timing read: lineage, side, duration,
-remaining clock, support, calibrated probabilities, promotion status, and safety flags. Raw paths,
-neighbors, liquidity vectors, detector state, geometry, hashes, and persistence internals are
-private.
+The public allowlist exposes the current bounded timing read and passive audit:
+lineage, side, duration, remaining clock, support, calibrated probabilities,
+promotion status, frozen/pending/matured counts, the latest bounded outcome,
+four-axis candidate and baseline metrics, and safety flags. Raw paths,
+neighbors, liquidity vectors, detector state, geometry, hashes, calibration
+bins, and persistence internals are private.
 
 JPCLF is an asymmetric gate:
 
@@ -1398,6 +1447,20 @@ authoritative and may append one plain timing sentence only after the field is m
 the single best action now. The streaming refresh applies the same gate, so a heartbeat cannot
 erase a timing veto or revive stale timing from another pair, frame, or close.
 
+An operator entry deadline of zero has one exact meaning: no executable entry
+window was issued. It is not an expired deadline and must not relabel an honest,
+current BUY/SELL market study as generic stale WAIT. Only a positive issued
+deadline that is earlier than the current time can expire entry permission. The
+directional study and the independent permission result remain visible even
+when no executable window exists.
+
+When the live stream is fresh, the chart identity is exact, and the current
+directional study is valid, a legacy freshness value of `UNKNOWN` attached to
+that unissued window does not demote the public answer to generic `STALE` or
+`STAY OUT`. The operator surface publishes `PREPARE / OBSERVING` while retaining
+the raw timing state for audit. Entry permission remains false, and neither the
+timing field nor the streaming synthesis gains broker-click authority.
+
 ### 17.8 Failure modes and test matrix
 
 | Failure or test | Required outcome |
@@ -1415,6 +1478,11 @@ erase a timing veto or revive stale timing from another pair, frame, or close.
 | Greatest timestamp belongs to an unbound row | Reject it; current event is selected by proof key and sequence |
 | Forming candle changes | No durable field, replay, or Pair DNA mutation |
 | Pair/timeframe/domain/coordinate change | Pending anchors are censored and old timing is removed from public state |
+| Same-frame identity is pending while cached study names the old pair | Publish `Identifying current chart`, unknown market identity, zero overlays, and no old audit metrics |
+| Overlay row reuses an ID from another pair or surface | Reject it by surface semantic identity plus pair/timeframe/frame lineage |
+| Pixel ROI row omits exact source bounds | Do not project or draw it; never guess the source plane |
+| Default Live overlay view | Show semantic current evidence only; generic swing/reference/history marks require an explicit view |
+| `Labels on` with overlapping or policy-shadowed labels | Show every present label without collision or policy suppression |
 | Process restart | Digest-validated field and pending anchors restore exactly once |
 | Target and stop touched in one unsequenced candle | Intrabar order is unknown and fails closed |
 | Public projection | No raw trajectory, neighbor vector, geometry, or private digest leaks |
@@ -1462,8 +1530,14 @@ The V3 market-study lane is complete only when all of these statements are true 
   all Granger-style and mutual-information language remains explicitly non-causal;
 - every published proof certificate validates its claim, inputs, derivation, ordered closed-candle
   identities, coordinate space, and order domain, while retaining zero execution authority;
+- a same-frame pending identity vetoes every older pair/study fallback, while a confirmed identity
+  may name only its matching surface and still carries no decision authority;
+- surface namespaces, overlay rows, exact ROI geometry, projected caches, and regression history
+  cannot cross a pair/timeframe/frame boundary; pixel projection without source bounds fails closed;
 - retired forecast families cannot return through `Show all`, and `Show all` plus `Labels on` really
   shows every present overlay label, even when clustered;
+- the default Live preset remains semantic-only, and the pair-scoped passive audit reports measured
+  outcomes without becoming a signal, permission source, broker click, or execution log;
 - session history describes what price did instead of mirroring permission `WAIT`;
 - session history never attaches a same-frame study to a different close key/sequence;
 - entry permission remains independent, fresh-frame gated, and fail-closed;

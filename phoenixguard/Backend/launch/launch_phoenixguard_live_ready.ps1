@@ -149,7 +149,9 @@ function Get-ValidatedPhoenixGuardRuntimeLock {
         [Parameter(Mandatory = $true)]
         [string]$ExpectedSessionId,
         [Parameter(Mandatory = $true)]
-        [int]$ExpectedApiPort
+        [int]$ExpectedApiPort,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedDataDir
     )
 
     if (-not (Test-Path -LiteralPath $LockPath -PathType Leaf)) {
@@ -180,9 +182,7 @@ function Get-ValidatedPhoenixGuardRuntimeLock {
         ''
     }
     $runtimeDataDir = [System.IO.Path]::GetFullPath([string]$lock.data_dir)
-    $expectedRuntimePrefix = [System.IO.Path]::GetFullPath(
-        (Join-Path -Path $expectedRoot -ChildPath 'runtime\live')
-    ).TrimEnd('\') + '\'
+    $expectedRuntimeDataDir = [System.IO.Path]::GetFullPath($ExpectedDataDir).TrimEnd('\')
 
     $isValid = (
         ([string]$lock.schema_version -ceq 'PG_RUNTIME_SINGLETON_GUARD_V3') -and
@@ -194,7 +194,7 @@ function Get-ValidatedPhoenixGuardRuntimeLock {
         ($ownerToken -cmatch '^[0-9a-f]{32}$') -and
         ([string]$lock.state_version_owner -ceq $ownerToken) -and
         ([string]$lock.runtime_owner_id -ceq $expectedOwnerId) -and
-        $runtimeDataDir.StartsWith($expectedRuntimePrefix, [System.StringComparison]::OrdinalIgnoreCase)
+        $runtimeDataDir.TrimEnd('\').Equals($expectedRuntimeDataDir, [System.StringComparison]::OrdinalIgnoreCase)
     )
     if (-not $isValid) {
         throw "Runtime lock ownership contract failed validation; refusing process cleanup."
@@ -502,16 +502,49 @@ $env:PHOENIXGUARD_UVICORN_ACCESS_LOG = '0'
 $env:PHOENIXGUARD_PERSIST_CHILD_STDIO = '0'
 $env:PHOENIXGUARD_SHOOTER_POLL_SEC = ([string][double]$ShooterPollSec).Replace(',', '.')
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '0'
-$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
+$legacyRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
+$configuredRuntimeDir = [string]$env:PHOENIXGUARD_RUNTIME_DIR
+if (-not [string]::IsNullOrWhiteSpace($configuredRuntimeDir)) {
+    $runtimeDir = [System.IO.Path]::GetFullPath($configuredRuntimeDir)
+} elseif (-not [string]::IsNullOrWhiteSpace([string]$env:LOCALAPPDATA)) {
+    $runtimeDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\runtime\live'
+} else {
+    $runtimeDir = $legacyRuntimeDir
+}
+$dataDir = if (-not [string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_DATA_DIR)) {
+    [System.IO.Path]::GetFullPath([string]$env:PHOENIXGUARD_DATA_DIR)
+} else {
+    Join-Path -Path $runtimeDir -ChildPath 'data_live'
+}
+$logsDir = if (-not [string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_LOGS_DIR)) {
+    [System.IO.Path]::GetFullPath([string]$env:PHOENIXGUARD_LOGS_DIR)
+} else {
+    Join-Path -Path $runtimeDir -ChildPath 'logs_live'
+}
+$trackerStatusFile = if (-not [string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_TRACKER_STATUS_FILE)) {
+    [System.IO.Path]::GetFullPath([string]$env:PHOENIXGUARD_TRACKER_STATUS_FILE)
+} else {
+    Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+}
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 }
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
-$env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
-$env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
-$env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+$env:PHOENIXGUARD_DATA_DIR = $dataDir
+$env:PHOENIXGUARD_LOGS_DIR = $logsDir
+$env:PHOENIXGUARD_TRACKER_STATUS_FILE = $trackerStatusFile
 $windowsRegionCaptureStatusPath = Join-Path -Path $runtimeDir -ChildPath 'windows_region_capture_status.json'
 $env:PHOENIXGUARD_WINDOWS_REGION_CAPTURE_STATUS_FILE = $windowsRegionCaptureStatusPath
+if ($runtimeDir -ne $legacyRuntimeDir) {
+    $legacyTokenPath = Join-Path -Path $legacyRuntimeDir -ChildPath 'edge_tab_capture.token'
+    $currentTokenPath = Join-Path -Path $runtimeDir -ChildPath 'edge_tab_capture.token'
+    if (
+        -not (Test-Path -LiteralPath $currentTokenPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $legacyTokenPath -PathType Leaf)
+    ) {
+        Copy-Item -LiteralPath $legacyTokenPath -Destination $currentTokenPath
+    }
+}
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Initialize-PhoenixGuardEdgeTabCapture.ps1')
 $edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
     -RuntimeDir $runtimeDir `
@@ -577,14 +610,16 @@ if (-not $processRowsAvailable) {
             -LockPath $runtimeLockPath `
             -RepositoryRoot $ProjectRoot `
             -ExpectedSessionId $SessionId `
-            -ExpectedApiPort 8793
+            -ExpectedApiPort 8793 `
+            -ExpectedDataDir $env:PHOENIXGUARD_DATA_DIR
     } elseif (Test-Path -LiteralPath $runtimeLockPath -PathType Leaf) {
         try {
             $validatedRuntimeLock = Get-ValidatedPhoenixGuardRuntimeLock `
                 -LockPath $runtimeLockPath `
                 -RepositoryRoot $ProjectRoot `
                 -ExpectedSessionId $SessionId `
-                -ExpectedApiPort 8793
+                -ExpectedApiPort 8793 `
+                -ExpectedDataDir $env:PHOENIXGUARD_DATA_DIR
         } catch {
             Write-Warning "Stale or invalid closed-port runtime lock will not be used as PID authority."
         }
@@ -689,7 +724,11 @@ if ($env:PHOENIXGUARD_DISK_GUARD_ENABLED -eq '0') {
         '--low-water',
         $guardLowWater,
         '--interval-sec',
-        $guardInterval
+        $guardInterval,
+        '--report-path',
+        (Join-Path -Path $runtimeDir -ChildPath 'disk_growth_guard_report.json'),
+        '--jsonl-log',
+        (Join-Path -Path $env:PHOENIXGUARD_LOGS_DIR -ChildPath 'disk_growth_guard.jsonl')
     )
     if ($env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS -ne '0') {
         $guardArgs += '--include-codex-sessions'
@@ -698,7 +737,7 @@ if ($env:PHOENIXGUARD_DISK_GUARD_ENABLED -eq '0') {
     $guardErrPath = '\\.\NUL'
     Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $guardArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $guardOutPath -RedirectStandardError $guardErrPath | Out-Null
     Write-Host "  enabled=true cap=$guardLimit low_water=$guardLowWater interval_sec=$guardInterval"
-    Write-Host "  guard_stdio=discarded report=runtime/live/disk_growth_guard_report.json"
+    Write-Host "  guard_stdio=discarded report=$(Join-Path -Path $runtimeDir -ChildPath 'disk_growth_guard_report.json')"
 } else {
     Write-Warning "Backend\tools\phoenixguard_disk_growth_guard.py not found. Disk cap worker not started."
 }
@@ -853,9 +892,12 @@ $summaryPayload | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPat
 Write-Host ""
 Write-Host "Live launch complete."
 Write-Host "  Dashboard: $dashboardUrl"
+Write-Host "  Runtime: $runtimeDir"
+Write-Host "  Data: $env:PHOENIXGUARD_DATA_DIR"
+Write-Host "  Logs: $env:PHOENIXGUARD_LOGS_DIR"
 if ($DisableShooter) {
     Write-Host "  Shooter: disabled; no shooter process was launched."
 } else {
-    Write-Host "  Shooter reporter: background package reporter with logs in runtime\live\logs"
+    Write-Host "  Shooter reporter: background package reporter with logs in $env:PHOENIXGUARD_LOGS_DIR"
 }
-Write-Host "  Launch summary: runtime\live\live_launch_summary.json"
+Write-Host "  Launch summary: $summaryPath"

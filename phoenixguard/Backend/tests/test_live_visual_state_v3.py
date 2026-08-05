@@ -1429,6 +1429,60 @@ def test_browser_tab_region_cannot_use_wgc_title_waiver() -> None:
     assert broker_source["title_requirement_satisfied"] is False
 
 
+def test_browser_tab_region_accepts_explicit_title_proof() -> None:
+    session: dict[str, Any] = {
+        "capture_source_v3": {
+            "state": "LIVE",
+            "fresh": True,
+            "decision_usable": True,
+            "source_id": "edge-tab-region-v3",
+            "sequence_id": "edge-sequence-808",
+            "source_generation": 1,
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+        "broker_source": {
+            "valid": True,
+            "status": "VALID",
+            "wrong_surface": False,
+            "url_valid": True,
+            "title_valid": True,
+            "pixel_fingerprint_valid": True,
+            "study_source_only": True,
+            "broker_click_safe": False,
+        },
+        "broker_source_lock": {
+            "valid": True,
+            "status": "VALID",
+            "broker_source_locked": True,
+            "reason_codes": [
+                "EXTERNAL_FRAME_FEED_LOCKED",
+                "CHART_STUDY_SOURCE_LOCKED",
+                "BROWSER_TAB_IDENTITY_VERIFIED",
+            ],
+            "surface_guard": {"wrong_surface": False, "capture_safe": True},
+            "evidence": {
+                "source_id": "edge-tab-region-v3",
+                "sequence_id": "edge-sequence-808",
+                "source_type": "browser_tab_roi_capture",
+                "coordinate_space": "edge_tab_roi_v1",
+                "study_source_only": True,
+                "broker_click_safe": False,
+                "title_valid": True,
+                "url_valid": True,
+            },
+        },
+    }
+
+    broker_source = _broker_source_summary(session)
+
+    assert broker_source["valid"] is True
+    assert broker_source["wrong_surface"] is False
+    assert broker_source["title_valid"] is True
+    assert broker_source["title_optional_for_study"] is False
+    assert broker_source["title_requirement_satisfied"] is True
+
+
 def test_title_gate_still_blocks_non_study_source() -> None:
     broker_source = _broker_source_summary(
         {

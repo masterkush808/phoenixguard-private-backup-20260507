@@ -16,6 +16,7 @@ from typing import Any, Protocol, Sequence, cast
 from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 from PIL import Image
+from starlette.concurrency import run_in_threadpool
 
 
 DEFAULT_MAX_FRAME_BYTES = 15 * 1024 * 1024
@@ -59,6 +60,32 @@ BROWSER_EXTENSION_COORDINATE_SPACES = (
     "edge_tab_roi_v1",
 )
 LEASED_COORDINATE_SPACES = frozenset({"edge_tab_roi_v1", "wgc_hwnd_roi_v1"})
+VISUAL_IDENTITY_SOURCE_CONTRACTS = frozenset(
+    {
+        ("browser_tab_roi_capture", "edge_tab_roi_v1"),
+        ("windows_graphics_capture_roi", "wgc_hwnd_roi_v1"),
+    }
+)
+
+
+def _effective_frame_identity_hints(
+    symbol: str,
+    timeframe: str,
+    metadata: Mapping[str, Any],
+) -> tuple[str, str, bool]:
+    """Discard persisted identity hints for adaptive leased chart regions."""
+
+    contract = (
+        str(metadata.get("source_type", "") or "").strip(),
+        str(metadata.get("coordinate_space", "") or "").strip(),
+    )
+    ignored = bool(
+        contract in VISUAL_IDENTITY_SOURCE_CONTRACTS
+        and (str(symbol or "").strip() or str(timeframe or "").strip())
+    )
+    if contract in VISUAL_IDENTITY_SOURCE_CONTRACTS:
+        return "", "", ignored
+    return str(symbol or ""), str(timeframe or ""), False
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +181,31 @@ class FrameIngestTracker(Protocol):
         sequence_id: str,
         source_generation: int,
         source_lease_id: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def heartbeat_external_source(
+        self,
+        session_id: str,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+        capture_epoch_ms: int,
+        source_render_fresh: bool,
+        material_change_pending: bool = False,
+        roi_normalized: Any = None,
+        roi_source_pixels: Mapping[str, Any] | None = None,
+        source_surface_width: int = 0,
+        source_surface_height: int = 0,
+        transport_frame_age_ms: int = 0,
+        decoder_frame_age_ms: int = 0,
+        capture_health_reason: str = "",
+        capture_status: str = "",
+        presented_frames: int = 0,
+        media_time: float = 0.0,
+        identity_observation_v3: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -993,6 +1045,137 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             "source_lease_id": str(state.get("source_lease_id", "") or state.get("lease_id", "") or ""),
         }
 
+    async def heartbeat_source_control(
+        request: Request,
+        session_id: str,
+        payload: dict[str, Any] = Body(...),
+        authorization: str | None = Header(default=None),
+        x_phoenixguard_token: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        """Acknowledge source transport health without waiting for inference."""
+
+        _require_origin_allowed(request.headers.get("origin"))
+        auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
+        source_id = str(payload.get("source_id", "") or "").strip()
+        sequence_id = str(payload.get("sequence_id", "") or "").strip()
+        source_lease_id = str(payload.get("source_lease_id", "") or "").strip()
+        try:
+            source_generation = int(payload.get("source_generation", 0))
+            capture_epoch_ms = int(payload.get("capture_epoch_ms", 0))
+            source_surface_width = int(
+                payload.get("source_surface_width", 0)
+            )
+            source_surface_height = int(
+                payload.get("source_surface_height", 0)
+            )
+            transport_frame_age_ms = int(
+                payload.get("transport_frame_age_ms", 0)
+            )
+            decoder_frame_age_ms = int(
+                payload.get("decoder_frame_age_ms", 0)
+            )
+            presented_frames = int(payload.get("presented_frames", 0))
+            media_time = float(payload.get("media_time", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Source heartbeat generation, epochs, dimensions, ages, and counters must be numeric.",
+            ) from exc
+        _require_scope_allowed(auth_context, session_id, source_id, "", "")
+        if (
+            not source_id
+            or len(source_id) > 128
+            or not sequence_id
+            or len(sequence_id) > 192
+            or source_generation <= 0
+            or not source_lease_id
+            or capture_epoch_ms <= 0
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "A current source_id, sequence_id, source_generation, "
+                    "source_lease_id, and capture_epoch_ms are required for heartbeat."
+                ),
+            )
+        roi_normalized = payload.get("roi_normalized", [])
+        if not isinstance(roi_normalized, (Mapping, list, tuple)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="roi_normalized must be a four-value vector or geometry object.",
+            )
+        roi_source_pixels = payload.get("roi_source_pixels", {})
+        if not isinstance(roi_source_pixels, Mapping):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="roi_source_pixels must be an object.",
+            )
+        identity_observation_v3 = payload.get("identity_observation_v3")
+        if identity_observation_v3 is not None and not isinstance(
+            identity_observation_v3, Mapping
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="identity_observation_v3 must be an object or null.",
+            )
+        try:
+            source_state = await run_in_threadpool(
+                get_tracker().heartbeat_external_source,
+                session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                source_generation=source_generation,
+                source_lease_id=source_lease_id,
+                capture_epoch_ms=capture_epoch_ms,
+                source_render_fresh=payload.get("source_render_fresh") is True,
+                material_change_pending=payload.get("material_change_pending") is True,
+                roi_normalized=roi_normalized,
+                roi_source_pixels=dict(cast(Mapping[str, Any], roi_source_pixels)),
+                source_surface_width=source_surface_width,
+                source_surface_height=source_surface_height,
+                transport_frame_age_ms=transport_frame_age_ms,
+                decoder_frame_age_ms=decoder_frame_age_ms,
+                capture_health_reason=str(payload.get("capture_health_reason", "") or ""),
+                capture_status=str(payload.get("capture_status", "") or ""),
+                presented_frames=presented_frames,
+                media_time=media_time,
+                identity_observation_v3=(
+                    dict(cast(Mapping[str, Any], identity_observation_v3))
+                    if isinstance(identity_observation_v3, Mapping)
+                    else None
+                ),
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            lease_status = int(getattr(exc, "status_code", 0) or 0)
+            lease_reason = str(getattr(exc, "reason_code", "") or "")
+            if lease_status in {
+                status.HTTP_409_CONFLICT,
+                status.HTTP_410_GONE,
+            } and lease_reason:
+                detail_factory = getattr(exc, "as_detail", None)
+                detail = detail_factory() if callable(detail_factory) else {
+                    "reason_code": lease_reason,
+                    "message": str(getattr(exc, "message", "") or str(exc)),
+                }
+                raise HTTPException(status_code=lease_status, detail=detail) from exc
+            raise
+        return {
+            "schema_version": "PG_CAPTURE_SOURCE_HEARTBEAT_ACCEPTED_V1",
+            "accepted": True,
+            "session_id": session_id,
+            "source_control": _public_source_control(source_state),
+        }
+
     def kill_source_control(
         request: Request,
         session_id: str,
@@ -1119,8 +1302,27 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
         try:
             _require_origin_allowed(request.headers.get("origin"))
             auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
-            _require_scope_allowed(auth_context, session_id, source_id, symbol, timeframe)
             metadata = _metadata_from_json(metadata_json)
+            effective_symbol, effective_timeframe, identity_hints_ignored = (
+                _effective_frame_identity_hints(symbol, timeframe, metadata)
+            )
+            audit_base["identity_hint_policy"] = (
+                "visual_reproof_required"
+                if (
+                    str(metadata.get("source_type", "") or "").strip(),
+                    str(metadata.get("coordinate_space", "") or "").strip(),
+                )
+                in VISUAL_IDENTITY_SOURCE_CONTRACTS
+                else "declared_hint_allowed"
+            )
+            audit_base["identity_hints_ignored"] = identity_hints_ignored
+            _require_scope_allowed(
+                auth_context,
+                session_id,
+                source_id,
+                effective_symbol,
+                effective_timeframe,
+            )
             _require_current_frame_source_contract(
                 session_id,
                 source_id=source_id,
@@ -1159,12 +1361,19 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             metadata["frame_bytes"] = frame_bytes
             metadata["source_generation"] = int(source_generation or 0)
             metadata["source_lease_id"] = str(source_lease_id or "")
-            tracker_response = get_tracker().ingest_external_frame(
+            if (
+                str(metadata.get("source_type", "") or "").strip(),
+                str(metadata.get("coordinate_space", "") or "").strip(),
+            ) in VISUAL_IDENTITY_SOURCE_CONTRACTS:
+                metadata["identity_hint_policy"] = "visual_reproof_required"
+                metadata["identity_hints_ignored"] = identity_hints_ignored
+            tracker_response = await run_in_threadpool(
+                get_tracker().ingest_external_frame,
                 session_id,
                 image,
                 source_id=source_id,
-                symbol=symbol,
-                timeframe=timeframe,
+                symbol=effective_symbol,
+                timeframe=effective_timeframe,
                 source_url=source_url,
                 sequence_id=sequence_id,
                 capture_epoch_ms=capture_epoch_ms,
@@ -1283,6 +1492,11 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
     router.add_api_route(
         "/sessions/{session_id}/source-control/kill",
         kill_source_control,
+        methods=["POST"],
+    )
+    router.add_api_route(
+        "/sessions/{session_id}/source-control/heartbeat",
+        heartbeat_source_control,
         methods=["POST"],
     )
     router.add_api_route(

@@ -116,6 +116,8 @@ class _SurfaceView(TypedDict):
     frame_id: _FrameId
     updated_at: float | None
     semantic_identity: NotRequired[str]
+    overlay_state_version: NotRequired[str]
+    overlay_frame_state_version: NotRequired[str]
     overlay_semantic_revision: NotRequired[str]
     overlay_geometry_revision: NotRequired[str]
 
@@ -150,6 +152,7 @@ class _OverlayView(TypedDict):
     semantic_id: NotRequired[str]
     overlay_semantic_revision: NotRequired[str]
     overlay_geometry_revision: NotRequired[str]
+    surface_semantic_identity: NotRequired[str]
     anchor_id: NotRequired[str]
     positioning_status: NotRequired[str]
     positioning_basis: NotRequired[str]
@@ -401,6 +404,261 @@ def test_wgc_study_source_projects_identity_locked_overlays_without_selector_fin
     assert overlay["timeframe"] == "M5"
     assert overlay["market_selector_visual_fingerprint"] == ""
     assert overlay["instrument_identity_status"] == "LOCKED"
+    assert overlay["surface_semantic_identity"] == workspace["surface"][
+        "semantic_identity"
+    ]
+
+
+def test_public_overlay_semantics_are_pair_scoped_even_when_track_id_is_reused() -> None:
+    first_payload = _wgc_identity_overlay_payload()
+    first = _build_workspace(first_payload, now_epoch=100.0)
+
+    second_payload = _wgc_identity_overlay_payload()
+    second_payload["symbol"] = "USD/CAD OTC"
+    second_tracking = _mutable_mapping(second_payload["tracking_summary"])
+    second_tracking["detected_market"] = "USD/CAD OTC"
+    second_container = _mutable_mapping(second_payload["overlays"])
+    second_row = cast(list[dict[str, object]], second_container["objects"])[0]
+    second_row["symbol"] = "USD/CAD OTC"
+    second = _build_workspace(second_payload, now_epoch=100.0)
+
+    assert first["overlays"][0]["id"] == second["overlays"][0]["id"]
+    assert first["overlays"][0]["semantic_id"] != second["overlays"][0][
+        "semantic_id"
+    ]
+    assert first["surface"]["semantic_identity"] != second["surface"][
+        "semantic_identity"
+    ]
+
+
+def test_unknown_market_frames_never_share_a_visual_surface_namespace() -> None:
+    first_payload = _fresh_payload()
+    first_tracking = _mutable_mapping(first_payload["tracking_summary"])
+    first_tracking.pop("detected_market", None)
+    first = _build_workspace(first_payload, now_epoch=100.0)
+
+    second_payload = _fresh_payload()
+    second_tracking = _mutable_mapping(second_payload["tracking_summary"])
+    second_tracking.pop("detected_market", None)
+    second_payload["display_frame_id"] = 15
+    second_payload["chart_frame_id"] = 15
+    second_payload["state_version"] = 15
+    second = _build_workspace(second_payload, now_epoch=101.0)
+
+    assert first["market"]["symbol"] == "Unknown"
+    assert second["market"]["symbol"] == "Unknown"
+    assert first["surface"]["semantic_identity"] != second["surface"][
+        "semantic_identity"
+    ]
+
+
+def test_same_frame_fast_chart_identity_names_surface_before_study_completes() -> None:
+    payload = _fresh_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking.pop("detected_market", None)
+    payload["current_chart_identity_v3"] = {
+        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+        "frame_id": 14,
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "pair_changed": True,
+        "decision_authority": False,
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["market"] == {"symbol": "USD/CAD OTC", "timeframe": "M5"}
+
+
+def test_fast_chart_identity_from_another_frame_is_never_attached() -> None:
+    payload = _fresh_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking.pop("detected_market", None)
+    payload["current_chart_identity_v3"] = {
+        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+        "frame_id": 13,
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "decision_authority": False,
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["market"]["symbol"] == "Unknown"
+
+
+def test_same_frame_pending_identity_vetoes_old_pair_and_overlays() -> None:
+    payload = _wgc_identity_overlay_payload()
+    payload["current_chart_identity_v3"] = {
+        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+        "frame_id": 14,
+        "display_frame_id": 14,
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "market_identity_confirmed": False,
+        "timeframe_identity_confirmed": False,
+        "decision_authority": False,
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["market"] == {
+        "symbol": "Unknown",
+        "timeframe": "Unknown",
+        "identity_status": "Identifying current chart",
+        "identity_pending": True,
+    }
+    assert workspace["overlays"] == []
+
+
+def test_same_frame_fast_chart_identity_unlocks_only_matching_overlay_rows() -> None:
+    payload = _wgc_identity_overlay_payload()
+    tracking = _mutable_mapping(payload["tracking_summary"])
+    tracking.pop("broker_source_lock", None)
+    tracking.pop("broker_source", None)
+    payload["current_chart_identity_v3"] = {
+        "schema_version": "PG_CURRENT_CHART_IDENTITY_V3",
+        "frame_id": 14,
+        "display_frame_id": 14,
+        "symbol": "CAD/CHF OTC",
+        "timeframe": "M5",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "decision_authority": False,
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert [row["id"] for row in workspace["overlays"]] == [
+        "wgc-demand-zone-14"
+    ]
+
+    mismatched = _mutable_mapping(payload["current_chart_identity_v3"])
+    mismatched["symbol"] = "USD/CAD OTC"
+    rejected = _build_workspace(payload, now_epoch=100.0)
+    assert rejected["overlays"] == []
+
+
+def test_compact_public_top_level_overlay_list_reaches_operator_workspace() -> None:
+    payload = _wgc_identity_overlay_payload()
+    container = cast(dict[str, object], payload["overlays"])
+    payload["overlays"] = cast(list[dict[str, object]], container["objects"])
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert len(workspace["overlays"]) == 1
+    assert workspace["overlays"][0]["id"] == "wgc-demand-zone-14"
+    assert workspace["surface"]["frame_id"] == 14
+
+
+def test_compact_public_overlay_contract_keeps_frame_aligned_identity_rows() -> None:
+    payload = _wgc_identity_overlay_payload()
+    tracking = cast(dict[str, object], payload["tracking_summary"])
+    tracking.pop("broker_source_lock", None)
+    tracking.pop("broker_source", None)
+    payload.pop("capture_source_v3", None)
+    payload["overlay_frame_id"] = 14
+    payload["overlay_object_frame_id"] = 14
+    container = cast(dict[str, object], payload["overlays"])
+    container.update(
+        {
+            "artifact_frame_aligned": True,
+            "artifact_frame_id": 14,
+            "overlay_object_frame_id": 14,
+            "symbol": "CAD/CHF OTC",
+            "timeframe": "M5",
+            "instrument_identity_status": "LOCKED",
+        }
+    )
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert len(workspace["overlays"]) == 1
+    assert workspace["overlays"][0]["id"] == "wgc-demand-zone-14"
+
+
+def _selector_v3_compact_overlay_payload() -> dict[str, object]:
+    payload = _wgc_identity_overlay_payload()
+    tracking = cast(dict[str, object], payload["tracking_summary"])
+    tracking.pop("broker_source_lock", None)
+    tracking.pop("broker_source", None)
+    selector_fingerprint = "selector_v3_cadchfotc_confirmed"
+    payload.update(
+        {
+            "overlay_frame_id": 14,
+            "overlay_object_frame_id": 14,
+            "market_selector_visual_fingerprint": selector_fingerprint,
+        }
+    )
+    container = cast(dict[str, object], payload["overlays"])
+    container.update(
+        {
+            "artifact_frame_aligned": True,
+            "artifact_frame_id": 14,
+            "overlay_object_frame_id": 14,
+            "symbol": "CAD/CHF OTC",
+            "timeframe": "M5",
+            "market_selector_visual_fingerprint": selector_fingerprint,
+            "instrument_identity_status": "LOCKED",
+        }
+    )
+    objects = cast(list[dict[str, object]], container["objects"])
+    objects[0]["market_selector_visual_fingerprint"] = selector_fingerprint
+    return payload
+
+
+def test_compact_selector_v3_exact_identity_projects_current_overlay() -> None:
+    workspace = _build_workspace(
+        _selector_v3_compact_overlay_payload(),
+        now_epoch=100.0,
+    )
+
+    assert len(workspace["overlays"]) == 1
+    overlay = workspace["overlays"][0]
+    assert overlay["id"] == "wgc-demand-zone-14"
+    assert overlay["symbol"] == "CAD/CHF OTC"
+    assert overlay["timeframe"] == "M5"
+    assert overlay["market_selector_visual_fingerprint"] == (
+        "selector_v3_cadchfotc_confirmed"
+    )
+    assert overlay["instrument_identity_status"] == "LOCKED"
+    assert workspace["surface"]["market_selector_visual_fingerprint"] == (
+        "selector_v3_cadchfotc_confirmed"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_case",
+    (
+        "selector",
+        "frame",
+        "pair",
+        "timeframe",
+    ),
+)
+def test_compact_selector_v3_identity_mismatch_fails_closed(
+    failure_case: str,
+) -> None:
+    payload = _selector_v3_compact_overlay_payload()
+    container = cast(dict[str, object], payload["overlays"])
+    objects = cast(list[dict[str, object]], container["objects"])
+    overlay = objects[0]
+    if failure_case == "selector":
+        overlay["market_selector_visual_fingerprint"] = "selector_v3_other"
+    elif failure_case == "frame":
+        overlay["frame_id"] = 13
+    elif failure_case == "pair":
+        overlay["symbol"] = "USD/CAD OTC"
+    elif failure_case == "timeframe":
+        overlay["timeframe"] = "M1"
+    else:
+        raise AssertionError(f"Unhandled failure case: {failure_case}")
+
+    assert _build_workspace(payload, now_epoch=100.0)["overlays"] == []
 
 
 @pytest.mark.parametrize(
@@ -1269,6 +1527,25 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
     assert "private-agent" not in serialized
 
 
+def test_operator_surface_exposes_frame_atomic_overlay_versions() -> None:
+    payload = _fresh_payload()
+    payload["overlay_state_version"] = "ovlock_4_a1b2c3d4e5f6"
+    payload["overlay_frame_state_version"] = "ov_14_4_a1b2c3d4e5f6"
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    assert workspace["surface"]["frame_id"] == 14
+    assert (
+        workspace["surface"]["overlay_state_version"]
+        == "ovlock_4_a1b2c3d4e5f6"
+    )
+    assert (
+        workspace["surface"]["overlay_frame_state_version"]
+        == "ov_14_4_a1b2c3d4e5f6"
+    )
+    assert "frame_timing_trace_v3" not in workspace["surface"]
+
+
 def test_operator_workspace_sanitizes_cpu_stream_health_without_authority() -> None:
     payload = _fresh_payload()
     payload["cpu_stream_v3"] = {
@@ -1574,6 +1851,43 @@ def test_duplicate_stream_pixels_are_not_reported_as_market_rest() -> None:
     assert "do not prove a market rest" in str(
         operator_action["instruction"]
     ).lower()
+
+
+def test_fresh_stream_keeps_current_study_visible_when_no_entry_window_was_issued() -> None:
+    payload = _countertrend_study_payload()
+    command = _mutable_mapping(payload["decision_command_center"])
+    command["execution_packet_present"] = False
+    command.pop("fresh", None)
+    command.pop("freshness_status", None)
+    command.pop("valid_until_epoch", None)
+    command.pop("valid_until_epoch_sec", None)
+    command.pop("expires_at", None)
+
+    base = _build_workspace(payload, now_epoch=100.0)
+    assert base["freshness"]["state"] == "UNKNOWN"
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        _cpu_stream_runtime_payload(
+            now=101.0,
+            frame_seq=44,
+            state="observing",
+        ),
+        now_epoch=101.0,
+    )
+    entry = cast(
+        dict[str, object],
+        cast(dict[str, object], refreshed["three_questions"])["entry_now"],
+    )
+    action = cast(dict[str, object], entry["operator_action"])
+
+    assert entry["timing_state"] == "STALE"
+    assert entry["state"] == "OBSERVING"
+    assert entry["headline"] == "PREPARE"
+    assert action["state"] == "PREPARE"
+    assert entry["enter_now"] is False
+    assert entry["entry_permission_authorized"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
 
 
 def test_missed_stream_decision_waits_for_fresh_directional_pullback() -> None:
@@ -1903,10 +2217,17 @@ def test_five_pair_m5_forecasts_are_concrete_bounded_and_stream_stable(
     assert action["state"] == "PREPARE"
     projection = cast(dict[str, object], entry["study_projection"])
     assert projection["headline"] == (
-        f"{side} direction studied · timing range withheld"
+        f"{forecast['headline']} · uncalibrated live-sequence estimate"
     )
-    assert projection["timing_range_publishable"] is False
-    assert "not replay-calibrated" in str(projection["summary"])
+    assert projection["status"] == "FORECAST_AVAILABLE_UNCALIBRATED"
+    assert projection["horizon_label"] == forecast["horizon_label"]
+    assert projection["timing_range_publishable"] is True
+    assert projection["calibrated"] is False
+    assert projection["basis"] == "LIVE_M5_SEQUENCE"
+    assert "uncalibrated live-sequence estimate" in str(
+        projection["summary"]
+    )
+    assert "supplies no event probability" in str(projection["summary"])
     assert projection["study_only"] is True
     assert projection["can_grant_entry_permission"] is False
 
@@ -1964,6 +2285,149 @@ def test_five_pair_m5_forecasts_are_concrete_bounded_and_stream_stable(
     assert later_forecast["horizon_label"] == forecast["horizon_label"]
 
 
+@pytest.mark.parametrize("failure_mode", ["SHORT_HORIZON", "STALE_LINEAGE"])
+def test_uncalibrated_live_sequence_projection_requires_current_eligible_lineage(
+    failure_mode: str,
+) -> None:
+    payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(
+        payload,
+        probability=None,
+        evidence_confidence=0.0,
+        calibration_grade="D_CURRENT_SEQUENCE",
+        source_tier="LIVE_M5_SEQUENCE",
+        support_count=0,
+        sweep_support_count=0,
+    )
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    forward = _mutable_mapping(
+        _mutable_mapping(study["path_clock_liquidity_v3"])[
+            "forward_timing_forecast"
+        ]
+    )
+    if failure_mode == "SHORT_HORIZON":
+        _mutable_mapping(forward["move_window"])["earliest"] = {
+            "seconds": 899,
+            "minutes": 14.983,
+            "candles": 2.997,
+        }
+    else:
+        _mutable_mapping(forward["lineage"])[
+            "closed_candle_key"
+        ] = "stale-closed-candle"
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    projection = cast(dict[str, object], entry["study_projection"])
+
+    assert forecast["status"] == "TIMING_UNRATED"
+    assert projection["status"] == "RESEARCH_ONLY_UNCALIBRATED"
+    assert projection["timing_range_publishable"] is False
+    assert "timing range withheld" in str(projection["headline"])
+    assert projection["can_grant_entry_permission"] is False
+
+
+def test_empirical_pair_timing_publishes_bounded_uncalibrated_projection() -> None:
+    payload = _countertrend_study_payload()
+    _mutable_mapping(payload["decision_command_center"])[
+        "execution_packet_present"
+    ] = False
+    _attach_forward_timing_forecast(
+        payload,
+        probability=None,
+        evidence_confidence=0.0,
+        calibration_grade="C_SPARSE_PAIR",
+        source_tier="PAIR",
+        support_count=3,
+        sweep_support_count=0,
+    )
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    forward = _mutable_mapping(
+        _mutable_mapping(study["path_clock_liquidity_v3"])[
+            "forward_timing_forecast"
+        ]
+    )
+    _mutable_mapping(forward["move_window"])["latest"] = {
+        "seconds": 2_700,
+        "minutes": 45,
+        "candles": 9,
+    }
+
+    entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
+        "entry_now"
+    ]
+    forecast = cast(dict[str, object], entry["timing_forecast"])
+    projection = cast(dict[str, object], entry["study_projection"])
+
+    assert forecast["status"] == "FORECAST_AVAILABLE"
+    assert forecast["forecast_lineage_matches"] is True
+    assert forecast["timing_empirical"] is True
+    assert forecast["timing_support_count"] == 3
+    assert forecast["horizon_seconds_low"] == 900
+    assert forecast["horizon_seconds_high"] == 2_700
+    assert projection["status"] == "FORECAST_AVAILABLE_UNCALIBRATED"
+    assert projection["timing_range_publishable"] is True
+    assert projection["basis"] == "PAIR"
+    assert projection["support_count"] == 3
+    assert "uncalibrated empirical pair estimate" in str(
+        projection["headline"]
+    )
+    assert "not an event probability" in str(projection["summary"])
+    assert projection["can_grant_entry_permission"] is False
+    assert entry["enter_now"] is False
+
+
+@pytest.mark.parametrize("failure_mode", ["SHORT_HORIZON", "STALE_LINEAGE"])
+def test_empirical_pair_projection_fails_closed_outside_timing_contract(
+    failure_mode: str,
+) -> None:
+    payload = _countertrend_study_payload()
+    _attach_forward_timing_forecast(
+        payload,
+        probability=None,
+        evidence_confidence=0.0,
+        calibration_grade="C_SPARSE_PAIR",
+        source_tier="PAIR",
+        support_count=3,
+        sweep_support_count=0,
+    )
+    study = _mutable_mapping(
+        _mutable_mapping(payload["tracking_summary"])["market_study_v3"]
+    )
+    forward = _mutable_mapping(
+        _mutable_mapping(study["path_clock_liquidity_v3"])[
+            "forward_timing_forecast"
+        ]
+    )
+    if failure_mode == "SHORT_HORIZON":
+        _mutable_mapping(forward["move_window"])["earliest"] = {
+            "seconds": 899,
+            "minutes": 14.983,
+            "candles": 2.997,
+        }
+    else:
+        _mutable_mapping(forward["lineage"])[
+            "closed_candle_key"
+        ] = "stale-pair-closed-candle"
+
+    projection = cast(
+        dict[str, object],
+        _build_workspace(payload, now_epoch=100.0)["three_questions"][
+            "entry_now"
+        ]["study_projection"],
+    )
+    assert projection["status"] == "RESEARCH_ONLY_UNCALIBRATED"
+    assert projection["timing_range_publishable"] is False
+    assert "timing range withheld" in str(projection["headline"])
+    assert projection["can_grant_entry_permission"] is False
+
+
 def test_active_target_forecasts_next_impulse_without_inviting_a_chase() -> None:
     payload = _countertrend_study_payload()
     _retarget_m5_study_payload(
@@ -2011,11 +2475,12 @@ def test_active_target_forecasts_next_impulse_without_inviting_a_chase() -> None
     assert entry["headline"] == "WAIT FOR PULLBACK"
     projection = cast(dict[str, object], entry["study_projection"])
     assert projection["headline"] == (
-        "BUY direction studied · timing range withheld"
+        f"{forecast['headline']} · uncalibrated live-sequence estimate"
     )
     assert projection["support_count"] == 0
     assert projection["calibrated"] is False
-    assert projection["timing_range_publishable"] is False
+    assert projection["basis"] == "LIVE_M5_SEQUENCE"
+    assert projection["timing_range_publishable"] is True
     assert action["state"] == "WAIT_FOR_PULLBACK"
     assert "Do not chase" in str(action["instruction"])
     assert "one completed rest or pullback" in str(action["instruction"])
@@ -2151,6 +2616,8 @@ def test_exact_window_uses_fixed_epochs_counts_down_and_expires_without_reset() 
     assert "fixed window opens in 15 min" in str(initial["headline"])
     assert initial_projection["timing_range_publishable"] is True
     assert initial_projection["headline"] == initial["headline"]
+    assert initial_projection["calibrated"] is True
+    assert initial_projection["basis"] == "PAIR"
 
     at_400 = refresh_operator_streaming_read_v3(
         workspace,
@@ -2288,6 +2755,69 @@ def test_stream_pair_switch_discards_prior_forecast_and_permission() -> None:
     assert action["state"] == "AVOID"
     assert entry["enter_now"] is False
     assert entry["identity_rebind_pending"] is False
+
+
+def test_heartbeat_pair_switch_revokes_partial_overlay_publish_without_study() -> None:
+    """Old-pair geometry cannot survive before market_study_v3 is complete."""
+
+    base = _build_workspace(_wgc_identity_overlay_payload(), now_epoch=100.0)
+    assert len(base["overlays"]) == 1
+    assert base["market"] == {"symbol": "CAD/CHF OTC", "timeframe": "M5"}
+    runtime = {
+        "display_frame_id": 14,
+        "capture_source_v3": {
+            "state": "LIVE",
+            "fresh": True,
+            "source_id": "edge-chart-region-v3",
+            "sequence_id": "edge-sequence-21",
+            "source_generation": 4,
+            "stale_after_sec": 20.0,
+            "stream": {
+                "revocation_identity_observation_v3": {
+                    "schema_version": "PG_REVOCATION_IDENTITY_OBSERVATION_V3",
+                    "revocation_only": True,
+                    "lease_fenced": True,
+                    "study_authority": False,
+                    "overlay_authority": False,
+                    "decision_authority": False,
+                    "symbol": "USD/CAD OTC",
+                    "timeframe": "M5",
+                    "observed_epoch": 100.5,
+                    "received_epoch": 101.0,
+                    "sequence_id": "edge-sequence-21",
+                    "source_generation": 4,
+                }
+            },
+        },
+        # The heavy study still belongs to the previous pair and has not yet
+        # published a completed market_study_v3 row.
+        "tracking_summary": {
+            "detected_market": "CAD/CHF OTC",
+            "detected_timeframe": "M5",
+        },
+        "latest_signal": {},
+    }
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        runtime,
+        now_epoch=101.0,
+    )
+
+    assert refreshed["market"] == {
+        "symbol": "USD/CAD OTC",
+        "timeframe": "M5",
+        "identity_status": "Classifying current chart",
+        "identity_pending": True,
+        "identity_authority": False,
+    }
+    assert refreshed["overlays"] == []
+    assert refreshed["history"] == []
+    assert refreshed["permission"]["allowed"] is False
+    questions = cast(dict[str, object], refreshed["three_questions"])
+    entry = cast(dict[str, object], questions["entry_now"])
+    assert entry["headline"] == "CLASSIFYING CURRENT CHART"
+    assert entry["enter_now"] is False
 
 
 def test_exact_stop_survival_calibration_never_bleeds_into_event_likelihood() -> None:
@@ -3517,6 +4047,48 @@ def test_final_public_overlay_boundary_preserves_only_safe_order_positioning_sem
         assert malformed_origin_rows == []
 
 
+def test_final_public_overlay_boundary_preserves_exact_surface_identity() -> None:
+    safe_rows = mobile_app._safe_operator_overlay_rows(  # pyright: ignore[reportPrivateUsage]
+        [
+            {
+                "id": "current-candle-identity-bound",
+                "type": "price",
+                "kind": "current_price",
+                "kind_label": "Current price",
+                "side": "BUY",
+                "group": "movement",
+                "family": "current_candles",
+                "layer": "recent_candles",
+                "label": "Current price",
+                "bounds": [759.0, 340.0, 764.0, 346.0],
+                "points": [],
+                "line_points": [],
+                "confidence": 1.0,
+                "lifecycle": "current",
+                "frame_id": 15,
+                "coordinate_space": "chart",
+                "coordinate_units": "pixels",
+                "symbol": "CAD/JPY OTC",
+                "timeframe": "M5",
+                "market_selector_visual_fingerprint": "selector_v3_cad_jpy_otc",
+                "instrument_identity_status": "LOCKED",
+                "surface_semantic_identity": "surface-cad-jpy-15",
+                "private_detector_trace": "must-not-cross-boundary",
+            }
+        ]
+    )
+
+    assert len(safe_rows) == 1
+    assert safe_rows[0]["symbol"] == "CAD/JPY OTC"
+    assert safe_rows[0]["timeframe"] == "M5"
+    assert safe_rows[0]["market_selector_visual_fingerprint"] == (
+        "selector_v3_cad_jpy_otc"
+    )
+    assert safe_rows[0]["instrument_identity_status"] == "LOCKED"
+    assert safe_rows[0]["surface_semantic_identity"] == "surface-cad-jpy-15"
+    assert "private_detector_trace" not in safe_rows[0]
+
+
 def test_order_reference_with_execution_authority_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3653,6 +4225,23 @@ def test_legacy_tracker_session_route_redacts_backend_internals() -> None:
     assert r"C:\\private" not in serialized
     assert "surface-secret" not in serialized
     assert "study-secret" not in serialized
+
+
+def test_operator_entry_deadline_distinguishes_absent_window_from_expiry() -> None:
+    now_epoch = 1_900_000_000.0
+
+    assert mobile_app._operator_entry_deadline_expired(
+        0.0,
+        now_epoch=now_epoch,
+    ) is False
+    assert mobile_app._operator_entry_deadline_expired(
+        now_epoch + 30.0,
+        now_epoch=now_epoch,
+    ) is False
+    assert mobile_app._operator_entry_deadline_expired(
+        now_epoch - 0.001,
+        now_epoch=now_epoch,
+    ) is True
 
 
 def test_operator_session_and_health_hot_paths_never_read_full_session(
@@ -4202,6 +4791,7 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
         return live_state_for_active_frame()
 
     operator_projection_calls = 0
+    advance_during_second_projection = {"value": False}
     original_operator_builder = mobile_app.build_operator_workspace_v1
 
     def counted_operator_builder(
@@ -4209,6 +4799,13 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
     ) -> dict[str, object]:
         nonlocal operator_projection_calls
         operator_projection_calls += 1
+        if operator_projection_calls == 2 and advance_during_second_projection["value"]:
+            active_frame["value"] = 16
+            active_revision["value"] = (
+                "operator-revision-16",
+                16,
+                now_epoch + 60.0,
+            )
         return original_operator_builder(source)
 
     deferred_tasks: list[
@@ -4281,16 +4878,28 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
         assert operator_projection_calls == 1
         assert len(deferred_tasks) == 1
 
+        advance_during_second_projection["value"] = True
         task, args, kwargs = deferred_tasks.pop()
         task(*args, **kwargs)
 
+        progressive_response = client.get(
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
+        assert progressive_response.status_code == 200
+        assert progressive_response.json()["surface"]["frame_id"] == 15
+        assert progressive_response.json()["freshness"]["state"] == "STALE"
+        assert len(deferred_tasks) == 1
+
+        advance_during_second_projection["value"] = False
+        task, args, kwargs = deferred_tasks.pop()
+        task(*args, **kwargs)
         refreshed_response = client.get(
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
 
-    assert operator_projection_calls == 2
+    assert operator_projection_calls == 3
     assert refreshed_response.status_code == 200
-    assert refreshed_response.json()["surface"]["frame_id"] == 15
+    assert refreshed_response.json()["surface"]["frame_id"] == 16
     assert deferred_tasks == []
 
 
@@ -4559,6 +5168,88 @@ def test_cached_operator_projection_refreshes_live_unchanged_external_transport(
         row["lifecycle"] in {"current", "historical"}
         for row in cast(list[dict[str, object]], refreshed["overlays"])
     )
+
+
+def test_fresh_leased_external_processing_is_analyzing_without_cpu_stream() -> None:
+    payload = _countertrend_study_payload()
+    _mutable_mapping(payload["decision_command_center"])[
+        "execution_packet_present"
+    ] = False
+    base = _build_workspace(payload, now_epoch=100.0)
+    runtime = {
+        "tracking_enabled": False,
+        "capture_source_v3": {
+            "state": "VALIDATING",
+            "fresh": True,
+            "decision_usable": False,
+            "source_id": "edge-chart-region-v3",
+            "sequence_id": "edge-sequence-21",
+            "source_generation": 4,
+            "reason_code": "FRAME_PROCESSING",
+            "message": "The latest Edge frame is being studied.",
+            "updated_at": 101.0,
+            "last_frame_epoch": 101.0,
+            "last_frame_id": 88,
+            "stream": {
+                "processing": True,
+                "last_transport_heartbeat_epoch": 101.0,
+            },
+        },
+        "tracking_summary": {
+            "detected_market": "EUR/USD",
+            "detected_timeframe": "M5",
+        },
+        "latest_signal": {},
+    }
+
+    refreshed = refresh_operator_streaming_read_v3(
+        base,
+        runtime,
+        now_epoch=101.0,
+    )
+    stream = cast(dict[str, object], refreshed["tracking"])["stream"]
+    assert isinstance(stream, dict)
+    assert stream["enabled"] is True
+    assert stream["state"] == "RUNNING"
+    assert stream["fresh"] is True
+    market_read = cast(dict[str, object], stream["market_read"])
+    assert market_read["state"] == "ANALYZING"
+    assert market_read["fresh"] is True
+    assert market_read["direction"] == "NEUTRAL"
+    assert market_read["direction_available"] is False
+    assert market_read["closed_candle"] is False
+    assert market_read["can_grant_entry_permission"] is False
+
+    questions = cast(dict[str, object], refreshed["three_questions"])
+    studied = cast(dict[str, object], questions["studied_direction_current"])
+    entry = cast(dict[str, object], questions["entry_now"])
+    action = cast(dict[str, object], entry["operator_action"])
+    assert studied["live_state"] == "ANALYZING"
+    assert "analyzing the latest frame" in str(studied["headline"])
+    assert entry["headline"] == "ANALYZING CURRENT FRAME"
+    assert entry["state"] == "ANALYZING"
+    assert entry["enter_now"] is False
+    assert entry["action"] == "DO_NOT_ENTER"
+    assert action["state"] == "ANALYZING"
+    assert action["entry_permission_authorized"] is False
+
+
+def test_unowned_external_validating_snapshot_does_not_become_live() -> None:
+    payload = _fresh_payload(side="BUY")
+    payload["capture_source_v3"] = {
+        "state": "VALIDATING",
+        "fresh": True,
+        "reason_code": "FRAME_PROCESSING",
+        "stream": {"processing": True},
+    }
+
+    stream = cpu_stream_tracking_contract_v3(payload, now_epoch=100.0)
+
+    assert stream["fresh"] is False
+    assert cast(dict[str, object], stream["market_read"])["state"] in {
+        "UNAVAILABLE",
+        "STARTING",
+    }
 
 
 

@@ -142,6 +142,8 @@ def test_first_accepted_roi_frame_promotes_source_live_without_leaking_lease(
             "universal-live",
             Image.new("RGB", (640, 360), (15, 20, 30)),
             source_id="edge-chart",
+            symbol="CHF/JPY OTC",
+            timeframe="M5",
             sequence_id="seq-live",
             capture_epoch_ms=now_ms,
             frame_id=1,
@@ -174,10 +176,162 @@ def test_first_accepted_roi_frame_promotes_source_live_without_leaking_lease(
         assert result["external_frame_feed"]["source_id"] == "edge-chart"
         assert result["external_frame_feed"]["sequence_id"] == "seq-live"
         assert result["external_frame_feed"]["frame_id"] == 1
+        assert result["external_frame_feed"]["symbol"] == ""
+        assert result["external_frame_feed"]["timeframe"] == ""
+        assert result["market"] == ""
         persisted = service.load_session_payload("universal-live")
         assert persisted["capture_source_v3"]["source_lease_id"] == claim["source_lease_id"]
         assert persisted["external_frame_feed"]["source_id"] == "edge-chart"
         assert persisted["external_frame_feed"]["frame_id"] == 1
+        assert persisted["external_frame_feed"]["symbol"] == ""
+        assert persisted["external_frame_feed"]["timeframe"] == ""
+        assert persisted["market"] == ""
+    finally:
+        service.shutdown()
+
+
+def test_transport_heartbeat_keeps_source_fresh_but_newer_material_frame_blocks_old_result(
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    service = _service_with_session(tmp_path)
+    try:
+        claim = _claim_browser_source(
+            service,
+            source_id="edge-chart",
+            sequence_id="seq-heartbeat",
+        )
+        first_heartbeat_epoch_ms = int(time.time() * 1000)
+        heartbeat = service.heartbeat_external_source(
+            "universal-live",
+            source_id="edge-chart",
+            sequence_id="seq-heartbeat",
+            source_generation=int(claim["source_generation"]),
+            source_lease_id=str(claim["source_lease_id"]),
+            capture_epoch_ms=first_heartbeat_epoch_ms,
+            source_render_fresh=True,
+            material_change_pending=False,
+            roi_normalized={"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+            roi_source_pixels={"x": 0, "y": 0, "width": 1920, "height": 1080},
+            source_surface_width=1920,
+            source_surface_height=1080,
+            capture_health_reason="capture_confirmed",
+            capture_status="active",
+        )
+        assert heartbeat["fresh"] is True
+        assert heartbeat["decision_usable"] is False
+        assert heartbeat["roi"]["normalized_bbox"] == [0.0, 0.0, 1.0, 1.0]
+        public = service.get_session_snapshot("universal-live")["capture_source_v3"]
+        assert public["fresh"] is True
+        assert public["roi"]["normalized_bbox"] == [0.0, 0.0, 1.0, 1.0]
+
+        analyzed_capture_epoch_ms = first_heartbeat_epoch_ms - 1_000
+
+        def receive_newer_frame_while_analysis_runs(*_args: Any, **_kwargs: Any) -> bool:
+            pending_epoch_ms = int(time.time() * 1000)
+            service.heartbeat_external_source(
+                "universal-live",
+                source_id="edge-chart",
+                sequence_id="seq-heartbeat",
+                source_generation=int(claim["source_generation"]),
+                source_lease_id=str(claim["source_lease_id"]),
+                capture_epoch_ms=pending_epoch_ms,
+                source_render_fresh=True,
+                material_change_pending=True,
+                roi_normalized={"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+            )
+            # A later unchanged pulse must not erase the queued changed frame.
+            service.heartbeat_external_source(
+                "universal-live",
+                source_id="edge-chart",
+                sequence_id="seq-heartbeat",
+                source_generation=int(claim["source_generation"]),
+                source_lease_id=str(claim["source_lease_id"]),
+                capture_epoch_ms=pending_epoch_ms,
+                source_render_fresh=True,
+                material_change_pending=False,
+                roi_normalized=[0.0, 0.0, 1.0, 1.0],
+            )
+            return True
+
+        monkeypatch.setattr(
+            service,
+            "_capture_and_analyze",
+            receive_newer_frame_while_analysis_runs,
+        )
+        result = service.ingest_external_frame(
+            "universal-live",
+            Image.new("RGB", (640, 360), (15, 20, 30)),
+            source_id="edge-chart",
+            sequence_id="seq-heartbeat",
+            capture_epoch_ms=analyzed_capture_epoch_ms,
+            frame_id=1,
+            metadata={
+                "source_type": "browser_tab_roi_capture",
+                "coordinate_space": "edge_tab_roi_v1",
+                "source_generation": claim["source_generation"],
+                "source_lease_id": claim["source_lease_id"],
+                "source_render_fresh": True,
+                "roi_normalized": {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+            },
+        )
+
+        guarded = result["capture_source_v3"]
+        assert guarded["state"] == "VALIDATING"
+        assert guarded["reason_code"] == "FRAME_PENDING"
+        assert guarded["fresh"] is True
+        assert guarded["decision_usable"] is False
+        assert guarded["stream"]["material_change_pending"] is True
+        assert guarded["roi"]["normalized_bbox"] == [0.0, 0.0, 1.0, 1.0]
+    finally:
+        service.shutdown()
+
+
+def test_same_lease_pending_frame_does_not_starve_completed_study_publication(
+    tmp_path: Any,
+) -> None:
+    service = _service_with_session(tmp_path)
+    try:
+        claim = _claim_browser_source(
+            service,
+            source_id="edge-chart",
+            sequence_id="seq-no-starvation",
+        )
+        study_capture_epoch = time.time() - 1.0
+        service.heartbeat_external_source(
+            "universal-live",
+            source_id="edge-chart",
+            sequence_id="seq-no-starvation",
+            source_generation=int(claim["source_generation"]),
+            source_lease_id=str(claim["source_lease_id"]),
+            capture_epoch_ms=int(time.time() * 1000),
+            source_render_fresh=True,
+            material_change_pending=True,
+            roi_normalized=[0.0, 0.0, 1.0, 1.0],
+        )
+        source = {
+            "source_id": "edge-chart",
+            "sequence_id": "seq-no-starvation",
+            "source_generation": int(claim["source_generation"]),
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "metadata": {"source_lease_id": str(claim["source_lease_id"])},
+        }
+
+        with service._external_source_publication_guard_v3(  # pyright: ignore[reportPrivateUsage]
+            "universal-live",
+            source,
+            capture_epoch=study_capture_epoch,
+        ) as publication_current:
+            assert publication_current is True
+
+        public = service.get_session_snapshot("universal-live")[
+            "capture_source_v3"
+        ]
+        assert public["state"] == "VALIDATING"
+        assert public["reason_code"] == "FRAME_PENDING"
+        assert public["fresh"] is True
+        assert public["decision_usable"] is False
     finally:
         service.shutdown()
 

@@ -14,8 +14,6 @@ const fields = [
   "sourceId",
   "token",
   "signingSecret",
-  "symbol",
-  "timeframe",
   "maxWidth",
   "jpegQuality",
   "materialDeltaThreshold",
@@ -76,7 +74,9 @@ function renderStatus(rawStatus) {
   sourceLease.textContent = value.sourceLeaseActive
     ? `Generation ${Number(value.sourceGeneration || 0)}`
     : "Not claimed";
-  renderFreshness.textContent = value.sourceRenderFresh ? "Fresh rendered frames" : value.lockedTabId > 0 ? "Frozen or awaiting frame" : "Not streaming";
+  renderFreshness.textContent = value.sourceRenderFresh
+    ? `Live tab capture (${value.captureStatus || "active"})`
+    : value.lockedTabId > 0 ? `Paused: ${value.captureHealthReason || "awaiting capture health"}` : "Not streaming";
   transportFrame.textContent = ageText(value.transportFrameAgeMs);
   visualChange.textContent = ageText(value.visualChangeAgeMs);
   sampling.textContent = `${Number(value.sampleFps || 0.25).toFixed(2)} FPS`;
@@ -93,11 +93,17 @@ function renderStatus(rawStatus) {
 async function renderCommands() {
   const commands = await chrome.commands.getAll();
   const byName = Object.fromEntries(commands.map((command) => [command.name, command]));
+  const fullViewport = byName["lock-full-viewport"]?.shortcut || "Unassigned";
   const select = byName["select-chart-region"]?.shortcut || "Unassigned";
   const kill = byName["stop-chart-capture"]?.shortcut || "Unassigned";
+  document.getElementById("fullViewportShortcut").textContent = fullViewport;
   document.getElementById("selectShortcut").textContent = select;
   document.getElementById("killShortcut").textContent = kill;
-  const missing = [select === "Unassigned" ? "Select / switch" : "", kill === "Unassigned" ? "Kill capture" : ""].filter(Boolean);
+  const missing = [
+    fullViewport === "Unassigned" ? "Lock full viewport" : "",
+    select === "Unassigned" ? "Select / switch" : "",
+    kill === "Unassigned" ? "Kill capture" : ""
+  ].filter(Boolean);
   shortcutError.hidden = missing.length === 0;
   shortcutError.textContent = missing.length
     ? `${missing.join(" and ")} shortcut is unassigned. Configure it at edge://extensions/shortcuts.`
@@ -106,7 +112,11 @@ async function renderCommands() {
 
 async function load() {
   const stored = await chrome.storage.local.get([CONFIG_KEY, STATUS_KEY]);
-  writeForm(stored[CONFIG_KEY] || DEFAULT_CONFIG);
+  const config = normalizeConfig(stored[CONFIG_KEY] || DEFAULT_CONFIG);
+  // Persist the normalized form so legacy symbol/timeframe hints disappear
+  // from storage as soon as the options page is opened.
+  await chrome.storage.local.set({[CONFIG_KEY]: config});
+  writeForm(config);
   renderStatus(stored[STATUS_KEY] || initialStatus());
   await renderCommands();
 }
@@ -120,7 +130,7 @@ document.getElementById("configForm").addEventListener("submit", (event) => {
       return;
     }
     await chrome.storage.local.set({[CONFIG_KEY]: validation.config});
-    setFeedback("Saved. Show any HTTP(S) chart and press Ctrl+Shift+8 to select its region.", "ok");
+    setFeedback("Saved. On a chart tab, press Ctrl+Shift+7 for the full viewport or Ctrl+Shift+8 for an exact region.", "ok");
   })();
 });
 

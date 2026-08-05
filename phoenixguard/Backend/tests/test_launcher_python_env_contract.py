@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,11 @@ def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.Monke
     monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv-dev")
     monkeypatch.setenv("VIRTUAL_ENV", str(ROOT / ".venv-dev"))
     monkeypatch.setenv("PHOENIXGUARD_PYTHON_EXE", str(wrong_python))
+    # Isolate the explicit-Python contract from whichever interpreter happens
+    # to run pytest on the workstation.  The configured environment itself is
+    # valid for this scenario; only PHOENIXGUARD_PYTHON_EXE is intentionally
+    # wrong.
+    monkeypatch.setattr(sys, "prefix", str(ROOT / ".venv-dev"))
 
     status = build_python_environment_status(ROOT)
 
@@ -472,6 +478,49 @@ def test_dashboard_browser_launcher_quotes_chrome_profile_paths_with_spaces() ->
     assert "ConvertTo-PhoenixGuardProcessArgumentString -Arguments $browserArguments" in text
     assert "Start-Process -FilePath $browserPath -ArgumentList $browserArgumentString" in text
     assert "Start-Process -FilePath $browserPath -ArgumentList (Get-PhoenixGuardDashboardBrowserArguments" not in text
+
+
+def test_dashboard_browser_launcher_keeps_edge_chart_rendering_in_background() -> None:
+    text = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+
+    argument_function = text[
+        text.index("function Get-PhoenixGuardDashboardBrowserArgument") : text.index(
+            "function Start-PhoenixGuardDashboardBrowser"
+        )
+    ]
+    for flag in (
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+        "CalculateNativeWinOcclusion",
+        "IntensiveWakeUpThrottling",
+    ):
+        assert flag in argument_function
+
+
+def test_canonical_launcher_never_starts_or_mutates_edge_without_explicit_opt_in() -> None:
+    powershell = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+    live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+    python = _read("Backend/launch/start_phoenixguard_24_7_tracker.py")
+
+    assert "[switch]$OpenDashboard" in powershell
+    assert "if ($OpenDashboard -and -not $NoBrowser)" in powershell
+    assert "--load-extension" not in powershell
+    assert "--new-window" not in powershell
+    assert "function Wait-PhoenixGuardExistingEdgeCapture" in powershell
+    assert "source-control" in powershell
+    assert "Existing Edge extension stream: DETECTED" in powershell
+    assert "PHOENIXGUARD_RESTORE_WINDOWS_REGION_CAPTURE" in powershell
+    for launcher in (powershell, live_ready):
+        assert "$env:LOCALAPPDATA" in launcher
+        assert "PhoenixGuard\\runtime\\live" in launcher
+        assert "[string]$env:PHOENIXGUARD_RUNTIME_DIR" in launcher
+        assert "$env:PHOENIXGUARD_DATA_DIR" in launcher
+        assert "$env:PHOENIXGUARD_LOGS_DIR" in launcher
+    assert 'os.environ.setdefault("PHOENIXGUARD_RUNTIME_DIR", str(runtime_root))' in python
+    assert 'os.getenv("LOCALAPPDATA"' in python
+    assert 'os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(script_dir / "runtime" / "live")' not in python
+    assert 'parser.add_argument("--open-dashboard", action="store_true", default=False)' in python
 
 
 def test_canonical_launchers_own_and_certify_universal_source_controller() -> None:

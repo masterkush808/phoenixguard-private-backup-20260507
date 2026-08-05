@@ -318,6 +318,7 @@
       border-left-color: var(--warn);
     }
 
+    .capture-source-control[data-state="NO_FRAMES"],
     .capture-source-control[data-state="STALE"],
     .capture-source-control[data-state="ERROR"] {
       border-left-color: var(--down);
@@ -816,6 +817,84 @@
       color: var(--muted);
       font-size: 10px;
       line-height: 1.55;
+    }
+
+    .decision-audit-strip {
+      display: grid;
+      grid-template-columns: minmax(230px, 1.35fr) repeat(4, minmax(86px, 0.55fr));
+      align-items: center;
+      gap: 12px 18px;
+      padding: 13px clamp(10px, 1.5vw, 22px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .decision-audit-summary {
+      min-width: 0;
+    }
+
+    .decision-audit-heading {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .decision-audit-heading span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .decision-audit-heading strong {
+      color: var(--gold);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 780;
+      letter-spacing: 0.1em;
+    }
+
+    .decision-audit-strip[data-state="measured"] .decision-audit-heading strong {
+      color: var(--up);
+    }
+
+    .decision-audit-counts,
+    .decision-audit-outcome,
+    .decision-audit-safety {
+      margin: 4px 0 0;
+      color: var(--quiet);
+      font-size: 9px;
+      line-height: 1.45;
+    }
+
+    .decision-audit-outcome {
+      color: var(--muted);
+    }
+
+    .decision-audit-metric {
+      min-width: 0;
+      padding-left: 12px;
+      border-left: 1px solid var(--line);
+    }
+
+    .decision-audit-metric span {
+      display: block;
+      color: var(--quiet);
+      font-size: 8px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .decision-audit-metric strong {
+      display: block;
+      margin-top: 3px;
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .decision-audit-metric[data-available="false"] strong {
+      color: var(--quiet);
     }
 
     .decision-risk {
@@ -2168,6 +2247,11 @@
         min-height: auto;
       }
 
+      .decision-audit-strip {
+        grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(74px, 0.55fr));
+        gap: 10px;
+      }
+
       .advanced-view .workspace-grid {
         grid-template-columns: 1fr;
       }
@@ -2390,6 +2474,20 @@
         line-height: 1.3;
       }
 
+      .decision-audit-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 10px;
+        padding: 9px 10px;
+      }
+
+      .decision-audit-summary {
+        grid-column: 1 / -1;
+      }
+
+      .decision-audit-metric {
+        padding-left: 8px;
+      }
+
       .evidence-list {
         grid-template-columns: 1fr;
       }
@@ -2525,7 +2623,7 @@
     }
   </style>
 </head>
-<body class="simple-view labels-on">
+<body class="simple-view labels-hover">
   <a class="skip-link" href="#main-content">Skip to live analysis</a>
 
   <header class="app-header" aria-label="808Fx Standard Hybrid System powered by the Phoenix Guard Engine V3">
@@ -2630,6 +2728,34 @@
           </div>
         </li>
       </ol>
+
+      <section class="decision-audit-strip" id="decision-audit-strip" data-state="collecting" aria-labelledby="decision-audit-title" aria-live="polite">
+        <div class="decision-audit-summary">
+          <div class="decision-audit-heading">
+            <span id="decision-audit-title">Decision accuracy · live audit</span>
+            <strong id="decision-audit-status">COLLECTING</strong>
+          </div>
+          <p class="decision-audit-counts" id="decision-audit-counts">0 frozen · 0 pending · 0 matured</p>
+          <p class="decision-audit-outcome" id="decision-audit-outcome">Waiting for a frozen forecast to mature against future market movement.</p>
+          <p class="decision-audit-safety">Outcome measurement only · never places trades or opens entry permission.</p>
+        </div>
+        <div class="decision-audit-metric" id="decision-audit-direction-wrap" data-available="false">
+          <span>Direction</span>
+          <strong id="decision-audit-direction">—</strong>
+        </div>
+        <div class="decision-audit-metric" id="decision-audit-timing-wrap" data-available="false">
+          <span>Timing</span>
+          <strong id="decision-audit-timing">—</strong>
+        </div>
+        <div class="decision-audit-metric" id="decision-audit-sweep-wrap" data-available="false">
+          <span>Sweep survival</span>
+          <strong id="decision-audit-sweep">—</strong>
+        </div>
+        <div class="decision-audit-metric" id="decision-audit-calibration-wrap" data-available="false">
+          <span>Calibration</span>
+          <strong id="decision-audit-calibration">—</strong>
+        </div>
+      </section>
 
       <details class="evidence-details">
         <summary>Technical contracts and evidence</summary>
@@ -2780,8 +2906,8 @@
               <span class="zoom-readout" id="zoom-readout">Fit</span>
             </div>
             <div class="label-controls" aria-label="Overlay labels">
-              <button class="label-mode" type="button" data-label-mode="on" aria-pressed="true">Labels on</button>
-              <button class="label-mode" type="button" data-label-mode="hover" aria-pressed="false">On hover</button>
+              <button class="label-mode" type="button" data-label-mode="on" aria-pressed="false">Labels on</button>
+              <button class="label-mode" type="button" data-label-mode="hover" aria-pressed="true">On hover</button>
               <button class="label-mode" type="button" data-label-mode="off" aria-pressed="false">Labels off</button>
               <button class="zoom-button" id="refresh-view" type="button">Refresh</button>
             </div>
@@ -2877,13 +3003,18 @@
     // SSE is primary. This bounded visible fallback keeps the operator brief
     // responsive if an intermediary delays or drops stream data events.
     const POLL_INTERVAL_MS = 2000;
+    const FRONTEND_HEARTBEAT_INTERVAL_MS = 5000;
+    const FRONTEND_HEARTBEAT_TRACE_TIMEOUT_MS = 1500;
+    const PAGE_INSTANCE_ID = "dashboard-" + Date.now().toString(36)
+      + "-" + Math.random().toString(36).slice(2, 10);
     const CAPTURE_SOURCE_STALE_FALLBACK_SECONDS = 25;
+    const CAPTURE_SOURCE_FIRST_FRAME_TIMEOUT_FALLBACK_SECONDS = 30;
     // Preserve a useful but bounded automatic closed-candle study history.
     const SESSION_HISTORY_ROW_LIMIT = 256;
     const OVERLAY_LAYERS_STORAGE_KEY = "phoenixguard.overlay.layers.v1";
     const DISABLED_OVERLAY_KINDS_STORAGE_KEY = "phoenixguard.overlay.disabled-kinds.v1";
     const OVERLAY_ORDER_POSITIONING_MIGRATION_KEY = "phoenixguard.overlay.layers.order-positioning-migration.v1";
-    const OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION = "1";
+    const OVERLAY_ORDER_POSITIONING_MIGRATION_VERSION = "2";
     const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "market_context", "structure", "zones", "plan", "history"]);
     const ALL_OVERLAY_FAMILIES = Object.freeze([
       "chart_bounds",
@@ -2902,7 +3033,19 @@
     ]);
     const OVERLAY_PRESETS = Object.freeze({
       all: ALL_OVERLAY_FAMILIES,
-      live: ["current_candles", "market_context", "council", "order_positioning"],
+      // The live desk is the operator's configured semantic study: current
+      // price, reaction objects, combined analysis, and actionable plan
+      // geometry. Generic H1/H2 swing boxes, wide support/resistance
+      // references, and replay rows stay in Structure/Zones/History.
+      live: [
+        "current_candles",
+        "market_context",
+        "council",
+        "order_positioning",
+        "triggers",
+        "targets",
+        "invalidation",
+      ],
       market_context: ["market_context", "supply_demand", "order_positioning"],
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
@@ -3017,6 +3160,18 @@
       questionEntryNow: byId("question-entry-now"),
       marketOriginConfidence: byId("market-origin-confidence"),
       directionStudyConfidence: byId("direction-study-confidence"),
+      decisionAuditStrip: byId("decision-audit-strip"),
+      decisionAuditStatus: byId("decision-audit-status"),
+      decisionAuditCounts: byId("decision-audit-counts"),
+      decisionAuditOutcome: byId("decision-audit-outcome"),
+      decisionAuditDirectionWrap: byId("decision-audit-direction-wrap"),
+      decisionAuditDirection: byId("decision-audit-direction"),
+      decisionAuditTimingWrap: byId("decision-audit-timing-wrap"),
+      decisionAuditTiming: byId("decision-audit-timing"),
+      decisionAuditSweepWrap: byId("decision-audit-sweep-wrap"),
+      decisionAuditSweep: byId("decision-audit-sweep"),
+      decisionAuditCalibrationWrap: byId("decision-audit-calibration-wrap"),
+      decisionAuditCalibration: byId("decision-audit-calibration"),
       currentMoveTitle: byId("current-move-title"),
       innerTrendTitle: byId("inner-trend-title"),
       permissionTitle: byId("permission-title"),
@@ -3122,6 +3277,13 @@
         ) {
           migrated.push("order_positioning");
         }
+        if (orderMigrationPending && storedPreset === "live") {
+          OVERLAY_PRESETS.live.forEach(function (family) {
+            if (!migrated.includes(family)) {
+              migrated.push(family);
+            }
+          });
+        }
         const enabled = migrated.filter(function (family) {
           return typeof family === "string" && ALL_OVERLAY_FAMILIES.includes(family);
         });
@@ -3165,7 +3327,7 @@
       showSavedOrderContext: ["all", "plan", "history"].includes(readStoredPreset()),
       activeFamilies: readStoredFamilies(),
       disabledKinds: readStoredDisabledKinds(),
-      labelMode: readStoredValue("phoenixguard.labels", "on"),
+      labelMode: readStoredValue("phoenixguard.labels", "hover"),
       overlayOpacity: Number(readStoredValue("phoenixguard.overlay.opacity", "88")) || 88,
       payload: null,
       visualPayload: null,
@@ -3176,6 +3338,18 @@
       acceptedView: "",
       requestSequence: 0,
       pollTimer: 0,
+      heartbeatIntervalTimer: 0,
+      heartbeatPulseTimer: 0,
+      heartbeatAbortController: null,
+      heartbeatInFlight: false,
+      heartbeatPending: false,
+      heartbeatStopped: false,
+      heartbeatOverlayStateVersion: "",
+      heartbeatOverlayFrameStateVersion: "",
+      heartbeatOverlayFrameId: 0,
+      lastRenderedOverlayCount: 0,
+      lastFrontendImageLoadedMs: 0,
+      lastFrontendOverlayDrawnMs: 0,
       entryExpiryTimer: 0,
       eventSource: null,
       streamConnected: false,
@@ -3515,20 +3689,132 @@
         + "/source-control/kill";
     }
 
+    function frontendHeartbeatUrl() {
+      return "/v1/mobile/frontend/heartbeat/v3";
+    }
+
+    function frontendPerformanceTraceUrl() {
+      return "/v1/mobile/performance/trace/v3?session_id="
+        + encodeURIComponent(SESSION_ID);
+    }
+
+    function captureSourceTruthEpoch(source) {
+      const row = safeObject(source);
+      const stream = safeObject(row.stream);
+      return Math.max(
+        eventEpochSeconds(row.updated_at),
+        eventEpochSeconds(row.last_frame_epoch),
+        eventEpochSeconds(stream.last_frame_epoch),
+        eventEpochSeconds(stream.last_capture_epoch),
+      );
+    }
+
     function captureSourceContract(payload) {
       const session = safeObject(state.liveSession);
-      if (Object.prototype.hasOwnProperty.call(session, "capture_source_v3")) {
-        return {present: true, source: safeObject(session.capture_source_v3)};
-      }
       const operatorState = safeObject(payload);
-      if (Object.prototype.hasOwnProperty.call(operatorState, "capture_source_v3")) {
-        return {present: true, source: safeObject(operatorState.capture_source_v3)};
-      }
       const tracking = safeObject(operatorState.tracking);
-      if (Object.prototype.hasOwnProperty.call(tracking, "capture_source_v3")) {
-        return {present: true, source: safeObject(tracking.capture_source_v3)};
+      const candidates = [];
+      [
+        [session, "capture_source_v3", "session"],
+        [operatorState, "capture_source_v3", "operator"],
+        [tracking, "capture_source_v3", "tracking"],
+      ].forEach(function (candidate) {
+        const owner = candidate[0];
+        const key = candidate[1];
+        if (!Object.prototype.hasOwnProperty.call(owner, key)) {
+          return;
+        }
+        const source = safeObject(owner[key]);
+        candidates.push({
+          source: source,
+          origin: candidate[2],
+          generation: Number(source.source_generation || 0),
+          epoch: captureSourceTruthEpoch(source),
+          revision: Number(source.state_revision || 0),
+          frame: Number(source.last_frame_id || safeObject(source.stream).last_frame_id || 0),
+        });
+      });
+      if (!candidates.length) {
+        return {present: false, source: {}, origin: ""};
       }
-      return {present: false, source: {}};
+      candidates.sort(function (left, right) {
+        return right.generation - left.generation
+          || right.epoch - left.epoch
+          || right.revision - left.revision
+          || right.frame - left.frame;
+      });
+      return {
+        present: true,
+        source: candidates[0].source,
+        origin: candidates[0].origin,
+      };
+    }
+
+    function chartIdentityView(payload) {
+      const operatorState = safeObject(payload);
+      const session = safeObject(state.liveSession);
+      const sessionTracking = safeObject(session.tracking_summary);
+      const operatorTracking = safeObject(operatorState.tracking_summary || operatorState.tracking);
+      const sessionHasIdentity = [
+        "market_identity_confirmed",
+        "timeframe_identity_confirmed",
+        "market_identity_mismatch",
+        "timeframe_identity_mismatch",
+      ].some(function (key) {
+        return Object.prototype.hasOwnProperty.call(sessionTracking, key);
+      });
+      const tracking = sessionHasIdentity ? sessionTracking : operatorTracking;
+      const hasMarketProof = Object.prototype.hasOwnProperty.call(tracking, "market_identity_confirmed");
+      const hasTimeframeProof = Object.prototype.hasOwnProperty.call(tracking, "timeframe_identity_confirmed");
+      const market = safeObject(operatorState.market);
+      const operatorSymbol = safeText(market.symbol || market.market, "");
+      const operatorTimeframe = safeText(market.timeframe, "");
+      const symbol = safeText(
+        tracking.detected_market || tracking.market || operatorSymbol,
+        "current pair",
+      );
+      const timeframe = safeText(
+        tracking.detected_timeframe || tracking.timeframe || operatorTimeframe,
+        "current timeframe",
+      );
+      const identityToken = function (value) {
+        return safeText(value, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      };
+      // A freshly selected source can expose its detected label before either
+      // identity proof is complete.  During that interval the operator payload
+      // still belongs to the previous accepted frame, so a label difference is
+      // confirmation work, not an already-proven identity change.
+      const symbolScopeMismatch = hasMarketProof
+        && tracking.market_identity_confirmed === true
+        && Boolean(operatorSymbol && symbol)
+        && identityToken(operatorSymbol) !== identityToken(symbol);
+      const timeframeScopeMismatch = hasTimeframeProof
+        && tracking.timeframe_identity_confirmed === true
+        && Boolean(operatorTimeframe && timeframe)
+        && identityToken(operatorTimeframe) !== identityToken(timeframe);
+      const mismatch = symbolScopeMismatch
+        || timeframeScopeMismatch
+        || tracking.market_identity_mismatch === true
+        || tracking.timeframe_identity_mismatch === true
+        || tracking.identity_mismatch === true;
+      const explicit = hasMarketProof
+        || hasTimeframeProof
+        || mismatch
+        || Boolean((tracking.detected_market || tracking.market) && operatorSymbol)
+        || Boolean((tracking.detected_timeframe || tracking.timeframe) && operatorTimeframe);
+      const confirmed = explicit
+        && (!hasMarketProof || tracking.market_identity_confirmed === true)
+        && (!hasTimeframeProof || tracking.timeframe_identity_confirmed === true)
+        && !mismatch;
+      return {
+        explicit: explicit,
+        confirmed: confirmed,
+        pending: explicit && !confirmed && !mismatch,
+        mismatch: mismatch,
+        symbol: symbol,
+        timeframe: timeframe,
+        label: [symbol, timeframe].filter(Boolean).join(" · "),
+      };
     }
 
     function visualObservationView(payload) {
@@ -3564,7 +3850,7 @@
       let sourceState = safeText(source.state, "NO_SOURCE").toUpperCase().replace(/[ -]+/g, "_");
       const allowedStates = new Set([
         "NO_SOURCE", "READY", "SELECTING", "CLAIMING", "VALIDATING", "LIVE",
-        "PAUSED", "STALE", "SWITCHING", "STOPPED", "KILLED", "ERROR",
+        "NO_FRAMES", "PAUSED", "STALE", "SWITCHING", "STOPPED", "KILLED", "ERROR",
       ]);
       if (!allowedStates.has(sourceState)) {
         sourceState = "NO_SOURCE";
@@ -3572,16 +3858,47 @@
       const lastFrameEpoch = eventEpochSeconds(source.last_frame_epoch || safeObject(source.stream).last_frame_epoch);
       const measuredAge = lastFrameEpoch > 0 ? Math.max(0, Date.now() / 1000 - lastFrameEpoch) : Infinity;
       const declaredAge = Number(source.frame_age_sec);
+      // `frame_age_sec` is measured beside the capture source and is the
+      // authoritative age. Recomputing it with the dashboard clock caused a
+      // fresh background tab to be labelled stale when clocks differed or the
+      // browser throttled a hidden page's timers.
       const frameAge = Number.isFinite(declaredAge) && declaredAge >= 0
-        ? Math.max(declaredAge, Number.isFinite(measuredAge) ? measuredAge : 0)
+        ? declaredAge
         : measuredAge;
       const declaredStaleAfter = Number(source.stale_after_sec);
       const staleAfterSeconds = Number.isFinite(declaredStaleAfter) && declaredStaleAfter >= 5
         ? declaredStaleAfter
         : CAPTURE_SOURCE_STALE_FALLBACK_SECONDS;
-      const fresh = source.fresh === true
-        && lastFrameEpoch > 0
-        && frameAge <= staleAfterSeconds;
+      const stream = safeObject(source.stream);
+      const acceptedFrames = Number(stream.accepted_frames);
+      const selectedEpoch = eventEpochSeconds(source.selected_at || source.updated_at);
+      const selectionAge = selectedEpoch > 0
+        ? Math.max(0, Date.now() / 1000 - selectedEpoch)
+        : 0;
+      const firstFrameTimeoutSeconds = Math.max(
+        staleAfterSeconds,
+        CAPTURE_SOURCE_FIRST_FRAME_TIMEOUT_FALLBACK_SECONDS,
+      );
+      const firstFrameTimedOut = sourceState === "VALIDATING"
+        && lastFrameEpoch <= 0
+        && (!Number.isFinite(acceptedFrames) || acceptedFrames <= 0)
+        && selectedEpoch > 0
+        && selectionAge > firstFrameTimeoutSeconds;
+      if (firstFrameTimedOut) {
+        sourceState = "NO_FRAMES";
+      }
+      const reasonCode = safeText(source.reason_code, "").toUpperCase();
+      const frameProcessing = reasonCode === "FRAME_PROCESSING"
+        || stream.processing === true;
+      // A FRAME_PROCESSING contract is the capture service's explicit active
+      // heartbeat while synchronous study owns the frame. Completed-overlay
+      // age can exceed the normal transport budget during that work and must
+      // not rewrite an active processing source as stale.
+      const fresh = frameProcessing
+        ? source.fresh === true
+        : source.fresh === true
+          && lastFrameEpoch > 0
+          && frameAge <= staleAfterSeconds;
       if (sourceState === "LIVE" && !fresh) {
         sourceState = "STALE";
       }
@@ -3595,6 +3912,7 @@
         SELECTING: "SELECTING",
         CLAIMING: "LOCKING",
         VALIDATING: "CHECKING",
+        NO_FRAMES: "NO FRAMES",
         LIVE: "LIVE",
         PAUSED: "PAUSED",
         STALE: "STALE",
@@ -3609,6 +3927,7 @@
         SELECTING: "Drag over the chart and release to lock it, or press Esc to cancel.",
         CLAIMING: "Locking the selected chart. Decisions remain paused until fresh frames arrive.",
         VALIDATING: "Checking the selected chart. Decisions remain paused until its first fresh frame is studied.",
+        NO_FRAMES: "The chart was selected, but Phoenix Guard received no picture from it. Stop tracking, select the chart again, and wait for the first live frame before using its study.",
         LIVE: "Fresh frames are streaming in the background while you use other apps.",
         PAUSED: "The selected chart is paused. Its last picture is historical, not a live decision.",
         STALE: "The selected chart stopped delivering fresh frames. The visible picture is historical.",
@@ -3621,21 +3940,71 @@
         source.display_name,
         ["NO_SOURCE", "READY"].includes(sourceState) ? "No chart selected" : "Selected chart",
       );
-      const age = lastFrameEpoch > 0
+      const age = firstFrameTimedOut
+        ? "No frame received"
+          + (transport ? " · " + transport : "")
+          + (selectedEpoch > 0 ? " · selected " + (formatAge(selectedEpoch) || "earlier") : "")
+        : lastFrameEpoch > 0
         ? (formatAge(lastFrameEpoch) || "Frame time unavailable") + (transport ? " · " + transport : "")
         : transport || (["NO_SOURCE", "READY"].includes(sourceState) ? "Not streaming" : "Waiting for first frame");
       return {
         present: contract.present,
         source: source,
+        origin: contract.origin,
         state: sourceState,
-        stateLabel: labels[sourceState],
+        stateLabel: frameProcessing ? "ANALYZING" : labels[sourceState],
         label: displayName,
         age: age,
-        message: safeText(source.message, defaults[sourceState]),
+        message: firstFrameTimedOut ? defaults.NO_FRAMES : safeText(source.message, defaults[sourceState]),
         fresh: fresh,
+        frameProcessing: frameProcessing,
+        transportActive: fresh && (sourceState === "LIVE" || frameProcessing),
         decisionUsable: sourceState === "LIVE" && fresh && source.decision_usable === true,
         killEnabled: !["NO_SOURCE", "READY", "STOPPED", "KILLED"].includes(sourceState),
       };
+    }
+
+    function operatorReadinessView(payload, sourceOverride) {
+      const operatorState = safeObject(payload);
+      const sourceView = sourceOverride || captureSourceView(operatorState);
+      const identity = chartIdentityView(operatorState);
+      const freshness = safeObject(operatorState.freshness);
+      const studyFreshness = normalizeFreshness(freshness.state || freshness.status);
+      const nextSemanticIdentity = visualNamespaceIdentity(operatorState);
+      const surfaceTransition = Boolean(
+        state.imageSemanticIdentity
+        && nextSemanticIdentity
+        && nextSemanticIdentity !== state.imageSemanticIdentity
+      );
+      const sourceLive = sourceView.present && sourceView.transportActive;
+      if (surfaceTransition || ["SELECTING", "CLAIMING", "VALIDATING", "SWITCHING"].includes(sourceView.state)) {
+        if (!surfaceTransition && sourceView.frameProcessing) {
+          return {state: "ANALYZING", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+        }
+        return {state: "WARMING", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (sourceLive && identity.mismatch) {
+        return {state: "IDENTITY_CHANGED", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (sourceLive && identity.pending) {
+        return {state: "IDENTIFYING", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (sourceLive && !sourceView.decisionUsable) {
+        return {state: "ANALYZING", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (sourceLive && studyFreshness !== "live") {
+        return {state: "ANALYZING", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (["PAUSED", "STALE"].includes(sourceView.state)) {
+        return {state: "INTERRUPTED", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (["NO_FRAMES", "ERROR"].includes(sourceView.state)) {
+        return {state: "SOURCE_ERROR", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      if (["NO_SOURCE", "READY", "STOPPED", "KILLED"].includes(sourceView.state)) {
+        return {state: "TRACKING_OFF", source: sourceView, identity: identity, studyFreshness: studyFreshness};
+      }
+      return {state: "READY", source: sourceView, identity: identity, studyFreshness: studyFreshness};
     }
 
     function renderCaptureSource(payload) {
@@ -3662,23 +4031,179 @@
       return view;
     }
 
+    function renderReadinessEntryState(config) {
+      const view = safeObject(config);
+      if (state.entryExpiryTimer) {
+        window.clearTimeout(state.entryExpiryTimer);
+        state.entryExpiryTimer = 0;
+      }
+      els.beginnerDecisionShell.dataset.tone = view.tone === "blocked" ? "blocked" : "hold";
+      els.questionEntryNow.dataset.state = safeText(view.state, "updating").toLowerCase();
+      setText(els.beginnerReadStatus, view.readStatus);
+      setText(els.beginnerDecisionTitle, view.headline);
+      setText(els.beginnerConfidence, view.confidence);
+      setText(els.beginnerForecastSummary, view.projection);
+      els.beginnerActionRow.dataset.action = view.tone === "blocked" ? "avoid" : "prepare";
+      setText(els.beginnerActionLabel, view.actionLabel);
+      setText(els.beginnerInstruction, view.instruction);
+      setText(els.beginnerReason, view.reason);
+      setText(els.beginnerNextCondition, view.nextCondition);
+      setText(els.beginnerEvidenceSafety, view.evidence);
+    }
+
+    function renderIdentityPendingAnswers(readiness) {
+      const identity = readiness.identity;
+      const marketLabel = identity.label || "the selected chart";
+      els.questionMarketHistory.dataset.state = "identifying";
+      els.questionDirectionStudy.dataset.state = "identifying";
+      setText(els.beginnerMarketContext, marketLabel);
+      setText(els.currentMoveTitle, "Identifying " + marketLabel);
+      setText(
+        els.beginnerNowRead,
+        "Fresh frames are arriving. Pair and timeframe are being confirmed before history is attached to this chart.",
+      );
+      setText(els.permissionTitle, "History not attached yet");
+      setText(
+        els.beginnerEntryRead,
+        "History from another pair or timeframe is never reused while chart identity is unproven.",
+      );
+      setText(els.marketOriginConfidence, "Live source · identity confirmation in progress");
+      setText(els.innerTrendTitle, "Current chart is being classified");
+      setText(
+        els.beginnerNextRead,
+        "Direction and timing will publish only after this live pair and timeframe own the completed study.",
+      );
+      setText(els.directionStudyConfidence, "No old directional read is presented as current");
+      setText(
+        els.beginnerEvidenceStory,
+        "Live capture confirmed · pair/timeframe identity still being proven",
+      );
+      setText(
+        els.beginnerEvidenceTiming,
+        "Timing is waiting for the same-pair, same-timeframe completed-candle lineage",
+      );
+    }
+
     function enforceCaptureSourceDecision(payload) {
-      const view = renderCaptureSource(payload);
-      if (!view.present || view.decisionUsable) {
+      const sourceView = renderCaptureSource(payload);
+      const readiness = operatorReadinessView(payload, sourceView);
+      if (!sourceView.present && readiness.state !== "WARMING") {
         return;
       }
-      const historical = ["PAUSED", "STALE", "STOPPED", "KILLED", "ERROR"].includes(view.state);
-      invalidateLiveEntryDecision(
-        view.message,
-        "STAY OUT",
-        ["NO_SOURCE", "READY", "STOPPED", "KILLED", "ERROR"].includes(view.state)
-          ? "Select a chart with Ctrl+Shift+B and wait for a fresh studied frame."
-          : "Wait for the selected chart to become fresh and decision-ready.",
-        historical ? "stale" : "updating",
-      );
-      if (historical && state.imageUrl) {
-        updateVisualStatus("chart", "stale", "Historical frame retained · selected source is not live");
+      if (readiness.state === "READY") {
+        return;
       }
+      if (["IDENTIFYING", "IDENTITY_CHANGED", "WARMING"].includes(readiness.state)) {
+        renderIdentityPendingAnswers(readiness);
+      }
+      if (readiness.state === "IDENTIFYING") {
+        renderReadinessEntryState({
+          state: "identifying",
+          readStatus: "Stream live · confirming chart identity",
+          headline: "CONFIRMING PAIR & TIMEFRAME",
+          confidence: "Live frames are arriving · current identity is not proven yet",
+          projection: "The chart is live. Phoenix Guard is binding history, direction, overlays, and timing to this exact pair and timeframe.",
+          actionLabel: "WAIT FOR CURRENT READ",
+          instruction: "Keep the chart streaming while its pair and timeframe are confirmed.",
+          reason: "No previous pair's signal is being reused as a current answer.",
+          nextCondition: "The three answers publish when pair and timeframe identity are both confirmed.",
+          evidence: "Live capture · identity confirmation in progress · entry answer withheld",
+        });
+        return;
+      }
+      if (readiness.state === "IDENTITY_CHANGED") {
+        renderReadinessEntryState({
+          state: "switching",
+          readStatus: "Stream live · chart identity changed",
+          headline: "REBINDING THE NEW CHART",
+          confidence: "Live source · previous study invalidated for this chart",
+          projection: "A pair or timeframe change was detected. The old chart's direction, timing, and overlays are not current here.",
+          actionLabel: "WAIT FOR CURRENT READ",
+          instruction: "Keep streaming while the new chart builds its own current study.",
+          reason: "The previous visual namespace was invalidated at the chart boundary.",
+          nextCondition: "A fresh identity-proven study for " + readiness.identity.label + " replaces this state.",
+          evidence: "Chart identity changed · old signal not current",
+        });
+        return;
+      }
+      if (readiness.state === "WARMING") {
+        renderReadinessEntryState({
+          state: "updating",
+          readStatus: sourceView.state === "SWITCHING" ? "Switching chart" : "Studying selected chart",
+          headline: "STUDYING THIS CHART",
+          confidence: "Live answer is loading",
+          projection: "The selected chart is being locked to one frame, pair, timeframe, and overlay geometry contract.",
+          actionLabel: "WAIT FOR CURRENT READ",
+          instruction: "Keep the selected chart streaming while the first matched study is prepared.",
+          reason: "The previous chart answer is not being shown as current during this transition.",
+          nextCondition: "The three answers replace this message after the current chart is verified.",
+          evidence: "Chart transition · current answer loading",
+        });
+        return;
+      }
+      if (readiness.state === "ANALYZING") {
+        renderReadinessEntryState({
+          state: "analyzing",
+          readStatus: "Stream live · analyzing latest frame",
+          headline: "ANALYZING LATEST FRAME",
+          confidence: "Fresh capture · completed study updating",
+          projection: "The chart stream is live. The newest frame is ahead of the last completed study, so no older entry answer is presented as current.",
+          actionLabel: "WAIT FOR CURRENT READ",
+          instruction: "Use the market-history and direction panels as context while the current decision catches up.",
+          reason: "Image processing can take longer than the capture interval; this is active analysis, not a stale source.",
+          nextCondition: "A frame-matched completed study and overlay set publish the next current answer.",
+          evidence: "Live capture · analysis in progress · entry answer withheld",
+        });
+        return;
+      }
+      if (readiness.state === "INTERRUPTED") {
+        renderReadinessEntryState({
+          state: "stale",
+          tone: "blocked",
+          readStatus: "Chart stream interrupted",
+          headline: "STREAM INTERRUPTED",
+          confidence: "Last completed study is historical until capture resumes",
+          projection: "The retained picture and overlays are context only because fresh chart frames stopped arriving.",
+          actionLabel: "DO NOT USE OLD SIGNAL",
+          instruction: "Resume the selected chart stream before using the decision panel.",
+          reason: sourceView.message,
+          nextCondition: "A new live frame must arrive and complete the current study.",
+          evidence: "Capture interrupted · previous answer invalidated",
+        });
+        if (state.imageUrl) {
+          updateVisualStatus("chart", "stale", "Historical frame retained · stream interrupted");
+        }
+        return;
+      }
+      if (readiness.state === "SOURCE_ERROR") {
+        renderReadinessEntryState({
+          state: "source-error",
+          tone: "blocked",
+          readStatus: "Chart source needs attention",
+          headline: "SOURCE NEEDS ATTENTION",
+          confidence: "No current frame is available",
+          projection: "Phoenix Guard cannot build current overlays or timing without a delivered chart frame.",
+          actionLabel: "RESELECT CHART",
+          instruction: "Select the chart region again and wait for its first accepted frame.",
+          reason: sourceView.message,
+          nextCondition: "Tracking resumes after a fresh frame is accepted from the selected chart.",
+          evidence: "No current source frame · previous answer invalidated",
+        });
+        return;
+      }
+      renderReadinessEntryState({
+        state: "tracking-off",
+        tone: "blocked",
+        readStatus: "Chart tracking is off",
+        headline: "TRACKING IS OFF",
+        confidence: "No current chart decision",
+        projection: "Select a chart to resume live history, direction, timing, and overlay study.",
+        actionLabel: "SELECT A CHART",
+        instruction: "Press Ctrl+Shift+B, select the chart, and keep its stream connected.",
+        reason: sourceView.message,
+        nextCondition: "A selected chart must deliver a fresh verified frame.",
+        evidence: "Tracking off · no current entry answer",
+      });
     }
 
     async function requestJson(url) {
@@ -3694,6 +4219,285 @@
         throw new Error("Live analysis returned an unsupported workspace format.");
       }
       return payload;
+    }
+
+    function positiveFrameId() {
+      for (let index = 0; index < arguments.length; index += 1) {
+        const value = Number(arguments[index]);
+        if (Number.isFinite(value) && value > 0) {
+          return Math.trunc(value);
+        }
+      }
+      return 0;
+    }
+
+    function overlayCountFromStateVersion(version, fallback) {
+      const match = /^ovlock_(\d+)_/.exec(safeText(version, ""));
+      if (match) {
+        return Math.max(0, Number(match[1]) || 0);
+      }
+      return Math.max(0, Number(fallback) || 0);
+    }
+
+    function heartbeatVersionFromPayload(payload) {
+      const operatorState = safeObject(payload);
+      const surface = safeObject(operatorState.surface);
+      const tracking = safeObject(operatorState.tracking);
+      const marketStudy = safeObject(tracking.market_study_v3);
+      const performance = safeObject(
+        operatorState.performance_trace_v3
+          || marketStudy.performance_trace_v3,
+      );
+      const overlayState = safeObject(performance.overlay_state);
+      return {
+        version: safeText(
+          operatorState.overlay_state_version
+            || surface.overlay_state_version
+            || tracking.overlay_state_version
+            || marketStudy.overlay_state_version
+            || performance.overlay_state_version
+            || overlayState.overlay_state_version,
+          "",
+        ),
+        frameVersion: safeText(
+          operatorState.overlay_frame_state_version
+            || surface.overlay_frame_state_version
+            || tracking.overlay_frame_state_version
+            || marketStudy.overlay_frame_state_version
+            || performance.overlay_frame_state_version
+            || overlayState.overlay_frame_state_version,
+          "",
+        ),
+      };
+    }
+
+    async function resolveHeartbeatOverlayVersion(payload, renderedFrameId) {
+      const direct = heartbeatVersionFromPayload(payload);
+      if (direct.version) {
+        state.heartbeatOverlayStateVersion = direct.version;
+        state.heartbeatOverlayFrameStateVersion = direct.frameVersion;
+        state.heartbeatOverlayFrameId = renderedFrameId;
+        return direct;
+      }
+      if (
+        state.heartbeatOverlayStateVersion
+        && state.heartbeatOverlayFrameId === renderedFrameId
+      ) {
+        return {
+          version: state.heartbeatOverlayStateVersion,
+          frameVersion: state.heartbeatOverlayFrameStateVersion,
+        };
+      }
+
+      const controller = typeof window.AbortController === "function"
+        ? new window.AbortController()
+        : null;
+      state.heartbeatAbortController = controller;
+      const timeoutTimer = controller
+        ? window.setTimeout(function () { controller.abort(); }, FRONTEND_HEARTBEAT_TRACE_TIMEOUT_MS)
+        : 0;
+      try {
+        const response = await fetch(frontendPerformanceTraceUrl(), {
+          cache: "no-store",
+          headers: {"Accept": "application/json"},
+          signal: controller ? controller.signal : undefined,
+        });
+        if (!response.ok) {
+          return null;
+        }
+        const trace = safeObject(await response.json());
+        const displayFrame = safeObject(trace.display_frame);
+        const overlayState = safeObject(trace.overlay_state);
+        const traceFrameId = positiveFrameId(
+          overlayState.frame_id,
+          trace.overlay_frame_id,
+          displayFrame.frame_id,
+          trace.display_frame_id,
+          trace.frame_id,
+        );
+        const version = safeText(
+          trace.overlay_state_version || overlayState.overlay_state_version,
+          "",
+        );
+        if (!version || (traceFrameId > 0 && traceFrameId !== renderedFrameId)) {
+          return null;
+        }
+        const resolved = {
+          version: version,
+          frameVersion: safeText(
+            trace.overlay_frame_state_version || overlayState.overlay_frame_state_version,
+            "",
+          ),
+        };
+        state.heartbeatOverlayStateVersion = resolved.version;
+        state.heartbeatOverlayFrameStateVersion = resolved.frameVersion;
+        state.heartbeatOverlayFrameId = renderedFrameId;
+        return resolved;
+      } catch (_error) {
+        return null;
+      } finally {
+        if (timeoutTimer) {
+          window.clearTimeout(timeoutTimer);
+        }
+        if (state.heartbeatAbortController === controller) {
+          state.heartbeatAbortController = null;
+        }
+      }
+    }
+
+    function heartbeatRenderSnapshot() {
+      const payload = safeObject(state.visualPayload);
+      const surface = safeObject(payload.surface);
+      const renderedFrameId = positiveFrameId(
+        surface.frame_id,
+        payload.display_frame_id,
+        payload.frame_id,
+      );
+      const surfaceReady = Boolean(
+        renderedFrameId > 0
+        && state.naturalWidth > 0
+        && state.naturalHeight > 0
+        && els.surfaceCanvas.classList.contains("ready")
+        && state.imageSemanticIdentity === visualNamespaceIdentity(payload),
+      );
+      if (!surfaceReady) {
+        return null;
+      }
+      return {
+        payload: payload,
+        surface: surface,
+        renderedFrameId: renderedFrameId,
+        visibleOverlayCount: Math.max(0, Number(state.lastRenderedOverlayCount) || 0),
+      };
+    }
+
+    async function sendFrontendHeartbeat() {
+      if (state.heartbeatStopped) {
+        return;
+      }
+      if (state.heartbeatInFlight) {
+        state.heartbeatPending = true;
+        return;
+      }
+      const snapshot = heartbeatRenderSnapshot();
+      if (!snapshot) {
+        return;
+      }
+      state.heartbeatInFlight = true;
+      try {
+        const version = await resolveHeartbeatOverlayVersion(
+          snapshot.payload,
+          snapshot.renderedFrameId,
+        );
+        const current = heartbeatRenderSnapshot();
+        if (
+          !version
+          || !version.version
+          || !current
+          || current.renderedFrameId !== snapshot.renderedFrameId
+        ) {
+          return;
+        }
+        const sourceOverlayCount = overlayCountFromStateVersion(
+          version.version,
+          state.overlays.length,
+        );
+        const sentAtMs = Date.now();
+        const heartbeat = {
+          session_id: SESSION_ID,
+          surface_id: "dashboard",
+          page_instance_id: PAGE_INSTANCE_ID,
+          route: "live",
+          overlay_mode: "CLEAN_LIVE",
+          surface_mode: state.surfaceMode,
+          page_visibility: document.visibilityState || "unknown",
+          document_hidden: Boolean(document.hidden),
+          sent_at_ms: sentAtMs,
+          frame_id: current.renderedFrameId,
+          rendered_frame_id: current.renderedFrameId,
+          display_frame_id: current.renderedFrameId,
+          chart_frame_id: current.renderedFrameId,
+          overlay_render_frame_id: current.renderedFrameId,
+          overlay_state_version: version.version,
+          overlay_frame_state_version: version.frameVersion,
+          state_version: safeText(current.payload.revision, ""),
+          overlay_count: sourceOverlayCount,
+          visible_overlay_count: current.visibleOverlayCount,
+          selected_overlay_id: safeText(state.selectedOverlayId, ""),
+          frontend_loaded_ms: state.lastFrontendImageLoadedMs,
+          frontend_overlay_drawn_ms: state.lastFrontendOverlayDrawnMs,
+          viewport: {
+            width: Math.max(0, Number(window.innerWidth) || 0),
+            height: Math.max(0, Number(window.innerHeight) || 0),
+          },
+          render_size: {
+            width: state.naturalWidth,
+            height: state.naturalHeight,
+          },
+          full_broker_surface_visible: true,
+          visible_artifact_kind: state.imageSpace === "window" ? "window" : "chart",
+          visible_image_src: state.imageUrl,
+          frontend_state_version: "operator-" + safeText(current.payload.revision, "0"),
+        };
+        await fetch(frontendHeartbeatUrl(), {
+          method: "POST",
+          cache: "no-store",
+          keepalive: true,
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(heartbeat),
+        });
+      } catch (_error) {
+        // Health reporting is deliberately isolated from operator polling.
+      } finally {
+        state.heartbeatInFlight = false;
+        if (state.heartbeatPending && !state.heartbeatStopped) {
+          state.heartbeatPending = false;
+          queueFrontendHeartbeat(0);
+        }
+      }
+    }
+
+    function queueFrontendHeartbeat(delay) {
+      if (state.heartbeatStopped) {
+        return;
+      }
+      if (state.heartbeatPulseTimer) {
+        window.clearTimeout(state.heartbeatPulseTimer);
+      }
+      state.heartbeatPulseTimer = window.setTimeout(function () {
+        state.heartbeatPulseTimer = 0;
+        sendFrontendHeartbeat();
+      }, Math.max(0, Number(delay) || 0));
+    }
+
+    function startFrontendHeartbeat() {
+      state.heartbeatStopped = false;
+      if (state.heartbeatIntervalTimer) {
+        return;
+      }
+      state.heartbeatIntervalTimer = window.setInterval(function () {
+        sendFrontendHeartbeat();
+      }, FRONTEND_HEARTBEAT_INTERVAL_MS);
+    }
+
+    function stopFrontendHeartbeat() {
+      state.heartbeatStopped = true;
+      state.heartbeatPending = false;
+      if (state.heartbeatIntervalTimer) {
+        window.clearInterval(state.heartbeatIntervalTimer);
+        state.heartbeatIntervalTimer = 0;
+      }
+      if (state.heartbeatPulseTimer) {
+        window.clearTimeout(state.heartbeatPulseTimer);
+        state.heartbeatPulseTimer = 0;
+      }
+      if (state.heartbeatAbortController) {
+        state.heartbeatAbortController.abort();
+        state.heartbeatAbortController = null;
+      }
     }
 
     function showSourceSelectionGuide() {
@@ -4035,6 +4839,7 @@
       setText(els.beginnerReason, "No current rest or sweep estimate is available. " + message);
       setText(els.beginnerNextCondition, "Reconnect the chart and wait for a new current observation.");
       setText(els.retracementEvidence, "Retracement evidence: unavailable while the live workspace is offline. Observation only; never entry permission.");
+      renderPassiveDecisionAudit({});
       renderStreamObservation({tracking: {stream: {enabled: false, state: "OFFLINE"}}});
       updateVisualStatus("chart", "offline", "Broker view unavailable");
       renderCaptureSource(state.payload || {});
@@ -4647,10 +5452,44 @@
           ? timingForecast.event_likelihood_support_count
           : timingForecast.support_count || 0,
       );
+      const timingObservationSupportCount = Number(
+        timingForecast.timing_support_count !== undefined
+          ? timingForecast.timing_support_count
+          : 0,
+      );
       const calibrationGrade = safeText(
         timingForecast.calibration_grade,
         "UNRATED",
       ).toUpperCase();
+      const timingForecastStatus = safeText(timingForecast.status, "").toUpperCase();
+      const timingSourceTier = safeText(
+        timingForecast.source || timingForecast.source_tier,
+        "",
+      ).toUpperCase();
+      const horizonSecondsLow = timingForecast.horizon_seconds_low === null
+        || timingForecast.horizon_seconds_low === undefined
+        ? NaN
+        : Number(timingForecast.horizon_seconds_low);
+      const horizonSecondsHigh = timingForecast.horizon_seconds_high === null
+        || timingForecast.horizon_seconds_high === undefined
+        ? NaN
+        : Number(timingForecast.horizon_seconds_high);
+      const liveSequenceTimingSource = timingSourceTier === "LIVE_M5_SEQUENCE";
+      const empiricalPairTimingSource = (
+        timingSourceTier === "PAIR" || timingSourceTier.startsWith("PAIR_")
+      )
+        && timingForecast.timing_empirical === true
+        && Number.isFinite(timingObservationSupportCount)
+        && timingObservationSupportCount > 0;
+      const uncalibratedClosedCandleEstimateAvailable = forecastIdentityMatches
+        && timingForecastStatus === "FORECAST_AVAILABLE"
+        && (liveSequenceTimingSource || empiricalPairTimingSource)
+        && currentTimeframe === "M5"
+        && Number.isFinite(horizonSecondsLow)
+        && Number.isFinite(horizonSecondsHigh)
+        && horizonSecondsLow >= 900
+        && horizonSecondsHigh >= horizonSecondsLow
+        && timingForecast.calibrated !== true;
       const projectionTimingUnproven = forecastIdentityMatches && (
         !Number.isFinite(timingSupportCount)
         || timingSupportCount <= 0
@@ -4667,7 +5506,11 @@
           .replace(/^[\s.:;·—-]+/, "");
       }
       const projectionHeadline = forecastIdentityMatches
-        ? projectionTimingUnproven
+        ? uncalibratedClosedCandleEstimateAvailable
+          ? forecastSide !== "HOLD"
+            ? forecastSide + " uncalibrated closed-candle estimate · " + horizonLabel
+            : "Uncalibrated closed-candle timing estimate · " + horizonLabel
+          : projectionTimingUnproven
           ? forecastSide !== "HOLD"
             ? forecastSide + " direction studied · timing range withheld"
             : "Direction study active · timing range withheld"
@@ -4676,17 +5519,28 @@
       const projectionSupportMessage = timingSupportCount > 0
         ? "Study only: " + timingSupportCount + " matching outcomes are recorded, but replay calibration has not passed. The candle range is not published and is not an entry signal."
         : "Study only: this pair has no replay-calibrated matching outcome yet. The candle range is not published and is not an entry signal.";
+      const uncalibratedClosedCandleEstimateMessage = empiricalPairTimingSource
+        ? "Empirical pair-history closed-candle estimate from "
+          + timingObservationSupportCount
+          + " timing observations. Event probability unavailable; this bounded timing range is not replay-calibrated and does not grant entry permission."
+        : "Current M5 closed-candle sequence estimate. Event probability unavailable; this timing range is not replay-calibrated and does not grant entry permission.";
       const studyProjection = [
         /[.!?]$/.test(projectionHeadline)
           ? projectionHeadline
           : projectionHeadline + ".",
-        projectionTimingUnproven ? projectionSupportMessage : projectionDetail,
+        uncalibratedClosedCandleEstimateAvailable
+          ? uncalibratedClosedCandleEstimateMessage
+          : projectionTimingUnproven
+            ? projectionSupportMessage
+            : projectionDetail,
       ].filter(Boolean).join(" ");
-      const estimatedLikelihoodLabel = questionField(
-        timingForecast,
-        ["estimated_likelihood_label"],
-        "Estimated likelihood unavailable",
-      );
+      const estimatedLikelihoodLabel = uncalibratedClosedCandleEstimateAvailable
+        ? "Event probability unavailable"
+        : questionField(
+            timingForecast,
+            ["estimated_likelihood_label"],
+            "Estimated likelihood unavailable",
+          );
       const evidenceConfidenceLabel = questionField(
         timingForecast,
         ["evidence_confidence_label", "confidence_label"],
@@ -4860,6 +5714,129 @@
       };
     }
 
+    function passiveDecisionAudit(payload) {
+      const operatorState = safeObject(payload);
+      const market = safeObject(operatorState.market);
+      const marketSymbol = canonicalMarketToken(market.symbol || market.market);
+      const marketTimeframe = safeText(market.timeframe, "").toUpperCase();
+      if (
+        market.identity_pending === true
+        || !marketSymbol
+        || marketSymbol === "UNKNOWN"
+        || !marketTimeframe
+        || marketTimeframe === "UNKNOWN"
+      ) {
+        return {};
+      }
+      const study = safeObject(safeObject(operatorState.tracking).market_study_v3);
+      // Keep the operator UI coupled only to the public V3 field contract;
+      // internal model vocabulary is intentionally not exposed in this file.
+      const fieldKey = ["path", "clock", "liqui" + "dity", "v3"].join("_");
+      const audit = safeObject(
+        safeObject(study[fieldKey]).passive_prediction_audit_v3,
+      );
+      if (
+        safeText(audit.schema_version, "").toUpperCase()
+          !== "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3"
+        || audit.study_only !== true
+        || audit.execution_authority !== false
+        || audit.places_trades !== false
+        || audit.can_grant_entry_permission !== false
+      ) {
+        return {};
+      }
+      const auditSymbol = canonicalMarketToken(audit.symbol);
+      const auditTimeframe = safeText(audit.timeframe, "").toUpperCase();
+      if (
+        (auditSymbol && auditSymbol !== marketSymbol)
+        || (auditTimeframe && auditTimeframe !== marketTimeframe)
+      ) {
+        return {};
+      }
+      return audit;
+    }
+
+    function decisionAuditMetric(value) {
+      if (value === null || value === undefined || value === "") {
+        return null;
+      }
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? clamp(numeric, 0, 1) : null;
+    }
+
+    function renderDecisionAuditMetric(wrapper, target, value) {
+      const metric = decisionAuditMetric(value);
+      wrapper.dataset.available = metric === null ? "false" : "true";
+      setText(target, metric === null ? "—" : Math.round(metric * 100) + "%");
+    }
+
+    function renderPassiveDecisionAudit(payload) {
+      const audit = passiveDecisionAudit(payload);
+      const frozen = Math.max(0, Number(audit.frozen_forecast_count) || 0);
+      const pending = Math.max(0, Number(audit.pending_outcome_count) || 0);
+      const matured = Math.max(0, Number(audit.matured_outcome_count) || 0);
+      const measured = matured > 0;
+      const metrics = safeObject(audit.candidate_metrics);
+      const latest = safeObject(audit.latest_matured_outcome);
+
+      els.decisionAuditStrip.dataset.state = measured ? "measured" : "collecting";
+      setText(els.decisionAuditStatus, measured ? "MEASURED" : "COLLECTING");
+      setText(
+        els.decisionAuditCounts,
+        frozen + " frozen · " + pending + " pending · " + matured + " matured",
+      );
+      renderDecisionAuditMetric(
+        els.decisionAuditDirectionWrap,
+        els.decisionAuditDirection,
+        metrics.directional_accuracy,
+      );
+      renderDecisionAuditMetric(
+        els.decisionAuditTimingWrap,
+        els.decisionAuditTiming,
+        metrics.timing_accuracy,
+      );
+      renderDecisionAuditMetric(
+        els.decisionAuditSweepWrap,
+        els.decisionAuditSweep,
+        metrics.sweep_survival_rate,
+      );
+      renderDecisionAuditMetric(
+        els.decisionAuditCalibrationWrap,
+        els.decisionAuditCalibration,
+        metrics.calibration_score,
+      );
+
+      if (!measured || !Object.keys(latest).length) {
+        setText(
+          els.decisionAuditOutcome,
+          frozen > 0
+            ? "Frozen forecasts are being compared with future market movement; no matured score yet."
+            : "Waiting for a frozen forecast to mature against future market movement.",
+        );
+        return;
+      }
+      const latestSide = studyDirection(latest.predicted_direction);
+      const outcomeParts = [];
+      if (latestSide !== "HOLD") {
+        outcomeParts.push("latest " + latestSide);
+      } else {
+        outcomeParts.push("latest outcome");
+      }
+      outcomeParts.push(latest.direction_correct === true ? "direction correct" : "direction missed");
+      outcomeParts.push(
+        latest.observed_move_occurred !== true
+          ? "move not observed"
+          : latest.timing_correct === true
+            ? "timing inside window"
+            : "timing outside window",
+      );
+      const latestSweep = decisionAuditMetric(latest.sweep_survival_rate);
+      if (latestSweep !== null) {
+        outcomeParts.push(Math.round(latestSweep * 100) + "% sweep survival");
+      }
+      setText(els.decisionAuditOutcome, outcomeParts.join(" · "));
+    }
+
     function renderDecision(payload) {
       const market = safeObject(payload.market);
       const freshness = safeObject(payload.freshness);
@@ -4880,10 +5857,12 @@
         : action === "SELL NOW"
           ? "sell"
           : freshState === "stale" || freshState === "offline" ? "blocked" : "hold";
-      const marketLabel = [
-        safeText(market.symbol || market.market, ""),
-        safeText(market.timeframe, ""),
-      ].filter(Boolean).join(" · ") || "Market not connected";
+      const marketLabel = market.identity_pending === true
+        ? safeText(market.identity_status, "Identifying current chart")
+        : [
+            safeText(market.symbol || market.market, ""),
+            safeText(market.timeframe, ""),
+          ].filter(Boolean).join(" · ") || "Market not connected";
       const observedAt = Number(freshness.observed_at || payload.observed_at || 0);
       const entryPermissionTitle = setupWindowVerifying
         ? "Setup window · verifying"
@@ -4950,6 +5929,7 @@
         entryPermissionTitle + " · " + answers.entry.evidence + " · " + freshnessLabel
           + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
       );
+      renderPassiveDecisionAudit(payload);
       scheduleEntryExpiry(permission, freshness, action);
       enforceCaptureSourceDecision(payload);
     }
@@ -5096,6 +6076,8 @@
       const stream = streamContract(payload);
       const enabled = stream.enabled === true;
       const streamState = normalizeStreamState(stream.state, enabled);
+      const sourceView = captureSourceView(payload);
+      const captureLive = sourceView.present && sourceView.transportActive;
       const labels = {
         running: "Continuous observation · live",
         starting: "Continuous observation · starting",
@@ -5107,9 +6089,18 @@
         unknown: "Observation health unavailable",
       };
       els.streamObservation.dataset.state = streamState;
-      setText(els.streamObservationLabel, labels[streamState]);
+      setText(
+        els.streamObservationLabel,
+        captureLive && streamState !== "running"
+          ? "Chart frames streaming · completed-frame analysis"
+          : labels[streamState],
+      );
 
       const detail = [titleCase(safeText(stream.state, "UNAVAILABLE"))];
+      if (captureLive && streamState !== "running") {
+        detail.push("capture transport live");
+        detail.push("intrabar observer " + streamState);
+      }
       const fps = Number(stream.acquisition_fps);
       if (stream.acquisition_fps !== null && stream.acquisition_fps !== undefined && Number.isFinite(fps)) {
         detail.push((fps >= 10 ? fps.toFixed(1) : fps.toFixed(2)) + " FPS acquisition");
@@ -5154,8 +6145,9 @@
       const liveRead = liveFormingRead(payload);
       const sourceView = renderCaptureSource(payload);
       const visualObservation = visualObservationView(payload);
+      const readiness = operatorReadinessView(payload, sourceView);
       if (sourceView.present) {
-        const sourceConnection = {
+        let sourceConnection = {
           LIVE: [
             "live",
             visualObservation.liveUnchanged
@@ -5165,6 +6157,7 @@
           SELECTING: ["updating", "Selecting chart"],
           CLAIMING: ["updating", "Locking chart"],
           VALIDATING: ["updating", "Checking chart"],
+          NO_FRAMES: ["offline", "Chart source sent no frames"],
           SWITCHING: ["updating", "Switching chart"],
           STALE: ["stale", "Chart stream stale"],
           PAUSED: ["stale", "Chart stream paused"],
@@ -5174,6 +6167,15 @@
           NO_SOURCE: ["updating", "Waiting for chart"],
           READY: ["updating", "Waiting for chart"],
         }[sourceView.state] || ["updating", "Waiting for chart"];
+        if (readiness.state === "IDENTIFYING") {
+          sourceConnection = ["live", "Chart live · confirming pair/timeframe"];
+        } else if (readiness.state === "IDENTITY_CHANGED") {
+          sourceConnection = ["live", "Chart live · rebinding new identity"];
+        } else if (readiness.state === "ANALYZING") {
+          sourceConnection = ["live", "Chart live · analyzing latest frame"];
+        } else if (readiness.state === "WARMING" && sourceView.state === "LIVE") {
+          sourceConnection = ["live", "Chart live · loading matched study"];
+        }
         setConnectionState(sourceConnection[0], sourceConnection[1]);
       } else {
         const label = !active
@@ -5187,6 +6189,8 @@
       setText(
         els.surfaceMeta,
         [
+          readiness.state === "IDENTIFYING" ? "Confirming pair/timeframe" : "",
+          readiness.state === "ANALYZING" ? "Analyzing latest accepted frame" : "",
           visualObservation.liveUnchanged ? "Live picture unchanged" : "",
           liveRead.available ? "Forming candle " + liveRead.label : "",
           liveRead.observedAt ? formatAge(liveRead.observedAt) : "",
@@ -5305,9 +6309,16 @@
       state.focusedOverlayId = "";
       state.overlays = [];
       state.visualPayload = null;
-      state.liveSession = null;
+      // The capture source belongs to the session, not to the old pair's
+      // overlay namespace. Preserve it across a pair/timeframe switch so a
+      // genuinely live background stream never flashes as disconnected while
+      // the new bitmap and identity proof are decoding.
       state.completedStudyHistory = [];
       state.lastVisualBundleKey = "";
+      state.lastRenderedOverlayCount = 0;
+      state.heartbeatOverlayStateVersion = "";
+      state.heartbeatOverlayFrameStateVersion = "";
+      state.heartbeatOverlayFrameId = 0;
       state.projectedGeometryCache.clear();
       state.controlGeometryCache.clear();
       reconcileRenderedChildren(els.hotspotLayer, []);
@@ -5339,7 +6350,7 @@
     function loadSurface(payload, options) {
       const config = options || {};
       const surface = currentSurface(payload);
-      const nextSemanticIdentity = surfaceSemanticIdentity(payload);
+      const nextSemanticIdentity = visualNamespaceIdentity(payload);
       const primaryUrl = versionedUrl(surface.primaryUrl, payload);
       const fallbackUrl = versionedUrl(surface.fallbackUrl, payload);
       const pendingPairChanged = Boolean(
@@ -5467,6 +6478,7 @@
         return;
       }
       els.surfaceCanvas.classList.add("ready");
+      state.lastFrontendImageLoadedMs = Date.now();
       els.surfaceCanvas.classList.remove("updating");
       els.surfaceCanvas.setAttribute("aria-busy", "false");
       els.surfacePlaceholder.hidden = true;
@@ -5479,7 +6491,7 @@
       const desiredSurface = currentSurface(queuedPayload || payload);
       const desiredPrimaryUrl = versionedUrl(desiredSurface.primaryUrl, queuedPayload || payload);
       const desiredFallbackUrl = versionedUrl(desiredSurface.fallbackUrl, queuedPayload || payload);
-      const desiredSemanticIdentity = surfaceSemanticIdentity(queuedPayload || payload);
+      const desiredSemanticIdentity = visualNamespaceIdentity(queuedPayload || payload);
       const queuedMatchesImage = Boolean(
         queuedPayload
         && desiredSemanticIdentity === state.imageSemanticIdentity
@@ -5581,7 +6593,10 @@
     }
 
     function exhaustiveLabelModeActive() {
-      return state.labelMode === "on" && state.overlayView === "all";
+      // "Labels on" is an explicit operator request for every label attached
+      // to the currently visible marks. Never silently hide lower-priority or
+      // policy-decluttered text in this mode, even when it becomes crowded.
+      return state.labelMode === "on";
     }
 
     function syncExhaustiveLabelMode() {
@@ -5723,31 +6738,10 @@
     }
 
     function applyStudyBackedCounts(counts, payload, overlays) {
-      const operatorState = safeObject(payload || state.payload || state.pendingPayload);
-      const overlayPool = safeList(overlays || state.overlays);
-      const candlestickEvidence = detectCandlestickEvidence(operatorState);
-      const hasChartSurface = Boolean(
-        safeText(safeObject(operatorState.surface).primary_url || safeObject(operatorState.surface).focus_url, "")
-        || safeList(safeObject(operatorState.surface).overlay_viewport && safeObject(safeObject(operatorState.surface).overlay_viewport).bounds).length === 4
-      );
-      const trendlineEvidence = overlayPool.filter(function (overlay) {
-        return !overlayIsDiagnostic(overlay) && overlayFamily(overlay) === "trendlines";
-      }).length;
-      const marketContextEvidence = overlayPool.filter(function (overlay) {
-        return !overlayIsDiagnostic(overlay) && overlayFamily(overlay) === "market_context";
-      }).length;
-      if (hasChartSurface && !counts.chart_bounds) {
-        counts.chart_bounds = 1;
-      }
-      if (trendlineEvidence > 0) {
-        counts.trendlines = Math.max(Number(counts.trendlines || 0), trendlineEvidence);
-      }
-      if (marketContextEvidence > 0) {
-        counts.market_context = Math.max(Number(counts.market_context || 0), marketContextEvidence);
-      }
-      if (candlestickEvidence.count > 0) {
-        counts.current_candles = Math.max(Number(counts.current_candles || 0), candlestickEvidence.count);
-      }
+      // Library badges count drawable geometry, not inferred study evidence.
+      // A trend or candle read with no exact chart anchor still belongs in the
+      // three-question brief, but advertising it as a visual mark produces the
+      // misleading "layer 1 / visible 0" state the operator reported.
       return counts;
     }
 
@@ -5967,7 +6961,7 @@
         return [family, 0];
       }));
       overlayPool.forEach(function (overlay) {
-        if (overlayIsDiagnostic(overlay)) {
+        if (overlayIsDiagnostic(overlay) || !overlayIsAvailableForControl(overlay)) {
           return;
         }
         const family = overlayFamily(overlay);
@@ -5994,6 +6988,11 @@
       renderTrendlineAvailability(counts.trendlines);
       renderDetailedOverlayControls(overlayPool);
       if (config.loading) {
+        const readiness = operatorReadinessView(state.payload || state.pendingPayload);
+        if (readiness.state !== "READY") {
+          updateOverlayLibraryStatus();
+          return;
+        }
         const enabledCount = ALL_OVERLAY_FAMILIES.filter(function (family) {
           return state.activeFamilies.has(family);
         }).length;
@@ -6021,6 +7020,48 @@
         setText(
           els.overlayLibraryStatus,
           enabledCount + " of " + ALL_OVERLAY_FAMILIES.length + " layers selected · Loading current overlays"
+        );
+        return;
+      }
+      const sourceView = captureSourceView(state.payload || state.pendingPayload);
+      const readiness = operatorReadinessView(state.payload || state.pendingPayload, sourceView);
+      if (sourceView.present && sourceView.state === "NO_FRAMES") {
+        setText(
+          els.overlayLibraryStatus,
+          enabledCount + " of " + ALL_OVERLAY_FAMILIES.length
+            + " layers on · No source frame received · Current overlays unavailable"
+        );
+        return;
+      }
+      if (readiness.state === "IDENTIFYING") {
+        setText(
+          els.overlayLibraryStatus,
+          enabledCount + " of " + ALL_OVERLAY_FAMILIES.length
+            + " layers on · Live chart · confirming " + readiness.identity.label
+        );
+        return;
+      }
+      if (readiness.state === "ANALYZING") {
+        setText(
+          els.overlayLibraryStatus,
+          enabledCount + " of " + ALL_OVERLAY_FAMILIES.length
+            + " layers on · Live chart · current overlay set is processing"
+        );
+        return;
+      }
+      if (readiness.state === "WARMING") {
+        setText(
+          els.overlayLibraryStatus,
+          enabledCount + " of " + ALL_OVERLAY_FAMILIES.length
+            + " layers on · Loading overlays for the selected chart"
+        );
+        return;
+      }
+      if (readiness.state === "INTERRUPTED") {
+        setText(
+          els.overlayLibraryStatus,
+          enabledCount + " of " + ALL_OVERLAY_FAMILIES.length
+            + " layers on · Stream interrupted · retained marks are historical"
         );
         return;
       }
@@ -6168,12 +7209,84 @@
       );
     }
 
+    function canonicalMarketToken(value) {
+      const token = safeText(value, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      return token === "UNKNOWN" ? "" : token;
+    }
+
+    function marketNamespaceIdentity(payload) {
+      const operatorState = safeObject(payload || state.payload);
+      const surface = safeObject(operatorState.surface);
+      const market = safeObject(operatorState.market);
+      const symbol = canonicalMarketToken(market.symbol);
+      const timeframe = canonicalMarketToken(market.timeframe);
+      const frameId = safeText(surface.frame_id, "");
+      // Unknown is a transition state, never a reusable market namespace.
+      // Including its frame prevents geometry retained under Unknown/M5 from
+      // being revived after another pair switch.
+      return symbol
+        ? symbol + ":" + timeframe
+        : "UNCLASSIFIED:" + timeframe + ":" + frameId;
+    }
+
+    function visualNamespaceIdentity(payload) {
+      return surfaceSemanticIdentity(payload) + "|" + marketNamespaceIdentity(payload);
+    }
+
+    function overlayIdentityMatchesPayload(overlay, payload) {
+      const row = safeObject(overlay);
+      const operatorState = safeObject(payload || state.visualPayload || state.payload);
+      const surface = safeObject(operatorState.surface);
+      const market = safeObject(operatorState.market);
+      // Drawing is stricter than the display/history fallback namespace. A
+      // missing exact surface identity must never be reconstructed from the
+      // session or pair after a chart switch.
+      const surfaceIdentity = safeText(surface.semantic_identity, "");
+      const rowSurfaceIdentity = safeText(row.surface_semantic_identity, "");
+      if (!surfaceIdentity || !rowSurfaceIdentity || rowSurfaceIdentity !== surfaceIdentity) {
+        return false;
+      }
+      const surfaceFrame = safeText(surface.frame_id, "");
+      const overlayFrame = safeText(row.frame_id, "");
+      if (!surfaceFrame || !overlayFrame || surfaceFrame !== overlayFrame) {
+        return false;
+      }
+      const marketSymbol = canonicalMarketToken(market.symbol);
+      const overlaySymbol = canonicalMarketToken(row.symbol || row.pair || row.market);
+      if (!marketSymbol || !overlaySymbol || marketSymbol !== overlaySymbol) {
+        return false;
+      }
+      const marketTimeframe = canonicalMarketToken(market.timeframe);
+      const overlayTimeframe = canonicalMarketToken(row.timeframe || row.tf);
+      if (!marketTimeframe || !overlayTimeframe || marketTimeframe !== overlayTimeframe) {
+        return false;
+      }
+      const surfaceSelectorFingerprint = safeText(
+        surface.market_selector_visual_fingerprint,
+        "",
+      );
+      const rowSelectorFingerprint = safeText(
+        row.market_selector_visual_fingerprint,
+        "",
+      );
+      // Non-browser capture transports can prove identity without a selector.
+      // When a browser surface publishes one, every row must carry that exact
+      // proof; absent or mismatched rows fail closed.
+      if (surfaceSelectorFingerprint !== rowSelectorFingerprint) {
+        return false;
+      }
+      if (safeText(row.instrument_identity_status, "").toUpperCase() !== "LOCKED") {
+        return false;
+      }
+      return true;
+    }
+
     function surfaceProjectionIdentity(payload) {
       const operatorState = safeObject(payload || state.visualPayload || state.payload);
       const surface = safeObject(operatorState.surface);
       const viewport = state.surfaceViewport;
       return JSON.stringify({
-        semantic: surfaceSemanticIdentity(operatorState),
+        semantic: visualNamespaceIdentity(operatorState),
         geometryRevision: safeText(
           surface.overlay_geometry_revision
             || operatorState.overlay_geometry_revision
@@ -6211,6 +7324,9 @@
           "",
         ),
         geometryRevision: safeText(overlay.overlay_geometry_revision, ""),
+        surfaceSemanticIdentity: safeText(overlay.surface_semantic_identity, ""),
+        symbol: safeText(overlay.symbol || overlay.pair || overlay.market, ""),
+        timeframe: safeText(overlay.timeframe || overlay.tf, ""),
         space: overlay.coordinate_space,
         units: overlay.coordinate_units,
         bounds: overlay.bounds || overlay.bbox || null,
@@ -6255,6 +7371,9 @@
     }
 
     function overlayMatchesSurface(overlay) {
+      if (!overlayIdentityMatchesPayload(overlay, state.visualPayload || state.payload)) {
+        return false;
+      }
       const space = safeText(overlay.coordinate_space, "chart").toLowerCase() === "window" ? "window" : "chart";
       const viewport = state.surfaceViewport;
       const hasForwardProjection = viewport
@@ -6266,10 +7385,7 @@
       if (space !== state.imageSpace && !hasForwardProjection && !hasReverseProjection) {
         return false;
       }
-      const visualPayload = safeObject(state.visualPayload || state.payload);
-      const surfaceFrame = safeText(safeObject(visualPayload.surface).frame_id, "");
-      const overlayFrame = safeText(overlay.frame_id, "");
-      return Boolean(surfaceFrame && overlayFrame && surfaceFrame === overlayFrame);
+      return true;
     }
 
     function projectOverlayPoint(x, y, normalized, overlaySpace) {
@@ -6297,6 +7413,13 @@
           // semantic name.
           if (viewport.sourceSpace === overlaySpace && viewport.targetSpace === state.imageSpace) {
             const sourceBounds = Array.isArray(viewport.sourceBounds) ? viewport.sourceBounds : null;
+            // Pixel coordinates cannot be mapped exactly without the source
+            // plane dimensions.  Inferring them from the target image span
+            // is what compressed boxes after broker/window geometry changed.
+            // Normalized rows remain self-describing and do not need this.
+            if (!normalized && !sourceBounds) {
+              return null;
+            }
             const sourceLeft = sourceBounds ? Number(sourceBounds[0]) : 0;
             const sourceTop = sourceBounds ? Number(sourceBounds[1]) : 0;
             const sourceWidth = sourceBounds
@@ -6833,6 +7956,8 @@
         || !state.naturalWidth
         || !state.naturalHeight
       ) {
+        state.lastRenderedOverlayCount = 0;
+        state.lastFrontendOverlayDrawnMs = Date.now();
         reconcileRenderedChildren(els.hotspotLayer, []);
         reconcileRenderedChildren(els.surfaceLineSvg, []);
         const freshnessPayload = safeObject(state.payload && state.payload.freshness);
@@ -6909,22 +8034,60 @@
       });
       reconcileRenderedChildren(els.surfaceLineSvg, svgCandidates);
       reconcileRenderedChildren(els.hotspotLayer, hotspotCandidates);
+      state.lastRenderedOverlayCount = renderedOverlayCount;
+      state.lastFrontendOverlayDrawnMs = Date.now();
 
       const freshnessPayload = safeObject(state.payload.freshness);
       const freshness = freshnessPayload.state || freshnessPayload.status;
       const sourceView = captureSourceView(state.payload);
+      const readiness = operatorReadinessView(state.payload, sourceView);
       const visualObservation = visualObservationView(state.payload);
       const liveUnchanged = visualObservation.liveUnchanged
         && sourceView.state === "LIVE"
         && sourceView.fresh;
-      const displayFreshness = liveUnchanged ? "LIVE" : freshness;
+      const sourceTransportLive = sourceView.transportActive;
+      const displayFreshness = sourceTransportLive ? "LIVE" : freshness;
       if (renderedOverlayCount > 0) {
         updateVisualStatus(
           "interactive",
           displayFreshness,
-          liveUnchanged
+          readiness.state === "IDENTIFYING"
+            ? "Interactive overlays · Live chart · confirming pair/timeframe"
+            : readiness.state === "ANALYZING"
+              ? "Interactive overlays · Live chart · latest study updating"
+              : liveUnchanged
             ? "Interactive overlays · Live picture unchanged"
             : "Interactive overlays · " + (normalizeFreshness(freshness) === "live" ? "Live" : titleCase(normalizeFreshness(freshness))),
+        );
+      } else if (sourceView.state === "NO_FRAMES") {
+        updateVisualStatus(
+          "chart",
+          "offline",
+          "No current chart frame · Current overlays unavailable",
+        );
+      } else if (readiness.state === "IDENTIFYING") {
+        updateVisualStatus(
+          "chart",
+          "live",
+          "Broker view live · Confirming pair/timeframe · overlays pending",
+        );
+      } else if (readiness.state === "ANALYZING") {
+        updateVisualStatus(
+          "chart",
+          "live",
+          "Broker view live · Analyzing latest frame · overlays pending",
+        );
+      } else if (readiness.state === "WARMING") {
+        updateVisualStatus(
+          "chart",
+          sourceTransportLive ? "live" : "updating",
+          "Current chart locked · Loading frame-matched overlays",
+        );
+      } else if (readiness.state === "INTERRUPTED") {
+        updateVisualStatus(
+          "chart",
+          "stale",
+          "Historical broker frame · live overlays invalidated",
         );
       } else {
         updateVisualStatus(
@@ -7425,10 +8588,13 @@
       const surface = safeObject(committedOperatorState.surface);
       const operatorOverlays = safeList(committedOperatorState.overlays)
         .map(safeObject)
-        .filter(function (overlay) { return !overlayIsDiagnostic(overlay); });
+        .filter(function (overlay) {
+          return !overlayIsDiagnostic(overlay)
+            && overlayIdentityMatchesPayload(overlay, committedOperatorState);
+        });
       const nextVisualBundleKey = JSON.stringify({
         frameId: surface.frame_id,
-        semanticIdentity: surface.semantic_identity,
+        semanticIdentity: visualNamespaceIdentity(committedOperatorState),
         semanticRevision: surface.overlay_semantic_revision,
         geometryRevision: surface.overlay_geometry_revision,
         primaryUrl: surface.primary_url,
@@ -7442,7 +8608,7 @@
         overlays: operatorOverlays,
       });
       const visualBundleChanged = nextVisualBundleKey !== state.lastVisualBundleKey;
-      const historySemanticIdentity = surfaceSemanticIdentity(committedOperatorState);
+      const historySemanticIdentity = visualNamespaceIdentity(committedOperatorState);
       if (
         state.historySemanticIdentity
         && historySemanticIdentity !== state.historySemanticIdentity
@@ -7461,6 +8627,7 @@
       commitLiveOperatorCopy(committedOperatorState);
       if (visualBundleChanged) {
         renderOverlays();
+        queueFrontendHeartbeat(0);
       }
     }
 
@@ -7492,6 +8659,8 @@
           revision: state.lastRevision,
           streamConnected: state.streamConnected,
           overlayRenderStats: Object.assign({}, state.overlayRenderStats),
+          visibleOverlayCount: state.lastRenderedOverlayCount,
+          heartbeatTimerActive: Boolean(state.heartbeatIntervalTimer),
         };
       },
     };
@@ -7630,6 +8799,7 @@
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) {
         refreshPublicState({force: true});
+        queueFrontendHeartbeat(0);
       }
     });
     window.addEventListener("resize", function () {
@@ -7639,7 +8809,14 @@
       });
     });
     window.addEventListener("pagehide", function () {
+      stopFrontendHeartbeat();
       closeSessionStream();
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted) {
+        startFrontendHeartbeat();
+        queueFrontendHeartbeat(0);
+      }
     });
 
     applyExperienceMode(state.experienceMode, false);
@@ -7648,6 +8825,7 @@
     els.overlayOpacity.value = String(state.overlayOpacity);
     document.documentElement.style.setProperty("--overlay-opacity", String(state.overlayOpacity / 100));
     setOverlayView(state.overlayView, {fetch: false, persist: false});
+    startFrontendHeartbeat();
     refreshPublicState({force: true});
     connectSessionStream();
     scheduleRefresh(POLL_INTERVAL_MS);

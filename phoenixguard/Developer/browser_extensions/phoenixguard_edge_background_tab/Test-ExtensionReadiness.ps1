@@ -22,7 +22,10 @@ try {
 }
 
 $manifestPath = Join-Path -Path $extensionRoot -ChildPath 'manifest.json'
+$packagePath = Join-Path -Path $extensionRoot -ChildPath 'package.json'
+$readmePath = Join-Path -Path $extensionRoot -ChildPath 'README.md'
 $manifest = $null
+$package = $null
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     $issues.Add("MV3 manifest is missing: $manifestPath")
 } else {
@@ -31,6 +34,17 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             ConvertFrom-Json -ErrorAction Stop
     } catch {
         $issues.Add("manifest.json is not valid JSON: $($_.Exception.Message)")
+    }
+}
+
+if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+    $issues.Add("Extension package metadata is missing: $packagePath")
+} else {
+    try {
+        $package = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $issues.Add("package.json is not valid JSON: $($_.Exception.Message)")
     }
 }
 
@@ -52,8 +66,8 @@ if ($null -ne $manifest) {
     }
 
     $permissionNames = @($manifest.permissions | ForEach-Object { [string]$_ })
-    $requiredPermissions = @('activeTab', 'offscreen', 'scripting', 'storage', 'tabCapture')
-    $allowedPermissions = @('activeTab', 'offscreen', 'scripting', 'storage', 'tabCapture')
+    $requiredPermissions = @('activeTab', 'alarms', 'offscreen', 'scripting', 'storage', 'tabCapture')
+    $allowedPermissions = @('activeTab', 'alarms', 'offscreen', 'scripting', 'storage', 'tabCapture')
     foreach ($requiredPermission in $requiredPermissions) {
         if ($requiredPermission -notin $permissionNames) {
             $issues.Add("Required MV3 permission is missing: $requiredPermission")
@@ -89,20 +103,24 @@ if ($null -ne $manifest) {
     }
 
     $commands = $manifest.commands
-    foreach ($requiredCommand in @('select-chart-region', 'stop-chart-capture')) {
+    foreach ($requiredCommand in @('lock-full-viewport', 'select-chart-region', 'stop-chart-capture')) {
         if ($null -eq $commands -or $null -eq $commands.$requiredCommand) {
             $issues.Add("Required extension command is missing: $requiredCommand")
         }
     }
+    $fullViewportWindows = [string]$commands.'lock-full-viewport'.suggested_key.windows
     $selectWindows = [string]$commands.'select-chart-region'.suggested_key.windows
     $killWindows = [string]$commands.'stop-chart-capture'.suggested_key.windows
+    if ($fullViewportWindows -ne 'Ctrl+Shift+7') {
+        $issues.Add('Full-viewport lock must default to Ctrl+Shift+7 on Windows.')
+    }
     if ($selectWindows -ne 'Ctrl+Shift+8') {
         $issues.Add('Select/switch must default to Ctrl+Shift+8 on Windows.')
     }
     if ($killWindows -ne 'Ctrl+Shift+9' -or -not [bool]$commands.'stop-chart-capture'.global) {
         $issues.Add('The global kill command must default to Ctrl+Shift+9 on Windows.')
     }
-    if (@($selectWindows, $killWindows) -contains 'Ctrl+Shift+B') {
+    if (@($fullViewportWindows, $selectWindows, $killWindows) -contains 'Ctrl+Shift+B') {
         $issues.Add('Ctrl+Shift+B is reserved by Edge and must not be assigned.')
     }
 
@@ -135,6 +153,20 @@ if ($null -ne $manifest) {
         foreach ($stylePath in @($contentScript.css)) {
             [void]$referencedFiles.Add([string]$stylePath)
         }
+    }
+}
+
+$packageVersion = if ($null -ne $package) { [string]$package.version } else { '' }
+if ($null -ne $package -and $packageVersion -ne $extensionVersion) {
+    $issues.Add("package.json version '$packageVersion' does not match manifest version '$extensionVersion'.")
+}
+if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
+    $issues.Add("Extension README is missing: $readmePath")
+} elseif (-not [string]::IsNullOrWhiteSpace($extensionVersion)) {
+    $readmeText = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
+    $declaredRelease = "Current unpacked release: **$extensionVersion**."
+    if (-not $readmeText.Contains($declaredRelease)) {
+        $issues.Add("README release declaration does not match manifest version '$extensionVersion'.")
     }
 }
 
@@ -188,6 +220,26 @@ if (Test-Path -LiteralPath $extensionRoot -PathType Container) {
         if ($sourceText -match '(?i)<script[^>]+src\s*=\s*["'']https?://') {
             $issues.Add("Remote script loading is forbidden: $($sourceFile.Name)")
         }
+        if ($sourceFile.FullName -in @(
+            (Join-Path $extensionRoot 'common.js'),
+            (Join-Path $extensionRoot 'service_worker.js'),
+            (Join-Path $extensionRoot 'offscreen.js'),
+            (Join-Path $extensionRoot 'roi_selector.js'),
+            (Join-Path $extensionRoot 'options.js')
+        )) {
+            $forbiddenBrowserMutations = [ordered]@{
+                'tab creation' = '(?is)\bchrome\s*\.\s*tabs\s*\.\s*create\s*\('
+                'window creation or activation' = '(?is)\bchrome\s*\.\s*windows\s*\.\s*(?:create|update)\s*\('
+                'tab highlighting' = '(?is)\bchrome\s*\.\s*tabs\s*\.\s*highlight\s*\('
+                'page focus' = '(?is)\bwindow\s*\.\s*focus\s*\('
+                'tab activation' = '(?is)\bchrome\s*\.\s*tabs\s*\.\s*update\s*\([^,]+,\s*\{[^}]*\bactive\s*:'
+            }
+            foreach ($entry in $forbiddenBrowserMutations.GetEnumerator()) {
+                if ($sourceText -match $entry.Value) {
+                    $issues.Add("Forbidden $($entry.Key) primitive is present: $($sourceFile.Name)")
+                }
+            }
+        }
     }
 }
 
@@ -213,6 +265,7 @@ $result = [ordered]@{
     manifest_version = if ($null -ne $manifest) { [int]$manifest.manifest_version } else { 0 }
     name = $extensionName
     version = $extensionVersion
+    package_version = $packageVersion
     permissions = $permissionNames
     host_permissions = $hostScopes
     issues = @($issues)

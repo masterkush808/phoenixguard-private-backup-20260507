@@ -44,6 +44,8 @@ def test_cleanup_apply_deletes_disposable_state_and_preserves_operator_file(
     (disposable / "derived-frame.jpg").write_bytes(b"derived")
     preserved = runtime_dir / "floating_window_v2.json"
     preserved.write_text("{}", encoding="utf-8")
+    capture_token = runtime_dir / "edge_tab_capture.token"
+    capture_token.write_text("a" * 64, encoding="utf-8")
     old_backup = tmp_path / "_archive" / "runtime_backup" / "20260719_010101"
     old_backup.mkdir(parents=True)
     (old_backup / "old-runtime.json").write_text("generated", encoding="utf-8")
@@ -78,7 +80,36 @@ def test_cleanup_apply_deletes_disposable_state_and_preserves_operator_file(
     assert not smoke_image.exists()
     assert not build_info.exists()
     assert preserved.exists()
+    assert capture_token.exists()
     assert not (tmp_path / "_archive").exists()
+
+
+def test_cleanup_accepts_only_exact_local_app_data_live_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cleaner(monkeypatch, tmp_path / "repo")
+    local_app_data = (tmp_path / "local-app-data").resolve()
+    runtime_dir = local_app_data / "PhoenixGuard" / "runtime" / "live"
+    runtime_dir.mkdir(parents=True)
+    disposable = runtime_dir / "data_live"
+    disposable.mkdir()
+    (disposable / "frame.json").write_text("{}", encoding="utf-8")
+    capture_token = runtime_dir / "edge_tab_capture.token"
+    capture_token.write_text("b" * 64, encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(cleaner, "RUNTIME_DIR", runtime_dir.resolve())
+    monkeypatch.setattr(sys, "argv", ["clean_v3_runtime_state.py", "--apply"])
+
+    assert cleaner.main() == 0
+    assert not disposable.exists()
+    assert capture_token.exists()
+
+    neighbor = local_app_data / "PhoenixGuard" / "runtime" / "not-live"
+    neighbor.mkdir()
+    monkeypatch.setattr(cleaner, "RUNTIME_DIR", neighbor.resolve())
+    with pytest.raises(RuntimeError, match="canonical live runtime"):
+        cleaner.collect_runtime_paths()
 
 
 def test_cleanup_skips_virtualenv_bytecode_but_removes_source_bytecode(

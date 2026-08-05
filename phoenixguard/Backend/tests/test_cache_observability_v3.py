@@ -15,6 +15,7 @@ from phoenixguard.decision.countertrend_sniper_v3 import (
 )
 from phoenixguard.execution.packet_v3 import build_execution_packet_v3
 from phoenixguard.mobile_api.app import create_app
+from phoenixguard.mobile_api.window_tracker import ContinuousWindowTrackerService
 from phoenixguard.runtime.cache_v3 import (
     CACHE_SCHEMA_VERSION,
     EXECUTION_PACKET_SCHEMA_VERSION,
@@ -2498,6 +2499,100 @@ def test_compact_live_state_refreshes_transport_without_rebuilding_geometry(
         assert payload["capture_source_v3"]["fresh"] is True
         assert "source_lease_id" not in payload["capture_source_v3"]
         assert payload["visual_observation_v3"]["status"] == "LIVE_FRAME_UNCHANGED"
+
+
+def test_hot_compact_cache_overlays_process_local_transport_heartbeat(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(
+        mobile_app,
+        "_SHOOTER_HANDSHAKE_PATH",
+        tmp_path / "missing_shooter_handshake.json",
+    )
+    monkeypatch.setattr(
+        mobile_app,
+        "_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC",
+        300.0,
+    )
+    _clear_mobile_live_state_caches()
+    service = ContinuousWindowTrackerService(
+        root_dir=data_dir / "mobile_api" / "window_tracker"
+    )
+    service.create_session(session_id="heartbeat-cache", auto_start=False)
+    claim = service.claim_external_source(
+        "heartbeat-cache",
+        source_id="edge-heartbeat-cache",
+        sequence_id="sequence-heartbeat-cache",
+        source_type="browser_tab_roi_capture",
+        selection_id="selection-heartbeat-cache",
+        display_name="Edge chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    try:
+        client = TestClient(create_app(window_tracker_service=service))
+        first = client.get(
+            "/v1/mobile/live/state/v3/heartbeat-cache?mode=CLEAN_LIVE&compact=1"
+        )
+        assert first.status_code == 200
+        assert first.json()["capture_source_v3"]["fresh"] is False
+        compact_response_cache = cast(
+            MutableMapping[Any, Any],
+            getattr(mobile_app, "_COMPACT_LIVE_STATE_RESPONSE_CACHE"),
+        )
+        assert compact_response_cache
+
+        heartbeat = service.heartbeat_external_source(
+            "heartbeat-cache",
+            source_id="edge-heartbeat-cache",
+            sequence_id="sequence-heartbeat-cache",
+            source_generation=int(claim["source_generation"]),
+            source_lease_id=str(claim["source_lease_id"]),
+            capture_epoch_ms=int(time.time() * 1000),
+            source_render_fresh=True,
+            material_change_pending=True,
+            roi_normalized={"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+            source_surface_width=1920,
+            source_surface_height=1080,
+            capture_health_reason="capture_confirmed",
+            capture_status="active",
+        )
+        assert heartbeat["reason_code"] == "FRAME_PENDING"
+
+        original_builder = mobile_app.build_live_state_v3
+
+        def fail_rebuild(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+            raise AssertionError(
+                "a transport heartbeat must not rebuild cached geometry"
+            )
+
+        monkeypatch.setattr(mobile_app, "build_live_state_v3", fail_rebuild)
+        second = client.get(
+            "/v1/mobile/live/state/v3/heartbeat-cache?mode=CLEAN_LIVE&compact=1"
+        )
+        monkeypatch.setattr(mobile_app, "build_live_state_v3", original_builder)
+        assert second.status_code == 200
+        payload = second.json()
+        source = payload["capture_source_v3"]
+        assert source["fresh"] is True
+        assert source["state"] == "VALIDATING"
+        assert source["reason_code"] == "FRAME_PENDING"
+        assert source["stream"]["transport_heartbeat_count"] == 1
+        assert source["stream"]["material_change_pending"] is True
+        assert "source_lease_id" not in source
+
+        operator = client.get(
+            "/v1/mobile/operator/state/v1/heartbeat-cache?view=live"
+        )
+        assert operator.status_code == 200
+        operator_payload = operator.json()
+        assert operator_payload["tracking"]["active"] is True
+        assert operator_payload["tracking"]["state"] == "UPDATING"
+        assert operator_payload["permission"]["allowed"] is False
+    finally:
+        service.shutdown()
 
 
 def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(

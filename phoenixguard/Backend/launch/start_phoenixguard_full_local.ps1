@@ -26,6 +26,7 @@ param(
     [string]$TrackerFocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.03,0.13,0.87,0.96' }),
     [ValidateSet('chrome', 'default', 'edge')]
     [string]$DashboardBrowser = $(if ($env:PHOENIXGUARD_DASHBOARD_BROWSER) { $env:PHOENIXGUARD_DASHBOARD_BROWSER } else { 'chrome' }),
+    [switch]$OpenDashboard,
     [switch]$NoBrowser,
     [switch]$NoStatusLoop,
     [switch]$NoKillExisting
@@ -59,9 +60,30 @@ if ($pythonScriptsDir -and -not ([string]$env:PATH).ToLowerInvariant().StartsWit
     $env:PATH = $pythonScriptsDir + [System.IO.Path]::PathSeparator + $env:PATH
 }
 
-$defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
-$runtimeDir = $defaultRuntimeDir
-$statusPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+$legacyRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
+$configuredRuntimeDir = [string]$env:PHOENIXGUARD_RUNTIME_DIR
+if (-not [string]::IsNullOrWhiteSpace($configuredRuntimeDir)) {
+    $runtimeDir = [System.IO.Path]::GetFullPath($configuredRuntimeDir)
+} elseif (-not [string]::IsNullOrWhiteSpace([string]$env:LOCALAPPDATA)) {
+    $runtimeDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\runtime\live'
+} else {
+    $runtimeDir = $legacyRuntimeDir
+}
+$dataDir = if (-not [string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_DATA_DIR)) {
+    [System.IO.Path]::GetFullPath([string]$env:PHOENIXGUARD_DATA_DIR)
+} else {
+    Join-Path -Path $runtimeDir -ChildPath 'data_live'
+}
+$logsDir = if (-not [string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_LOGS_DIR)) {
+    [System.IO.Path]::GetFullPath([string]$env:PHOENIXGUARD_LOGS_DIR)
+} else {
+    Join-Path -Path $runtimeDir -ChildPath 'logs_live'
+}
+$statusPath = if (-not [string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_TRACKER_STATUS_FILE)) {
+    [System.IO.Path]::GetFullPath([string]$env:PHOENIXGUARD_TRACKER_STATUS_FILE)
+} else {
+    Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+}
 $persistChildStdio = ($env:PHOENIXGUARD_PERSIST_CHILD_STDIO -eq '1')
 $discardStdoutPath = 'NUL'
 $discardStderrPath = '\\.\NUL'
@@ -109,9 +131,9 @@ $env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG = if ($env:PHOENIXGUARD_OVERLAY_PERSIST_
 $env:PHOENIXGUARD_UVICORN_ACCESS_LOG = if ($env:PHOENIXGUARD_UVICORN_ACCESS_LOG) { $env:PHOENIXGUARD_UVICORN_ACCESS_LOG } else { '0' }
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = if ($env:PHOENIXGUARD_FAST_FOCUS_PREVIEW) { $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW } else { '0' }
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
-$env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
-$env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
-$env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+$env:PHOENIXGUARD_DATA_DIR = $dataDir
+$env:PHOENIXGUARD_LOGS_DIR = $logsDir
+$env:PHOENIXGUARD_TRACKER_STATUS_FILE = $statusPath
 
 $launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $LaunchProfile
 $launchMt4Bridge = -not ($env:PHOENIXGUARD_MT4_BRIDGE_ENABLED -and $env:PHOENIXGUARD_MT4_BRIDGE_ENABLED.Trim().ToLowerInvariant() -in @('0', 'false', 'off', 'no'))
@@ -174,12 +196,14 @@ function Get-PhoenixGuardDashboardBrowserArgument {
         }
         New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
         $arguments.Add("--user-data-dir=$profileDir")
-        $arguments.Add('--disable-background-timer-throttling')
-        $arguments.Add('--disable-renderer-backgrounding')
-        $arguments.Add('--disable-backgrounding-occluded-windows')
-        $arguments.Add('--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache')
-        $arguments.Add('--new-window')
     }
+    # These flags apply only when an operator explicitly asks PhoenixGuard to
+    # open a dashboard. The canonical launch never starts or mutates Edge; the
+    # already-installed extension retains its already-authorized chart stream.
+    $arguments.Add('--disable-background-timer-throttling')
+    $arguments.Add('--disable-renderer-backgrounding')
+    $arguments.Add('--disable-backgrounding-occluded-windows')
+    $arguments.Add('--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache')
     $arguments.Add($Url)
     return [string[]]$arguments.ToArray()
 }
@@ -208,6 +232,42 @@ function Start-PhoenixGuardDashboardBrowser {
 
     Write-Warning "Configured dashboard browser '$BrowserName' was not found. Falling back to the Windows default browser."
     Start-Process $Url
+}
+
+function Wait-PhoenixGuardExistingEdgeCapture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceBaseUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$SourceSessionId,
+        [double]$TimeoutSec = 12.0
+    )
+
+    $token = [string]$env:PHOENIXGUARD_FRAME_INGEST_TOKEN
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        return $false
+    }
+    $headers = @{ Authorization = "Bearer $token" }
+    $endpoint = "$SourceBaseUrl/v1/mobile/frame-ingest/sessions/$SourceSessionId/source-control"
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0.0, $TimeoutSec))
+    do {
+        try {
+            $payload = Invoke-RestMethod -Uri $endpoint -Headers $headers -TimeoutSec 3
+            $source = $payload.source_control
+            $state = [string]$source.state
+            $sourceType = [string]$source.source_type
+            if (
+                $sourceType -eq 'browser_tab_roi_capture' -and
+                $state -in @('VALIDATING', 'LIVE', 'STALE')
+            ) {
+                return $true
+            }
+        } catch {
+            Write-Verbose "Waiting for an already-authorized Edge chart stream: $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    return $false
 }
 
 function ConvertTo-PhoenixGuardProcessArgumentString {
@@ -267,6 +327,16 @@ Write-Host "  Broker Click Path: $brokerClickPath"
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 }
+if ($runtimeDir -ne $legacyRuntimeDir) {
+    $legacyTokenPath = Join-Path -Path $legacyRuntimeDir -ChildPath 'edge_tab_capture.token'
+    $currentTokenPath = Join-Path -Path $runtimeDir -ChildPath 'edge_tab_capture.token'
+    if (
+        -not (Test-Path -LiteralPath $currentTokenPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $legacyTokenPath -PathType Leaf)
+    ) {
+        Copy-Item -LiteralPath $legacyTokenPath -Destination $currentTokenPath
+    }
+}
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Initialize-PhoenixGuardEdgeTabCapture.ps1')
 $edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
     -RuntimeDir $runtimeDir `
@@ -322,7 +392,8 @@ function Start-WindowsRegionCaptureChildProcess {
         [Parameter(Mandatory = $true)]
         [string]$ChildBaseUrl,
         [Parameter(Mandatory = $true)]
-        [string]$ChildSessionId
+        [string]$ChildSessionId,
+        [switch]$RestoreSavedBinding
     )
 
     $captureArgs = @(
@@ -334,7 +405,7 @@ function Start-WindowsRegionCaptureChildProcess {
         '--status-path',
         $windowsRegionCaptureStatusPath
     )
-    if (Test-Path -LiteralPath $windowsRegionCaptureRestoreBindingPath -PathType Leaf) {
+    if ($RestoreSavedBinding -and (Test-Path -LiteralPath $windowsRegionCaptureRestoreBindingPath -PathType Leaf)) {
         $captureArgs += @(
             '--restore-binding',
             $windowsRegionCaptureRestoreBindingPath
@@ -492,13 +563,21 @@ try {
         throw "Window tracker session '$SessionId' was not available after startup wait. Last error: $lastSessionError"
     }
     if ($session) {
+        $existingEdgeCapture = Wait-PhoenixGuardExistingEdgeCapture `
+            -SourceBaseUrl $baseUrl `
+            -SourceSessionId $SessionId `
+            -TimeoutSec 12.0
+        if ($existingEdgeCapture) {
+            Write-Host 'Existing Edge extension stream: DETECTED (no browser launch, tab switch, or new source claim)'
+        }
         $windowsRegionCaptureScript = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_windows_region_capture.py'
         if (Test-Path -LiteralPath $windowsRegionCaptureScript -PathType Leaf) {
             $readinessOutput = & $pythonPath $windowsRegionCaptureScript --readiness-check 2>&1
             if ($LASTEXITCODE -eq 0) {
                 $windowsRegionCaptureProcess = Start-WindowsRegionCaptureChildProcess `
                     -ChildBaseUrl $baseUrl `
-                    -ChildSessionId $SessionId
+                    -ChildSessionId $SessionId `
+                    -RestoreSavedBinding:($env:PHOENIXGUARD_RESTORE_WINDOWS_REGION_CAPTURE -eq '1' -and -not $existingEdgeCapture)
                 $sourceReadyDeadline = (Get-Date).AddSeconds(8)
                 while ((Get-Date) -lt $sourceReadyDeadline -and -not $windowsRegionCaptureProcess.HasExited) {
                     if (Test-Path -LiteralPath $windowsRegionCaptureStatusPath -PathType Leaf) {
@@ -634,7 +713,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Process topology certification failed after launch. Clean stack was not proven."
 }
 
-if (-not $NoBrowser) {
+if ($OpenDashboard -and -not $NoBrowser) {
     Start-PhoenixGuardDashboardBrowser -Url $dashboardUrl -BrowserName $DashboardBrowser
 }
 
@@ -643,6 +722,10 @@ if (-not (Test-Path -LiteralPath $statusPath)) {
 }
 
 Write-Host "Dashboard: $dashboardUrl"
+Write-Host "Browser launch: $(if ($OpenDashboard -and -not $NoBrowser) { 'requested by operator' } else { 'suppressed; existing Edge tabs remain untouched' })"
+Write-Host "Runtime directory: $runtimeDir"
+Write-Host "Data directory: $dataDir"
+Write-Host "Logs directory: $logsDir"
 Write-Host "Status: $statusPath"
 Write-Host "Universal source controller: $(if ($windowsRegionCaptureReady) { 'READY' } else { 'DEGRADED' })"
 Write-Host "Universal source status: $windowsRegionCaptureStatusPath"

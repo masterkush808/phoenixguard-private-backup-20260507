@@ -73,16 +73,15 @@ def _dashboard_browser_args(browser_name: DashboardBrowserName, executable_path:
     if browser_name == "chrome":
         profile_dir = _dashboard_chrome_profile_dir()
         profile_dir.mkdir(parents=True, exist_ok=True)
-        args.extend(
-            [
-                f"--user-data-dir={profile_dir}",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache",
-                "--new-window",
-            ]
-        )
+        args.append(f"--user-data-dir={profile_dir}")
+    args.extend(
+        [
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache",
+        ]
+    )
     args.append(url)
     return args
 
@@ -297,8 +296,18 @@ def _resolve_python_launcher(env: dict[str, str], script_dir: Path | None = None
     return process_exe, pyvenv_launcher
 
 
+def _default_runtime_root(script_dir: Path) -> Path:
+    configured = str(os.getenv("PHOENIXGUARD_RUNTIME_DIR", "") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    local_app_data = str(os.getenv("LOCALAPPDATA", "") or "").strip()
+    if _is_windows() and local_app_data:
+        return Path(local_app_data) / "PhoenixGuard" / "runtime" / "live"
+    return script_dir / "runtime" / "live"
+
+
 def _default_live_runtime_dir(script_dir: Path, leaf: str) -> Path:
-    return script_dir / "runtime" / "live" / leaf
+    return _default_runtime_root(script_dir) / leaf
 
 
 def _slugify_session_id(value: str) -> str:
@@ -984,10 +993,11 @@ def _ensure_session(
 def main() -> int:
     script_dir = PROJECT_ROOT
     assert_repo_venv_runtime("tracker", script_dir)
-    os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(script_dir / "runtime" / "live")
-    os.environ["PHOENIXGUARD_DATA_DIR"] = str(_default_live_runtime_dir(script_dir, "data_live"))
-    os.environ["PHOENIXGUARD_LOGS_DIR"] = str(_default_live_runtime_dir(script_dir, "logs_live"))
-    os.environ["PHOENIXGUARD_TRACKER_STATUS_FILE"] = str(script_dir / "runtime" / "live" / "tracker_status.json")
+    runtime_root = _default_runtime_root(script_dir)
+    os.environ.setdefault("PHOENIXGUARD_RUNTIME_DIR", str(runtime_root))
+    os.environ.setdefault("PHOENIXGUARD_DATA_DIR", str(runtime_root / "data_live"))
+    os.environ.setdefault("PHOENIXGUARD_LOGS_DIR", str(runtime_root / "logs_live"))
+    os.environ.setdefault("PHOENIXGUARD_TRACKER_STATUS_FILE", str(runtime_root / "tracker_status.json"))
 
     parser = argparse.ArgumentParser(description="Start the PhoenixGuard 24/7 locked tracker.")
     parser.add_argument("--host", default=os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1"))
@@ -1007,7 +1017,7 @@ def main() -> int:
     parser.add_argument("--session-read-failures", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_SESSION_READ_FAILURES", "3")))
     parser.add_argument("--wait-for-lock", action="store_true", default=True)
     parser.add_argument("--no-wait-for-lock", dest="wait_for_lock", action="store_false")
-    parser.add_argument("--open-dashboard", action="store_true", default=True)
+    parser.add_argument("--open-dashboard", action="store_true", default=False)
     parser.add_argument("--no-open-dashboard", dest="open_dashboard", action="store_false")
     parser.add_argument(
         "--dashboard-browser",

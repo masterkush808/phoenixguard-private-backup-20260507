@@ -146,6 +146,13 @@ accepted input pixel count, so a small focus crop cannot hide an unbounded 8K
 window allocation. The grayscale ring is tiny. Session JSON and artifacts are
 not written at the raw observation cadence.
 
+Session snapshot reads are side-effect free. They may not normalize and save a
+session while holding the global tracker lock. External-source lease metadata
+uses its own cache lock, so a completed study holding a per-session commit lock
+can never wait on the global tracker lock while source control waits in the
+opposite order. This prevents a capture study from freezing `/v3`, source
+control, operator state, and dashboard reads together.
+
 ## 6. Stream identity and geometry
 
 Every frame is interpreted inside this tuple:
@@ -173,6 +180,49 @@ authoritative, but browser chrome and the animated payout/tab strip are never
 part of the selector fingerprint. A changed focus fingerprint resets the stream
 generation and forces pair/timeframe re-confirmation before an actionable
 publication, even when cached session text still names the old pair.
+
+The fast identity lane publishes `PG_CURRENT_CHART_IDENTITY_V3` for the exact
+display frame. A confirmed row may name the operator surface only when its
+`frame_id` or `display_frame_id` equals the displayed frame, both pair and
+timeframe confirmations are true, and `decision_authority` is false. It never
+supplies direction, timing, permission, or execution authority. A same-frame
+pending row is an explicit identity fence: the operator publishes
+`Unknown / Unknown` with `Identifying current chart`, rejects all overlays, and
+does not fall back to an older selector, tracking summary, signal, or study.
+A row for another frame is ignored.
+
+The rendered visual namespace combines the server surface identity, pair, and
+timeframe. Unknown identity additionally includes the frame so two unclassified
+frames cannot share geometry. Every overlay row repeats the exact
+`surface_semantic_identity`; the browser rejects a row whose surface, frame,
+pair, or timeframe differs from the displayed bitmap. A namespace change clears
+the old overlay set, projected-geometry caches, detached DOM nodes, selected
+inspector, and pair history before the new bitmap/overlay bundle commits.
+
+Geometry is projected only through the declared ROI contract. Normalized rows
+are self-describing. Pixel rows projected between chart and window spaces must
+carry the source plane's exact `source_bounds`; the browser never guesses source
+dimensions from the destination span. Missing or mismatched source bounds fail
+closed, so a pair switch, resize, or crop cannot compress old boxes into the new
+chart.
+
+An Edge source leased as `browser_tab_roi_capture / edge_tab_roi_v1` is already
+the exact operator-selected pixel plane. The tracker therefore publishes it as
+`authoritative_edge_tab_roi_v1` and must not run the local full-window chart
+locator over it a second time. The adapter binds its chart box directly to the
+full leased pixel plane and records the `authoritative_edge_tab_roi` pipeline
+stage; `detect_chart_bbox` is absent on this path. Every public box, line, label,
+and `source_bounds` value therefore stays in the unchanged leased ROI. The
+automatic full-window crop is reserved for local desktop/window capture, where
+the incoming pixels have not already been selected by the extension.
+
+The Edge extension persists only an operator-authorized tab/ROI binding. After
+an API or stack restart it reconnects that saved binding, claims the new
+lease/generation, and resumes capture without opening, focusing, or creating a
+browser tab. A transport heartbeat is independent from heavy inference, so the
+source remains observably live while a frame is being studied. A fresh manual
+selection is required only when the saved tab/ROI no longer exists or the
+operator explicitly kills the binding.
 
 ## 7. Temporal evidence contract
 
@@ -214,6 +264,15 @@ The producer and study worker are independent:
 
 This is bounded coalescing: latency and memory stay fixed even when a heavy
 study takes longer than the observation interval.
+
+Every live external study also carries `PG_LIVE_STUDY_TIMING_V3`. The default
+CPU budget is 45 seconds and is configurable only inside the bounded 10-120
+second range. The deadline is stamped before adapter dispatch, checked at
+adapter entry and between major stages, and rechecked before publication. A
+worker that waited too long for CPU or completed outside the budget is recorded
+as discarded and cannot replace the last current result with stale analysis.
+The contract separately reports queue delay and adapter work so latency is
+diagnosable without weakening identity, geometry, or entry gates.
 
 ### Cross-process stream truth
 
@@ -298,6 +357,29 @@ decode afterward. Overlay geometry and its individual entry-area controls stay
 on the last committed bitmap until the new exact-frame image is ready, so UI
 latency improves without mixing frames.
 
+The default `Live read` overlay preset is deliberately semantic and current:
+current price, reaction map, combined analysis, order areas, entry triggers,
+targets, and risk/invalidation. Semantic structure, zones, trendlines, and
+replay marks remain available through their explicit Structure, Zones,
+History, or All views. Legacy raster H1/H2 votes and broad diagnostic
+support/resistance labels are never burned into the ordinary broker image;
+they require an explicit internal diagnostics render. This leaves one
+canonical, toggleable semantic geometry plane instead of two conflicting
+overlay systems. Badge counts report drawable geometry rather than synthetic
+study evidence. Hover is the restrained default label mode. `Labels on` is
+exhaustive: collision and policy-shadow suppression are bypassed, so every
+label on every currently selected mark remains visible even when the result is
+clustered.
+
+A compact `Decision accuracy · live audit` strip follows the three answers.
+It renders `COLLECTING` or `MEASURED`, frozen/pending/matured forecast counts,
+the latest matured outcome, and candidate direction, timing, sweep-survival,
+and calibration metrics when present. The browser accepts the audit only when
+its pair/timeframe matches the current proven market identity and its public
+safety flags state study-only, no execution authority, no broker trades, and no
+entry-permission authority. The strip measures past forecast decisions against
+later market movement; it is not a fourth decision surface or a trade signal.
+
 ### Path-clock timing on the stream
 
 Every newly proven closed candle also advances the bounded Joint Path-Clock
@@ -319,6 +401,10 @@ Broker/source close times take precedence when present.
   sweeps remain learnable, but that late state cannot open a new entry;
 - raw trajectories and replay freezes use a dedicated bounded side store;
 - the streaming DTO carries only a mature, current-lineage timing summary;
+- `passive_prediction_audit_v3` carries bounded frozen, pending, and matured
+  forecast counts plus direction, timing, sweep-survival, and calibration
+  evidence against the registered baseline; it contains no raw path and has no
+  execution authority;
 - missing, immature, stale, or cross-generation timing is omitted rather than
   displayed as zero confidence;
 - a mature timing read can delay or veto Q3 but can never grant permission.
@@ -349,7 +435,9 @@ conflicting direction, expired packet, missing entry zone, or risk rejection.
 | Failure | Required behavior |
 |---|---|
 | Window hidden or native capture unavailable | Use non-activating `PrintWindow` first. For an explicitly locked chart only, a bounded byte-identical streak may invoke the existing identity-verified visible-capture recovery, which restores that exact HWND without synthesizing clicks or keys. Recovery attempts are rate-limited; only a recovered frame already classified as non-duplicate/non-rejected may force one study keyframe, without resetting generation. Failures retain the snapshot fallback and remain observable. |
-| Pair/tab changes | Start a new generation and revoke old geometry/results |
+| Pair/tab changes | Start a new generation, publish a same-frame pending identity fence, clear the old pair's geometry/history/caches, and accept new overlays only after exact pair/timeframe confirmation |
+| Pending identity while cached study still names the prior pair | Publish `Identifying current chart` with unknown market identity and zero overlays; never fall back to the cached pair |
+| Pixel overlay lacks exact source bounds for ROI projection | Do not draw it; never infer the source plane from destination dimensions |
 | Producer faster than inference | Replace only unclaimed pending work; coalesce while in flight; never queue |
 | Duplicate/static capture | Update health counters; avoid a heavy model run, never relabel duplicate pixels as market rest, and never overwrite a supported decision with fallback WAIT. A locked-chart stream may attempt the bounded visible recovery above. |
 | Browser/SSE reconnect | Rehydrate latest contract; do not restart producer |
@@ -393,10 +481,13 @@ The change is complete only when all of these pass:
    fallback, and public stream metadata.
 3. Existing window-tracker, packet, source-lock, geometry, and execution tests
    remain green.
-4. Operator tests prove exactly three questions and a sanitized stream-health
-   contract with no new execution authority.
+4. Operator tests prove exactly three questions, same-frame confirmed identity,
+   pending-identity veto of stale pair/overlays, pair-scoped semantic IDs, and a
+   sanitized stream/audit contract with no new execution authority.
 5. Browser tests prove desktop/mobile layout, collapsed diagnostics, live SSE
-   refresh, and reduced-motion behavior.
+   refresh, exact ROI projection, pair-switch cache/DOM invalidation,
+   semantic-only default Live overlays, exhaustive `Labels on`, and
+   pair-scoped passive-audit rendering.
 6. A synthetic benchmark reports observer latency, effective FPS, accepted
    keyframe ratio, and bounded ring sizes on the repository live interpreter.
 7. The canonical stack is relaunched and `/health`, `/v3`, session state, SSE,
