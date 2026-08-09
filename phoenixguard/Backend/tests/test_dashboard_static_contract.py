@@ -197,6 +197,9 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert '"Chart stream live · picture unchanged"' in text
     assert '"Interactive overlays · Live picture unchanged"' in text
     assert "function selectOverlay(overlay)" in text
+    assert "function strictTrendlineOverlayAccepted(overlay)" in text
+    assert "overlay.geometry_contract_accepted !== true" in text
+    assert "if (!strictTrendlineOverlayAccepted(overlay))" in text
     assert 'button.setAttribute("aria-pressed", active ? "true" : "false");' in text
     assert '+ (points.length >= 2 ? " line-hit" : "")' in text
     assert '.surface-hotspot.line-hit {' in text

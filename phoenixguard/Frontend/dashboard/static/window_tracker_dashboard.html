@@ -8599,7 +8599,63 @@
       return [x0, y0, x1, y1];
     }
 
+    function strictTrendlineOverlayAccepted(overlay) {
+      const identity = [
+        overlayFamily(overlay),
+        overlayGroup(overlay),
+        safeText(overlay.type, ""),
+        safeText(overlay.role, ""),
+      ].join(" ").toLowerCase();
+      if (!identity.includes("trendline")) {
+        return true;
+      }
+      if (overlay.geometry_contract_accepted !== true) {
+        return false;
+      }
+      const status = safeText(overlay.geometry_status, "").toUpperCase();
+      if (status !== "VISIBLE_TO_LATEST_X" && !status.startsWith("ANCHORS_VALID_")) {
+        return false;
+      }
+      const anchors = Array.isArray(overlay.anchor_wick_points) ? overlay.anchor_wick_points : [];
+      const bounds = Array.isArray(overlay.chart_bounds) ? overlay.chart_bounds.map(Number) : [];
+      const line = Array.isArray(overlay.line_points) ? overlay.line_points : [];
+      if (anchors.length < 2 || line.length < 2 || bounds.length < 4 || bounds.some(function (value) { return !Number.isFinite(value); })) {
+        return false;
+      }
+      const tolerance = 0.75;
+      for (const anchor of anchors.slice(0, 2)) {
+        if (!Array.isArray(anchor) || anchor.length < 2) {
+          return false;
+        }
+        const x = Number(anchor[0]);
+        const y = Number(anchor[1]);
+        if (
+          !Number.isFinite(x)
+          || !Number.isFinite(y)
+          || x < bounds[0] - tolerance
+          || x > bounds[2] + tolerance
+          || y < bounds[1] - tolerance
+          || y > bounds[3] + tolerance
+        ) {
+          return false;
+        }
+      }
+      for (let index = 0; index < 2; index += 1) {
+        if (
+          !Array.isArray(line[index])
+          || Math.abs(Number(line[index][0]) - Number(anchors[index][0])) > tolerance
+          || Math.abs(Number(line[index][1]) - Number(anchors[index][1])) > tolerance
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     function overlayPoints(overlay) {
+      if (!strictTrendlineOverlayAccepted(overlay)) {
+        return [];
+      }
       const candidates = [overlay.line_points, overlay.points, overlay.path];
       const raw = candidates.find(function (value) { return Array.isArray(value) && value.length >= 2; }) || [];
       const points = [];
