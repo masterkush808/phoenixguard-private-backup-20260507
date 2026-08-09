@@ -548,6 +548,28 @@ def test_trendline_derivation_rejects_horizontal_lines() -> None:
     assert not [row for row in derive_trendline_overlays(horizontal_lows) if row["type"].endswith("_TRENDLINE")]
 
 
+def test_trendline_role_comes_from_wick_side_not_slope_sign() -> None:
+    wick_bottoms = [200.0, 190.0, 185.0, 210.0, 240.0, 220.0, 215.0, 210.0]
+    candles = [
+        _canonical_candle(
+            index,
+            wick_top=wick_bottom - 40.0,
+            wick_bottom=wick_bottom,
+            closed=index < len(wick_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(wick_bottoms)
+    ]
+
+    support = next(
+        row
+        for row in derive_trendline_overlays(candles)
+        if row["trendline_role"] == "support"
+    )
+    assert support["anchor_wick_points"] == [[15.0, 200.0], [135.0, 240.0]]
+    assert support["line_obstruction_count"] == 0
+    assert support["significant_close"] is False
+
+
 def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean() -> None:
     # Lower-high pivots 0, 3, and 6 sit on y = 80 + 6 * bar.
     wick_tops = [80.0, 100.0, 108.0, 98.0, 126.0, 134.0, 116.0, 142.0, 148.0, 154.0]

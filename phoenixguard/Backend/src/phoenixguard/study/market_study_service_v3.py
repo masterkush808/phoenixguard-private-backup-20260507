@@ -18,6 +18,7 @@ import threading
 from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.study.behavioral_sequence_v3 import measure_market_behavior_v3
+from phoenixguard.study.latent_state_discovery_v3 import build_latent_state_discovery_v3
 from phoenixguard.study.adaptive_feature_ontology_v3 import (
     ADAPTIVE_FEATURE_ONTOLOGY_SCHEMA_VERSION,
     AdaptiveFeatureOntologyV3,
@@ -3481,6 +3482,16 @@ class MarketStudyServiceV3:
                 timeframe_seconds=timeframe_seconds,
                 material_studies=material_studies,
             )
+            hidden_state_discovery = build_latent_state_discovery_v3(
+                candles=_rows(advanced_candles.get("candles")),
+                behavior=advanced_behavior,
+                pair_profile=historical_pair_profile,
+                advanced_studies=advanced_studies,
+                research_studies=research_studies,
+                symbol=canonical_symbol,
+                timeframe=canonical_timeframe,
+                timeframe_seconds=timeframe_seconds,
+            )
             result = _base_contract(
                 symbol=canonical_symbol,
                 timeframe=canonical_timeframe,
@@ -3507,6 +3518,8 @@ class MarketStudyServiceV3:
                     "directional_read": directional,
                     "path_clock_liquidity_v3": path_clock_liquidity,
                     "path_clock_liquidity": deepcopy(path_clock_liquidity),
+                    "hidden_state_discovery_v3": hidden_state_discovery,
+                    "intelligence_authority": "HIDDEN_STATE_DISCOVERY_V3",
                     **advanced_studies,
                     **research_studies,
                 }

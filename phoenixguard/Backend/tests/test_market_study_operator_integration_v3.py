@@ -330,6 +330,32 @@ def _market_study() -> dict[str, object]:
             "study_only": True,
             "execution_authority": False,
         },
+        "hidden_state_discovery_v3": {
+            "schema_version": "PG_LATENT_STATE_DISCOVERY_V3",
+            "status": "ACTIVE",
+            "study_only": True,
+            "observation_only": True,
+            "strategy_authority": False,
+            "blocker_authority": False,
+            "execution_authority": False,
+            "grants_entry_permission": False,
+            "symbol": "CAD/JPY OTC",
+            "timeframe": "M5",
+            "timeframe_seconds": 300,
+            "hidden_state": {"state": "UP_SWING", "direction": "BUY"},
+            "control": {"side": "BUY", "status": "ACTIVE_STATE"},
+            "directional_components": {
+                "BUY": {"next_state_probability": 0.2},
+                "SELL": {"next_state_probability": 0.7},
+                "REST": {"next_state_probability": 0.1},
+            },
+            "state_cycle_horizon": {
+                "status": "EMPIRICAL_STATE_CYCLE",
+                "expected_candles": 23,
+                "duration": {"seconds": 6900, "display": "1h 55m"},
+            },
+            "private_probe_rows": ["must-not-publish"],
+        },
         "directional_read": {
             "side": "BUY",
             "confidence": 0.73,
@@ -341,13 +367,37 @@ def _market_study() -> dict[str, object]:
 
 def test_market_study_survives_both_live_state_compaction_paths() -> None:
     study = _market_study()
-    tracking = {"detected_market": "CAD/JPY OTC", "market_study_v3": study}
+    tracking = {
+        "detected_market": "CAD/JPY OTC",
+        "market_study_v3": study,
+        "timeframe_seconds": 300,
+        "timeframe_resolution_v3": {
+            "schema_version": "PG_TIMEFRAME_RESOLUTION_V3",
+            "status": "VERIFIED",
+            "value": "M5",
+        },
+        "timeframe_selector": {"value": "M5", "seconds_per_candle": 300},
+        "trendline_geometry_contract_v3": {
+            "schema_version": "PG_STRICT_TRENDLINE_GEOMETRY_V3",
+            "status": "VALIDATED",
+            "published_count": 1,
+        },
+        "trendlines_v3": [{"type": "SUPPORT_TRENDLINE"}],
+    }
     signal = {"action": "BUY", "market_study_v3": study}
 
     assert _compact_tracking_summary(tracking)["market_study_v3"] == study
     assert _compact_latest_signal(signal)["market_study_v3"] == study
     assert _compact_live_state_market_payload(tracking)["market_study_v3"] == study
     assert _compact_live_state_latest_signal_payload(signal)["market_study_v3"] == study
+    for compact in (
+        _compact_tracking_summary(tracking),
+        _compact_live_state_market_payload(tracking),
+    ):
+        assert compact["timeframe_seconds"] == 300
+        assert compact["timeframe_resolution_v3"]["value"] == "M5"
+        assert compact["trendline_geometry_contract_v3"]["published_count"] == 1
+        assert compact["trendlines_v3"] == [{"type": "SUPPORT_TRENDLINE"}]
     compact_poll = _compact_live_poll_session_payload(
         {"tracking_summary": tracking, "latest_signal": signal}
     )
@@ -377,6 +427,11 @@ def test_operator_workspace_exposes_study_separately_from_permission() -> None:
     assert study["regression"]["inner_trend"]["side"] == "SELL"
     assert study["behavior"]["current_state"]["state"] == "REST"
     assert study["directional_read"]["side"] == "BUY"
+    hidden = study["hidden_state_discovery_v3"]
+    assert hidden["control"]["side"] == "BUY"
+    assert hidden["state_cycle_horizon"]["expected_candles"] == 23
+    assert hidden["execution_authority"] is False
+    assert "private_probe_rows" not in hidden
     assert study["execution_authority"] is False
     assert "forecast" not in study
     for research_key in CONTINUOUS_RESEARCH_KEYS:

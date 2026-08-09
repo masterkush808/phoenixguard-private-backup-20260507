@@ -2197,6 +2197,10 @@ def _compact_tracking_summary(tracking: Mapping[str, Any]) -> dict[str, Any]:
         "symbol_context",
         "timing_signal",
         "tracked_candles",
+        "trendline_geometry_contract_v3",
+        "trendlines_v3",
+        "timeframe_resolution_v3",
+        "timeframe_selector",
     }
     compact = _compact_scalar_and_selected(tracking, selected)
     compact["model_council_result_present"] = bool(tracking.get("model_council_result"))

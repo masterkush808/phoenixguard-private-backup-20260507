@@ -2621,6 +2621,165 @@
         text-shadow: none;
       }
     }
+    .legacy-three-question-panel {
+      display: none !important;
+    }
+
+    .latent-control-rail {
+      display: grid;
+      grid-template-columns: minmax(10rem, 0.7fr) minmax(16rem, 1.6fr) minmax(14rem, 1fr);
+      gap: 1rem;
+      align-items: center;
+      margin-top: 1rem;
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+      border-left: 4px solid var(--muted, #83949c);
+      background: linear-gradient(110deg, rgba(13, 24, 30, 0.96), rgba(18, 31, 37, 0.82));
+    }
+
+    .latent-control-rail[data-side="buy"] {
+      border-left-color: var(--good, #52d79a);
+    }
+
+    .latent-control-rail[data-side="sell"] {
+      border-left-color: var(--bad, #ff6b6b);
+    }
+
+    .latent-control-primary,
+    .latent-control-detail {
+      display: grid;
+      gap: 0.25rem;
+    }
+
+    .latent-control-kicker,
+    .latent-component-head span {
+      color: var(--muted, #83949c);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+    }
+
+    #latent-control-side {
+      font-family: var(--font-display, "Arial Narrow", sans-serif);
+      font-size: clamp(1.35rem, 2.3vw, 2rem);
+      letter-spacing: 0.04em;
+    }
+
+    .latent-control-rail[data-side="buy"] #latent-control-side {
+      color: var(--good, #52d79a);
+    }
+
+    .latent-control-rail[data-side="sell"] #latent-control-side {
+      color: var(--bad, #ff6b6b);
+    }
+
+    #latent-state-label {
+      color: var(--text, #edf4f2);
+      font-weight: 800;
+    }
+
+    #latent-control-context,
+    .latent-cycle,
+    .latent-component-support {
+      color: var(--muted, #83949c);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .latent-cycle {
+      border-left: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+      padding-left: 1rem;
+    }
+
+    .latent-component-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.85rem;
+      margin-top: 0.85rem;
+    }
+
+    .latent-component {
+      position: relative;
+      overflow: hidden;
+      min-height: 10.5rem;
+      padding: 1rem;
+      border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+      background: rgba(10, 20, 25, 0.72);
+      transition: border-color 180ms ease, background 180ms ease;
+    }
+
+    .latent-component::before {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      content: "";
+      opacity: 0.46;
+    }
+
+    .latent-component-buy::before {
+      background: var(--good, #52d79a);
+    }
+
+    .latent-component-sell::before {
+      background: var(--bad, #ff6b6b);
+    }
+
+    .latent-component.is-control {
+      border-color: currentColor;
+      background: linear-gradient(135deg, rgba(16, 34, 37, 0.94), rgba(10, 20, 25, 0.78));
+    }
+
+    .latent-component-buy.is-control {
+      color: var(--good, #52d79a);
+    }
+
+    .latent-component-sell.is-control {
+      color: var(--bad, #ff6b6b);
+    }
+
+    .latent-component-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: baseline;
+    }
+
+    .latent-component-head strong {
+      color: currentColor;
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+    }
+
+    .latent-component-state {
+      margin: 1.4rem 0 0.35rem;
+      color: var(--text, #edf4f2);
+      font-family: var(--font-display, "Arial Narrow", sans-serif);
+      font-size: clamp(1.25rem, 2.1vw, 1.75rem);
+    }
+
+    .latent-component-mass {
+      margin: 0;
+      color: var(--text, #edf4f2);
+      font-size: 0.92rem;
+      font-weight: 700;
+    }
+
+    .latent-component-support {
+      margin: 0.55rem 0 0;
+    }
+
+    @media (max-width: 760px) {
+      .latent-control-rail,
+      .latent-component-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .latent-cycle {
+        border-left: 0;
+        border-top: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+        padding: 0.75rem 0 0;
+      }
+    }
   </style>
 </head>
 <body class="simple-view labels-hover">
@@ -2662,7 +2821,7 @@
       <header class="decision-brief-head">
         <div class="decision-brief-title">
           <span class="decision-kicker">Live trading brief</span>
-          <h2 id="beginner-story-title">Three answers. One decision.</h2>
+          <h2 id="beginner-story-title">Hidden-state control</h2>
           <p id="beginner-story-summary">The model explains the market, the active study, and the trade decision in that order.</p>
         </div>
         <div class="decision-context">
@@ -2677,7 +2836,40 @@
         </div>
       </header>
 
-      <ol class="decision-questions" aria-label="The three live trading questions">
+        <div class="latent-control-rail" id="latent-control-rail" data-side="unresolved" role="status" aria-live="polite">
+          <div class="latent-control-primary">
+            <span class="latent-control-kicker">STATE CONTROL</span>
+            <strong id="latent-control-side">ANALYZING</strong>
+          </div>
+          <div class="latent-control-detail">
+            <span id="latent-state-label">Latent state unresolved</span>
+            <span id="latent-control-context">Waiting for empirical transition evidence.</span>
+          </div>
+          <div class="latent-cycle" id="latent-cycle-horizon">Full state-cycle horizon pending</div>
+        </div>
+
+        <div class="latent-component-grid" aria-label="BUY and SELL hidden-state components">
+          <article class="latent-component latent-component-buy" id="latent-buy-component">
+            <div class="latent-component-head">
+              <span>BUY COMPONENT</span>
+              <strong id="latent-buy-status">NOT IN CONTROL</strong>
+            </div>
+            <p class="latent-component-state" id="latent-buy-state">UP_SWING evidence pending</p>
+            <p class="latent-component-mass" id="latent-buy-mass">Next-state mass unavailable</p>
+            <p class="latent-component-support" id="latent-buy-support">Waiting for Pair DNA support</p>
+          </article>
+          <article class="latent-component latent-component-sell" id="latent-sell-component">
+            <div class="latent-component-head">
+              <span>SELL COMPONENT</span>
+              <strong id="latent-sell-status">NOT IN CONTROL</strong>
+            </div>
+            <p class="latent-component-state" id="latent-sell-state">DOWN_SWING evidence pending</p>
+            <p class="latent-component-mass" id="latent-sell-mass">Next-state mass unavailable</p>
+            <p class="latent-component-support" id="latent-sell-support">Waiting for Pair DNA support</p>
+          </article>
+        </div>
+
+        <ol class="decision-questions legacy-three-question-panel" aria-label="Legacy decision questions" aria-hidden="true" hidden>
         <li class="decision-question" data-question="history" id="question-market-history">
           <span class="question-number" aria-hidden="true">01</span>
           <span class="story-label" id="story-step-one-label">Question 1</span>
@@ -6467,6 +6659,137 @@
       setText(els.decisionAuditOutcome, outcomeParts.join(" · "));
     }
 
+    function renderLatentStateControl(payload) {
+      const study = safeObject(marketStudyContract(payload));
+      const latent = safeObject(
+        study.hidden_state_discovery_v3 || study.latent_state_discovery_v3,
+      );
+      const hiddenState = safeObject(latent.hidden_state);
+      const control = safeObject(latent.control);
+      const components = safeObject(latent.directional_components);
+      const buy = safeObject(components.BUY || components.buy);
+      const sell = safeObject(components.SELL || components.sell);
+      const rest = safeObject(components.REST || components.rest);
+      const horizon = safeObject(latent.state_cycle_horizon);
+      const horizonDurationContract = safeObject(horizon.duration);
+      const rail = document.getElementById("latent-control-rail");
+      const buyCard = document.getElementById("latent-buy-component");
+      const sellCard = document.getElementById("latent-sell-component");
+      const write = (id, value) => {
+        const node = document.getElementById(id);
+        if (node) setText(node, value);
+      };
+      const metricNumber = (value) => (
+        value === null || value === undefined || value === ""
+          ? Number.NaN
+          : Number(value)
+      );
+      const probabilityCopy = (component) => {
+        const probability = metricNumber(component.next_state_probability);
+        return Number.isFinite(probability)
+          ? (probability * 100).toFixed(1) + "% empirical next-state mass"
+          : "Next-state mass needs more history";
+      };
+      const supportCopy = (component) => {
+        const support = metricNumber(component.outgoing_transition_support);
+        const count = metricNumber(component.next_state_count);
+        if (!Number.isFinite(support) || support <= 0) {
+          return "Waiting for Pair DNA transition support";
+        }
+        const destinationCount = Number.isFinite(count) ? count : 0;
+        return destinationCount + " matching exits across " + support
+          + " observed state transitions";
+      };
+
+      setText(els.beginnerStoryTitle, "Hidden-state control");
+      setText(
+        els.beginnerStorySummary,
+        "BUY and SELL are empirical state components, not strategy rules or entry commands.",
+      );
+
+      if (!Object.keys(latent).length) {
+        if (rail) rail.dataset.side = "unresolved";
+        if (buyCard) buyCard.classList.remove("is-control");
+        if (sellCard) sellCard.classList.remove("is-control");
+        write("latent-control-side", "ANALYZING");
+        write("latent-state-label", "Latent state unresolved");
+        write(
+          "latent-control-context",
+          "Waiting for the closed-candle state model. No strategy rule will substitute.",
+        );
+        write("latent-cycle-horizon", "Full state-cycle horizon pending");
+        return;
+      }
+
+      const side = safeText(control.side, "UNRESOLVED").toUpperCase();
+      const currentState = safeText(hiddenState.state, "UNRESOLVED").toUpperCase();
+      const controlLabel = side === "BUY" || side === "SELL"
+        ? side + " CONTROLS"
+        : "NEITHER CONTROLS";
+      if (rail) rail.dataset.side = side.toLowerCase();
+      if (buyCard) buyCard.classList.toggle("is-control", side === "BUY");
+      if (sellCard) sellCard.classList.toggle("is-control", side === "SELL");
+      write("latent-control-side", controlLabel);
+      write(
+        "latent-state-label",
+        "Current hidden state: " + currentState.replaceAll("_", " "),
+      );
+      const restProbability = metricNumber(rest.next_state_probability);
+      write(
+        "latent-control-context",
+        safeText(control.basis, "empirical state evidence unresolved")
+          .replaceAll("_", " ")
+          + (Number.isFinite(restProbability)
+            ? " · REST mass " + (restProbability * 100).toFixed(1) + "%"
+            : ""),
+      );
+
+      const path = Array.isArray(horizon.path)
+        ? horizon.path
+          .map((item) => safeText(safeObject(item).state, "").replaceAll("_", " "))
+          .filter(Boolean)
+        : [];
+      const expectedCandles = metricNumber(horizon.expected_candles);
+      const durationDisplay = safeText(horizonDurationContract.display, "");
+      const horizonDuration = Number.isFinite(expectedCandles)
+        ? "about " + expectedCandles.toFixed(1) + " candles"
+          + (durationDisplay && durationDisplay !== "duration unsupported"
+            ? " / " + durationDisplay
+            : "")
+        : "duration still unsupported";
+      write(
+        "latent-cycle-horizon",
+        path.length
+          ? "Whole state cycle: " + path.join(" -> ") + " · " + horizonDuration
+          : "Whole state-cycle path needs more Pair DNA history",
+      );
+
+      write(
+        "latent-buy-status",
+        side === "BUY" ? "IN CONTROL" : "NOT IN CONTROL",
+      );
+      write(
+        "latent-buy-state",
+        buy.currently_active
+          ? "UP SWING ACTIVE NOW"
+          : "UP SWING IS NOT THE ACTIVE STATE",
+      );
+      write("latent-buy-mass", probabilityCopy(buy));
+      write("latent-buy-support", supportCopy(buy));
+      write(
+        "latent-sell-status",
+        side === "SELL" ? "IN CONTROL" : "NOT IN CONTROL",
+      );
+      write(
+        "latent-sell-state",
+        sell.currently_active
+          ? "DOWN SWING ACTIVE NOW"
+          : "DOWN SWING IS NOT THE ACTIVE STATE",
+      );
+      write("latent-sell-mass", probabilityCopy(sell));
+      write("latent-sell-support", supportCopy(sell));
+    }
+
     function renderDecision(payload) {
       const market = safeObject(payload.market);
       const freshness = safeObject(payload.freshness);
@@ -6565,6 +6888,7 @@
         entryPermissionTitle + " · " + answers.entry.evidence + " · " + freshnessLabel
           + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
       );
+      renderLatentStateControl(payload);
       renderPassiveDecisionAudit(payload);
       scheduleEntryExpiry(permission, freshness, action);
       enforceCaptureSourceDecision(payload);

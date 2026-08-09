@@ -233,7 +233,96 @@ def _set_process_dpi_awareness_early() -> None:
 
 _set_process_dpi_awareness_early()
 
-_TIMEFRAME_LABELS: tuple[str, ...] = ("M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1")
+_TIMEFRAME_LABELS: tuple[str, ...] = (
+    "S3",
+    "S5",
+    "S10",
+    "S15",
+    "S30",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "M10",
+    "M15",
+    "M20",
+    "M30",
+    "M45",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H6",
+    "H8",
+    "H12",
+    "D1",
+    "D2",
+    "D3",
+    "W1",
+    "W2",
+    "MN1",
+    "MN3",
+    "MN6",
+)
+_TIMEFRAME_UNIT_SECONDS: Mapping[str, int] = {
+    "S": 1,
+    "M": 60,
+    "H": 60 * 60,
+    "D": 24 * 60 * 60,
+    "W": 7 * 24 * 60 * 60,
+    "MN": 30 * 24 * 60 * 60,
+}
+_MAX_SUPPORTED_TIMEFRAME_SECONDS = 10 * 366 * 24 * 60 * 60
+
+
+def _canonical_timeframe_label_v3(value: Any) -> str:
+    """Normalize explicit chart intervals without guessing from bare numbers."""
+
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    for pattern, replacement in (
+        (r"\bMONTHS?\b", "MN"),
+        (r"\bWEEKS?\b", "W"),
+        (r"\bDAYS?\b", "D"),
+        (r"\bHOURS?|\bHRS?\b", "H"),
+        (r"\bMINUTES?|\bMINS?\b", "M"),
+        (r"\bSECONDS?|\bSECS?\b", "S"),
+    ):
+        raw = re.sub(pattern, replacement, raw)
+    compact = re.sub(r"[^A-Z0-9]", "", raw)
+    match = re.fullmatch(
+        r"(?:(MN|[SMHDW])([0-9OIL]{1,4})|([0-9OIL]{1,4})(MN|[SMHDW]))",
+        compact,
+    )
+    if match is None:
+        return ""
+    unit = str(match.group(1) or match.group(4) or "")
+    raw_amount = str(match.group(2) or match.group(3) or "")
+    raw_amount = raw_amount.translate(
+        str.maketrans({"O": "0", "I": "1", "L": "1"})
+    )
+    try:
+        amount = int(raw_amount)
+    except ValueError:
+        return ""
+    if amount <= 0:
+        return ""
+    if unit == "S" and amount % 60 == 0:
+        unit, amount = "M", amount // 60
+    if unit == "M" and amount % 60 == 0:
+        unit, amount = "H", amount // 60
+    if unit == "H" and amount % 24 == 0:
+        unit, amount = "D", amount // 24
+    if unit == "D" and amount % 7 == 0:
+        unit, amount = "W", amount // 7
+    multiplier = int(_TIMEFRAME_UNIT_SECONDS.get(unit, 0))
+    if multiplier <= 0 or amount * multiplier > _MAX_SUPPORTED_TIMEFRAME_SECONDS:
+        return ""
+    return f"{unit}{amount}"
+
+
 _FX_CURRENCY_CODES: frozenset[str] = frozenset({"AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD", "USD"})
 _POCKET_OPTION_WINDOW_FALLBACK_TOKENS = (
     "pocket option",
@@ -370,23 +459,22 @@ def _identity_text_timeframe_candidates_v3(text: Any) -> list[str]:
     raw = str(text or "").upper()
     if not raw:
         return []
-    aliases = {
-        "1M": "M1",
-        "3M": "M3",
-        "5M": "M5",
-        "15M": "M15",
-        "30M": "M30",
-        "1H": "H1",
-        "4H": "H4",
-        "1D": "D1",
-    }
-    labels: list[str] = []
-    for token in re.findall(
-        r"(?<![A-Z0-9])(?:M1|M3|M5|M15|M30|H1|H4|D1|1M|3M|5M|15M|30M|1H|4H|1D)(?![A-Z0-9])",
-        raw,
+    for pattern, replacement in (
+        (r"\bMONTHS?\b", "MN"),
+        (r"\bWEEKS?\b", "W"),
+        (r"\bDAYS?\b", "D"),
+        (r"\bHOURS?|\bHRS?\b", "H"),
+        (r"\bMINUTES?|\bMINS?\b", "M"),
+        (r"\bSECONDS?|\bSECS?\b", "S"),
     ):
-        label = aliases.get(token, token)
-        if label in _TIMEFRAME_LABELS and label not in labels:
+        raw = re.sub(pattern, replacement, raw)
+    labels: list[str] = []
+    token_pattern = re.compile(
+        r"(?<![A-Z0-9])(?:(?:MN|[SMHDW])\s*[0-9OIL]{1,4}|[0-9OIL]{1,4}\s*(?:MN|[SMHDW]))(?![A-Z0-9])"
+    )
+    for token in token_pattern.findall(raw):
+        label = _canonical_timeframe_label_v3(token)
+        if label and label not in labels:
             labels.append(label)
     return labels
 _FIXED_BROKER_AMOUNT = "5"
@@ -417,7 +505,7 @@ _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 30.0
 _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC = 300.0
 _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC = 0.5
 _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC = 30.0
-_TRACKER_ARTIFACT_RETENTION_FRAMES = 144
+_TRACKER_ARTIFACT_RETENTION_FRAMES = 48
 _EXECUTION_HISTORY_AREA_MIN_SAMPLE = 6
 _EXECUTION_BUY_HISTORY_HIGH_POSITION = 0.74
 _EXECUTION_BUY_HISTORY_STRETCH_POSITION = 0.88
@@ -490,20 +578,11 @@ def _array_mean_float(value: Any) -> float:
 
 
 def _timeframe_seconds(timeframe: Any, default: int = 300) -> int:
-    label = str(timeframe or "").strip().upper()
-    seconds = {
-        "S3": 3,
-        "S15": 15,
-        "S30": 30,
-        "M1": 60,
-        "M3": 180,
-        "M5": 300,
-        "M15": 900,
-        "M30": 1800,
-        "H1": 3600,
-        "H4": 14400,
-        "D1": 86400,
-    }.get(label, int(default))
+    label = _canonical_timeframe_label_v3(timeframe)
+    match = re.fullmatch(r"(MN|[SMHDW])(\d{1,4})", label)
+    if match is None:
+        return max(1, int(default))
+    seconds = int(_TIMEFRAME_UNIT_SECONDS[match.group(1)]) * int(match.group(2))
     return max(1, int(seconds))
 
 
@@ -517,31 +596,148 @@ def _high_frequency_profile_expiry_seconds(timeframe: Any) -> int:
 
 
 _EXECUTION_TIMEFRAME_SECONDS = {
-    "S3": 3,
-    "S15": 15,
-    "S30": 30,
-    "M1": 60,
-    "M3": 180,
-    "M5": 300,
-    "M15": 900,
-    "M30": 1800,
-    "H1": 3600,
-    "H4": 14400,
-    "D1": 86400,
+    label: _timeframe_seconds(label) for label in _TIMEFRAME_LABELS
 }
 _STRICT_MISSING_SIGNAL_ID_MESSAGE = "Strict execution blocked this signal because signal_id is missing."
 
 
 def _strict_execution_timeframe_seconds(timeframe: Any) -> int:
-    label = str(timeframe or "").strip().upper()
-    if label not in _EXECUTION_TIMEFRAME_SECONDS:
+    label = _canonical_timeframe_label_v3(timeframe)
+    if not label:
         raise ValueError("strict execution requires an explicit supported timeframe")
-    return int(_EXECUTION_TIMEFRAME_SECONDS[label])
+    return int(_EXECUTION_TIMEFRAME_SECONDS.get(label, _timeframe_seconds(label)))
 
 
 def _candles_to_seconds(candle_count: Any, timeframe: Any, default_timeframe_seconds: int = 300) -> int:
     candles = max(0, int(round(_float_or(candle_count, 0.0))))
     return int(candles * _timeframe_seconds(timeframe, default=default_timeframe_seconds))
+
+
+def _timeframe_resolution_contract_v3(
+    value: Any,
+    *,
+    source: Any,
+    confidence: Any,
+    identity_confirmed: bool,
+) -> dict[str, Any]:
+    label = _canonical_timeframe_label_v3(value)
+    seconds = _timeframe_seconds(label) if label else 0
+    return {
+        "schema_version": "PG_TIMEFRAME_RESOLUTION_V3",
+        "status": (
+            "VERIFIED"
+            if label and identity_confirmed
+            else "UNCONFIRMED"
+            if label
+            else "UNRESOLVED"
+        ),
+        "value": label,
+        "seconds_per_candle": seconds,
+        "minutes_per_candle": round(seconds / 60.0, 6) if seconds else None,
+        "hours_per_candle": round(seconds / 3600.0, 6) if seconds else None,
+        "source": str(source or "unresolved"),
+        "confidence": round(_clip01(confidence), 6),
+        "identity_confirmed": bool(label and identity_confirmed),
+        "resolution_policy": "visual_ocr_plus_locked_source_metadata_consensus",
+        "failure_policy": "never_substitute_a_different_timeframe",
+    }
+
+
+def _strict_live_trendline_geometry_v3(value: Any) -> dict[str, Any]:
+    """Return renderable geometry only for the proven wick-anchor contract."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    row = dict(cast(Mapping[str, Any], value))
+    overlay_type = str(row.get("type", "") or "").upper()
+    if overlay_type not in {
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+    }:
+        return {}
+    if str(row.get("anchor_type", "") or "").upper() != "TRENDLINE_TOUCH_POINTS":
+        return {}
+    if str(row.get("trendline_validation", "") or "") != "wick_anchor_no_obstruction_closed_body_validation":
+        return {}
+    if bool(row.get("significant_close", False)):
+        return {}
+    if int(_float_or(row.get("line_obstruction_count"), 0.0)) != 0:
+        return {}
+    if str(row.get("breach_state", "ACTIVE") or "ACTIVE").upper() != "ACTIVE":
+        return {}
+    if int(_float_or(row.get("touch_count"), 0.0)) < 2:
+        return {}
+    if int(_float_or(row.get("anchor_span_bars"), 0.0)) < 3:
+        return {}
+
+    def points(raw: Any) -> list[list[float]]:
+        result: list[list[float]] = []
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+            return result
+        for item in cast(Sequence[Any], raw):
+            if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
+                return []
+            point = cast(Sequence[Any], item)
+            if len(point) < 2:
+                return []
+            x = _float_or(point[0], float("nan"))
+            y = _float_or(point[1], float("nan"))
+            if not math.isfinite(x) or not math.isfinite(y):
+                return []
+            result.append([float(x), float(y)])
+        return result
+
+    line_points = points(row.get("line_points") or row.get("points"))
+    anchor_points = points(row.get("anchor_wick_points"))
+    if len(line_points) < 2 or len(anchor_points) < 2:
+        return {}
+    if any(
+        abs(line_points[index][axis] - anchor_points[index][axis]) > 0.75
+        for index in (0, 1)
+        for axis in (0, 1)
+    ):
+        return {}
+    dx = anchor_points[1][0] - anchor_points[0][0]
+    dy = anchor_points[1][1] - anchor_points[0][1]
+    if abs(dx) <= 1e-6 or abs(dy) <= 1e-6:
+        return {}
+    return {
+        "type": overlay_type,
+        "role": str(row.get("trendline_role", row.get("role", "")) or "").lower(),
+        "line_points": line_points,
+        "anchor_wick_points": anchor_points[:2],
+        "touch_count": int(_float_or(row.get("touch_count"), 2.0)),
+        "confidence": _clip01(row.get("confidence", 0.0)),
+        "display_label": str(
+            row.get("display_label")
+            or row.get("label")
+            or overlay_type.replace("_", " ")
+        ),
+        "validation": "wick_anchor_no_obstruction_closed_body_validation",
+    }
+
+
+def _trendline_geometry_contract_v3(
+    trendlines: Sequence[Any], *, observed_candle_count: int
+) -> dict[str, Any]:
+    validated = [
+        row
+        for raw in trendlines
+        if (row := _strict_live_trendline_geometry_v3(raw))
+    ]
+    return {
+        "schema_version": "PG_STRICT_TRENDLINE_GEOMETRY_V3",
+        "status": "VALIDATED" if validated else "NO_VALID_TWO_WICK_LINE",
+        "observed_candle_count": max(0, int(observed_candle_count)),
+        "published_count": len(validated),
+        "rejected_count": max(0, len(trendlines) - len(validated)),
+        "anchor_contract": "two_closed_candle_wick_pivots",
+        "breach_contract": "no_significant_closed_body_breach",
+        "forming_candle_can_invalidate": False,
+        "coordinate_contract": "current_chart_image_space",
+        "validated_types": [row["type"] for row in validated],
+    }
 
 
 def _float_or(value: Any, fallback: float = 0.0) -> float:
@@ -3593,9 +3789,13 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "timeframe",
         "timeframe_confidence",
         "timeframe_identity_confirmed",
+        "timeframe_resolution_v3",
+        "timeframe_seconds",
+        "timeframe_selector",
         "timeframe_source",
         "tracked_candles",
         "trend_context",
+        "trendline_geometry_contract_v3",
         "trendlines_v3",
         "two_candle_study",
         "visible_candle_count",
@@ -7270,15 +7470,16 @@ def _normalize_external_source_roi_v3(value: Any) -> list[float]:
     """
 
     if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, Any], value)
         raw: list[Any] = [
-            value.get("x"),
-            value.get("y"),
-            value.get("width"),
-            value.get("height"),
+            mapping.get("x"),
+            mapping.get("y"),
+            mapping.get("width"),
+            mapping.get("height"),
         ]
         mapping_geometry = True
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        raw = list(value)[:4]
+        raw = list(cast(Sequence[Any], value))[:4]
         mapping_geometry = False
     else:
         return []
@@ -8428,7 +8629,13 @@ def _edge_tab_bracket_identity_surface_v3(
         return {}
 
     def pixel_text_proof(bbox: Sequence[int]) -> tuple[bool, str, int]:
-        crop = surface.crop(tuple(int(item) for item in bbox[:4])).convert("L")
+        crop_box = (
+            int(bbox[0]),
+            int(bbox[1]),
+            int(bbox[2]),
+            int(bbox[3]),
+        )
+        crop = surface.crop(crop_box).convert("L")
         if crop.width < 3 or crop.height < 3:
             return False, "", 0
         grayscale = np.asarray(crop, dtype=np.uint8)
@@ -14803,17 +15010,27 @@ class PhoenixGuardWindowTrackingAdapter:
                     cached_ocr_bank = self.__dict__.get(
                         "_ocr_char_template_bank"
                     )
+                    timeframe_bank = (
+                        cast(Mapping[str, Any], cached_timeframe_bank)
+                        if isinstance(cached_timeframe_bank, Mapping)
+                        else None
+                    )
+                    ocr_bank = (
+                        cast(Mapping[str, Any], cached_ocr_bank)
+                        if isinstance(cached_ocr_bank, Mapping)
+                        else None
+                    )
                     timeframe_bank_incomplete = bool(
-                        isinstance(cached_timeframe_bank, Mapping)
+                        timeframe_bank is not None
                         and not all(
-                            cached_timeframe_bank.get(label)
+                            timeframe_bank.get(label)
                             for label in _TIMEFRAME_LABELS
                         )
                     )
                     ocr_bank_incomplete = bool(
-                        isinstance(cached_ocr_bank, Mapping)
+                        ocr_bank is not None
                         and not all(
-                            cached_ocr_bank.get(label)
+                            ocr_bank.get(label)
                             for label in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/.-"
                         )
                     )
@@ -23450,6 +23667,12 @@ class PhoenixGuardWindowTrackingAdapter:
             detected_chart_timeframe
             and timeframe_confidence >= min_timeframe_identity_confidence
         )
+        timeframe_resolution_v3 = _timeframe_resolution_contract_v3(
+            detected_chart_timeframe or timeframe,
+            source=timeframe_source,
+            confidence=timeframe_confidence,
+            identity_confirmed=timeframe_identity_confirmed,
+        )
         if len(candles) < 5:
             market_study_v3 = pending_market_study_v3(
                 "Waiting for at least four proven completed candles.",
@@ -23462,9 +23685,15 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["display_region"] = dict(chart_region)
             tracking["tracked_candles"] = candles
             tracking["trendlines_v3"] = derive_trendline_overlays(candles)
+            tracking["trendline_geometry_contract_v3"] = _trendline_geometry_contract_v3(
+                tracking["trendlines_v3"], observed_candle_count=len(candles)
+            )
             tracking["detected_timeframe"] = timeframe
             tracking["timeframe_source"] = timeframe_source
             tracking["timeframe_confidence"] = timeframe_confidence
+            tracking["timeframe_seconds"] = timeframe_resolution_v3["seconds_per_candle"]
+            tracking["timeframe_selector"] = dict(timeframe_resolution_v3)
+            tracking["timeframe_resolution_v3"] = dict(timeframe_resolution_v3)
             tracking["configured_high_frequency_timeframe"] = configured_high_frequency_timeframe
             tracking["high_frequency_study_timeframe"] = high_frequency_study_timeframe
             tracking["high_frequency_timeframe_source"] = high_frequency_timeframe_source
@@ -23933,8 +24162,12 @@ class PhoenixGuardWindowTrackingAdapter:
         projection["behavior_state"] = str(behavior_payload.get("current_state", "noise") or "noise")
         projection["next_behavior_state"] = str(behavior_payload.get("next_most_likely_state", "sideways_pause") or "sideways_pause")
         projection["decision_kernel"] = decision_kernel
-        tracked_public = candles[-36:]
+        tracked_public = candles[-_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES:]
         trendlines_v3 = derive_trendline_overlays(tracked_public)
+        trendline_geometry_contract_v3 = _trendline_geometry_contract_v3(
+            trendlines_v3,
+            observed_candle_count=len(tracked_public),
+        )
 
         reasons = [
             f"global {global_direction} slope {global_slope:+.3f}",
@@ -24009,6 +24242,9 @@ class PhoenixGuardWindowTrackingAdapter:
             "detected_timeframe": timeframe,
             "timeframe_source": timeframe_source,
             "timeframe_confidence": timeframe_confidence,
+            "timeframe_seconds": timeframe_resolution_v3["seconds_per_candle"],
+            "timeframe_selector": dict(timeframe_resolution_v3),
+            "timeframe_resolution_v3": dict(timeframe_resolution_v3),
             "configured_high_frequency_timeframe": configured_high_frequency_timeframe,
             "high_frequency_study_timeframe": high_frequency_study_timeframe,
             "high_frequency_timeframe_source": high_frequency_timeframe_source,
@@ -24038,6 +24274,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "overlay_kind": setup,
             "tracked_candles": tracked_public,
             "trendlines_v3": trendlines_v3,
+            "trendline_geometry_contract_v3": trendline_geometry_contract_v3,
             "historical_structure": historical_structure,
             "support_resistance_zones": support_resistance_zones,
             "support_resistance_context": support_resistance_context,
@@ -26974,6 +27211,18 @@ class PhoenixGuardWindowTrackingAdapter:
         overlay_geometry = _mapping_to_dict(tracking_summary.get("overlay_geometry", {}))
         layer_visibility = _mapping_to_dict(overlay_geometry.get("layer_visibility", {}))
         diagnostics_visible = bool(layer_visibility.get("diagnostics", False)) or bool(overlay_geometry.get("debug_enabled", False))
+        trendlines_visible = bool(layer_visibility.get("trendlines", True))
+        validated_trendlines = (
+            [
+                geometry
+                for raw in _sequence_of_mappings(
+                    tracking_summary.get("trendlines_v3", [])
+                )
+                if (geometry := _strict_live_trendline_geometry_v3(raw))
+            ]
+            if trendlines_visible
+            else []
+        )
 
         # The operator workspace owns the canonical, toggleable semantic
         # overlay plane.  Keeping a second set of support, structure, and H*
@@ -26982,7 +27231,7 @@ class PhoenixGuardWindowTrackingAdapter:
         # instrument switch.  Preserve the broker pixels exactly for normal
         # live use; the legacy renderer remains available only when an
         # explicit diagnostics/debug layer is requested.
-        if not diagnostics_visible:
+        if not diagnostics_visible and not validated_trendlines:
             return surface_image.convert("RGB")
 
         chart_width = max(1, int(chart_box[2] - chart_box[0]))
@@ -27003,6 +27252,51 @@ class PhoenixGuardWindowTrackingAdapter:
         }
         label_font = _overlay_font(max(11, int(round(surface_image.width * 0.011))), bold=True)
         caption_font = _overlay_font(max(10, int(round(surface_image.width * 0.0095))), bold=False)
+
+        for trendline in validated_trendlines:
+            overlay_type = str(trendline.get("type", "") or "")
+            color: ColorRGB = (
+                (70, 224, 151)
+                if overlay_type == "SUPPORT_TRENDLINE"
+                else (255, 118, 102)
+                if overlay_type == "RESISTANCE_TRENDLINE"
+                else (78, 194, 255)
+            )
+            translated_points = [
+                (
+                    max(chart_box[0] + 1, min(chart_box[2] - 1, int(round(point[0] + chart_offset_x)))),
+                    max(chart_box[1] + 1, min(chart_box[3] - 1, int(round(point[1] + chart_offset_y)))),
+                )
+                for point in cast(Sequence[Sequence[float]], trendline["line_points"])
+            ]
+            translated_anchors = [
+                (
+                    max(chart_box[0] + 1, min(chart_box[2] - 1, int(round(point[0] + chart_offset_x)))),
+                    max(chart_box[1] + 1, min(chart_box[3] - 1, int(round(point[1] + chart_offset_y)))),
+                )
+                for point in cast(Sequence[Sequence[float]], trendline["anchor_wick_points"])
+            ]
+            draw.line(translated_points, fill=_rgba(color, 224), width=3)
+            for anchor_x, anchor_y in translated_anchors:
+                draw.ellipse(
+                    [anchor_x - 4, anchor_y - 4, anchor_x + 4, anchor_y + 4],
+                    fill=_rgba(color, 210),
+                    outline=(7, 16, 22, 230),
+                    width=1,
+                )
+            label_x, label_y = translated_points[-1]
+            draw.text(
+                (
+                    max(chart_box[0] + 4, label_x - 110),
+                    max(chart_box[1] + 4, label_y - 18),
+                ),
+                str(trendline.get("display_label", "TRENDLINE") or "TRENDLINE"),
+                fill=_rgba(color, 238),
+                font=caption_font,
+            )
+
+        if not diagnostics_visible:
+            return Image.alpha_composite(overlay, canvas).convert("RGB")
 
         draw.rounded_rectangle(
             chart_box,
@@ -27845,14 +28139,36 @@ class PhoenixGuardWindowTrackingAdapter:
         _lane_x0, lane_y0, _lane_x1, lane_y1, selector_layout = _market_selector_lane_bounds(image)
         candidates: list[dict[str, Any]] = []
         min_confidence_by_label: dict[str, float] = {
+            "S3": 0.58,
+            "S5": 0.58,
+            "S10": 0.60,
+            "S15": 0.60,
+            "S30": 0.62,
             "M1": 0.56,
+            "M2": 0.56,
             "M3": 0.56,
+            "M4": 0.56,
             "M5": 0.56,
+            "M10": 0.60,
             "M15": 0.60,
+            "M20": 0.64,
             "M30": 0.68,
+            "M45": 0.68,
             "H1": 0.68,
+            "H2": 0.68,
+            "H3": 0.68,
             "H4": 0.70,
+            "H6": 0.70,
+            "H8": 0.70,
+            "H12": 0.72,
             "D1": 0.72,
+            "D2": 0.72,
+            "D3": 0.72,
+            "W1": 0.74,
+            "W2": 0.74,
+            "MN1": 0.76,
+            "MN3": 0.76,
+            "MN6": 0.76,
         }
 
         try:
@@ -28293,7 +28609,11 @@ class PhoenixGuardWindowTrackingAdapter:
             if segment.size == 0 or int(np.sum(segment > 0)) < 8:
                 segment_score_maps = []
                 break
-            allowed_labels = {"M", "H", "D"} if segment_index == 0 else {"0", "1", "3", "4", "5"}
+            allowed_labels = (
+                {"S", "M", "H", "D", "W", "N"}
+                if segment_index == 0
+                else {"N", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
+            )
             segment_scores: dict[str, float] = {}
             for segment_label in allowed_labels:
                 label_best = 0.0
@@ -30734,10 +31054,10 @@ class ContinuousWindowTrackerService:
             _TRACKER_ARTIFACT_RETENTION_FRAMES,
             24,
         )
-        max_age_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC", 5400.0, 300.0)
-        max_mb = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB", 128.0, 32.0)
-        decision_keep = _env_int("PHOENIXGUARD_TRACKER_DECISION_RETENTION_FILES", 12, 1)
-        prune_interval_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC", 30.0, 5.0)
+        max_age_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC", 1800.0, 300.0)
+        max_mb = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB", 64.0, 32.0)
+        decision_keep = _env_int("PHOENIXGUARD_TRACKER_DECISION_RETENTION_FILES", 8, 1)
+        prune_interval_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC", 60.0, 5.0)
         try:
             if not artifact_dir.exists():
                 return

@@ -106,14 +106,20 @@ def test_tracker_pressure_uses_server_authoritative_temporal_event() -> None:
     assert "History never grants entry permission." in dashboard
 
 
-def test_tracker_dashboard_uses_three_questions_and_separate_entry_permission() -> None:
+def test_tracker_dashboard_exposes_only_buy_sell_hidden_state_components() -> None:
     dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
         encoding="utf-8"
     )
 
     assert 'id="current-move-title"' in dashboard
     assert 'id="permission-title"' in dashboard
-    assert 'aria-label="The three live trading questions"' in dashboard
+    assert 'id="latent-control-rail"' in dashboard
+    assert 'aria-label="BUY and SELL hidden-state components"' in dashboard
+    assert "BUY COMPONENT" in dashboard
+    assert "SELL COMPONENT" in dashboard
+    assert 'class="decision-questions legacy-three-question-panel"' in dashboard
+    assert 'aria-label="Legacy decision questions" aria-hidden="true" hidden' in dashboard
+    assert 'aria-label="The three live trading questions"' not in dashboard
     assert 'id="market-origin-question">Where is the market from, and how did history behave?' in dashboard
     assert 'id="direction-study-question">Which direction was studied, and what is being studied now?' in dashboard
     assert 'id="entry-now-question">What is the best decision to do right now?' in dashboard
@@ -151,7 +157,7 @@ def test_tracker_dashboard_uses_sanitized_operator_overlays() -> None:
 
     assert 'const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";' in dashboard
     assert "const operatorOverlays = safeList(committedOperatorState.overlays)" in dashboard
-    assert ".filter(function (overlay) { return !overlayIsDiagnostic(overlay); });" in dashboard
+    assert "overlayIdentityMatchesPayload(overlay, committedOperatorState)" in dashboard
     assert "state.overlays = operatorOverlays;" in dashboard
     assert "function lifecycleIsVisible(overlay)" in dashboard
     assert "function overlayMatchesSurface(overlay)" in dashboard

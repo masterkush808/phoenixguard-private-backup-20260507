@@ -2050,10 +2050,10 @@ def test_market_story_and_history_prefer_v3_regression_study(
     ]
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
-        assert page.locator("#story-step-one-label").inner_text() == "QUESTION 1"
-        assert page.locator("#story-step-two-label").inner_text() == "QUESTION 2"
-        assert page.locator("#story-step-three-label").inner_text() == "QUESTION 3"
+        assert page.locator(".legacy-three-question-panel").is_hidden()
+        assert page.locator("#latent-control-rail").is_visible()
+        assert page.locator("#latent-buy-component").is_visible()
+        assert page.locator("#latent-sell-component").is_visible()
         assert page.locator("#current-move-title").inner_text() == "From an upward market"
         assert page.locator("#inner-trend-title").inner_text() == (
             "SELL studied · completed BUY · forming moving"
@@ -2205,19 +2205,17 @@ def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
         assert "never places trades" in strip.inner_text().lower()
 
 
-def test_q3_renders_timing_forecast_and_keeps_live_action_separate(
+def test_hidden_legacy_timing_forecast_never_replaces_hidden_state_control(
     chromium_browser: Browser,
 ) -> None:
     payload = _with_timing_forecast(_operator_payload(action="WAIT"))
 
     with _dashboard_page(chromium_browser, payload) as page:
         assert page.locator(".decision-question").count() == 3
-        assert page.locator("#beginner-decision-title").inner_text() == (
-            "PREPARE"
-        )
-        assert page.locator(
-            ".decision-projection .decision-kicker"
-        ).inner_text() == "STUDY PROJECTION"
+        assert page.locator(".legacy-three-question-panel").is_hidden()
+        assert page.locator("#latent-control-rail").is_visible()
+        assert page.locator("#latent-buy-component").is_visible()
+        assert page.locator("#latent-sell-component").is_visible()
         assert page.locator("#beginner-confidence").inner_text() == (
             "Entry closed · studied setup is being prepared"
         )
@@ -2444,7 +2442,7 @@ def test_q3_explains_active_move_as_next_impulse_without_chase_language(
         assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
 
 
-def test_q3_unrated_projection_never_leads_and_atomic_permission_controls_enter(
+def test_hidden_unrated_projection_never_leads_and_atomic_permission_controls_enter(
     chromium_browser: Browser,
 ) -> None:
     payload = _with_timing_forecast(
@@ -2471,13 +2469,10 @@ def test_q3_unrated_projection_never_leads_and_atomic_permission_controls_enter(
     )
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
-        assert "BUY" not in page.locator(
-            "#beginner-decision-title"
-        ).inner_text()
-        assert page.locator(
-            ".decision-projection .decision-kicker"
-        ).inner_text() == "STUDY PROJECTION"
+        assert page.locator(".legacy-three-question-panel").is_hidden()
+        assert page.locator("#latent-control-rail").is_visible()
+        assert page.locator("#latent-buy-component").is_visible()
+        assert page.locator("#latent-sell-component").is_visible()
         projection = page.locator("#beginner-forecast-summary").inner_text()
         assert "BUY direction studied · timing range withheld" in projection
         assert "3–6" not in projection
@@ -2984,9 +2979,14 @@ def test_current_order_areas_have_independent_always_visible_controls(
             "confidence": 0.84,
             "lifecycle": "current",
             "frame_id": 42,
-            "coordinate_space": "chart",
-            "coordinate_units": "normalized",
-            "positioning_status": "WAITING",
+                "coordinate_space": "chart",
+                "coordinate_units": "normalized",
+                "symbol": payload["market"]["symbol"],
+                "timeframe": payload["market"]["timeframe"],
+                "surface_semantic_identity": payload["surface"]["semantic_identity"],
+                "market_selector_visual_fingerprint": payload["surface"]["market_selector_visual_fingerprint"],
+                "instrument_identity_status": "LOCKED",
+                "positioning_status": "WAITING",
             "positioning_mode": "REFERENCE",
             "positioning_basis": "Current chart structure",
             "immutable_geometry": False,
@@ -3073,7 +3073,7 @@ def test_current_order_areas_have_independent_always_visible_controls(
         assert reference_treatment["geometryRole"] == "FORWARD_REACTION_WINDOW"
         assert reference_treatment["reactionAnchor"] == "LATEST_COMPLETED_CANDLE"
         assert reference_treatment["label"] == "Buy lower · limit · current"
-        assert float(reference_treatment["labelOpacity"]) >= 0.9
+        assert float(reference_treatment["labelOpacity"]) == 0.0
 
         def assert_pixel_geometry(
             overlay_id: str,
@@ -3227,7 +3227,7 @@ def test_current_order_areas_have_independent_always_visible_controls(
         )
 
 
-def test_precision_entry_trigger_count_can_activate_its_hidden_family(
+def test_precision_entry_trigger_count_tracks_its_active_live_family(
     chromium_browser: Browser,
 ) -> None:
     payload = _operator_payload()
@@ -3250,6 +3250,11 @@ def test_precision_entry_trigger_count_can_activate_its_hidden_family(
             "frame_id": 42,
             "coordinate_space": "chart",
             "coordinate_units": "normalized",
+            "symbol": payload["market"]["symbol"],
+            "timeframe": payload["market"]["timeframe"],
+            "surface_semantic_identity": payload["surface"]["semantic_identity"],
+            "market_selector_visual_fingerprint": payload["surface"]["market_selector_visual_fingerprint"],
+            "instrument_identity_status": "LOCKED",
         }
     )
 
@@ -3258,13 +3263,13 @@ def test_precision_entry_trigger_count_can_activate_its_hidden_family(
         assert control.locator("[data-order-kind-count]").inner_text() == "1"
         assert control.get_attribute("data-available") == "true"
         assert control.is_disabled() is False
-        assert control.get_attribute("aria-pressed") == "false"
-        assert page.locator('[data-overlay-id="precision-entry-current"]').count() == 0
+        assert control.get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-overlay-id="precision-entry-current"]').count() == 1
 
         control.click()
 
-        assert control.get_attribute("aria-pressed") == "true"
-        assert page.locator('[data-overlay-id="precision-entry-current"]').count() == 1
+        assert control.get_attribute("aria-pressed") == "false"
+        assert page.locator('[data-overlay-id="precision-entry-current"]').count() == 0
 
 
 
@@ -3292,6 +3297,11 @@ def test_order_area_controls_remain_atomic_while_the_next_image_decodes(
             "frame_id": 42,
             "coordinate_space": "chart",
             "coordinate_units": "normalized",
+            "symbol": initial["market"]["symbol"],
+            "timeframe": initial["market"]["timeframe"],
+            "surface_semantic_identity": initial["surface"]["semantic_identity"],
+            "market_selector_visual_fingerprint": initial["surface"]["market_selector_visual_fingerprint"],
+            "instrument_identity_status": "LOCKED",
             "positioning_status": "WAITING",
             "positioning_mode": "REFERENCE",
             "positioning_basis": "Current chart structure",
@@ -3486,7 +3496,7 @@ def test_existing_live_preset_migrates_order_positioning_without_touching_custom
         )
         assert page.evaluate(
             "localStorage.getItem('phoenixguard.overlay.layers.order-positioning-migration.v1')"
-        ) == "1"
+        ) == "2"
 
         page.evaluate(
             """
@@ -3507,7 +3517,7 @@ def test_existing_live_preset_migrates_order_positioning_without_touching_custom
         ) == ["trendlines"]
         assert page.evaluate(
             "localStorage.getItem('phoenixguard.overlay.layers.order-positioning-migration.v1')"
-        ) == "1"
+        ) == "2"
         page.evaluate(
             "() => window.PhoenixGuardDashboard.toggleFamily('scene_forecaster')"
         )
@@ -3599,23 +3609,55 @@ def test_mobile_overlay_library_has_tappable_controls_without_page_overflow(
 
 
 @pytest.mark.parametrize("viewport", [(390, 844), (360, 800)])
-def test_mobile_first_viewport_contains_the_actual_entry_answer(
+def test_mobile_first_viewport_contains_hidden_state_control(
     chromium_browser: Browser,
     viewport: tuple[int, int],
 ) -> None:
     with _dashboard_page(
         chromium_browser, _operator_payload(), viewport=viewport
     ) as page:
-        box = page.locator("#beginner-decision-title").bounding_box()
+        assert page.locator(".legacy-three-question-panel").is_hidden()
+        box = page.locator("#latent-control-rail").bounding_box()
         assert box is not None
         assert box["y"] >= 0
         assert box["y"] + box["height"] <= viewport[1], (viewport, box)
-        instruction_box = page.locator("#beginner-instruction").bounding_box()
-        assert instruction_box is not None
-        assert instruction_box["y"] + instruction_box["height"] <= viewport[1], (
-            viewport,
-            instruction_box,
-        )
+        assert page.locator("#latent-buy-component").is_visible()
+        assert page.locator("#latent-sell-component").is_visible()
+
+
+def test_hidden_state_contract_drives_buy_sell_components(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["tracking"]["market_study_v3"] = {
+        "hidden_state_discovery_v3": {
+            "schema_version": "PG_LATENT_STATE_DISCOVERY_V3",
+            "status": "ACTIVE",
+            "study_only": True,
+            "hidden_state": {"state": "UP_SWING"},
+            "control": {"side": "BUY", "basis": "current_latent_state_is_up_swing"},
+            "directional_components": {
+                "BUY": {"next_state_probability": 0.1, "outgoing_transition_support": 9},
+                "SELL": {"next_state_probability": 0.8, "outgoing_transition_support": 9},
+                "REST": {"next_state_probability": 0.1, "outgoing_transition_support": 9},
+            },
+            "state_cycle_horizon": {
+                "expected_candles": 23,
+                "duration": {"display": "1h 55m"},
+                "path": [
+                    {"state": "UP_SWING", "expected_candles": 3},
+                    {"state": "DOWN_SWING", "expected_candles": 20},
+                ],
+            },
+        }
+    }
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        assert page.locator("#latent-control-side").inner_text() == "BUY CONTROLS"
+        assert page.locator("#latent-buy-status").inner_text() == "IN CONTROL"
+        assert page.locator("#latent-sell-status").inner_text() == "NOT IN CONTROL"
+        assert "23.0 candles" in page.locator("#latent-cycle-horizon").inner_text()
+        assert "1h 55m" in page.locator("#latent-cycle-horizon").inner_text()
 
 
 def test_ended_sell_pressure_and_current_up_move_keep_entry_closed_and_study_uptrend(

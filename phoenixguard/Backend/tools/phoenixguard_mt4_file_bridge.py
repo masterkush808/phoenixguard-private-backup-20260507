@@ -702,6 +702,8 @@ def _compact_allowance_package(
         "decision_accepted": source.get("decision_accepted") is True if source_present else bool(eligible),
         "execution_ready": source.get("execution_ready") is True if source_present else bool(eligible),
         "executable": source.get("executable") is True if source_present else bool(eligible),
+        "live_executable": source.get("live_executable"),
+        "ablation_profile": str(source.get("ablation_profile") or ""),
         "tracking_active": bool(source.get("tracking_active", False)) and not eligible,
         "intraday_capture_active": bool(source.get("intraday_capture_active", package_type == "INTRADAY_ENTER_NOW" and eligible)),
         "entry_now_allowed": bool(entry_now_allowed),
@@ -909,6 +911,14 @@ def _validate_command(command: dict[str, object]) -> None:
     if execution.get("amount_action") != "DO_NOT_CHANGE_AMOUNT":
         raise ValueError("MT4 command execution.amount_action must be DO_NOT_CHANGE_AMOUNT")
     allowance = _nested(command, "allowance_package")
+    allowance_schema = str(allowance.get("schema_version") or "").strip().upper()
+    ablation_profile = str(allowance.get("ablation_profile") or "").strip().upper()
+    if allowance_schema == "SHADOW_ALLOWANCE_PACKAGE_V1":
+        raise ValueError("MT4 command rejects SHADOW_ALLOWANCE_PACKAGE_V1")
+    if allowance.get("live_executable") is False:
+        raise ValueError("MT4 command rejects allowance_package.live_executable=false")
+    if ablation_profile not in {"", "BASELINE_FULL_SAFETY"}:
+        raise ValueError("MT4 command rejects non-baseline blocker ablation profiles")
     if allowance.get("schema_version") != "PG_ALLOWANCE_PACKAGE_V1":
         raise ValueError("MT4 command allowance_package schema_version mismatch")
     if allowance.get("source_present") is not True or allowance.get("inferred") is True:

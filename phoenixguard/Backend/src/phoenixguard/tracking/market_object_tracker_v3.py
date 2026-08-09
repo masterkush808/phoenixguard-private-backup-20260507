@@ -1626,9 +1626,10 @@ def _validated_trendline(
                 float(second["bottom" if role == "support" else "top"]),
             ]
             anchor_dy = float(second_point[1]) - float(first_point[1])
-            if role == "support" and anchor_dy >= -min_anchor_dy:
-                continue
-            if role == "resistance" and anchor_dy <= min_anchor_dy:
+            # Support/resistance describes the wick side that owns the line,
+            # not a mandatory slope sign. Falling support and rising resistance
+            # remain subject to every span, obstruction, and close-breach gate.
+            if abs(anchor_dy) < min_anchor_dy:
                 continue
             anchor_dx_signed = float(second_point[0]) - float(first_point[0])
             slope = 0.0 if abs(anchor_dx_signed) <= 1e-6 else anchor_dy / anchor_dx_signed
@@ -1864,8 +1865,10 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
         if candidate:
             candidate = dict(candidate)
             candidate["_inner_score"] = (
-                float(candidate.get("touch_count", 0.0) or 0.0)
+                float(candidate.get("anchor_span_fraction", 0.0) or 0.0) * 8.0
+                + min(4.0, float(candidate.get("touch_count", 0.0) or 0.0))
                 - float(candidate.get("close_distance_norm", 9.0) or 9.0)
+                - min(2.0, float(candidate.get("wick_probe_count", 0.0) or 0.0) * 0.4)
                 + (0.75 if role == latest_direction else 0.0)
             )
             inner_candidates.append(candidate)

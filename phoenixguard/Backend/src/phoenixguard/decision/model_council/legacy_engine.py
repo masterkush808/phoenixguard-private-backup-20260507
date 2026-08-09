@@ -5,6 +5,10 @@ import json
 import time
 from typing import Any, Mapping, Sequence, cast
 
+from phoenixguard.decision.blocker_ablation_profile_v3 import (
+    build_shadow_allowance_package_v1,
+    resolve_blocker_ablation_profile_v3,
+)
 from phoenixguard.decision.book_strategy_master_v3 import (
     BOOK_STRATEGY_EXECUTION_AUTHORITY,
     MODEL_COUNCIL_CONTRIBUTOR_ROLE,
@@ -7149,6 +7153,35 @@ def evaluate_model_council_v3(
             allowance_package["authorization_survival_trace_v3"] = astar_authorization_trace
             promotion_trace["astar_decision_state_v3"] = astar_authorization_ledger
             promotion_trace["authorization_survival_trace_v3"] = astar_authorization_trace
+            blocker_ablation_profile = resolve_blocker_ablation_profile_v3(snapshot)
+
+            def _current_shadow_allowance_package() -> dict[str, Any]:
+                current_blockers = [
+                    *survival_blockers,
+                    *_rows(opportunity_maturity.get("blockers")),
+                    *_rows(book_strategy.get("blockers")),
+                ]
+                current_warnings = [
+                    *survival_soft_warnings,
+                    *_rows(opportunity_maturity.get("soft_contributors")),
+                    *_rows(book_strategy.get("soft_warnings")),
+                ]
+                return build_shadow_allowance_package_v1(
+                    allowance_package,
+                    blockers=current_blockers,
+                    warnings=current_warnings,
+                    profile=blocker_ablation_profile,
+                )
+
+            shadow_allowance_package = _current_shadow_allowance_package()
+
+            def _refresh_shadow_allowance_package() -> None:
+                refreshed = _current_shadow_allowance_package()
+                shadow_allowance_package.clear()
+                shadow_allowance_package.update(refreshed)
+
+            promotion_trace["blocker_ablation_profile"] = blocker_ablation_profile.value
+            promotion_trace["shadow_allowance_package"] = shadow_allowance_package
             council_scores = {
                 "global": round(float(_clip01(market.get("global_score"), raw_council_score)), 4),
                 "local": round(float(_clip01(market.get("local_score"), raw_council_score)), 4),
@@ -7282,6 +7315,8 @@ def evaluate_model_council_v3(
                 "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
                 "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
                 "allowance_package": allowance_package,
+                "blocker_ablation_profile": blocker_ablation_profile.value,
+                "shadow_allowance_package": shadow_allowance_package,
             }
             council_debate = _council_debate(
                 candidate_side=candidate_side,
@@ -7310,6 +7345,8 @@ def evaluate_model_council_v3(
                 "execution_opportunity_window_v3": execution_opportunity_window,
                 "execution": execution,
                 "allowance_package": allowance_package,
+                "blocker_ablation_profile": blocker_ablation_profile.value,
+                "shadow_allowance_package": shadow_allowance_package,
                 "model_council": council,
                 "promotion_trace": promotion_trace,
                 "council_scores": council_scores,
@@ -7433,6 +7470,8 @@ def evaluate_model_council_v3(
                 "execution": study_execution,
                 "model_council": council,
                 "allowance_package": allowance_package,
+                "blocker_ablation_profile": blocker_ablation_profile.value,
+                "shadow_allowance_package": shadow_allowance_package,
                 "block_reason": block_reason,
                 "promotion_trace": promotion_trace,
                 "reason": council["arbitration_reason"],
@@ -7610,6 +7649,7 @@ def evaluate_model_council_v3(
                         final_state="WATCHING",
                         promotion_result="STUDY_PACKET_PUBLISHED",
                     )
+                    _refresh_shadow_allowance_package()
                     promotion_trace["allowance_package"] = allowance_package
                     study_packet["denied_at"] = block_reason
                     study_packet["next_required"] = next_required
@@ -7841,6 +7881,7 @@ def evaluate_model_council_v3(
                             final_state="BLOCKED_BY_RUNTIME",
                             promotion_result="BLOCKED_BY_RUNTIME",
                         )
+                        _refresh_shadow_allowance_package()
                         promotion_trace.update(
                             {
                                 "release_state": runtime_release_state,
@@ -8038,6 +8079,7 @@ def evaluate_model_council_v3(
                         final_state=str(council.get("final_state") or final_state or "WATCHING"),
                         promotion_result="STUDY_PACKET_PUBLISHED",
                     )
+                    _refresh_shadow_allowance_package()
                     result_execution = _mapping(result.get("execution") or execution)
                     result_execution.update(
                         {
@@ -8342,6 +8384,7 @@ def evaluate_model_council_v3(
                             final_state="BLOCKED_BY_RUNTIME",
                             promotion_result="STUDY_PACKET_PUBLISHED",
                         )
+                        _refresh_shadow_allowance_package()
                         entry_permission_v3 = build_entry_permission_v3(
                             dual_thesis_report,
                             execution_packet={},

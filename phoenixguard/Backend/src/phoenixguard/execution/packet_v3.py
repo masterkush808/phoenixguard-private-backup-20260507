@@ -32,6 +32,7 @@ EXECUTION_PACKET_SCHEMA_VERSION = "PG_EXECUTION_PACKET_V3"
 PG_EXECUTION_PACKET_SCHEMA_VERSION = EXECUTION_PACKET_SCHEMA_VERSION
 PLAYBOOK_EXECUTION_AUTHORITY = "PLAYBOOK_FINAL_DECIDER_V3"
 ALLOWANCE_PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
+SHADOW_ALLOWANCE_PACKAGE_SCHEMA_VERSION = "SHADOW_ALLOWANCE_PACKAGE_V1"
 STUDY_PACKET_SCHEMA_VERSION = "PG_MODEL_COUNCIL_STUDY_V3"
 STUDY_PACKET_TYPE = "STUDY_PACKET"
 EXECUTION_PACKET_TYPE = EXECUTION_PACKET_SCHEMA_VERSION
@@ -1021,6 +1022,25 @@ def validate_execution_packet_v3(
         allowance_type = _enum_text(allowance_package.get("package_type"))
         allowance_authority = _clean_str(allowance_package.get("execution_authority"))
         allowance_packet_authority = _clean_str(allowance_package.get("packet_authority"))
+        allowance_ablation_profile = _enum_text(allowance_package.get("ablation_profile"))
+        if require_executable and allowance_schema == SHADOW_ALLOWANCE_PACKAGE_SCHEMA_VERSION:
+            add(
+                "SHADOW_ALLOWANCE_PACKAGE_NOT_EXECUTABLE",
+                MODEL_COUNCIL,
+                "SHADOW_ALLOWANCE_PACKAGE_V1 is analysis-only and cannot authorize execution.",
+            )
+        if require_executable and allowance_package.get("live_executable") is False:
+            add(
+                "ALLOWANCE_PACKAGE_LIVE_EXECUTION_FORBIDDEN",
+                MODEL_COUNCIL,
+                "allowance_package.live_executable=false forbids executable handoff.",
+            )
+        if require_executable and allowance_ablation_profile not in {"", "BASELINE_FULL_SAFETY"}:
+            add(
+                "ABLATION_PROFILE_NOT_EXECUTABLE",
+                MODEL_COUNCIL,
+                "Non-baseline blocker ablation profiles cannot authorize execution.",
+            )
         if allowance_schema != ALLOWANCE_PACKAGE_SCHEMA_VERSION:
             add("INVALID_ALLOWANCE_PACKAGE_SCHEMA", MODEL_COUNCIL, "allowance_package.schema_version is invalid.")
         if allowance_type not in VALID_ALLOWANCE_PACKAGE_TYPES:

@@ -245,44 +245,25 @@ def test_dashboard_commits_live_answers_before_the_broker_bitmap_finishes() -> N
     assert "state.overlays = operatorOverlays;" in text[full_commit:]
 
 
-def test_dashboard_first_viewport_answers_exactly_three_plain_language_questions() -> None:
+def test_dashboard_first_viewport_is_two_sided_hidden_state_control() -> None:
     text = _dashboard_text()
 
-    assert 'class="decision-questions" aria-label="The three live trading questions"' in text
-    assert text.count('class="decision-question" data-question=') == 3
-    assert 'id="market-origin-question">Where is the market from, and how did history behave?</h3>' in text
-    assert 'id="direction-study-question">Which direction was studied, and what is being studied now?</h3>' in text
-    assert (
-        'id="entry-now-question">What is the best decision to do right now?</h3>'
-        in text
-    )
-    assert 'id="story-step-one-label">Question 1</span>' in text
-    assert 'id="story-step-two-label">Question 2</span>' in text
-    assert 'id="story-step-three-label">Question 3</span>' in text
-    assert 'id="beginner-decision-title" aria-live="assertive">STAY OUT</h2>' in text
-    assert 'id="beginner-forecast-summary"' in text
-    assert '<span class="decision-kicker">Study projection</span>' in text
-    assert 'id="beginner-action-label" aria-live="assertive">STAY OUT</strong>' in text
-    assert '<span>Right now</span>' in text
-    assert '<span class="decision-kicker">Why this answer</span>' in text
-    assert '<span class="decision-kicker">Invalidation</span>' in text
-    assert "NO — NOT YET" not in text
-    assert '<summary>Technical contracts and evidence</summary>' in text
-
-    assert 'id="current-move-title"' in text
-    assert 'id="inner-trend-title"' in text
-    assert 'id="permission-title"' in text
-    assert 'id="pressure-event" data-state="none"' in text
+    assert '<h2 id="beginner-story-title">Hidden-state control</h2>' in text
+    assert 'class="latent-component-grid" aria-label="BUY and SELL hidden-state components"' in text
+    assert text.count('class="latent-component latent-component-') == 2
+    assert 'id="latent-buy-component"' in text
+    assert 'id="latent-sell-component"' in text
+    assert 'id="latent-control-side">ANALYZING</strong>' in text
+    assert 'id="latent-cycle-horizon">Full state-cycle horizon pending</div>' in text
+    assert 'class="decision-questions legacy-three-question-panel"' in text
+    assert 'aria-hidden="true" hidden' in text
+    assert '.legacy-three-question-panel {' in text
+    assert 'display: none !important;' in text
+    assert 'function renderLatentStateControl(payload)' in text
+    assert 'study.hidden_state_discovery_v3 || study.latent_state_discovery_v3' in text
+    assert 'renderLatentStateControl(payload);' in text
+    assert 'BUY and SELL are empirical state components, not strategy rules or entry commands.' in text
     assert 'safeObject(safeObject(payload).three_questions)' in text
-    assert '"market_origin_history"' in text
-    assert '"studied_direction_current"' in text
-    assert '"entry_now"' in text
-    assert 'const answers = threeQuestionAnswers(payload, study, permission);' in text
-    assert 'setText(els.beginnerDecisionTitle, answers.entry.headline);' in text
-    assert 'setText(els.beginnerForecastSummary, answers.entry.forecastSummary);' in text
-    assert 'setText(els.beginnerActionLabel, answers.entry.operatorAction);' in text
-    assert 'const rawTimingForecast = safeObject(entryContract.timing_forecast);' in text
-    assert '"Evidence confidence unavailable"' in text
     assert '"No lineage-matched timing source"' in text
     assert (
         '"The timing study is paused until the current pair, timeframe, and '

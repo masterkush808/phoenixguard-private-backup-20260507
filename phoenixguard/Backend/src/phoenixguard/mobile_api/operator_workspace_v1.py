@@ -6743,6 +6743,104 @@ def retracement_study_contract_v3(
     }
 
 
+def _bounded_hidden_state_value(value: object, *, depth: int = 0) -> object:
+    if depth > 10:
+        return None
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value, 8) if math.isfinite(value) else None
+    if isinstance(value, str):
+        return _safe_public_text(value, "", limit=320)
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for raw_key, item in list(
+            cast(Mapping[object, object], value).items()
+        )[:128]:
+            key = str(raw_key)
+            lowered = key.lower()
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,95}", key):
+                continue
+            if any(
+                token in lowered
+                for token in (
+                    "private",
+                    "secret",
+                    "password",
+                    "auth_token",
+                    "filesystem",
+                    "host_path",
+                )
+            ):
+                continue
+            result[key] = _bounded_hidden_state_value(item, depth=depth + 1)
+        return result
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return [
+            _bounded_hidden_state_value(item, depth=depth + 1)
+            for item in list(cast(Sequence[object], value))[:128]
+        ]
+    return None
+
+
+def _hidden_state_discovery_contract(value: object) -> dict[str, object]:
+    source = _mapping(value)
+    if (
+        _text(source.get("schema_version"), "")
+        != "PG_LATENT_STATE_DISCOVERY_V3"
+        or source.get("study_only") is not True
+    ):
+        return {}
+    selected = (
+        "schema_version",
+        "status",
+        "study_only",
+        "observation_only",
+        "strategy_authority",
+        "blocker_authority",
+        "execution_authority",
+        "grants_entry_permission",
+        "symbol",
+        "timeframe",
+        "timeframe_seconds",
+        "input_authority",
+        "publication_policy",
+        "hidden_state",
+        "control",
+        "directional_components",
+        "next_state_distribution",
+        "state_survival",
+        "state_cycle_horizon",
+        "directional_outcome_distribution",
+        "pair_dna",
+        "learning_objectives",
+        "causal_hypotheses",
+        "causal_limit",
+        "operator_interpretation",
+    )
+    result = {
+        key: _bounded_hidden_state_value(source.get(key))
+        for key in selected
+        if key in source
+    }
+    result.update(
+        {
+            "schema_version": "PG_LATENT_STATE_DISCOVERY_V3",
+            "study_only": True,
+            "observation_only": True,
+            "strategy_authority": False,
+            "blocker_authority": False,
+            "execution_authority": False,
+            "grants_entry_permission": False,
+        }
+    )
+    return result
+
+
 def _market_study_contract(value: object) -> dict[str, object]:
     """Project the bounded observation-only study into the operator DTO."""
 
@@ -6777,6 +6875,10 @@ def _market_study_contract(value: object) -> dict[str, object]:
     regime_partition = _mapping(source.get("regime_partition"))
     cross_pair = _mapping(source.get("cross_pair_association"))
     claim_proofs = _mapping(source.get("claim_proofs"))
+    hidden_state_discovery = _hidden_state_discovery_contract(
+        source.get("hidden_state_discovery_v3")
+        or source.get("latent_state_discovery_v3")
+    )
     path_clock_liquidity = path_clock_liquidity_contract_v3(
         source.get("path_clock_liquidity_v3")
         or source.get("path_clock_liquidity")
@@ -6807,6 +6909,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
         "closed_candle_key": _safe_identifier(
             source.get("closed_candle_key"), ""
         ),
+        "hidden_state_discovery_v3": hidden_state_discovery,
         "regression": {
             "schema_version": "PG_REGRESSION_STUDY_V3",
             "regime": _safe_public_text(regression.get("regime"), "Unknown", limit=40),
