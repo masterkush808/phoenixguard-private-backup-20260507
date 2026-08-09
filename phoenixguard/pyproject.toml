@@ -7,6 +7,11 @@ name = "phoenixguard"
 version = "3.0.0"
 description = "PhoenixGuard V3 local chart intelligence runtime"
 requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26,<2.0",
+  "opencv-python>=4.8,<5.0",
+  "rapidocr-onnxruntime==1.4.4"
+]
 
 [tool.setuptools]
 package-dir = {"" = "Backend/src"}
@@ -17,7 +22,8 @@ where = ["Backend/src"]
 [tool.setuptools.package-data]
 phoenixguard = [
   "V3_CANONICAL_MANIFEST.json",
-  "V3_LANGUAGE_CONSTITUTION.md"
+  "V3_LANGUAGE_CONSTITUTION.md",
+  "V3_MASKED_FUTURE_BEHAVIOR_MODEL.json.gz"
 ]
 
 [tool.ruff.lint.per-file-ignores]
