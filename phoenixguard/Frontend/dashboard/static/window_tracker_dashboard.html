@@ -2944,8 +2944,8 @@
           <strong id="decision-audit-sweep">unconfirmed</strong>
         </div>
         <div class="decision-audit-metric" id="decision-audit-calibration-wrap" data-available="false">
-          <span>Uncertainty</span>
-          <strong id="decision-audit-calibration">unresolved</strong>
+          <span>Profit proof</span>
+          <strong id="decision-audit-calibration">unproven</strong>
         </div>
       </section>
 
@@ -6611,6 +6611,8 @@
       const selectedLine = safeObject(structure.selected_line);
       const matured = Math.max(0, Number(audit.matured_outcome_count) || 0);
       const metrics = safeObject(audit.candidate_metrics);
+      const profitability = safeObject(audit.profitability_evidence_v3);
+      const referenceProfit = safeObject(profitability.reference_scenario);
       const stateAge = Math.max(0, Number(hiddenState.age_candles) || 0);
       const transitionSupport = Math.max(
         0,
@@ -6622,6 +6624,15 @@
       );
       const lineTouches = Math.max(0, Number(selectedLine.touch_count) || 0);
       const uncertainty = decisionAuditMetric(distribution.normalized_entropy);
+      const profitabilitySupport = Math.max(0, Number(profitability.support) || 0);
+      const profitabilityMinimum = Math.max(
+        0,
+        Number(profitability.minimum_forward_outcomes) || 0,
+      );
+      const lowerExpectedValue = Number(referenceProfit.expected_value_per_unit_lower_95);
+      const pointExpectedValue = Number(referenceProfit.expected_value_per_unit_point);
+      const referencePayout = Number(referenceProfit.payout_ratio);
+      const profitProven = profitability.promotion_eligible === true;
       const controlStatus = safeText(control.status, "").toUpperCase();
       const structureConfirmed = controlStatus === "STRUCTURALLY_CONFIRMED_CONTROL";
       const reactionActive = controlStatus.includes("REACTION") || controlStatus.includes("TOUCH");
@@ -6630,7 +6641,11 @@
       els.decisionAuditStrip.dataset.state = structureConfirmed ? "measured" : "collecting";
       setText(
         els.decisionAuditStatus,
-        structureConfirmed
+        profitProven
+          ? "POSITIVE EV PROVEN"
+          : profitabilitySupport > 0
+            ? "EV UNPROVEN"
+            : structureConfirmed
           ? "STRUCTURE CONFIRMED"
           : reactionActive
             ? "REACTION ACTIVE"
@@ -6668,8 +6683,13 @@
       renderEvidenceAuditMetric(
         els.decisionAuditCalibrationWrap,
         els.decisionAuditCalibration,
-        uncertainty === null ? "unresolved" : Math.round(uncertainty * 100) + "% entropy",
-        uncertainty !== null,
+        profitabilitySupport > 0 && Number.isFinite(lowerExpectedValue)
+          ? (lowerExpectedValue >= 0 ? "+" : "")
+            + (lowerExpectedValue * 100).toFixed(1) + "% low EV"
+          : uncertainty === null
+            ? "unproven"
+            : Math.round(uncertainty * 100) + "% entropy",
+        profitabilitySupport > 0 || uncertainty !== null,
       );
 
       const outcomeParts = [];
@@ -6688,6 +6708,23 @@
             + (directionalAccuracy === null
               ? ""
               : " · direction " + Math.round(directionalAccuracy * 100) + "%"),
+        );
+      }
+      if (profitabilitySupport > 0) {
+        const profitStatus = safeText(
+          profitability.status,
+          "PROFITABILITY_UNPROVEN",
+        ).replaceAll("_", " ").toLowerCase();
+        outcomeParts.push(
+          "Profitability: " + profitStatus
+            + " · " + profitabilitySupport + " / " + profitabilityMinimum + " outcomes"
+            + (Number.isFinite(referencePayout)
+              ? " · " + Math.round(referencePayout * 100) + "% payout reference"
+              : "")
+            + (Number.isFinite(pointExpectedValue)
+              ? " · point EV " + (pointExpectedValue >= 0 ? "+" : "")
+                + (pointExpectedValue * 100).toFixed(1) + "%"
+              : ""),
         );
       }
       setText(els.decisionAuditOutcome, outcomeParts.join(" · "));

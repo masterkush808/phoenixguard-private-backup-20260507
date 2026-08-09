@@ -960,7 +960,153 @@ class PathClockLiquiditySideStoreV3:
             )
         except PathClockLiquidityValidationError:
             return {}, {}, pending_gate
+        profitability = PathClockLiquiditySideStoreV3._profitability_evidence(
+            matured_count=len(candidate_rows),
+            candidate_metrics=_mapping(candidate_score.get("metrics")),
+            baseline_metrics=_mapping(baseline_score.get("metrics")),
+        )
+        gate = dict(gate)
+        gate["profitability_evidence_v3"] = profitability
+        if gate.get("passed") is True and profitability.get("promotion_eligible") is not True:
+            gate["passed"] = False
+            gate["status"] = "PROFITABILITY_NOT_PROVEN"
+            gate["reason"] = (
+                "Four-axis improvement is not promotion-safe until forward-only "
+                "net expectancy remains positive at the conservative payout "
+                "under the 95% lower confidence bound."
+            )
         return dict(baseline_score), dict(candidate_score), dict(gate)
+
+    @staticmethod
+    def _profitability_evidence(
+        *,
+        matured_count: int,
+        candidate_metrics: Mapping[str, Any],
+        baseline_metrics: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Measure payout-aware forward expectancy without granting execution."""
+
+        support = max(0, int(matured_count or 0))
+        minimum_outcomes = 200
+
+        def probability(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if 0.0 <= parsed <= 1.0 else None
+
+        candidate_win_rate = probability(candidate_metrics.get("directional_accuracy"))
+        baseline_win_rate = probability(baseline_metrics.get("directional_accuracy"))
+        lower_bound: float | None = None
+        if support > 0 and candidate_win_rate is not None:
+            z = 1.959963984540054
+            z_squared = z * z
+            denominator = 1.0 + z_squared / support
+            center = (
+                candidate_win_rate + z_squared / (2.0 * support)
+            ) / denominator
+            radius = (
+                z
+                * (
+                    (
+                        candidate_win_rate * (1.0 - candidate_win_rate)
+                        + z_squared / (4.0 * support)
+                    )
+                    / support
+                )
+                ** 0.5
+                / denominator
+            )
+            lower_bound = max(0.0, center - radius)
+
+        scenarios: list[dict[str, Any]] = []
+        for payout_ratio in (0.65, 0.70, 0.75, 0.80, 0.85, 0.90):
+            break_even = 1.0 / (1.0 + payout_ratio)
+            point_ev = (
+                candidate_win_rate * payout_ratio - (1.0 - candidate_win_rate)
+                if candidate_win_rate is not None
+                else None
+            )
+            lower_ev = (
+                lower_bound * payout_ratio - (1.0 - lower_bound)
+                if lower_bound is not None
+                else None
+            )
+            scenarios.append(
+                {
+                    "payout_ratio": payout_ratio,
+                    "break_even_win_probability": round(break_even, 6),
+                    "expected_value_per_unit_point": (
+                        round(point_ev, 6) if point_ev is not None else None
+                    ),
+                    "expected_value_per_unit_lower_95": (
+                        round(lower_ev, 6) if lower_ev is not None else None
+                    ),
+                    "point_estimate_positive": bool(
+                        point_ev is not None and point_ev > 0.0
+                    ),
+                    "lower_bound_positive": bool(
+                        lower_ev is not None and lower_ev > 0.0
+                    ),
+                }
+            )
+        reference = next(row for row in scenarios if row["payout_ratio"] == 0.75)
+        conservative = next(row for row in scenarios if row["payout_ratio"] == 0.65)
+        baseline_outperformed = bool(
+            candidate_win_rate is not None
+            and baseline_win_rate is not None
+            and candidate_win_rate > baseline_win_rate
+        )
+        promotion_eligible = bool(
+            support >= minimum_outcomes
+            and conservative["lower_bound_positive"] is True
+            and baseline_outperformed
+        )
+        if candidate_win_rate is None or support <= 0:
+            status = "NO_MATURED_FORWARD_OUTCOMES"
+        elif support < minimum_outcomes:
+            status = "INSUFFICIENT_FORWARD_SUPPORT"
+        elif reference["point_estimate_positive"] is not True:
+            status = "NEGATIVE_EXPECTANCY_AT_REFERENCE_PAYOUT"
+        elif conservative["lower_bound_positive"] is not True:
+            status = "POSITIVE_POINT_ESTIMATE_NOT_STATISTICALLY_PROVEN"
+        elif not baseline_outperformed:
+            status = "POSITIVE_EXPECTANCY_NOT_BETTER_THAN_BASELINE"
+        else:
+            status = "PROVEN_FORWARD_POSITIVE_EXPECTANCY"
+        return {
+            "schema_version": "PG_FORWARD_PROFITABILITY_EVIDENCE_V3",
+            "status": status,
+            "support": support,
+            "minimum_forward_outcomes": minimum_outcomes,
+            "candidate_win_probability": (
+                round(candidate_win_rate, 6)
+                if candidate_win_rate is not None
+                else None
+            ),
+            "candidate_win_probability_lower_95": (
+                round(lower_bound, 6) if lower_bound is not None else None
+            ),
+            "baseline_win_probability": (
+                round(baseline_win_rate, 6)
+                if baseline_win_rate is not None
+                else None
+            ),
+            "baseline_outperformed": baseline_outperformed,
+            "reference_payout_ratio": 0.75,
+            "conservative_promotion_payout_ratio": 0.65,
+            "reference_scenario": reference,
+            "conservative_promotion_scenario": conservative,
+            "payout_scenarios": scenarios,
+            "promotion_eligible": promotion_eligible,
+            "objective": "maximize_forward_net_expectancy_not_directional_accuracy",
+            "confidence_bound": "wilson_lower_95_diagnostic",
+            "serial_dependence_warning": True,
+            "forward_only_outcomes": True,
+            "places_trades": False,
+            **_safety_contract(),
+        }
 
     @staticmethod
     def _passive_prediction_audit(
@@ -1091,6 +1237,11 @@ class PathClockLiquiditySideStoreV3:
         }
         pending_count = len(pending_anchors)
         matured_count = len(matured_rows)
+        profitability = PathClockLiquiditySideStoreV3._profitability_evidence(
+            matured_count=matured_count,
+            candidate_metrics=candidate_metrics,
+            baseline_metrics=baseline_metrics,
+        )
         return {
             "schema_version": PASSIVE_PREDICTION_AUDIT_SCHEMA_VERSION,
             "status": (
@@ -1113,6 +1264,7 @@ class PathClockLiquiditySideStoreV3:
             "candidate_metrics": deepcopy(candidate_metrics),
             "baseline_metrics": deepcopy(baseline_metrics),
             "axis_deltas": axis_deltas,
+            "profitability_evidence_v3": profitability,
             "tracks_market_outcomes_only": True,
             "places_trades": False,
             **_safety_contract(),
@@ -2152,6 +2304,13 @@ def pending_path_clock_liquidity_v3(
             "candidate_metrics": {},
             "baseline_metrics": {},
             "axis_deltas": {},
+            "profitability_evidence_v3": (
+                PathClockLiquiditySideStoreV3._profitability_evidence(
+                    matured_count=0,
+                    candidate_metrics={},
+                    baseline_metrics={},
+                )
+            ),
             "tracks_market_outcomes_only": True,
             "places_trades": False,
             **_safety_contract(),

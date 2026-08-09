@@ -334,6 +334,9 @@ def test_dashboard_exposes_live_hidden_state_evidence_audit() -> None:
     assert "pairDna.transition_support" in text
     assert "structure.confirmed_trendline_count" in text
     assert "distribution.normalized_entropy" in text
+    assert "audit.profitability_evidence_v3" in text
+    assert 'profitability.promotion_eligible === true' in text
+    assert '"POSITIVE EV PROVEN"' in text
     assert 'status === "STRUCTURALLY_CONFIRMED_CONTROL"' in text
     assert 'candidateSide + " LOCAL LEG ONLY"' in text
     assert "renderPassiveDecisionAudit(payload);" in text

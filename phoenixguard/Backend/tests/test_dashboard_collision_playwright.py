@@ -2195,6 +2195,18 @@ def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
                     "sweep_survival_rate": 0.56,
                     "calibration_score": 0.71,
                 },
+                "profitability_evidence_v3": {
+                    "schema_version": "PG_FORWARD_PROFITABILITY_EVIDENCE_V3",
+                    "status": "PROVEN_FORWARD_POSITIVE_EXPECTANCY",
+                    "support": 240,
+                    "minimum_forward_outcomes": 200,
+                    "promotion_eligible": True,
+                    "reference_scenario": {
+                        "payout_ratio": 0.75,
+                        "expected_value_per_unit_point": 0.08,
+                        "expected_value_per_unit_lower_95": 0.042,
+                    },
+                },
                 "latest_matured_outcome": {
                     "predicted_direction": "UP",
                     "direction_correct": True,
@@ -2209,16 +2221,16 @@ def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
     with _dashboard_page(chromium_browser, payload) as page:
         strip = page.locator("#decision-audit-strip")
         assert strip.get_attribute("data-state") == "measured"
-        assert page.locator("#decision-audit-status").inner_text() == "STRUCTURE CONFIRMED"
+        assert page.locator("#decision-audit-status").inner_text() == "POSITIVE EV PROVEN"
         assert page.locator("#decision-audit-counts").inner_text() == (
             "6 completed in local state · 42 Pair DNA transitions · 2 confirmed lines · 9 matured outcomes"
         )
         assert page.locator("#decision-audit-direction").inner_text() == "6 candles"
         assert page.locator("#decision-audit-timing").inner_text() == "42 observed"
         assert page.locator("#decision-audit-sweep").inner_text() == "3 / 3 touches"
-        assert page.locator("#decision-audit-calibration").inner_text() == "35% entropy"
+        assert page.locator("#decision-audit-calibration").inner_text() == "+4.2% low EV"
         assert page.locator("#decision-audit-outcome").inner_text() == (
-            "SELL structural control is confirmed by primary structure and a three-touch wick line. · Outcome audit: 9 matured · direction 78%"
+            "SELL structural control is confirmed by primary structure and a three-touch wick line. · Outcome audit: 9 matured · direction 78% · Profitability: proven forward positive expectancy · 240 / 200 outcomes · 75% payout reference · point EV +8.0%"
         )
         assert "never an entry instruction" in strip.inner_text().lower()
 
