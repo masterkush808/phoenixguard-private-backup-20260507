@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping, Sequence, cast
 
 LATENT_STATE_DISCOVERY_SCHEMA_VERSION = "PG_LATENT_STATE_DISCOVERY_V3"
 MIN_TRANSITION_SUPPORT = 3
+MIN_CONTROL_STATE_AGE_CANDLES = 3
 UP_STATE = "UP_SWING"
 DOWN_STATE = "DOWN_SWING"
 REST_STATE = "REST"
@@ -599,43 +600,81 @@ def _range_dynamics(candles: Sequence[Any]) -> dict[str, Any]:
 
 
 def _controller(
-    current_state: str, distribution: Mapping[str, Any]
+    current: Mapping[str, Any], distribution: Mapping[str, Any]
 ) -> dict[str, Any]:
+    current_state = str(current.get("state", "UNRESOLVED"))
     probabilities = _mapping(distribution.get("probabilities"))
+    transition_support = int(distribution.get("support", 0) or 0)
+    state_age = int(current.get("age_candles", 0) or 0)
+    common = {
+        "side": "UNRESOLVED",
+        "candidate_side": "UNRESOLVED",
+        "local_leg_side": (
+            "BUY"
+            if current_state == UP_STATE
+            else "SELL"
+            if current_state == DOWN_STATE
+            else "REST"
+        ),
+        "minimum_completed_candles": MIN_CONTROL_STATE_AGE_CANDLES,
+        "observed_completed_candles": state_age,
+        "minimum_transition_support": MIN_TRANSITION_SUPPORT,
+        "observed_transition_support": transition_support,
+        "minimum_trendline_touches": 3,
+        "minimum_anchor_span_bars": 5,
+        "requires_structural_confirmation": True,
+        "authority": "STATE_EVIDENCE_NOT_ENTRY_INSTRUCTION",
+    }
     if current_state == UP_STATE:
         return {
-            "side": "BUY",
-            "status": "ACTIVE_STATE",
-            "basis": "current_latent_state_is_up_swing",
+            **common,
+            "candidate_side": "BUY",
+            "status": (
+                "DEVELOPING_LOCAL_STATE"
+                if state_age < MIN_CONTROL_STATE_AGE_CANDLES
+                else "AWAITING_PAIR_DNA_SUPPORT"
+                if distribution.get("status") != "SUPPORTED"
+                else "AWAITING_STRUCTURAL_CONFIRMATION"
+            ),
+            "basis": "local_up_swing_is_candidate_evidence_not_market_control",
         }
     if current_state == DOWN_STATE:
         return {
-            "side": "SELL",
-            "status": "ACTIVE_STATE",
-            "basis": "current_latent_state_is_down_swing",
+            **common,
+            "candidate_side": "SELL",
+            "status": (
+                "DEVELOPING_LOCAL_STATE"
+                if state_age < MIN_CONTROL_STATE_AGE_CANDLES
+                else "AWAITING_PAIR_DNA_SUPPORT"
+                if distribution.get("status") != "SUPPORTED"
+                else "AWAITING_STRUCTURAL_CONFIRMATION"
+            ),
+            "basis": "local_down_swing_is_candidate_evidence_not_market_control",
         }
     if current_state == REST_STATE and distribution.get("status") == "SUPPORTED":
         buy_mass = _number(probabilities.get(UP_STATE)) or 0.0
         sell_mass = _number(probabilities.get(DOWN_STATE)) or 0.0
         if buy_mass > sell_mass:
             return {
-                "side": "BUY",
-                "status": "EMPIRICAL_NEXT_STATE_LEAD",
-                "basis": "buy_has_greater_observed_transition_mass_from_rest",
+                **common,
+                "candidate_side": "BUY",
+                "status": "REST_NEXT_STATE_LEAD_ONLY",
+                "basis": "buy_leads_rest_transitions_but_does_not_control",
             }
         if sell_mass > buy_mass:
             return {
-                "side": "SELL",
-                "status": "EMPIRICAL_NEXT_STATE_LEAD",
-                "basis": "sell_has_greater_observed_transition_mass_from_rest",
+                **common,
+                "candidate_side": "SELL",
+                "status": "REST_NEXT_STATE_LEAD_ONLY",
+                "basis": "sell_leads_rest_transitions_but_does_not_control",
             }
         return {
-            "side": "UNRESOLVED",
+            **common,
             "status": "TIED_TRANSITION_MASS",
             "basis": "neither_side_leads",
         }
     return {
-        "side": "UNRESOLVED",
+        **common,
         "status": "INSUFFICIENT_EMPIRICAL_SUPPORT",
         "basis": "no_strategy_rule_substitution",
     }
@@ -1075,7 +1114,7 @@ def build_latent_state_discovery_v3(
                 "causal_status": "REQUIRES_VALIDATED_OUTCOME_CONDITIONING",
             },
         },
-        "control": _controller(str(current["state"]), distribution),
+        "control": _controller(current, distribution),
         "directional_components": _components(
             str(current["state"]), distribution
         ),

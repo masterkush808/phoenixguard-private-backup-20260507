@@ -705,9 +705,25 @@ def _strict_live_trendline_geometry_v3(value: Any) -> dict[str, Any]:
     return {
         "type": overlay_type,
         "role": str(row.get("trendline_role", row.get("role", "")) or "").lower(),
+        "direction": str(row.get("direction", "") or "").upper(),
+        "trendline_scope": str(row.get("trendline_scope", "") or "").upper(),
         "line_points": line_points,
         "anchor_wick_points": anchor_points[:2],
         "touch_count": int(_float_or(row.get("touch_count"), 2.0)),
+        "touch_candle_indices": [
+            int(_float_or(item, -1.0))
+            for item in row.get("touch_candle_indices", [])
+            if _float_or(item, -1.0) >= 0
+        ],
+        "anchor_span_bars": int(_float_or(row.get("anchor_span_bars"), 0.0)),
+        "confirmation_state": str(
+            row.get("confirmation_state")
+            or ("CONFIRMED" if int(_float_or(row.get("touch_count"), 0.0)) >= 3 else "DEVELOPING")
+        ).upper(),
+        "forming_touch": bool(row.get("forming_touch", False)),
+        "close_distance_norm": round(
+            max(0.0, _float_or(row.get("close_distance_norm"), 9.999)), 4
+        ),
         "confidence": _clip01(row.get("confidence", 0.0)),
         "display_label": str(
             row.get("display_label")
@@ -726,18 +742,247 @@ def _trendline_geometry_contract_v3(
         for raw in trendlines
         if (row := _strict_live_trendline_geometry_v3(raw))
     ]
+    confirmed_count = sum(
+        1
+        for row in validated
+        if row["touch_count"] >= 3
+        and row["anchor_span_bars"] >= 5
+        and row["confirmation_state"] == "CONFIRMED"
+    )
     return {
         "schema_version": "PG_STRICT_TRENDLINE_GEOMETRY_V3",
         "status": "VALIDATED" if validated else "NO_VALID_TWO_WICK_LINE",
         "observed_candle_count": max(0, int(observed_candle_count)),
         "published_count": len(validated),
+        "confirmed_count": confirmed_count,
+        "developing_count": max(0, len(validated) - confirmed_count),
         "rejected_count": max(0, len(trendlines) - len(validated)),
-        "anchor_contract": "two_closed_candle_wick_pivots",
+        "anchor_contract": "two_closed_candle_wick_draw_points_third_touch_confirmation",
+        "control_confirmation_contract": "three_touches_minimum_five_bar_span_plus_structure_alignment",
         "breach_contract": "no_significant_closed_body_breach",
         "forming_candle_can_invalidate": False,
         "coordinate_contract": "current_chart_image_space",
         "validated_types": [row["type"] for row in validated],
     }
+
+
+def _reconcile_latent_state_control_v3(
+    market_study_v3: Any,
+    *,
+    trendlines: Sequence[Any],
+    candles: Sequence[Mapping[str, Any]],
+    major_trend_side: Any,
+) -> dict[str, Any]:
+    """Separate local-leg classification from structurally confirmed control."""
+
+    if not isinstance(market_study_v3, Mapping):
+        return {}
+    study = dict(cast(Mapping[str, Any], market_study_v3))
+    latent_key = (
+        "hidden_state_discovery_v3"
+        if isinstance(study.get("hidden_state_discovery_v3"), Mapping)
+        else "latent_state_discovery_v3"
+    )
+    latent_raw = study.get(latent_key)
+    if not isinstance(latent_raw, Mapping):
+        return study
+    latent = dict(cast(Mapping[str, Any], latent_raw))
+    hidden = _mapping_to_dict(latent.get("hidden_state"))
+    control = _mapping_to_dict(latent.get("control"))
+    distribution = _mapping_to_dict(latent.get("next_state_distribution"))
+
+    local_side = str(
+        control.get("candidate_side")
+        or control.get("local_leg_side")
+        or hidden.get("direction")
+        or control.get("side")
+        or "UNRESOLVED"
+    ).upper()
+    if local_side not in {"BUY", "SELL"}:
+        local_side = "UNRESOLVED"
+    major_side = str(major_trend_side or "HOLD").upper()
+    if major_side not in {"BUY", "SELL"}:
+        major_side = "UNRESOLVED"
+
+    latest_indices = {max(0, len(candles) - 1)} if candles else set()
+    if candles and isinstance(candles[-1], Mapping):
+        latest = cast(Mapping[str, Any], candles[-1])
+        for key in ("source_index", "index", "candle_index", "sequence_index"):
+            candidate = int(_float_or(latest.get(key), -1.0))
+            if candidate >= 0:
+                latest_indices.add(candidate)
+
+    line_evidence: list[dict[str, Any]] = []
+    for raw in trendlines:
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(cast(Mapping[str, Any], raw))
+        strict = _strict_live_trendline_geometry_v3(row)
+        if not strict:
+            continue
+        touch_count = int(_float_or(row.get("touch_count"), 0.0))
+        anchor_span = int(_float_or(row.get("anchor_span_bars"), 0.0))
+        confirmation = str(
+            row.get("confirmation_state")
+            or ("CONFIRMED" if touch_count >= 3 else "DEVELOPING")
+        ).upper()
+        direction = str(row.get("direction") or strict.get("direction") or "").upper()
+        if direction not in {"BUY", "SELL"}:
+            role = str(row.get("trendline_role") or strict.get("role") or "").lower()
+            direction = "BUY" if role == "support" else "SELL" if role == "resistance" else "UNRESOLVED"
+        raw_touch_indices = row.get("touch_candle_indices", [])
+        touch_indices = {
+            int(_float_or(item, -1.0))
+            for item in raw_touch_indices
+            if _float_or(item, -1.0) >= 0
+        } if isinstance(raw_touch_indices, Sequence) and not isinstance(raw_touch_indices, (str, bytes, bytearray)) else set()
+        forming_touch = bool(row.get("forming_touch", False))
+        current_touch = bool(forming_touch or latest_indices.intersection(touch_indices))
+        close_distance = max(0.0, _float_or(row.get("close_distance_norm"), 9.999))
+        confirmed = bool(
+            touch_count >= 3
+            and anchor_span >= 5
+            and confirmation == "CONFIRMED"
+        )
+        line_evidence.append(
+            {
+                "type": str(row.get("type", "") or "").upper(),
+                "role": str(row.get("trendline_role") or strict.get("role") or "").lower(),
+                "direction": direction,
+                "trendline_scope": str(row.get("trendline_scope", "") or "").upper(),
+                "touch_count": touch_count,
+                "anchor_span_bars": anchor_span,
+                "confirmation_state": confirmation,
+                "confirmed_for_control": confirmed,
+                "current_touch": current_touch,
+                "forming_touch": forming_touch,
+                "close_distance_norm": round(close_distance, 4),
+                "wick_probe_count": int(_float_or(row.get("wick_probe_count"), 0.0)),
+                "confidence": _clip01(row.get("confidence", 0.0)),
+                "_rank": (
+                    (100.0 if current_touch else 0.0)
+                    + (12.0 if str(row.get("trendline_scope", "") or "").upper() == "MAJOR" else 6.0)
+                    + touch_count * 4.0
+                    + min(20.0, anchor_span)
+                    - close_distance
+                ),
+            }
+        )
+
+    ranked = sorted(line_evidence, key=lambda row: float(row["_rank"]), reverse=True)
+    confirmed_lines = [row for row in ranked if bool(row["confirmed_for_control"])]
+    reaction_lines = [row for row in confirmed_lines if bool(row["current_touch"])]
+    if local_side in {"BUY", "SELL"}:
+        reaction_lines.sort(
+            key=lambda row: (
+                row["direction"] != local_side,
+                float(row["_rank"]),
+            ),
+            reverse=True,
+        )
+    reaction_line = reaction_lines[0] if reaction_lines else None
+    reaction_side = str(reaction_line.get("direction", "UNRESOLVED")) if reaction_line else "UNRESOLVED"
+    reaction_status = (
+        "LIVE_TOUCH_DEVELOPING"
+        if reaction_line and bool(reaction_line.get("forming_touch"))
+        else "CLOSED_CANDLE_REACTION_CONFIRMED"
+        if reaction_line
+        else "NO_CURRENT_CONFIRMED_LINE_REACTION"
+    )
+
+    structural_side = major_side if major_side in {"BUY", "SELL"} else local_side
+    structural_line = next(
+        (row for row in confirmed_lines if row["direction"] == structural_side),
+        None,
+    )
+    state_age = int(hidden.get("age_candles", control.get("observed_completed_candles", 0)) or 0)
+    transition_support = int(distribution.get("support", control.get("observed_transition_support", 0)) or 0)
+    local_state_mature = state_age >= 3 and transition_support >= 3
+    confirmed_side = "UNRESOLVED"
+    if structural_line and major_side in {"BUY", "SELL"}:
+        confirmed_side = major_side
+    elif structural_line and local_side in {"BUY", "SELL"} and local_state_mature:
+        confirmed_side = local_side
+
+    if confirmed_side in {"BUY", "SELL"}:
+        status = "STRUCTURALLY_CONFIRMED_CONTROL"
+        basis = "primary_structure_plus_confirmed_third_touch_wick_line"
+        if local_side in {"BUY", "SELL"} and local_side != confirmed_side:
+            explanation = (
+                f"{confirmed_side} structural control is confirmed; the {local_side} local swing is an opposing pullback, not control."
+            )
+        else:
+            explanation = (
+                f"{confirmed_side} structural control is confirmed by primary structure and a three-touch wick line."
+            )
+    elif reaction_line:
+        status = (
+            "LIVE_OPPOSING_FORCE_TOUCH"
+            if reaction_status == "LIVE_TOUCH_DEVELOPING"
+            else "CONFIRMED_OPPOSING_FORCE_REACTION"
+        )
+        basis = "confirmed_trendline_touch_reaction_without_full_control_alignment"
+        explanation = (
+            f"{reaction_side} reaction at confirmed {reaction_line['role']} is active, but full structural control is not yet proven."
+        )
+    elif ranked:
+        status = "AWAITING_THIRD_TOUCH_CONFIRMATION"
+        basis = "visible_wick_line_is_not_yet_control_grade"
+        explanation = (
+            f"The best wick line has {ranked[0]['touch_count']} touches across {ranked[0]['anchor_span_bars']} bars; control requires at least three touches and a five-bar span."
+        )
+    else:
+        status = str(control.get("status") or "AWAITING_STRUCTURAL_CONFIRMATION")
+        basis = str(control.get("basis") or "no_confirmed_wick_line")
+        explanation = "Local swing state is visible, but neither side has confirmed structural control."
+
+    selected_line = structural_line or reaction_line or (ranked[0] if ranked else None)
+    public_line = (
+        {key: value for key, value in selected_line.items() if key != "_rank"}
+        if selected_line
+        else {}
+    )
+    control.update(
+        {
+            "side": confirmed_side,
+            "candidate_side": local_side,
+            "local_leg_side": local_side,
+            "major_structure_side": major_side,
+            "status": status,
+            "basis": basis,
+            "explanation": explanation,
+            "reaction_side": reaction_side,
+            "reaction_status": reaction_status,
+            "minimum_completed_candles": 3,
+            "observed_completed_candles": state_age,
+            "minimum_transition_support": 3,
+            "observed_transition_support": transition_support,
+            "minimum_trendline_touches": 3,
+            "minimum_anchor_span_bars": 5,
+            "entry_instruction": False,
+            "execution_authority": False,
+            "structural_evidence": {
+                "strict_trendline_count": len(ranked),
+                "confirmed_trendline_count": len(confirmed_lines),
+                "selected_line": public_line,
+                "opposing_force_side": reaction_side,
+                "reaction_status": reaction_status,
+            },
+        }
+    )
+    latent["control"] = control
+    components = _mapping_to_dict(latent.get("directional_components"))
+    for component_side in ("BUY", "SELL"):
+        component = _mapping_to_dict(components.get(component_side))
+        component["local_leg_active"] = local_side == component_side
+        component["structural_control_confirmed"] = confirmed_side == component_side
+        component["reaction_status"] = (
+            reaction_status if reaction_side == component_side else "NO_CURRENT_REACTION"
+        )
+        components[component_side] = component
+    latent["directional_components"] = components
+    study[latent_key] = latent
+    return study
 
 
 def _float_or(value: Any, fallback: float = 0.0) -> float:
@@ -24230,6 +24475,12 @@ class PhoenixGuardWindowTrackingAdapter:
             support_resistance_zones=support_resistance_zones,
             contract_duration_seconds=jpclf_contract_duration_seconds,
             smart_money_context=smart_money_context,
+        )
+        market_study_v3 = _reconcile_latent_state_control_v3(
+            market_study_v3,
+            trendlines=trendlines_v3,
+            candles=tracked_public,
+            major_trend_side=major_trend_side,
         )
 
         tracking_summary: dict[str, Any] = {

@@ -6,6 +6,7 @@ from phoenixguard.mobile_api.window_tracker import (
     _candles_to_seconds,
     _canonical_timeframe_label_v3,
     _identity_text_timeframe_candidates_v3,
+    _reconcile_latent_state_control_v3,
     _strict_live_trendline_geometry_v3,
     _timeframe_seconds,
 )
@@ -183,6 +184,78 @@ def test_cycle_duration_falls_back_to_observed_closed_candle_segments() -> None:
     ]
     assert horizon["expected_candles"] == 5.0
     assert horizon["duration"]["seconds"] == 1500
+    assert result["control"]["side"] == "UNRESOLVED"
+    assert result["control"]["candidate_side"] == "BUY"
+    assert result["control"]["status"] == "AWAITING_STRUCTURAL_CONFIRMATION"
+
+
+def test_structural_control_requires_third_touch_and_overrides_local_pullback() -> None:
+    study = {
+        "hidden_state_discovery_v3": {
+            "hidden_state": {
+                "state": "UP_SWING",
+                "direction": "BUY",
+                "age_candles": 2,
+            },
+            "control": {
+                "side": "UNRESOLVED",
+                "candidate_side": "BUY",
+                "status": "DEVELOPING_LOCAL_STATE",
+            },
+            "next_state_distribution": {"status": "SUPPORTED", "support": 8},
+            "directional_components": {"BUY": {}, "SELL": {}, "REST": {}},
+        }
+    }
+    resistance = {
+        "type": "INNER_TRENDLINE",
+        "trendline_role": "resistance",
+        "trendline_scope": "LOCAL",
+        "direction": "SELL",
+        "anchor_type": "TRENDLINE_TOUCH_POINTS",
+        "trendline_validation": "wick_anchor_no_obstruction_closed_body_validation",
+        "line_points": [[10.0, 100.0], [50.0, 88.0]],
+        "anchor_wick_points": [[10.0, 100.0], [50.0, 88.0]],
+        "touch_candle_indices": [1, 4, 7],
+        "touch_count": 3,
+        "anchor_span_bars": 8,
+        "confirmation_state": "CONFIRMED",
+        "line_obstruction_count": 0,
+        "significant_close": False,
+        "breach_state": "ACTIVE",
+        "forming_touch": False,
+        "close_distance_norm": 0.2,
+        "confidence": 0.88,
+    }
+    candles = [{"source_index": index} for index in range(8)]
+
+    reconciled = _reconcile_latent_state_control_v3(
+        study,
+        trendlines=[resistance],
+        candles=candles,
+        major_trend_side="SELL",
+    )
+    control = reconciled["hidden_state_discovery_v3"]["control"]
+    assert control["side"] == "SELL"
+    assert control["local_leg_side"] == "BUY"
+    assert control["status"] == "STRUCTURALLY_CONFIRMED_CONTROL"
+    assert control["reaction_side"] == "SELL"
+    assert control["reaction_status"] == "CLOSED_CANDLE_REACTION_CONFIRMED"
+
+    developing = _reconcile_latent_state_control_v3(
+        study,
+        trendlines=[
+            {
+                **resistance,
+                "touch_candle_indices": [1, 7],
+                "touch_count": 2,
+                "confirmation_state": "DEVELOPING",
+            }
+        ],
+        candles=candles,
+        major_trend_side="SELL",
+    )["hidden_state_discovery_v3"]["control"]
+    assert developing["side"] == "UNRESOLVED"
+    assert developing["status"] == "AWAITING_THIRD_TOUCH_CONFIRMATION"
 
 
 def test_strict_wick_role_is_independent_of_slope_direction() -> None:

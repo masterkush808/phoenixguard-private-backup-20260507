@@ -262,7 +262,7 @@ def test_dashboard_first_viewport_is_two_sided_hidden_state_control() -> None:
     assert 'function renderLatentStateControl(payload)' in text
     assert 'study.hidden_state_discovery_v3 || study.latent_state_discovery_v3' in text
     assert 'renderLatentStateControl(payload);' in text
-    assert 'BUY and SELL are empirical state components, not strategy rules or entry commands.' in text
+    assert 'A local swing is not control. Control needs multi-candle state maturity' in text
     assert 'safeObject(safeObject(payload).three_questions)' in text
     assert '"No lineage-matched timing source"' in text
     assert (
@@ -319,22 +319,23 @@ def test_dashboard_first_viewport_is_two_sided_hidden_state_control() -> None:
     assert "function rememberCompletedStudyHistory(payload)" in text
 
 
-def test_dashboard_exposes_compact_passive_decision_accuracy_audit() -> None:
+def test_dashboard_exposes_live_hidden_state_evidence_audit() -> None:
     text = _dashboard_text()
 
     assert 'id="decision-audit-strip" data-state="collecting"' in text
-    assert 'id="decision-audit-title">Decision accuracy · live audit</span>' in text
-    assert 'id="decision-audit-status">COLLECTING</strong>' in text
-    assert "0 frozen · 0 pending · 0 matured" in text
-    assert "Outcome measurement only · never places trades or opens entry permission." in text
+    assert 'id="decision-audit-title">Hidden-state evidence · live audit</span>' in text
+    assert 'id="decision-audit-status">WAITING</strong>' in text
+    assert "Waiting for closed-candle state evidence." in text
+    assert "Descriptive evidence only · never an entry instruction, trade, or permission." in text
     assert "function passiveDecisionAudit(payload)" in text
     assert "function renderPassiveDecisionAudit(payload)" in text
     assert "audit.can_grant_entry_permission !== false" in text
     assert "metrics.directional_accuracy" in text
-    assert "metrics.timing_accuracy" in text
-    assert "metrics.sweep_survival_rate" in text
-    assert "metrics.calibration_score" in text
-    assert 'measured ? "MEASURED" : "COLLECTING"' in text
+    assert "pairDna.transition_support" in text
+    assert "structure.confirmed_trendline_count" in text
+    assert "distribution.normalized_entropy" in text
+    assert 'status === "STRUCTURALLY_CONFIRMED_CONTROL"' in text
+    assert 'candidateSide + " LOCAL LEG ONLY"' in text
     assert "renderPassiveDecisionAudit(payload);" in text
 
 

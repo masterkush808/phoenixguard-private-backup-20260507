@@ -2924,28 +2924,28 @@
       <section class="decision-audit-strip" id="decision-audit-strip" data-state="collecting" aria-labelledby="decision-audit-title" aria-live="polite">
         <div class="decision-audit-summary">
           <div class="decision-audit-heading">
-            <span id="decision-audit-title">Decision accuracy · live audit</span>
-            <strong id="decision-audit-status">COLLECTING</strong>
+            <span id="decision-audit-title">Hidden-state evidence · live audit</span>
+            <strong id="decision-audit-status">WAITING</strong>
           </div>
-          <p class="decision-audit-counts" id="decision-audit-counts">0 frozen · 0 pending · 0 matured</p>
-          <p class="decision-audit-outcome" id="decision-audit-outcome">Waiting for a frozen forecast to mature against future market movement.</p>
-          <p class="decision-audit-safety">Outcome measurement only · never places trades or opens entry permission.</p>
+          <p class="decision-audit-counts" id="decision-audit-counts">Waiting for closed-candle state evidence.</p>
+          <p class="decision-audit-outcome" id="decision-audit-outcome">Local movement will not be presented as market control.</p>
+          <p class="decision-audit-safety">Descriptive evidence only · never an entry instruction, trade, or permission.</p>
         </div>
         <div class="decision-audit-metric" id="decision-audit-direction-wrap" data-available="false">
-          <span>Direction</span>
-          <strong id="decision-audit-direction">—</strong>
+          <span>State age</span>
+          <strong id="decision-audit-direction">waiting</strong>
         </div>
         <div class="decision-audit-metric" id="decision-audit-timing-wrap" data-available="false">
-          <span>Timing</span>
-          <strong id="decision-audit-timing">—</strong>
+          <span>Pair DNA</span>
+          <strong id="decision-audit-timing">0 observed</strong>
         </div>
         <div class="decision-audit-metric" id="decision-audit-sweep-wrap" data-available="false">
-          <span>Sweep survival</span>
-          <strong id="decision-audit-sweep">—</strong>
+          <span>Line proof</span>
+          <strong id="decision-audit-sweep">unconfirmed</strong>
         </div>
         <div class="decision-audit-metric" id="decision-audit-calibration-wrap" data-available="false">
-          <span>Calibration</span>
-          <strong id="decision-audit-calibration">—</strong>
+          <span>Uncertainty</span>
+          <strong id="decision-audit-calibration">unresolved</strong>
         </div>
       </section>
 
@@ -6592,69 +6592,103 @@
       setText(target, metric === null ? "—" : Math.round(metric * 100) + "%");
     }
 
+    function renderEvidenceAuditMetric(wrapper, target, value, available) {
+      wrapper.dataset.available = available ? "true" : "false";
+      setText(target, value);
+    }
+
     function renderPassiveDecisionAudit(payload) {
       const audit = passiveDecisionAudit(payload);
-      const frozen = Math.max(0, Number(audit.frozen_forecast_count) || 0);
-      const pending = Math.max(0, Number(audit.pending_outcome_count) || 0);
+      const study = safeObject(marketStudyContract(payload));
+      const latent = safeObject(
+        study.hidden_state_discovery_v3 || study.latent_state_discovery_v3,
+      );
+      const hiddenState = safeObject(latent.hidden_state);
+      const control = safeObject(latent.control);
+      const distribution = safeObject(latent.next_state_distribution);
+      const pairDna = safeObject(latent.pair_dna);
+      const structure = safeObject(control.structural_evidence);
+      const selectedLine = safeObject(structure.selected_line);
       const matured = Math.max(0, Number(audit.matured_outcome_count) || 0);
-      const measured = matured > 0;
       const metrics = safeObject(audit.candidate_metrics);
-      const latest = safeObject(audit.latest_matured_outcome);
+      const stateAge = Math.max(0, Number(hiddenState.age_candles) || 0);
+      const transitionSupport = Math.max(
+        0,
+        Number(pairDna.transition_support) || Number(distribution.support) || 0,
+      );
+      const confirmedLines = Math.max(
+        0,
+        Number(structure.confirmed_trendline_count) || 0,
+      );
+      const lineTouches = Math.max(0, Number(selectedLine.touch_count) || 0);
+      const uncertainty = decisionAuditMetric(distribution.normalized_entropy);
+      const controlStatus = safeText(control.status, "").toUpperCase();
+      const structureConfirmed = controlStatus === "STRUCTURALLY_CONFIRMED_CONTROL";
+      const reactionActive = controlStatus.includes("REACTION") || controlStatus.includes("TOUCH");
+      const hasLatent = Object.keys(latent).length > 0;
 
-      els.decisionAuditStrip.dataset.state = measured ? "measured" : "collecting";
-      setText(els.decisionAuditStatus, measured ? "MEASURED" : "COLLECTING");
+      els.decisionAuditStrip.dataset.state = structureConfirmed ? "measured" : "collecting";
+      setText(
+        els.decisionAuditStatus,
+        structureConfirmed
+          ? "STRUCTURE CONFIRMED"
+          : reactionActive
+            ? "REACTION ACTIVE"
+            : hasLatent
+              ? "LIVE EVIDENCE"
+              : "WAITING",
+      );
       setText(
         els.decisionAuditCounts,
-        frozen + " frozen · " + pending + " pending · " + matured + " matured",
+        hasLatent
+          ? stateAge + " completed in local state · "
+            + transitionSupport + " Pair DNA transitions · "
+            + confirmedLines + " confirmed lines · "
+            + matured + " matured outcomes"
+          : "Waiting for closed-candle state evidence.",
       );
-      renderDecisionAuditMetric(
+      renderEvidenceAuditMetric(
         els.decisionAuditDirectionWrap,
         els.decisionAuditDirection,
-        metrics.directional_accuracy,
+        stateAge + (stateAge === 1 ? " candle" : " candles"),
+        hasLatent,
       );
-      renderDecisionAuditMetric(
+      renderEvidenceAuditMetric(
         els.decisionAuditTimingWrap,
         els.decisionAuditTiming,
-        metrics.timing_accuracy,
+        transitionSupport + " observed",
+        transitionSupport > 0,
       );
-      renderDecisionAuditMetric(
+      renderEvidenceAuditMetric(
         els.decisionAuditSweepWrap,
         els.decisionAuditSweep,
-        metrics.sweep_survival_rate,
+        lineTouches > 0 ? lineTouches + " / 3 touches" : "unconfirmed",
+        lineTouches > 0,
       );
-      renderDecisionAuditMetric(
+      renderEvidenceAuditMetric(
         els.decisionAuditCalibrationWrap,
         els.decisionAuditCalibration,
-        metrics.calibration_score,
+        uncertainty === null ? "unresolved" : Math.round(uncertainty * 100) + "% entropy",
+        uncertainty !== null,
       );
 
-      if (!measured || !Object.keys(latest).length) {
-        setText(
-          els.decisionAuditOutcome,
-          frozen > 0
-            ? "Frozen forecasts are being compared with future market movement; no matured score yet."
-            : "Waiting for a frozen forecast to mature against future market movement.",
-        );
-        return;
-      }
-      const latestSide = studyDirection(latest.predicted_direction);
       const outcomeParts = [];
-      if (latestSide !== "HOLD") {
-        outcomeParts.push("latest " + latestSide);
+      const explanation = safeText(control.explanation, "");
+      if (explanation) {
+        outcomeParts.push(explanation);
+      } else if (hasLatent) {
+        outcomeParts.push("Local state is measured, but structural control is not confirmed.");
       } else {
-        outcomeParts.push("latest outcome");
+        outcomeParts.push("Waiting for the lineage-matched hidden-state study.");
       }
-      outcomeParts.push(latest.direction_correct === true ? "direction correct" : "direction missed");
-      outcomeParts.push(
-        latest.observed_move_occurred !== true
-          ? "move not observed"
-          : latest.timing_correct === true
-            ? "timing inside window"
-            : "timing outside window",
-      );
-      const latestSweep = decisionAuditMetric(latest.sweep_survival_rate);
-      if (latestSweep !== null) {
-        outcomeParts.push(Math.round(latestSweep * 100) + "% sweep survival");
+      const directionalAccuracy = decisionAuditMetric(metrics.directional_accuracy);
+      if (matured > 0) {
+        outcomeParts.push(
+          "Outcome audit: " + matured + " matured"
+            + (directionalAccuracy === null
+              ? ""
+              : " · direction " + Math.round(directionalAccuracy * 100) + "%"),
+        );
       }
       setText(els.decisionAuditOutcome, outcomeParts.join(" · "));
     }
@@ -6704,7 +6738,7 @@
       setText(els.beginnerStoryTitle, "Hidden-state control");
       setText(
         els.beginnerStorySummary,
-        "BUY and SELL are empirical state components, not strategy rules or entry commands.",
+        "A local swing is not control. Control needs multi-candle state maturity, Pair DNA support, and a confirmed third-touch wick line aligned with primary structure.",
       );
 
       if (!Object.keys(latent).length) {
@@ -6722,22 +6756,43 @@
       }
 
       const side = safeText(control.side, "UNRESOLVED").toUpperCase();
+      const status = safeText(control.status, "").toUpperCase();
+      const candidateSide = safeText(
+        control.candidate_side || control.local_leg_side || hiddenState.direction,
+        "UNRESOLVED",
+      ).toUpperCase();
+      const reactionSide = safeText(control.reaction_side, "UNRESOLVED").toUpperCase();
+      const reactionStatus = safeText(control.reaction_status, "").toUpperCase();
+      const confirmedControl = (
+        (side === "BUY" || side === "SELL")
+        && status === "STRUCTURALLY_CONFIRMED_CONTROL"
+      );
+      const reactionConfirmed = reactionStatus === "CLOSED_CANDLE_REACTION_CONFIRMED";
+      const reactionDeveloping = reactionStatus === "LIVE_TOUCH_DEVELOPING";
       const currentState = safeText(hiddenState.state, "UNRESOLVED").toUpperCase();
-      const controlLabel = side === "BUY" || side === "SELL"
-        ? side + " CONTROLS"
-        : "NEITHER CONTROLS";
-      if (rail) rail.dataset.side = side.toLowerCase();
-      if (buyCard) buyCard.classList.toggle("is-control", side === "BUY");
-      if (sellCard) sellCard.classList.toggle("is-control", side === "SELL");
+      const controlLabel = confirmedControl
+        ? side + " STRUCTURAL CONTROL"
+        : (reactionSide === "BUY" || reactionSide === "SELL") && reactionConfirmed
+          ? reactionSide + " REACTION CONFIRMED"
+          : (reactionSide === "BUY" || reactionSide === "SELL") && reactionDeveloping
+            ? reactionSide + " TOUCH DEVELOPING"
+            : candidateSide === "BUY" || candidateSide === "SELL"
+              ? candidateSide + " LOCAL LEG ONLY"
+              : "NEITHER CONFIRMED";
+      if (rail) rail.dataset.side = confirmedControl ? side.toLowerCase() : "unresolved";
+      if (buyCard) buyCard.classList.toggle("is-control", confirmedControl && side === "BUY");
+      if (sellCard) sellCard.classList.toggle("is-control", confirmedControl && side === "SELL");
       write("latent-control-side", controlLabel);
+      const stateAge = metricNumber(hiddenState.age_candles);
       write(
         "latent-state-label",
-        "Current hidden state: " + currentState.replaceAll("_", " "),
+        "Current local state: " + currentState.replaceAll("_", " ")
+          + (Number.isFinite(stateAge) ? " · " + stateAge + " completed candles" : ""),
       );
       const restProbability = metricNumber(rest.next_state_probability);
       write(
         "latent-control-context",
-        safeText(control.basis, "empirical state evidence unresolved")
+        safeText(control.explanation || control.basis, "empirical state evidence unresolved")
           .replaceAll("_", " ")
           + (Number.isFinite(restProbability)
             ? " · REST mass " + (restProbability * 100).toFixed(1) + "%"
@@ -6766,7 +6821,13 @@
 
       write(
         "latent-buy-status",
-        side === "BUY" ? "IN CONTROL" : "NOT IN CONTROL",
+        confirmedControl && side === "BUY"
+          ? "STRUCTURAL CONTROL"
+          : reactionSide === "BUY" && reactionConfirmed
+            ? "REACTION CONFIRMED"
+            : candidateSide === "BUY"
+              ? "LOCAL LEG ONLY"
+              : "NOT CONFIRMED",
       );
       write(
         "latent-buy-state",
@@ -6778,7 +6839,13 @@
       write("latent-buy-support", supportCopy(buy));
       write(
         "latent-sell-status",
-        side === "SELL" ? "IN CONTROL" : "NOT IN CONTROL",
+        confirmedControl && side === "SELL"
+          ? "STRUCTURAL CONTROL"
+          : reactionSide === "SELL" && reactionConfirmed
+            ? "REACTION CONFIRMED"
+            : candidateSide === "SELL"
+              ? "LOCAL LEG ONLY"
+              : "NOT CONFIRMED",
       );
       write(
         "latent-sell-state",

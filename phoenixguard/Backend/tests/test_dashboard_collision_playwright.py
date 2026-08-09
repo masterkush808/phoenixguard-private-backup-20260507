@@ -2158,6 +2158,24 @@ def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
 ) -> None:
     payload = _operator_payload(action="WAIT")
     cast(dict[str, Any], payload["tracking"])["market_study_v3"] = {
+        "hidden_state_discovery_v3": {
+            "hidden_state": {"state": "DOWN_SWING", "age_candles": 6},
+            "control": {
+                "side": "SELL",
+                "candidate_side": "SELL",
+                "status": "STRUCTURALLY_CONFIRMED_CONTROL",
+                "explanation": "SELL structural control is confirmed by primary structure and a three-touch wick line.",
+                "structural_evidence": {
+                    "confirmed_trendline_count": 2,
+                    "selected_line": {"touch_count": 3},
+                },
+            },
+            "next_state_distribution": {
+                "support": 14,
+                "normalized_entropy": 0.35,
+            },
+            "pair_dna": {"transition_support": 42},
+        },
         "path_clock_liquidity_v3": {
             "passive_prediction_audit_v3": {
                 "schema_version": "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3",
@@ -2191,18 +2209,18 @@ def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
     with _dashboard_page(chromium_browser, payload) as page:
         strip = page.locator("#decision-audit-strip")
         assert strip.get_attribute("data-state") == "measured"
-        assert page.locator("#decision-audit-status").inner_text() == "MEASURED"
+        assert page.locator("#decision-audit-status").inner_text() == "STRUCTURE CONFIRMED"
         assert page.locator("#decision-audit-counts").inner_text() == (
-            "12 frozen · 3 pending · 9 matured"
+            "6 completed in local state · 42 Pair DNA transitions · 2 confirmed lines · 9 matured outcomes"
         )
-        assert page.locator("#decision-audit-direction").inner_text() == "78%"
-        assert page.locator("#decision-audit-timing").inner_text() == "67%"
-        assert page.locator("#decision-audit-sweep").inner_text() == "56%"
-        assert page.locator("#decision-audit-calibration").inner_text() == "71%"
+        assert page.locator("#decision-audit-direction").inner_text() == "6 candles"
+        assert page.locator("#decision-audit-timing").inner_text() == "42 observed"
+        assert page.locator("#decision-audit-sweep").inner_text() == "3 / 3 touches"
+        assert page.locator("#decision-audit-calibration").inner_text() == "35% entropy"
         assert page.locator("#decision-audit-outcome").inner_text() == (
-            "latest BUY · direction correct · timing inside window · 50% sweep survival"
+            "SELL structural control is confirmed by primary structure and a three-touch wick line. · Outcome audit: 9 matured · direction 78%"
         )
-        assert "never places trades" in strip.inner_text().lower()
+        assert "never an entry instruction" in strip.inner_text().lower()
 
 
 def test_hidden_legacy_timing_forecast_never_replaces_hidden_state_control(
@@ -3634,8 +3652,13 @@ def test_hidden_state_contract_drives_buy_sell_components(
             "schema_version": "PG_LATENT_STATE_DISCOVERY_V3",
             "status": "ACTIVE",
             "study_only": True,
-            "hidden_state": {"state": "UP_SWING"},
-            "control": {"side": "BUY", "basis": "current_latent_state_is_up_swing"},
+            "hidden_state": {"state": "UP_SWING", "direction": "BUY", "age_candles": 2},
+            "control": {
+                "side": "BUY",
+                "candidate_side": "BUY",
+                "status": "ACTIVE_STATE",
+                "basis": "legacy_local_state_label",
+            },
             "directional_components": {
                 "BUY": {"next_state_probability": 0.1, "outgoing_transition_support": 9},
                 "SELL": {"next_state_probability": 0.8, "outgoing_transition_support": 9},
@@ -3653,9 +3676,9 @@ def test_hidden_state_contract_drives_buy_sell_components(
     }
 
     with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#latent-control-side").inner_text() == "BUY CONTROLS"
-        assert page.locator("#latent-buy-status").inner_text() == "IN CONTROL"
-        assert page.locator("#latent-sell-status").inner_text() == "NOT IN CONTROL"
+        assert page.locator("#latent-control-side").inner_text() == "BUY LOCAL LEG ONLY"
+        assert page.locator("#latent-buy-status").inner_text() == "LOCAL LEG ONLY"
+        assert page.locator("#latent-sell-status").inner_text() == "NOT CONFIRMED"
         assert "23.0 candles" in page.locator("#latent-cycle-horizon").inner_text()
         assert "1h 55m" in page.locator("#latent-cycle-horizon").inner_text()
 
