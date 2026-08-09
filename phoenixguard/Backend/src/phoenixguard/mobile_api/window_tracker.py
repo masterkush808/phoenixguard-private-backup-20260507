@@ -772,6 +772,8 @@ def _reconcile_latent_state_control_v3(
     trendlines: Sequence[Any],
     candles: Sequence[Mapping[str, Any]],
     major_trend_side: Any,
+    global_direction: Any = "HOLD",
+    local_direction: Any = "HOLD",
 ) -> dict[str, Any]:
     """Separate local-leg classification from structurally confirmed control."""
 
@@ -982,7 +984,20 @@ def _reconcile_latent_state_control_v3(
         components[component_side] = component
     latent["directional_components"] = components
     study[latent_key] = latent
-    return study
+    from phoenixguard.study.directional_consensus_v3 import (
+        resolve_directional_consensus_v3,
+    )
+
+    return resolve_directional_consensus_v3(
+        study,
+        symbol=str(latent.get("symbol") or study.get("symbol") or ""),
+        timeframe=str(latent.get("timeframe") or study.get("timeframe") or ""),
+        major_side=major_trend_side,
+        global_side=global_direction,
+        local_side=local_direction,
+        trendlines=trendlines,
+        candles=candles,
+    )
 
 
 def _float_or(value: Any, fallback: float = 0.0) -> float:
@@ -24481,6 +24496,8 @@ class PhoenixGuardWindowTrackingAdapter:
             trendlines=trendlines_v3,
             candles=tracked_public,
             major_trend_side=major_trend_side,
+            global_direction=global_direction,
+            local_direction=local_direction,
         )
 
         tracking_summary: dict[str, Any] = {

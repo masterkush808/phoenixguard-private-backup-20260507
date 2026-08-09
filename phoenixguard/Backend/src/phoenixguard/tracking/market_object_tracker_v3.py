@@ -1909,7 +1909,12 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
     for row in overlays:
         row.pop("_average_range_px", None)
         row.pop("_median_gap_px", None)
-    return [row for row in overlays if normalize_bounds(row.get("bounds")) is not None]
+    published = [row for row in overlays if normalize_bounds(row.get("bounds")) is not None]
+    from phoenixguard.tracking.trendline_geometry_v3 import (
+        normalize_trendline_overlays_v3,
+    )
+
+    return normalize_trendline_overlays_v3(published, candles)
 
 
 @dataclass(frozen=True)

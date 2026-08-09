@@ -339,6 +339,8 @@ def test_dashboard_exposes_live_hidden_state_evidence_audit() -> None:
     assert '"POSITIVE EV PROVEN"' in text
     assert 'status === "STRUCTURALLY_CONFIRMED_CONTROL"' in text
     assert 'candidateSide + " LOCAL LEG ONLY"' in text
+    assert 'directionalSide + " DOMINANT STRUCTURE"' in text
+    assert 'status.startsWith("STABLE_DIRECTION")' in text
     assert "renderPassiveDecisionAudit(payload);" in text
 
 

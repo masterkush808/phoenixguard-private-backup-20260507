@@ -6605,6 +6605,9 @@
       );
       const hiddenState = safeObject(latent.hidden_state);
       const control = safeObject(latent.control);
+      const directionalConsensus = safeObject(
+        latent.directional_consensus_v3 || control.directional_consensus_v3,
+      );
       const distribution = safeObject(latent.next_state_distribution);
       const pairDna = safeObject(latent.pair_dna);
       const structure = safeObject(control.structural_evidence);
@@ -6635,6 +6638,7 @@
       const profitProven = profitability.promotion_eligible === true;
       const controlStatus = safeText(control.status, "").toUpperCase();
       const structureConfirmed = controlStatus === "STRUCTURALLY_CONFIRMED_CONTROL";
+      const directionStable = controlStatus.startsWith("STABLE_DIRECTION");
       const reactionActive = controlStatus.includes("REACTION") || controlStatus.includes("TOUCH");
       const hasLatent = Object.keys(latent).length > 0;
 
@@ -6647,6 +6651,8 @@
             ? "EV UNPROVEN"
             : structureConfirmed
           ? "STRUCTURE CONFIRMED"
+          : directionStable
+            ? "DIRECTION STABLE"
           : reactionActive
             ? "REACTION ACTIVE"
             : hasLatent
@@ -6798,6 +6804,14 @@
         control.candidate_side || control.local_leg_side || hiddenState.direction,
         "UNRESOLVED",
       ).toUpperCase();
+      const directionalSide = safeText(
+        control.directional_side || directionalConsensus.stable_side,
+        "UNRESOLVED",
+      ).toUpperCase();
+      const directionStable = (
+        (directionalSide === "BUY" || directionalSide === "SELL")
+        && (status.startsWith("STABLE_DIRECTION") || status === "STRUCTURALLY_CONFIRMED_CONTROL")
+      );
       const reactionSide = safeText(control.reaction_side, "UNRESOLVED").toUpperCase();
       const reactionStatus = safeText(control.reaction_status, "").toUpperCase();
       const confirmedControl = (
@@ -6813,10 +6827,16 @@
           ? reactionSide + " REACTION CONFIRMED"
           : (reactionSide === "BUY" || reactionSide === "SELL") && reactionDeveloping
             ? reactionSide + " TOUCH DEVELOPING"
+            : directionStable
+              ? directionalSide + " DOMINANT STRUCTURE"
             : candidateSide === "BUY" || candidateSide === "SELL"
               ? candidateSide + " LOCAL LEG ONLY"
               : "NEITHER CONFIRMED";
-      if (rail) rail.dataset.side = confirmedControl ? side.toLowerCase() : "unresolved";
+      if (rail) rail.dataset.side = confirmedControl
+        ? side.toLowerCase()
+        : directionStable
+          ? directionalSide.toLowerCase()
+          : "unresolved";
       if (buyCard) buyCard.classList.toggle("is-control", confirmedControl && side === "BUY");
       if (sellCard) sellCard.classList.toggle("is-control", confirmedControl && side === "SELL");
       write("latent-control-side", controlLabel);
@@ -6860,6 +6880,8 @@
         "latent-buy-status",
         confirmedControl && side === "BUY"
           ? "STRUCTURAL CONTROL"
+          : directionStable && directionalSide === "BUY"
+            ? "DOMINANT STRUCTURE"
           : reactionSide === "BUY" && reactionConfirmed
             ? "REACTION CONFIRMED"
             : candidateSide === "BUY"
@@ -6868,8 +6890,10 @@
       );
       write(
         "latent-buy-state",
-        buy.currently_active
-          ? "UP SWING ACTIVE NOW"
+        buy.currently_active || control.local_leg_side === "BUY"
+          ? directionStable && directionalSide === "SELL"
+            ? "LOCAL UP PULLBACK ACTIVE"
+            : "UP SWING ACTIVE NOW"
           : "UP SWING IS NOT THE ACTIVE STATE",
       );
       write("latent-buy-mass", probabilityCopy(buy));
@@ -6878,6 +6902,8 @@
         "latent-sell-status",
         confirmedControl && side === "SELL"
           ? "STRUCTURAL CONTROL"
+          : directionStable && directionalSide === "SELL"
+            ? "DOMINANT STRUCTURE"
           : reactionSide === "SELL" && reactionConfirmed
             ? "REACTION CONFIRMED"
             : candidateSide === "SELL"
@@ -6886,8 +6912,12 @@
       );
       write(
         "latent-sell-state",
-        sell.currently_active
-          ? "DOWN SWING ACTIVE NOW"
+        sell.currently_active || control.local_leg_side === "SELL"
+          ? directionStable && directionalSide === "BUY"
+            ? "LOCAL DOWN PULLBACK ACTIVE"
+            : "DOWN SWING ACTIVE NOW"
+          : directionStable && directionalSide === "SELL" && control.local_leg_side === "BUY"
+            ? "SELL STRUCTURE · LOCAL BUY PULLBACK"
           : "DOWN SWING IS NOT THE ACTIVE STATE",
       );
       write("latent-sell-mass", probabilityCopy(sell));
