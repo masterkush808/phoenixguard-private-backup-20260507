@@ -18,7 +18,7 @@ from phoenixguard.decision.scene_forecast_features_v3 import (
 
 
 SCENE_FORECAST_CONTRIBUTION_SCHEMA_V3 = "PG_SCENE_FORECAST_CONTRIBUTION_V3"
-FORECAST_HORIZON_STEPS_V3 = 12
+FORECAST_HORIZON_STEPS_V3 = 72
 
 
 def _finite(value: Any) -> float | None:
@@ -2507,9 +2507,13 @@ def synchronize_scene_forecast_geometry_v3(
         list(cast(Iterable[Any], selected.get("forecast_candles", [])))
     )
     if len(line_points) != FORECAST_HORIZON_STEPS_V3 + 1:
-        raise ValueError("the selected scenario must contain an anchor plus twelve events")
+        raise ValueError(
+            f"the selected scenario must contain an anchor plus {FORECAST_HORIZON_STEPS_V3} events"
+        )
     if len(forecast_candles) != FORECAST_HORIZON_STEPS_V3:
-        raise ValueError("the selected scenario must contain twelve connected OHLC candles")
+        raise ValueError(
+            f"the selected scenario must contain {FORECAST_HORIZON_STEPS_V3} connected OHLC candles"
+        )
 
     for scenario in scenarios:
         identity = (
@@ -2582,20 +2586,24 @@ def reanchor_scene_forecast_geometry_v3(
 
     root_points = required_sequence(
         result.get("line_points"),
-        label="an anchor plus twelve events",
+        label="an anchor plus seventy-two events",
     )
     root_candles = required_sequence(
         result.get("forecast_candles"),
-        label="twelve connected OHLC candles",
+        label=f"{FORECAST_HORIZON_STEPS_V3} connected OHLC candles",
     )
     raw_scenarios = required_sequence(
         result.get("forecast_scenarios"),
         label="exactly three scenarios",
     )
     if len(root_points) != FORECAST_HORIZON_STEPS_V3 + 1:
-        raise ValueError("cached forecast must contain an anchor plus twelve events")
+        raise ValueError(
+            f"cached forecast must contain an anchor plus {FORECAST_HORIZON_STEPS_V3} events"
+        )
     if len(root_candles) != FORECAST_HORIZON_STEPS_V3:
-        raise ValueError("cached forecast must contain twelve connected OHLC candles")
+        raise ValueError(
+            f"cached forecast must contain {FORECAST_HORIZON_STEPS_V3} connected OHLC candles"
+        )
     if len(raw_scenarios) != 3:
         raise ValueError("cached forecast must contain exactly three scenarios")
 
@@ -2670,7 +2678,9 @@ def reanchor_scene_forecast_geometry_v3(
             raise ValueError(f"{label} must be a candle sequence")
         rows = cast(Sequence[Any], value)
         if len(rows) != FORECAST_HORIZON_STEPS_V3:
-            raise ValueError(f"{label} must contain twelve candles")
+            raise ValueError(
+                f"{label} must contain {FORECAST_HORIZON_STEPS_V3} candles"
+            )
         for index, raw_row in enumerate(rows):
             if not isinstance(raw_row, Mapping):
                 raise ValueError(f"{label}[{index}] must be a candle mapping")
@@ -3005,7 +3015,7 @@ def build_scene_forecast_contribution_v3(
             "selective_authorized": False,
             "selective_status": "NO_EDGE",
             "trade_authorization_status": "NO_EDGE",
-            "path_target_semantics": "DIRECT_12_EVENT_COHERENT_TRAJECTORY",
+            "path_target_semantics": "DIRECT_72_EVENT_COHERENT_TRAJECTORY",
             "trajectory_decoder_status": "AVAILABLE",
             "trajectory_scenarios": list(provider.get("forecast_scenarios", [])),
             "path_confidence": max(
@@ -3090,7 +3100,7 @@ def build_scene_forecast_contribution_v3(
     }
     result["interpretation"] = (
         "The V3 scene forecaster consumes closed candle geometry plus the causal suite "
-        "and draws one coherent 12-event path. It remains advisory until independent "
+        "and draws one coherent 72-event path. It remains advisory until independent "
         "walk-forward direction and calibration gates pass."
     )
     result["reason"] = result["interpretation"]

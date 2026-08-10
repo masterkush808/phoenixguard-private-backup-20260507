@@ -41,9 +41,6 @@ from phoenixguard.paths import PROJECT_ROOT
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
-from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import (
-    build_lstm_candle_sequence_contribution,
-)
 from phoenixguard.decision.order_positioning_evidence_v3 import (
     order_positioning_evidence_rows_v3,
 )
@@ -23037,26 +23034,6 @@ class PhoenixGuardWindowTrackingAdapter:
                 del self._scene_forecast_cache[oldest]
             return copy.deepcopy(contribution)
 
-    def _build_lstm_contribution(
-        self,
-        *,
-        candles: Sequence[Mapping[str, Any]],
-        chart_image: Image.Image,
-        timeframe: str,
-        sequence_phase: str,
-        market_play_label: str,
-    ) -> dict[str, Any]:
-        """Build the independent, production-gated LSTM candle-path lane."""
-
-        return build_lstm_candle_sequence_contribution(
-            candles=candles,
-            image_size=chart_image.size,
-            timeframe=timeframe,
-            sequence_phase=sequence_phase,
-            market_play_label=market_play_label,
-            chart_image=chart_image,
-        )
-
     @staticmethod
     def _market_study_objects_v3(
         *groups: Sequence[Mapping[str, Any]],
@@ -24316,46 +24293,6 @@ class PhoenixGuardWindowTrackingAdapter:
                     "min_timeframe_confidence": min_timeframe_identity_confidence,
                 }
             )
-        # Scene and LSTM are independent forecast lanes.  In particular, a
-        # scene fallback must never masquerade as a loaded LSTM artifact or
-        # inherit the LSTM production/selective-risk gates.
-        lstm_contribution = self._build_lstm_contribution(
-            candles=candles,
-            chart_image=chart_image,
-            timeframe=high_frequency_study_timeframe,
-            sequence_phase=str(
-                behavior_payload.get("current_state", setup) or setup
-            ),
-            market_play_label=setup,
-        )
-        # The LSTM lane can intentionally study a different timeframe from the
-        # visible chart. Stamp its exact frame/pair/study identity so public
-        # selection and authorization can reject stale cross-market evidence.
-        lstm_contribution.update(
-            {
-                "frame_id": frame_index,
-                "model_vote_frame_id": frame_index,
-                "pair": market,
-                "timeframe": high_frequency_study_timeframe,
-                "market_identity_confirmed": market_identity_confirmed,
-                "timeframe_identity_confirmed": timeframe_identity_confirmed,
-            }
-        )
-        if not (market_identity_confirmed and timeframe_identity_confirmed):
-            # A correctly loaded artifact is still diagnostic until the broker
-            # pair and study timeframe are both confirmed for this exact frame.
-            lstm_contribution.update(
-                {
-                    "selective_side": "NO_EDGE",
-                    "selective_authorized": False,
-                    "selective_status": "NO_EDGE",
-                    "trade_authorization_status": "NO_EDGE",
-                    "contribution": 0.0,
-                    "effective_contribution": 0.0,
-                    "score_influence_allowed": False,
-                    "playbook_participation_allowed": False,
-                }
-            )
         high_frequency_forecast = build_high_frequency_candle_forecast(
             candles=candles,
             image_size=chart_image.size,
@@ -24375,12 +24312,11 @@ class PhoenixGuardWindowTrackingAdapter:
             setup=setup,
             frame_id=frame_index,
             sequence_id=sequence_id,
-            lstm_contribution=lstm_contribution,
+            scene_forecast_contribution=scene_forecast_contribution,
         )
         decision_kernel["high_frequency_forecast"] = high_frequency_forecast
         decision_kernel["two_candle_study"] = _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {}))
         decision_kernel["scene_forecast_contribution"] = scene_forecast_contribution
-        decision_kernel["lstm_contribution"] = lstm_contribution
         kernel_trade_mode = str(decision_kernel.get("trade_mode", "STAND_ASIDE") or "STAND_ASIDE").upper()
         kernel_candle_side = _upper_action(decision_kernel.get("candle_execution_side", "HOLD"))
         countertrend_allowed = bool(execution_controls.get("allow_countertrend_scalp", False))
@@ -24560,7 +24496,6 @@ class PhoenixGuardWindowTrackingAdapter:
             "micro_candle_forecast": high_frequency_forecast,
             "two_candle_study": _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {})),
             "scene_forecast_contribution": scene_forecast_contribution,
-            "lstm_contribution": lstm_contribution,
             "countertrend_lane": countertrend_lane,
             "box_context": _mapping_to_dict(behavior_payload.get("box_context", {})),
             "trend_context": _mapping_to_dict(behavior_payload.get("trend_context", {})),
@@ -24655,7 +24590,6 @@ class PhoenixGuardWindowTrackingAdapter:
             "micro_candle_forecast": high_frequency_forecast,
             "two_candle_study": _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {})),
             "scene_forecast_contribution": scene_forecast_contribution,
-            "lstm_contribution": lstm_contribution,
             "global_local_control": control_state,
             "control_owner": str(control_state.get("owner", "balanced")),
             "control_direction": str(control_state.get("direction", "HOLD")),

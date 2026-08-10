@@ -394,7 +394,9 @@ def _predict_direct_quantiles(
                 label=f"Chronos {target_name}.{key}",
             )
             if len(horizon) != FORECAST_HORIZON_STEPS:
-                raise RuntimeError(f"Chronos {target_name}.{key} is not twelve events")
+                raise RuntimeError(
+                    f"Chronos {target_name}.{key} is not {FORECAST_HORIZON_STEPS} events"
+                )
             field[key] = tuple(
                 _finite(value, label=f"Chronos {target_name}.{key}[{step}]")
                 for step, value in enumerate(horizon)
@@ -630,29 +632,79 @@ def _suite_direction_bias(prepared: _PreparedScene) -> float:
     return max(-1.0, min(1.0, bias))
 
 
+def _causal_analog_delta_path(
+    deltas: Sequence[float],
+    *,
+    suite_bias: float,
+) -> list[float]:
+    """Continue visible candle geometry without smoothing away its swings.
+
+    Every successor candidate comes from this scene's own closed-candle delta
+    history. The recursively updated context can therefore reproduce impulses,
+    rests, and reversals, while the structured V3 suite only provides a bounded
+    state-direction nudge. No future candle or cross-chart path is consulted.
+    """
+
+    history = [float(value) for value in deltas if math.isfinite(float(value))]
+    if not history:
+        return [0.0] * FORECAST_HORIZON_STEPS
+    center = statistics.median(history)
+    centered = [value - center for value in history]
+    scale = max(
+        1e-6,
+        math.sqrt(statistics.fmean(value * value for value in centered)),
+        statistics.median(abs(value) for value in history),
+    )
+    recent = history[-min(7, len(history)) :]
+    momentum = statistics.median(recent)
+    suite_drift = suite_bias * scale
+    state_drift = 0.55 * momentum + 0.25 * center + 0.20 * suite_drift
+    context_width = min(6, max(1, len(history) // 4))
+    generated: list[float] = []
+
+    for step in range(FORECAST_HORIZON_STEPS):
+        sequence = history + generated
+        context = sequence[-context_width:]
+        candidates: list[tuple[float, int]] = []
+        for next_index in range(context_width, len(history)):
+            candidate_context = history[next_index - context_width : next_index]
+            distance = statistics.fmean(
+                ((left - right) / scale) ** 2
+                for left, right in zip(context, candidate_context)
+            )
+            candidate_delta = history[next_index]
+            if abs(state_drift) > 1e-9 and candidate_delta * state_drift < 0.0:
+                distance += 0.08 * min(1.0, abs(candidate_delta) / scale)
+            candidates.append((distance, next_index))
+        if candidates:
+            _, selected_index = min(candidates, key=lambda row: (row[0], row[1]))
+            analog_delta = history[selected_index]
+        else:
+            analog_delta = history[step % len(history)]
+        analog_weight = 0.92 if abs(analog_delta) <= 0.25 * scale else 0.84
+        generated.append(
+            analog_weight * analog_delta + (1.0 - analog_weight) * state_drift
+        )
+    return generated
+
+
 def _fallback_offset_quantiles(prepared: _PreparedScene) -> dict[str, dict[str, tuple[float, ...]]]:
     closes = prepared.close_history
     deltas = [right - left for left, right in zip(closes, closes[1:])]
-    recent = deltas[-min(7, len(deltas)) :] if deltas else [0.0]
-    momentum = statistics.median(recent)
     residual_center = statistics.median(deltas) if deltas else 0.0
     residuals = [value - residual_center for value in deltas] or [0.0]
     residual_scale = max(
         0.025,
         math.sqrt(statistics.fmean(value * value for value in residuals)),
     )
-    suite_bias = _suite_direction_bias(prepared)
-    suite_drift = suite_bias * max(
-        residual_scale,
-        statistics.median(abs(value) for value in recent),
-        0.025,
+    projected_deltas = _causal_analog_delta_path(
+        deltas,
+        suite_bias=_suite_direction_bias(prepared),
     )
-    blended_drift = 0.64 * momentum + 0.36 * suite_drift
     current = closes[-1] if closes else 0.0
     median_path: list[float] = []
-    for step in range(FORECAST_HORIZON_STEPS):
-        innovation = residuals[-1 - (step % len(residuals))] * 0.18
-        current += blended_drift * (0.84**step) + innovation
+    for projected_delta in projected_deltas:
+        current += projected_delta
         median_path.append(current)
     spread = [residual_scale * math.sqrt(step + 1) for step in range(FORECAST_HORIZON_STEPS)]
     close = {
@@ -667,6 +719,19 @@ def _fallback_offset_quantiles(prepared: _PreparedScene) -> dict[str, dict[str, 
             for high, low in zip(prepared.targets[1], prepared.targets[2])
         ),
     )
+    historical_upper_wicks = [
+        max(0.0, high - max(open_value, close_value))
+        for open_value, high, close_value in zip(
+            prepared.targets[0], prepared.targets[1], prepared.targets[3]
+        )
+    ] or [0.20 * typical_range]
+    historical_lower_wicks = [
+        max(0.0, min(open_value, close_value) - low)
+        for open_value, low, close_value in zip(
+            prepared.targets[0], prepared.targets[2], prepared.targets[3]
+        )
+    ] or [0.20 * typical_range]
+    minimum_wick = 0.08 * typical_range
     open_rows: dict[str, tuple[float, ...]] = {}
     high_rows: dict[str, tuple[float, ...]] = {}
     low_rows: dict[str, tuple[float, ...]] = {}
@@ -675,10 +740,13 @@ def _fallback_offset_quantiles(prepared: _PreparedScene) -> dict[str, dict[str, 
         opens: list[float] = []
         highs: list[float] = []
         lows: list[float] = []
-        for value in close[key]:
+        for step, value in enumerate(close[key]):
+            wick_index = step % len(historical_upper_wicks)
+            upper_wick = max(minimum_wick, historical_upper_wicks[wick_index])
+            lower_wick = max(minimum_wick, historical_lower_wicks[wick_index])
             opens.append(prior)
-            highs.append(max(prior, value) + 0.20 * typical_range)
-            lows.append(min(prior, value) - 0.20 * typical_range)
+            highs.append(max(prior, value) + upper_wick)
+            lows.append(min(prior, value) - lower_wick)
             prior = value
         open_rows[key] = tuple(opens)
         high_rows[key] = tuple(highs)
@@ -741,7 +809,7 @@ def build_chronos_scene_forecast_contribution_v3(
 
     The provider always uses the causal ``PG_SCENE_FORECAST_FEATURES_V3``
     contract. Model failure is isolated behind a deterministic residual-library
-    fallback that still returns twelve chart events, but that fallback can
+    fallback that still returns seventy-two chart events, but that fallback can
     never claim calibration, production readiness, or trade authority.
     """
 
@@ -980,7 +1048,7 @@ def build_chronos_scene_forecast_contribution_v3(
         "fallback": {
             "active": not is_foundation_output,
             "method": (
-                "RESIDUAL_LIBRARY_STATISTICAL_NON_LSTM"
+                "RESIDUAL_LIBRARY_STATISTICAL"
                 if not is_foundation_output
                 else "NONE"
             ),

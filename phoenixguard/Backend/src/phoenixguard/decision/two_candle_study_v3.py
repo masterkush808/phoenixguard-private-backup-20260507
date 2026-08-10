@@ -4,11 +4,6 @@ import math
 from statistics import median
 from typing import Any, Mapping, Sequence, cast
 
-from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import (
-    build_lstm_candle_sequence_contribution,
-)
-
-
 TWO_CANDLE_STUDY_SCHEMA_VERSION = "PG_TWO_CANDLE_STUDY_V3"
 TEXT_AND_BANDS_ONLY = "TEXT_AND_BANDS_ONLY"
 SIDES = {"BUY", "SELL"}
@@ -123,12 +118,18 @@ def _score_side(
     candidate_side: str,
     continuation_probability: float,
     reversal_probability: float,
-    lstm: Mapping[str, Any],
+    scene_forecast: Mapping[str, Any],
 ) -> float:
     side_key = "p_next_buy" if side == "BUY" else "p_next_sell"
     ratio_key = "recent_buy_ratio" if side == "BUY" else "recent_sell_ratio"
-    lstm_side = _side(lstm.get("next_1_direction"), "HOLD")
-    lstm_fresh = bool(lstm.get("fresh"))
+    scene_side = _side(
+        scene_forecast.get("side", scene_forecast.get("direction")),
+        "HOLD",
+    )
+    scene_available = bool(
+        scene_forecast.get("forecast_path")
+        or scene_forecast.get("forecast_candles")
+    )
     score = 0.30 * _clip01(kernel.get(side_key), 0.0)
     score += 0.16 * float(impulse_side == side)
     score += 0.15 * float(local_side == side)
@@ -137,8 +138,10 @@ def _score_side(
     score += 0.10 * _clip01(stats.get(ratio_key), 0.0)
     score += 0.07 * continuation_probability * float(side in {local_side, impulse_side, candidate_side})
     score += 0.05 * reversal_probability * float(side == impulse_side and side != global_side)
-    if lstm_fresh:
-        score += 0.10 * _clip01(lstm.get("next_1_probability"), 0.0) * float(lstm_side == side)
+    if scene_available:
+        score += 0.10 * _clip01(scene_forecast.get("confidence"), 0.0) * float(
+            scene_side == side
+        )
     return max(0.0, float(score))
 
 
@@ -245,7 +248,7 @@ def build_two_candle_study_v3(
     setup: str = "",
     frame_id: int | str = 0,
     sequence_id: str = "",
-    lstm_contribution: Mapping[str, Any] | None = None,
+    scene_forecast_contribution: Mapping[str, Any] | None = None,
     model_council: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows = _rows(candles)
@@ -254,15 +257,7 @@ def build_two_candle_study_v3(
     kernel = _mapping(decision_kernel)
     stats = _mapping(candle_statistics)
     behavior_payload = _mapping(behavior)
-    lstm = _mapping(lstm_contribution)
-    if not lstm:
-        lstm = build_lstm_candle_sequence_contribution(
-            candles=rows,
-            image_size=image_size,
-            timeframe=timeframe,
-            sequence_phase=str(behavior_payload.get("current_state") or setup or ""),
-            market_play_label=setup,
-        )
+    scene_forecast = _mapping(scene_forecast_contribution)
     council = _mapping(model_council)
     timeframe_label = str(timeframe or "").upper()
     pressure_seed = _side(impulse_direction or candidate_action, "HOLD")
@@ -280,7 +275,7 @@ def build_two_candle_study_v3(
             "study_rows": [],
             "candle_forecasts": [],
             "signals": [],
-            "lstm_contribution": lstm,
+            "scene_forecast_contribution": scene_forecast,
             "do_not_render_synthetic_candles": True,
             "diagnostics": {"visible_candles": len(features), "minimum_visible_candles": 5},
         }
@@ -294,7 +289,7 @@ def build_two_candle_study_v3(
             "last_completed_candle": features[-1] if features else {},
             "next_candle_forecast": {},
             "second_next_candle_forecast": {},
-            "lstm_contribution": lstm,
+            "scene_forecast_contribution": scene_forecast,
             "summary": summary,
             "do_not_render_synthetic_candles": True,
         }
@@ -320,7 +315,7 @@ def build_two_candle_study_v3(
         + 0.26 * opposing_ratio
         + 0.18 * consolidation_probability
         + 0.16 * float(run_length >= 3)
-        + 0.16 * _clip01(_mapping(lstm).get("pullback_first_probability"), 0.0)
+        + 0.16 * _clip01(scene_forecast.get("pullback_first_probability"), 0.0)
     )
     buy_score = _score_side(
         "BUY",
@@ -332,7 +327,7 @@ def build_two_candle_study_v3(
         candidate_side=candidate_side,
         continuation_probability=continuation_probability,
         reversal_probability=reversal_probability,
-        lstm=lstm,
+        scene_forecast=scene_forecast,
     )
     sell_score = _score_side(
         "SELL",
@@ -344,7 +339,7 @@ def build_two_candle_study_v3(
         candidate_side=candidate_side,
         continuation_probability=continuation_probability,
         reversal_probability=reversal_probability,
-        lstm=lstm,
+        scene_forecast=scene_forecast,
     )
     probabilities = _normalize_probs(buy_score, sell_score, pullback_first_probability)
     pressure_side = "BUY" if probabilities["BUY"] >= probabilities["SELL"] else "SELL"
@@ -452,7 +447,7 @@ def build_two_candle_study_v3(
         "primary_pressure": pressure_side,
         "pattern": pattern,
         "model_council_agreement": council_agreement,
-        "lstm_contribution": lstm,
+        "scene_forecast_contribution": scene_forecast,
         "display_as": TEXT_AND_BANDS_ONLY,
         "do_not_render_synthetic_candles": True,
         "summary": summary,
@@ -471,11 +466,20 @@ def build_two_candle_study_v3(
             "meaning": "chance the next candle pauses/retests before continuation",
         },
         {
-            "name": "lstm sequence contributor",
-            "side": _side(lstm.get("side"), "HOLD"),
-            "confidence": round(_clip01(lstm.get("confidence"), 0.0), 4),
-            "meaning": str(lstm.get("interpretation") or "diagnostic LSTM contribution"),
-            "fresh": bool(lstm.get("fresh")),
+            "name": "native scene trajectory",
+            "side": _side(
+                scene_forecast.get("side", scene_forecast.get("direction")),
+                "HOLD",
+            ),
+            "confidence": round(_clip01(scene_forecast.get("confidence"), 0.0), 4),
+            "meaning": str(
+                scene_forecast.get("interpretation")
+                or "native PhoenixGuard scene trajectory contribution"
+            ),
+            "fresh": bool(
+                scene_forecast.get("forecast_path")
+                or scene_forecast.get("forecast_candles")
+            ),
             "blocker": False,
         },
     ]
@@ -492,7 +496,7 @@ def build_two_candle_study_v3(
         "study_rows": [next_step, second_step],
         "candle_forecasts": [next_step, second_step],
         "two_candle_study": two_candle_study,
-        "lstm_contribution": lstm,
+        "scene_forecast_contribution": scene_forecast,
         "signals": signals,
         "probabilities": {
             "buy": round(probabilities["BUY"], 4),

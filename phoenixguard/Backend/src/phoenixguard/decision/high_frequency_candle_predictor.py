@@ -20,7 +20,7 @@ def build_high_frequency_candle_forecast(
     setup: str = "",
     frame_id: int | str = 0,
     sequence_id: str = "",
-    lstm_contribution: Mapping[str, Any] | None = None,
+    scene_forecast_contribution: Mapping[str, Any] | None = None,
     model_council: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compatibility entry point for the old micro-candle forecast name.
@@ -44,7 +44,7 @@ def build_high_frequency_candle_forecast(
         setup=setup,
         frame_id=frame_id,
         sequence_id=sequence_id,
-        lstm_contribution=lstm_contribution,
+        scene_forecast_contribution=scene_forecast_contribution,
         model_council=model_council,
     )
 

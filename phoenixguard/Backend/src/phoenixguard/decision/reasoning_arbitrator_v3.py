@@ -47,7 +47,7 @@ ROLE_MODEL_MAP = {
     "Supply/Demand and Zone Expert": "clip",
     "Angle and Momentum Expert": "simclr",
     "Memory Similarity Expert": "swav",
-    "Timing and Path Expert": "lstm_candle_sequence",
+    "Timing and Path Expert": "scene_forecast",
     "Risk and Trap Expert": "byol",
 }
 

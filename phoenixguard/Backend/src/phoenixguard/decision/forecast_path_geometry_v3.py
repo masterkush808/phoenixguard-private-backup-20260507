@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 
-FORECAST_HORIZON_STEPS = 12
+FORECAST_HORIZON_STEPS = 72
 _QUANTILE_KEYS = ("p10", "p50", "p90")
 _EPSILON = 1e-9
 _VIEWPORT_PADDING = 0.035
@@ -121,7 +121,9 @@ def _anchor_values(anchor: Mapping[str, Any]) -> tuple[float, float, float, floa
         label="anchor.event_step_x_norm",
     )
     if x_norm + FORECAST_HORIZON_STEPS * step_x > 1.0 + _EPSILON:
-        raise ForecastPathGeometryError("twelve event slots do not fit on the chart plane")
+        raise ForecastPathGeometryError(
+            f"{FORECAST_HORIZON_STEPS} event slots do not fit on the chart plane"
+        )
     return x_norm, y_norm, price_norm, step_x
 
 
@@ -405,7 +407,7 @@ def _forecast_candles(
         and len(line_points) == FORECAST_HORIZON_STEPS + 1
     ):
         raise ForecastPathGeometryError(
-            "scenario OHLC geometry must contain exactly twelve forecast events"
+            f"scenario OHLC geometry must contain exactly {FORECAST_HORIZON_STEPS} forecast events"
         )
     if (interval_top_points is None) != (interval_bottom_points is None):
         raise ForecastPathGeometryError(
@@ -418,7 +420,7 @@ def _forecast_candles(
             == FORECAST_HORIZON_STEPS + 1
         ):
             raise ForecastPathGeometryError(
-                "scenario interval geometry must contain the anchor and twelve events"
+                f"scenario interval geometry must contain the anchor and {FORECAST_HORIZON_STEPS} events"
             )
 
     candles: list[dict[str, Any]] = []
