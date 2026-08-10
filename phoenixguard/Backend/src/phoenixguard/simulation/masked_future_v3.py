@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 from statistics import median
 import threading
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
 from PIL import Image
@@ -130,15 +130,25 @@ def parse_instrument_text_v3(value: object) -> tuple[str, str]:
     return symbol, timeframe
 
 
+class _RapidOCREngineV3(Protocol):
+    def __call__(
+        self,
+        image: object,
+    ) -> tuple[Sequence[Sequence[object]] | None, object]: ...
+
+
 def _rapidocr_header_text_v3(image: Image.Image) -> str:
     """Read title/chart headers only; all other OCR text is discarded."""
 
     try:
-        engine = getattr(_OCR_THREAD_LOCAL, "engine", None)
+        engine = cast(
+            _RapidOCREngineV3 | None,
+            getattr(_OCR_THREAD_LOCAL, "engine", None),
+        )
         if engine is None:
-            from rapidocr_onnxruntime import RapidOCR
+            from rapidocr_onnxruntime import RapidOCR  # pyright: ignore[reportMissingModuleSource]
 
-            engine = RapidOCR()
+            engine = cast(_RapidOCREngineV3, RapidOCR())
             _OCR_THREAD_LOCAL.engine = engine
         crop_height = min(image.height, max(180, int(round(image.height * 0.20))))
         header = np.asarray(image.crop((0, 0, image.width, crop_height)).convert("RGB"), dtype=np.uint8)
@@ -147,7 +157,7 @@ def _rapidocr_header_text_v3(image: Image.Image) -> str:
         return ""
     texts: list[str] = []
     for row in result or []:
-        if not isinstance(row, Sequence) or len(row) < 3:
+        if len(row) < 3:
             continue
         confidence = _number(row[2], 0.0)
         text = str(row[1] or "").strip()
@@ -178,14 +188,19 @@ def _compact_candle(row: Mapping[str, Any], *, candle_id: str, timestamp: int) -
         key: row.get(key)
         for key in (
             "open_y_px", "close_y_px", "wick_top_px", "wick_bottom_px", "body_top_px", "body_bottom_px", "direction", "palette", "parse_confidence", "spacing_confidence", "track_id"
+            , "center_x_px", "body_left_px", "body_right_px"
         )
         if row.get(key) is not None
     }
     payload.update({"candle_id": candle_id, "timestamp": timestamp})
-    return adapt_tracker_candle_v3(
+    adapted = adapt_tracker_candle_v3(
         payload,
         closure_proof={"proven_closed": True, "event_key": f"masked-future:{candle_id}", "candle_id": candle_id},
     )
+    for key in ("center_x_px", "body_left_px", "body_right_px"):
+        if row.get(key) is not None:
+            adapted[key] = _number(row.get(key))
+    return adapted
 
 
 def _candle_token(row: Mapping[str, Any], scale: float) -> str:
@@ -223,17 +238,23 @@ class ExtractedSequenceV3:
     metadata_source: str
     width: int
     height: int
-    candles: list[dict[str, Any]] = field(default_factory=list)
+    candles: list[dict[str, Any]] = field(
+        default_factory=lambda: list[dict[str, Any]]()
+    )
     shingles: tuple[str, ...] = ()
     family_name: str = ""
     extraction_status: str = "EXTRACTED"
     extraction_reason: str = ""
     extractor_version: str = STATIC_EXTRACTOR_VERSION
+    analysis_width: int = 0
+    analysis_height: int = 0
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ExtractedSequenceV3":
         payload = dict(value)
         payload.setdefault("extractor_version", "LEGACY")
+        payload.setdefault("analysis_width", int(payload.get("width", 0) or 0))
+        payload.setdefault("analysis_height", int(payload.get("height", 0) or 0))
         payload["candles"] = [dict(item) for item in cast(Sequence[Mapping[str, Any]], payload.get("candles", []))]
         payload["shingles"] = tuple(str(item) for item in cast(Sequence[Any], payload.get("shingles", [])))
         return cls(**payload)
@@ -258,6 +279,9 @@ def extract_image_sequence_v3(
     *,
     source_bucket: str = "UNLABELED",
     maximum_width: int = 1600,
+    symbol_hint: object = "",
+    timeframe_hint: object = "",
+    skip_ocr: bool = False,
 ) -> ExtractedSequenceV3:
     image_path = Path(path).resolve()
     stat = image_path.stat()
@@ -265,9 +289,16 @@ def extract_image_sequence_v3(
     with Image.open(image_path) as source:
         image = source.convert("RGB")
         original_width, original_height = image.size
+        hint_symbol, hint_timeframe = parse_instrument_text_v3(
+            f"{symbol_hint or ''} {timeframe_hint or ''}"
+        )
         filename_symbol, filename_timeframe = parse_instrument_text_v3(image_path.stem)
+        if hint_symbol != "UNKNOWN":
+            filename_symbol = hint_symbol
+        if hint_timeframe != "UNKNOWN":
+            filename_timeframe = hint_timeframe
         ocr_text = ""
-        if filename_symbol == "UNKNOWN" or filename_timeframe == "UNKNOWN":
+        if not skip_ocr and (filename_symbol == "UNKNOWN" or filename_timeframe == "UNKNOWN"):
             ocr_text = _rapidocr_header_text_v3(image)
         ocr_symbol, ocr_timeframe = parse_instrument_text_v3(ocr_text)
         symbol = filename_symbol if filename_symbol != "UNKNOWN" else ocr_symbol
@@ -283,6 +314,7 @@ def extract_image_sequence_v3(
             image = image.resize((maximum_width, max(64, int(round(image.height * ratio)))), Image.Resampling.LANCZOS)
         rgb = np.asarray(image, dtype=np.uint8)
         perceptual_hash = _dhash(image)
+        analysis_width, analysis_height = image.size
     default_tracks = extract_candle_tracks_adaptive_v3(rgb, minimum_track_length=6)
     latest_default = max((_number(row.get("center_x_px")) for row in default_tracks), default=0.0)
     track_candidates: list[list[dict[str, Any]]] = [default_tracks]
@@ -336,6 +368,8 @@ def extract_image_sequence_v3(
         extraction_status=status,
         extraction_reason=reason,
         extractor_version=STATIC_EXTRACTOR_VERSION,
+        analysis_width=int(analysis_width),
+        analysis_height=int(analysis_height),
     )
 
 
@@ -938,7 +972,14 @@ def run_masked_future_replay_v3(
     output.mkdir(parents=True, exist_ok=True)
     _write_json(output / "summary.json", summary, reserve_gb=minimum_free_gb)
     _write_predictions(output / "predictions.jsonl.gz", predictions, reserve_gb=minimum_free_gb)
-    failures = [asdict(record) | {"candles": [], "shingles": []} for record in records if record.extraction_status != "EXTRACTED"]
+    failures: list[dict[str, Any]] = []
+    for record in records:
+        if record.extraction_status == "EXTRACTED":
+            continue
+        failure: dict[str, Any] = asdict(record)
+        failure["candles"] = list[dict[str, Any]]()
+        failure["shingles"] = list[str]()
+        failures.append(failure)
     _write_json(output / "extraction_failures.json", {"failures": failures}, reserve_gb=minimum_free_gb)
     report = render_masked_future_report_v3(summary).encode("utf-8")
     enforce_disk_reserve(output, minimum_free_gb=minimum_free_gb, required_bytes=len(report))
