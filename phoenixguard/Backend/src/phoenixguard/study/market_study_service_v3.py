@@ -19,11 +19,6 @@ from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.study.behavioral_sequence_v3 import measure_market_behavior_v3
 from phoenixguard.study.latent_state_discovery_v3 import build_latent_state_discovery_v3
-from phoenixguard.study.masked_future_behavior_v3 import (
-    apply_masked_future_evidence_v3,
-    load_default_masked_future_model_v3,
-    pending_masked_future_evidence_v3,
-)
 from phoenixguard.study.adaptive_feature_ontology_v3 import (
     ADAPTIVE_FEATURE_ONTOLOGY_SCHEMA_VERSION,
     AdaptiveFeatureOntologyV3,
@@ -2621,9 +2616,6 @@ class MarketStudyServiceV3:
         self._pending: dict[tuple[str, str], dict[str, Any]] = {}
         self._result_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._pair_observation_seen: set[tuple[str, str]] = set()
-        self._masked_future_behavior = load_default_masked_future_model_v3(
-            self.root_dir
-        )
 
     def resolver_order_state(
         self,
@@ -3500,25 +3492,6 @@ class MarketStudyServiceV3:
                 timeframe=canonical_timeframe,
                 timeframe_seconds=timeframe_seconds,
             )
-            masked_future_behavior = pending_masked_future_evidence_v3(
-                "No promoted masked-future behavior artifact is installed."
-            )
-            if self._masked_future_behavior is not None:
-                try:
-                    masked_future_behavior = self._masked_future_behavior.predict(
-                        candles=_rows(advanced_candles.get("candles")),
-                        behavior=advanced_behavior,
-                        symbol=canonical_symbol,
-                        timeframe=canonical_timeframe,
-                    )
-                except (TypeError, ValueError, ArithmeticError):
-                    masked_future_behavior = pending_masked_future_evidence_v3(
-                        "Masked-future behavior inference rejected malformed study evidence."
-                    )
-            hidden_state_discovery = apply_masked_future_evidence_v3(
-                hidden_state_discovery,
-                masked_future_behavior,
-            )
             result = _base_contract(
                 symbol=canonical_symbol,
                 timeframe=canonical_timeframe,
@@ -3546,7 +3519,6 @@ class MarketStudyServiceV3:
                     "path_clock_liquidity_v3": path_clock_liquidity,
                     "path_clock_liquidity": deepcopy(path_clock_liquidity),
                     "hidden_state_discovery_v3": hidden_state_discovery,
-                    "masked_future_behavior_v3": masked_future_behavior,
                     "intelligence_authority": "HIDDEN_STATE_DISCOVERY_V3",
                     **advanced_studies,
                     **research_studies,
