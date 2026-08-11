@@ -13629,9 +13629,12 @@ def test_causal_right_lane_wins_over_longer_historical_lane_and_is_cached(
     ) -> list[dict[str, Any]]:
         del minimum_track_length
         scan_bounds.append(x_bounds)
-        if x_bounds == (0.40, 0.92):
+        if x_bounds == (0.50, 0.82):
             return tracks(500, 12, 10)
-        return tracks(40, 27, 8)
+        # This historical lane ends at x=464 (48.3% of the frame). The former
+        # 45% shortcut incorrectly treated that as the current chart edge and
+        # skipped the causal-right scan entirely.
+        return tracks(40, 54, 8)
 
     monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
     image = Image.new("RGB", (960, 508), color=(20, 26, 38))
@@ -13641,12 +13644,14 @@ def test_causal_right_lane_wins_over_longer_historical_lane_and_is_cached(
     )
 
     lane_audit = cast(Mapping[str, Any], metadata["causal_lane_selection"])
-    assert scan_bounds == [None, (0.40, 0.92)]
+    assert scan_bounds == [None, (0.50, 0.82)]
     assert len(rows) == 12
     assert max(float(row["center_x"]) for row in rows) == 610.0
     assert lane_audit["selected_lane"] == "causal_right"
-    assert lane_audit["default_track_count"] == 27
+    assert lane_audit["default_track_count"] == 54
     assert lane_audit["right_candidate_track_count"] == 12
+    assert lane_audit["default_endpoint_proven"] is False
+    assert lane_audit["current_endpoint_unproven"] is False
     cached = adapter._live_candle_cache[  # noqa: SLF001
         "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
     ]
@@ -13679,7 +13684,7 @@ def test_disjoint_right_lane_underflow_fails_closed_instead_of_publishing_histor
         minimum_track_length: int = 6,
     ) -> list[dict[str, Any]]:
         del minimum_track_length
-        if x_bounds == (0.40, 0.92):
+        if x_bounds == (0.50, 0.82):
             return tracks(500, 7, 15)
         return tracks(40, 27, 8)
 
@@ -13698,6 +13703,52 @@ def test_disjoint_right_lane_underflow_fails_closed_instead_of_publishing_histor
     assert adapter._live_candle_cache[  # noqa: SLF001
         "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
     ]["tracks"] == []
+
+
+def test_unproven_current_endpoint_fails_closed_without_a_right_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    scan_bounds: list[tuple[float, float] | None] = []
+
+    def fake_adaptive_extract(
+        _image: NDArray[np.uint8],
+        *,
+        x_bounds: tuple[float, float] | None = None,
+        minimum_track_length: int = 6,
+    ) -> list[dict[str, Any]]:
+        del minimum_track_length
+        scan_bounds.append(x_bounds)
+        if x_bounds == (0.50, 0.82):
+            return []
+        return [
+            {
+                "track_id": index,
+                "bbox": [37 + index * 8, 180, 43 + index * 8, 230],
+                "center_x_px": float(40 + index * 8),
+                "center_y_px": 205.0 + float(index % 3),
+                "direction": "BUY" if index % 2 == 0 else "SELL",
+                "color": "green" if index % 2 == 0 else "red",
+            }
+            for index in range(54)
+        ]
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "extract_candle_tracks_adaptive_v3",
+        fake_adaptive_extract,
+    )
+    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+        Image.new("RGB", (960, 508), color=(20, 26, 38)),
+        cache_key="pocket-live|M5|USD/CAD OTC|selector_v3_current_pair|960x508",
+    )
+
+    audit = cast(Mapping[str, Any], metadata["causal_lane_selection"])
+    assert scan_bounds == [None, (0.50, 0.82)]
+    assert rows == []
+    assert audit["selected_lane"] == "ambiguous_fail_closed"
+    assert audit["current_endpoint_unproven"] is True
+    assert audit["selection_reason"] == "current_chart_endpoint_unproven_fail_closed"
 
 
 def test_pair_a_to_pair_b_full_refresh_keeps_pair_b_on_causal_right_lane(
@@ -13728,9 +13779,12 @@ def test_pair_a_to_pair_b_full_refresh_keeps_pair_b_on_causal_right_lane(
         del minimum_track_length
         if phase["pair"] == "A":
             return tracks(520, 12, 8)
-        if x_bounds == (0.40, 0.92):
+        if x_bounds == (0.50, 0.82):
             return tracks(500, 12, 10)
-        return tracks(40, 27, 8)
+        # Reproduce the live pair-switch defect: pair B has a convincing long
+        # historical lane ending just beyond the old 45% shortcut, while its
+        # actual current candles continue in the bounded right lane.
+        return tracks(40, 54, 8)
 
     monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
     image = Image.new("RGB", (960, 508), color=(20, 26, 38))

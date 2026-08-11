@@ -20037,21 +20037,68 @@ class PhoenixGuardWindowTrackingAdapter:
             return max(centers, default=0.0)
 
         default_latest_x = latest_center_x(default_tracks)
-        right_scan_attempted = bool(not default_tracks or default_latest_x < float(image_width) * 0.45)
+        default_centers = sorted(
+            float(
+                row.get(
+                    "center_x_px",
+                    row.get("center_x", 0.0),
+                )
+                or 0.0
+            )
+            for row in default_tracks
+        )
+        default_spacings = [
+            right - left
+            for left, right in zip(default_centers, default_centers[1:])
+            if right - left > 1.0
+        ]
+        default_median_spacing = (
+            float(np.median(np.asarray(default_spacings, dtype=np.float32)))
+            if default_spacings
+            else max(4.0, float(image_width) * 0.008)
+        )
+        # PocketOption leaves a forward-time area to the right of the forming
+        # candle. Depending on zoom and pair, the causal edge usually lies near
+        # 50-65% of the captured tab rather than at the image border. The old
+        # 45% shortcut accepted a long historical lane ending near 48% and
+        # never searched for the actual candles continuing around 59%. Every
+        # lane below the conservative scan boundary must therefore receive the
+        # bounded right-side scan before geometry can be published.
+        current_region_scan_ratio = 0.58
+        minimum_current_endpoint_ratio = 0.50
+        minimum_endpoint_lead_ratio = 0.055
+        minimum_endpoint_lead_px = max(
+            float(image_width) * minimum_endpoint_lead_ratio,
+            default_median_spacing * 4.0,
+        )
+        default_endpoint_proven = bool(
+            default_tracks
+            and default_latest_x
+            >= float(image_width) * minimum_current_endpoint_ratio
+        )
+        right_scan_attempted = bool(
+            not default_tracks
+            or default_latest_x < float(image_width) * current_region_scan_ratio
+        )
         right_tracks: list[dict[str, Any]] = []
         if right_scan_attempted:
             right_tracks = extract_candle_tracks_adaptive_v3(
                 arr,
-                x_bounds=(0.40, 0.92),
+                # Start beyond the dense historical lane. A 40% start still
+                # allowed that longer lattice to win the adaptive ranking and
+                # returned x=48.9% again; the focused band recovers the actual
+                # current candles at x=50-59% while excluding broker controls.
+                x_bounds=(0.50, 0.82),
                 minimum_track_length=6,
             )
         right_latest_x = latest_center_x(right_tracks)
         right_candidate_disjoint = bool(
             right_tracks
-            and right_latest_x >= float(image_width) * 0.50
+            and right_latest_x
+            >= float(image_width) * minimum_current_endpoint_ratio
             and (
                 not default_tracks
-                or right_latest_x - default_latest_x > float(image_width) * 0.12
+                or right_latest_x - default_latest_x > minimum_endpoint_lead_px
             )
         )
         right_candidate_valid = bool(
@@ -20066,18 +20113,22 @@ class PhoenixGuardWindowTrackingAdapter:
             right_candidate_disjoint
             and 0 < len(right_tracks) < 8
         )
+        current_endpoint_unproven = bool(
+            not right_candidate_valid
+            and not default_endpoint_proven
+        )
         shared_tracks = (
             right_tracks
             if right_candidate_valid
             else []
-            if right_candidate_ambiguous
+            if right_candidate_ambiguous or current_endpoint_unproven
             else default_tracks
         )
         selected_lane = (
             "causal_right"
             if right_candidate_valid
             else "ambiguous_fail_closed"
-            if right_candidate_ambiguous
+            if right_candidate_ambiguous or current_endpoint_unproven
             else "default"
         )
         if right_candidate_valid:
@@ -20086,9 +20137,11 @@ class PhoenixGuardWindowTrackingAdapter:
             selection_reason = "default_lane_reaches_current_chart_edge"
         elif right_candidate_ambiguous:
             selection_reason = "disjoint_right_lane_track_underflow_fail_closed"
+        elif current_endpoint_unproven:
+            selection_reason = "current_chart_endpoint_unproven_fail_closed"
         elif len(right_tracks) < 8:
             selection_reason = "right_candidate_track_underflow"
-        elif right_latest_x < float(image_width) * 0.50:
+        elif right_latest_x < float(image_width) * minimum_current_endpoint_ratio:
             selection_reason = "right_candidate_does_not_reach_current_region"
         else:
             selection_reason = "right_candidate_not_far_enough_ahead"
@@ -20101,15 +20154,20 @@ class PhoenixGuardWindowTrackingAdapter:
                 "default_track_count": int(len(default_tracks)),
                 "default_latest_x_px": round(default_latest_x, 3),
                 "default_latest_x_norm": round(default_latest_x / float(image_width), 6),
-                "right_candidate_bounds": [0.40, 0.92],
+                "right_candidate_bounds": [0.50, 0.82],
                 "right_candidate_track_count": int(len(right_tracks)),
                 "right_candidate_latest_x_px": round(right_latest_x, 3),
                 "right_candidate_latest_x_norm": round(right_latest_x / float(image_width), 6),
                 "right_candidate_disjoint": right_candidate_disjoint,
                 "right_candidate_ambiguous": right_candidate_ambiguous,
+                "default_endpoint_proven": default_endpoint_proven,
+                "current_endpoint_unproven": current_endpoint_unproven,
+                "current_region_scan_ratio": current_region_scan_ratio,
                 "minimum_right_track_count": 8,
-                "minimum_right_endpoint_norm": 0.50,
-                "minimum_endpoint_lead_norm": 0.12,
+                "minimum_right_endpoint_norm": minimum_current_endpoint_ratio,
+                "minimum_endpoint_lead_norm": minimum_endpoint_lead_ratio,
+                "minimum_endpoint_lead_px": round(minimum_endpoint_lead_px, 3),
+                "default_median_spacing_px": round(default_median_spacing, 3),
             }
         )
         tracks: list[dict[str, Any]] = []

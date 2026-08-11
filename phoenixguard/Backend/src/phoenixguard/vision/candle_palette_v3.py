@@ -349,10 +349,16 @@ def _regular_path(
         for predecessor in range(index - 1, -1, -1):
             left = rows[predecessor]
             delta_x = center_x - float(left["center_x_px"])
-            if delta_x > expected_gap * 4.45:
+            # A broker expiry marker, grid label, or compressed color run can
+            # hide several consecutive candle bodies while the wick sequence
+            # remains causal. The former four-candle ceiling split one visible
+            # chart into a long historical lane and a detached live lane. Keep
+            # the bridge bounded to five missing candles and retain the y-jump,
+            # palette, spacing-residual, and OHLC-continuity gates below.
+            if delta_x > expected_gap * 6.45:
                 break
             multiple = int(round(delta_x / expected_gap))
-            if multiple < 1 or multiple > 4:
+            if multiple < 1 or multiple > 6:
                 continue
             residual = abs(delta_x - multiple * expected_gap)
             if residual > tolerance:

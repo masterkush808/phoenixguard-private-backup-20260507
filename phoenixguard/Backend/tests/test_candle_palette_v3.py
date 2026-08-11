@@ -144,6 +144,30 @@ def test_track_ids_and_x_coordinates_are_strictly_ordered() -> None:
     assert _all_increasing([float(row["center_x_px"]) for row in tracks])
 
 
+def test_causal_track_bridges_five_temporarily_hidden_candles() -> None:
+    image, _directions, expected_centers = _synthetic_chart(
+        buy_palette="green",
+        sell_palette="magenta",
+        count=30,
+    )
+    # Simulate an expiry marker or chart annotation hiding five complete candle
+    # bodies between a long historical run and the still-visible current edge.
+    for center in expected_centers[20:25]:
+        x = int(center)
+        image[:, x - 4 : x + 5] = 18
+
+    tracks = extract_candle_tracks_v3(
+        image,
+        roi_bounds=(5, 10, 355, 250),
+        minimum_track_length=6,
+    )
+    centers = [float(row["center_x_px"]) for row in tracks]
+
+    assert centers[:20] == expected_centers[:20]
+    assert centers[-5:] == expected_centers[25:]
+    assert len(centers) == 25
+
+
 def test_palette_hypotheses_reject_a_larger_incoherent_blue_ui_lattice() -> None:
     chart, expected_directions, expected_centers = _synthetic_chart(
         buy_palette="green",
