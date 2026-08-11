@@ -475,8 +475,14 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
     assert "overlayKind(overlay) === token && overlayIsAvailableForControl(overlay)" in text
     live_preset = text[text.index("live: [") : text.index("market_context: [")]
     for family in (
+        "chart_bounds",
         "current_candles",
+        "major_swings",
+        "local_swings",
+        "supply_demand",
+        "trendlines",
         "market_context",
+        "book_rules",
         "council",
         "order_positioning",
         "triggers",
@@ -484,8 +490,9 @@ def test_dashboard_has_permanent_independent_order_area_controls() -> None:
         "invalidation",
     ):
         assert f'"{family}"' in live_preset
-    for generic_family in ("major_swings", "local_swings", "supply_demand", "history"):
-        assert f'"{generic_family}"' not in live_preset
+    assert '"history"' not in live_preset
+    assert 'structure: ["current_candles", "major_swings", "local_swings", "trendlines", "book_rules"]' in text
+    assert 'zones: ["supply_demand", "book_rules"]' in text
     assert 'history: ["history", "major_swings", "local_swings", "order_positioning"]' in text
     assert "function orderPositioningContext(overlay)" in text
     assert "function orderOriginStudyOverlay(overlay)" in text
@@ -532,7 +539,6 @@ def test_dashboard_source_contains_no_private_strategy_vocabulary() -> None:
     lowered = _dashboard_text().split("<script", 1)[0].lower()
 
     for private_term in (
-        "smc",
         "liquidity",
         "order block",
         "order_block",

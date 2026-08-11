@@ -3163,7 +3163,7 @@
       <section class="book-rule-signal" id="book-rule-architecture-panel" data-action="WAIT" data-priority="HIGH" aria-label="High-priority current book-rule action live V3" aria-live="polite">
         <header class="book-rule-head">
           <h3 class="book-rule-title">Current scenario action and book rules - live V3</h3>
-          <span class="book-rule-priority" id="book-rule-status">High priority - waiting for current closed-candle rules</span>
+          <span class="book-rule-priority" id="book-rule-status">High priority - Primary signal provider - waiting for current closed-candle rules</span>
         </header>
         <div class="book-rule-core">
           <div class="book-rule-action">
@@ -3471,12 +3471,16 @@
     ]);
     const OVERLAY_PRESETS = Object.freeze({
       all: ALL_OVERLAY_FAMILIES,
-      // The live desk is the operator's configured semantic study: current
-      // price, reaction objects, combined analysis, and actionable plan
-      // geometry. Generic H1/H2 swing boxes, wide support/resistance
-      // references, and replay rows stay in Structure/Zones/History.
+      // The live desk exposes every current-chart evidence family. Specialized
+      // views remain useful for isolation, but they must never make accepted
+      // CV geometry appear absent from the default operator workspace.
       live: [
+        "chart_bounds",
         "current_candles",
+        "major_swings",
+        "local_swings",
+        "supply_demand",
+        "trendlines",
         "market_context",
         "book_rules",
         "council",
@@ -3486,8 +3490,8 @@
         "invalidation",
       ],
       market_context: ["market_context", "book_rules", "supply_demand", "order_positioning"],
-      structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
-      zones: ["supply_demand"],
+      structure: ["current_candles", "major_swings", "local_swings", "trendlines", "book_rules"],
+      zones: ["supply_demand", "book_rules"],
       plan: ["book_rules", "council", "order_positioning", "triggers", "targets", "invalidation"],
       history: ["history", "major_swings", "local_swings", "order_positioning"],
     });
@@ -5651,7 +5655,7 @@
       if (!Object.keys(control).length) {
         const panel = document.getElementById("book-rule-architecture-panel");
         if (panel) panel.dataset.action = "WAIT";
-        setText("book-rule-status", "High priority - waiting for current frame-locked rules");
+        setText("book-rule-status", "High priority - Primary signal provider - waiting for current frame-locked rules");
         setText("book-rule-action", "WAIT");
         setText("book-rule-action-detail", "No same-frame, pair-locked book action is published.");
         setText("book-rule-scenario", "Waiting for the current closed-candle rule stack");
@@ -5691,7 +5695,7 @@
         : `${confidence} book confidence - ${String(control.playbook || "UNRESOLVED").replace(/_/g, " ")}`;
 
       if (panel) panel.dataset.action = ["BUY", "SELL", "AVOID"].includes(action) ? action : "WAIT";
-      setText("book-rule-status", `High priority - primary rule provider - ${boundedBookText(String(control.status || "ACTIVE").replace(/_/g, " "), "ACTIVE", 32)}`);
+      setText("book-rule-status", `High priority - Primary signal provider - ${boundedBookText(String(control.status || "ACTIVE").replace(/_/g, " "), "ACTIVE", 32)}`);
       setText("book-rule-action", action);
       setText("book-rule-action-detail", boundedBookText(detail, "Current book action is unresolved.", 120));
       setText("book-rule-scenario", boundedBookText(control.scenario, "No complete directional book setup is aligned.", 180));

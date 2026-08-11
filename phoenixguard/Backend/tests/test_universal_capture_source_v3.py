@@ -120,6 +120,104 @@ def test_external_analysis_exception_clears_processing_and_allows_next_frame(
         service.shutdown()
 
 
+def test_rejected_study_healthy_heartbeat_releases_lease_for_fresh_recapture(
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    service = _service_with_session(tmp_path)
+    try:
+        claim = _claim_browser_source(
+            service,
+            source_id="edge-chart",
+            sequence_id="seq-study-reclaim",
+        )
+        monkeypatch.setattr(
+            service,
+            "_capture_and_analyze",
+            lambda *args, **kwargs: False,
+        )
+        now_ms = int(time.time() * 1000)
+        metadata = {
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+            "source_generation": claim["source_generation"],
+            "source_lease_id": claim["source_lease_id"],
+            "source_render_fresh": True,
+        }
+        failed = service.ingest_external_frame(
+            "universal-live",
+            Image.new("RGB", (640, 360), (15, 20, 30)),
+            source_id="edge-chart",
+            sequence_id="seq-study-reclaim",
+            capture_epoch_ms=now_ms,
+            frame_id=1,
+            metadata=metadata,
+        )
+        assert failed["frame_ingest"]["accepted"] is False
+        assert failed["frame_ingest"]["failure_reason_code"] == (
+            "FRAME_STUDY_NOT_ACCEPTED"
+        )
+
+        released = service.heartbeat_external_source(
+            "universal-live",
+            source_id="edge-chart",
+            sequence_id="seq-study-reclaim",
+            source_generation=int(claim["source_generation"]),
+            source_lease_id=str(claim["source_lease_id"]),
+            capture_epoch_ms=now_ms + 1_000,
+            source_render_fresh=True,
+            capture_status="active",
+            decoder_frame_age_ms=10,
+        )
+        assert released["state"] == "NO_SOURCE"
+        assert released["reason_code"] == "SOURCE_RECLAIM_REQUIRED"
+        assert released["source_id"] == ""
+        assert released["sequence_id"] == ""
+        assert released["source_generation"] == 0
+        assert "source_lease_id" not in released
+        assert released["stream"]["study_reclaim_attempts"] == 1
+
+        reclaimed = service.claim_external_source(
+            "universal-live",
+            source_id="edge-chart",
+            sequence_id="seq-study-reclaim",
+            source_type="browser_tab_roi_capture",
+            selection_id="selection-seq-study-reclaim",
+            display_name="TradingView chart",
+            coordinate_space="edge_tab_roi_v1",
+            expected_source_control=released,
+        )
+        assert reclaimed["state"] == "VALIDATING"
+        assert reclaimed["source_generation"] == 1
+        assert reclaimed["source_lease_id"] != claim["source_lease_id"]
+        assert reclaimed["stream"]["study_reclaim_attempts"] == 1
+
+        monkeypatch.setattr(service, "_capture_and_analyze", _accept_capture)
+        recovered = service.ingest_external_frame(
+            "universal-live",
+            Image.new("RGB", (640, 360), (15, 20, 30)),
+            source_id="edge-chart",
+            sequence_id="seq-study-reclaim",
+            capture_epoch_ms=now_ms + 2_000,
+            frame_id=1,
+            metadata={
+                **metadata,
+                "source_generation": reclaimed["source_generation"],
+                "source_lease_id": reclaimed["source_lease_id"],
+            },
+        )
+        assert recovered["frame_ingest"]["accepted"] is True
+        assert recovered["capture_source_v3"]["state"] == "LIVE"
+        assert (
+            recovered["capture_source_v3"]["stream"][
+                "study_reclaim_attempts"
+            ]
+            == 0
+        )
+    finally:
+        service.shutdown()
+
+
 def test_source_claim_switch_and_kill_are_generation_fenced(tmp_path: Any) -> None:
     service = _service_with_session(tmp_path)
     try:

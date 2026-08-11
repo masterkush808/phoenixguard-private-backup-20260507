@@ -965,8 +965,58 @@ def _analysis_mailbox_worker(mailbox: FrameAnalysisMailbox) -> None:
                 mailbox.worker = None
             return
         outcome = FrameAnalysisOutcome(state="discarded")
+        transient_retry_count = 0
         try:
-            outcome = _run_analysis_job(mailbox, job)
+            while True:
+                outcome = _run_analysis_job(mailbox, job)
+                retry_limit = _env_int(
+                    "PHOENIXGUARD_FRAME_STUDY_TRANSIENT_RETRY_LIMIT",
+                    2,
+                    0,
+                )
+                if not (
+                    outcome.state == "failed"
+                    and outcome.reason_code == "FRAME_STUDY_NOT_ACCEPTED"
+                    and transient_retry_count < retry_limit
+                ):
+                    break
+                with _ANALYSIS_MAILBOX_LOCK:
+                    retry_is_current = bool(
+                        not mailbox.retired
+                        and mailbox.active_job is job
+                        and mailbox.pending_job is None
+                        and job.mailbox_epoch == mailbox.epoch
+                        and job.identity_key == mailbox.identity_key
+                    )
+                if not retry_is_current:
+                    break
+                base_delay_ms = _env_int(
+                    "PHOENIXGUARD_FRAME_STUDY_TRANSIENT_RETRY_DELAY_MS",
+                    750,
+                    1,
+                )
+                retry_delay_ms = min(
+                    5_000,
+                    base_delay_ms * (2**transient_retry_count),
+                )
+                transient_retry_count += 1
+                _audit_async_analysis_event(
+                    "frame_analysis_retry_scheduled",
+                    job,
+                    reason_code=outcome.reason_code,
+                    status_code=0,
+                )
+                time.sleep(retry_delay_ms / 1000.0)
+                with _ANALYSIS_MAILBOX_LOCK:
+                    retry_is_current = bool(
+                        not mailbox.retired
+                        and mailbox.active_job is job
+                        and mailbox.pending_job is None
+                        and job.mailbox_epoch == mailbox.epoch
+                        and job.identity_key == mailbox.identity_key
+                    )
+                if not retry_is_current:
+                    break
         finally:
             job.image.close()
         with _ANALYSIS_MAILBOX_LOCK:
@@ -1892,6 +1942,22 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 }
                 raise HTTPException(status_code=lease_status, detail=detail) from exc
             raise
+        if (
+            str(source_state.get("state", "") or "").strip().upper()
+            == "NO_SOURCE"
+            and str(source_state.get("reason_code", "") or "").strip().upper()
+            == "SOURCE_RECLAIM_REQUIRED"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason_code": "SOURCE_RECLAIM_REQUIRED",
+                    "message": (
+                        "The failed source lease was released. Reclaim the "
+                        "locked chart and submit one fresh frame."
+                    ),
+                },
+            )
         return {
             "schema_version": "PG_CAPTURE_SOURCE_HEARTBEAT_ACCEPTED_V1",
             "accepted": True,

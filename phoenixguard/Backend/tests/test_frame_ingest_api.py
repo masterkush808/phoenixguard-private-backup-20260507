@@ -222,6 +222,74 @@ class _FakeFrameTracker:
         }
 
 
+class _HeartbeatReclaimFrameTracker(_FakeFrameTracker):
+    def heartbeat_external_source(
+        self,
+        session_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        super().heartbeat_external_source(session_id, **kwargs)
+        self.capture_source_v3 = {
+            "schema_version": "PG_CAPTURE_SOURCE_V3",
+            "state_revision": 2,
+            "state": "NO_SOURCE",
+            "source_id": "",
+            "source_generation": 0,
+            "source_type": "",
+            "coordinate_space": "",
+            "selection_id": "",
+            "sequence_id": "",
+            "reason_code": "SOURCE_RECLAIM_REQUIRED",
+        }
+        return dict(self.capture_source_v3)
+
+
+def test_healthy_heartbeat_returns_reclaim_conflict_after_failed_lease_release(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    tracker = _HeartbeatReclaimFrameTracker()
+    client = _client(tracker)
+    headers = {"Authorization": "Bearer secret-token"}
+    claim_response = client.post(
+        "/v1/mobile/frame-ingest/sessions/reclaim-live/source-control/claim",
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "reclaim-sequence",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "reclaim-selection",
+            "display_name": "Reclaim chart",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    )
+    assert claim_response.status_code == 201
+    claim = claim_response.json()
+
+    heartbeat = client.post(
+        "/v1/mobile/frame-ingest/sessions/reclaim-live/source-control/heartbeat",
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "reclaim-sequence",
+            "source_generation": claim["source_generation"],
+            "source_lease_id": claim["source_lease_id"],
+            "capture_epoch_ms": int(time.time() * 1000),
+            "source_render_fresh": True,
+            "material_change_pending": False,
+            "capture_status": "active",
+            "decoder_frame_age_ms": 10,
+        },
+    )
+
+    assert heartbeat.status_code == 409
+    assert heartbeat.json()["detail"]["reason_code"] == (
+        "SOURCE_RECLAIM_REQUIRED"
+    )
+    assert tracker.capture_source_v3["state"] == "NO_SOURCE"
+
+
 class _FakeSourceLeaseError(RuntimeError):
     def __init__(self, status_code: int, reason_code: str) -> None:
         self.status_code = int(status_code)
@@ -343,6 +411,26 @@ class _ProcessingFailOnceFrameTracker(_FakeFrameTracker):
             "last_frame_id": int(stream.get("last_frame_id", 0) or 0),
             "stream": stream,
         }
+
+
+class _StudyRejectOnceFrameTracker(_FakeFrameTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reject_next_study = True
+        self.attempted_frame_ids: list[int] = []
+
+    def ingest_external_frame(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        frame_id = int(kwargs.get("frame_id", 0) or 0)
+        self.attempted_frame_ids.append(frame_id)
+        if self.reject_next_study:
+            self.reject_next_study = False
+            return {
+                "frame_ingest": {
+                    "accepted": False,
+                    "failure_reason_code": "FRAME_STUDY_NOT_ACCEPTED",
+                }
+            }
+        return super().ingest_external_frame(*args, **kwargs)
 
 
 class _LateLeaseFailureTracker(_FakeFrameTracker):
@@ -1383,6 +1471,73 @@ def test_async_failure_clears_exact_processing_frame_and_allows_retry(
     assert [call["frame_id"] for call in tracker.calls] == [2]
     audit_text = audit_log.read_text(encoding="utf-8")
     assert "do-not-publish" not in audit_text
+
+
+def test_transient_study_rejection_retries_same_frame_without_new_upload(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "1")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_STUDY_TRANSIENT_RETRY_DELAY_MS", "1")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
+    tracker = _StudyRejectOnceFrameTracker()
+    client = _client(tracker)
+    headers = {"Authorization": "Bearer secret-token"}
+    claim_response = client.post(
+        "/v1/mobile/frame-ingest/sessions/study-retry-live/source-control/claim",
+        headers=headers,
+        json={
+            "source_id": "edge-roi",
+            "sequence_id": "study-retry-sequence",
+            "source_type": "browser_tab_roi_capture",
+            "selection_id": "study-retry-selection",
+            "display_name": "Study retry chart",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    )
+    assert claim_response.status_code == 201
+    claim = claim_response.json()
+    accepted = client.post(
+        "/v1/mobile/frame-ingest/sessions/study-retry-live/frames",
+        headers=headers,
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            "source_id": "edge-roi",
+            "sequence_id": "study-retry-sequence",
+            "capture_epoch_ms": str(int(time.time() * 1000)),
+            "frame_id": "1",
+            "source_generation": str(claim["source_generation"]),
+            "source_lease_id": str(claim["source_lease_id"]),
+            "metadata_json": json.dumps(
+                {
+                    "source_type": "browser_tab_roi_capture",
+                    "coordinate_space": "edge_tab_roi_v1",
+                    "source_render_fresh": True,
+                }
+            ),
+        },
+    )
+    assert accepted.status_code == 202
+
+    def status_payload() -> dict[str, Any]:
+        response = client.get(
+            "/v1/mobile/frame-ingest/sessions/study-retry-live/status",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    assert _wait_until(lambda: status_payload()["last_completed_frame_id"] == 1)
+    recovered = status_payload()
+    assert recovered["analysis_busy"] is False
+    assert recovered["last_failed_frame_id"] is None
+    assert recovered["last_failure_reason_code"] == ""
+    assert tracker.attempted_frame_ids == [1, 1]
+    assert [call["frame_id"] for call in tracker.calls] == [1]
+    assert "frame_analysis_retry_scheduled" in audit_log.read_text(encoding="utf-8")
 
 
 def test_worker_lease_validation_exception_is_a_visible_bounded_failure(

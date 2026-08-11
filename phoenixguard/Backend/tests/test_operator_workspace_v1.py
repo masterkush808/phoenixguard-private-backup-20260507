@@ -7046,6 +7046,12 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
         "overlay_frame_id": 14,
         "full_overlay_frame_id": 14,
         "model_vote_frame_id": 14,
+        "symbol": "USD/JPY OTC",
+        "timeframe": "M5",
+        "market_selector_visual_fingerprint": "selector_v3_usdjpyotc_frame_14",
+        "instrument_identity_status": "LOCKED",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
         "tracking_enabled": True,
         "last_capture_epoch": 99.0,
         "last_display_surface_signature": "window-sig-14",
@@ -7071,6 +7077,31 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
         "role": "inner_support",
         "bounds": [420.0, 310.0, 760.0, 520.0],
         "line_points": [[420.0, 520.0], [760.0, 310.0]],
+        "touch_points": [[420.0, 520.0], [760.0, 310.0]],
+        "touch_count": 2,
+        "anchor_evidence_status": "VALID",
+        "anchor_evidence": {
+            "valid": True,
+            "candle_indices": [10, 20],
+            "touch_points": [[420.0, 520.0], [760.0, 310.0]],
+        },
+        "anchor_quality": {
+            "has_wick_anchor": True,
+            "inside_plot_area": True,
+            "matches_symbol_timeframe": True,
+            "matches_selector_fingerprint": True,
+            "chart_transform_valid": True,
+        },
+        "trendline_validation": "wick_anchor_no_obstruction_closed_body_validation",
+        "validation_reason": "two exact wick anchors bind the line",
+        "symbol": "USD/JPY OTC",
+        "timeframe": "M5",
+        "market_selector_visual_fingerprint": "selector_v3_usdjpyotc_frame_14",
+        "instrument_identity_status": "LOCKED",
+        "anchor_candles": [10, 20],
+        "anchor_candle_indices": [10, 20],
+        "sequence_id": "sequence-frame-14",
+        "chart_transform_id": "ct-frame-14",
         "frame_id": 14,
         "coordinate_mode": "CHART_IMAGE_SPACE",
         "lifecycle_state": "ACTIVE",
@@ -7145,6 +7176,11 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
         workspace = cast(_OperatorWorkspaceView, response.json())
         assert workspace["surface"]["frame_id"] == 14
         assert [row["family"] for row in workspace["overlays"]] == ["trendlines"]
+        assert workspace["overlays"][0]["geometry_contract_accepted"] is True
+        assert workspace["overlays"][0]["anchor_wick_points"] == [
+            [420.0, 520.0],
+            [760.0, 310.0],
+        ]
         assert {row["frame_id"] for row in workspace["overlays"]} == {14}
         assert all(row["lifecycle"] == "current" for row in workspace["overlays"])
 

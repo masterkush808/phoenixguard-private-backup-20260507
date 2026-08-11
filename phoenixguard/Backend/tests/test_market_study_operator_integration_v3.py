@@ -10,7 +10,10 @@ from phoenixguard.mobile_api.live_state_v3 import (
     _compact_latest_signal,
     _compact_tracking_summary,
 )
-from phoenixguard.mobile_api.app import _bounded_operator_projection_context
+from phoenixguard.mobile_api.app import (
+    _bounded_operator_projection_context,
+    _operator_projection_input_for_current_frame,
+)
 from phoenixguard.mobile_api.operator_workspace_v1 import build_operator_workspace_v1
 from phoenixguard.mobile_api.window_tracker import (
     _compact_live_state_latest_signal_payload,
@@ -595,6 +598,53 @@ def test_operator_projection_context_keeps_live_and_automatic_history() -> None:
         }
     ]
     assert bounded_any["history"] == bounded_any["recent_studies"]
+
+
+def test_atomic_book_frame_keeps_same_frame_compact_cv_overlays_only() -> None:
+    compact = {
+        "session_id": "same-frame-overlay-merge",
+        "display_frame_id": 14,
+        "overlays": {
+            "objects": [
+                {
+                    "overlay_id": "cv-demand-14",
+                    "type": "DEMAND_ZONE",
+                    "frame_id": 14,
+                }
+            ]
+        },
+    }
+    session = {
+        "session_id": "same-frame-overlay-merge",
+        "display_frame_id": 14,
+        "tracking_summary": {
+            "book_rule_action_signal_v3": {"frame_id": 14},
+            "book_rule_overlay_rows_v3": [
+                {"id": "book-zone-14", "frame_id": 14}
+            ],
+        },
+    }
+
+    same_frame = _operator_projection_input_for_current_frame(
+        {}, compact, session
+    )
+    assert cast(dict[str, Any], same_frame["overlays"])["objects"] == [
+        {"overlay_id": "cv-demand-14", "type": "DEMAND_ZONE", "frame_id": 14}
+    ]
+    assert same_frame["_book_rule_overlay_rows_v3"] == [
+        {"id": "book-zone-14", "frame_id": 14}
+    ]
+
+    newer_compact = cast(dict[str, Any], json.loads(json.dumps(compact)))
+    newer_compact["display_frame_id"] = 15
+    cast(dict[str, Any], newer_compact["overlays"])["objects"][0][
+        "frame_id"
+    ] = 15
+    isolated = _operator_projection_input_for_current_frame(
+        {}, newer_compact, session
+    )
+    assert isolated["display_frame_id"] == 14
+    assert "overlays" not in isolated
 
 
 def test_operator_projection_keeps_nested_study_evidence_without_private_payload() -> None:

@@ -2930,6 +2930,11 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             "BOOK_RULE_ZONE",
             "BOOK_RULE_CANDLE",
         }
+        is_trendline_overlay = raw_type in {
+            "SUPPORT_TRENDLINE",
+            "RESISTANCE_TRENDLINE",
+            "INNER_TRENDLINE",
+        }
         layer = _text(overlay.get("layer"), "").lower()
         trusted_positioning_row = bool(
             source_object_id in trusted_positioning_object_ids
@@ -3168,6 +3173,10 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         book_anchor_wick_points: list[list[float]] = []
         book_touch_count = 0
         book_geometry_role = ""
+        trendline_chart_bounds: list[float] = []
+        trendline_anchor_wick_points: list[list[float]] = []
+        trendline_touch_count = 0
+        trendline_contract_accepted = False
         if latest_candle:
             # A one-point close anchor is intentionally published only for the
             # latest candle and only when it is corroborated by this frame's
@@ -3187,6 +3196,84 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             # A label with no verified chart geometry is exactly the floating
             # overlay failure this contract is designed to prevent.
             continue
+        if is_trendline_overlay:
+            anchor_evidence = _mapping(overlay.get("anchor_evidence"))
+            anchor_quality = _mapping(overlay.get("anchor_quality"))
+            trendline_touch_points = _point_pairs(
+                overlay.get("touch_points") or anchor_evidence.get("touch_points")
+            )
+            explicit_anchor_contract = bool(
+                _explicit_bool(anchor_evidence.get("valid")) is True
+                and _text(overlay.get("anchor_evidence_status")).upper()
+                == "VALID"
+                and anchor_quality
+            )
+            if explicit_anchor_contract:
+                trendline_anchor_wick_points = trendline_touch_points[:2]
+                trendline_touch_count = max(
+                    _integer(overlay.get("touch_count")),
+                    len(trendline_touch_points),
+                )
+                declared_chart_bounds = _bounds(chart_plane_bounds)
+                trendline_chart_bounds = (
+                    declared_chart_bounds
+                    if declared_chart_bounds
+                    and book_geometry_is_inside_declared_chart(
+                        accepted_bounds=declared_chart_bounds,
+                        bounds=public_bounds,
+                        points=public_points,
+                        line_points=public_line_points,
+                    )
+                    else list(public_bounds)
+                )
+                tolerance = 0.75
+                anchors_bind_line = bool(
+                    len(public_line_points) >= 2
+                    and len(trendline_anchor_wick_points) == 2
+                    and all(
+                        abs(
+                            public_line_points[index][axis]
+                            - trendline_anchor_wick_points[index][axis]
+                        )
+                        <= tolerance
+                        for index in range(2)
+                        for axis in range(2)
+                    )
+                )
+                trendline_contract_accepted = bool(
+                    coordinate_space == "chart"
+                    and coordinate_units == "pixels"
+                    and len(trendline_chart_bounds) == 4
+                    and _explicit_bool(anchor_evidence.get("valid")) is True
+                    and _text(overlay.get("anchor_evidence_status")).upper()
+                    == "VALID"
+                    and _explicit_bool(anchor_quality.get("has_wick_anchor"))
+                    is True
+                    and _explicit_bool(anchor_quality.get("inside_plot_area"))
+                    is True
+                    and _explicit_bool(
+                        anchor_quality.get("matches_symbol_timeframe")
+                    )
+                    is True
+                    and _explicit_bool(
+                        anchor_quality.get("matches_selector_fingerprint")
+                    )
+                    is True
+                    and _explicit_bool(
+                        anchor_quality.get("chart_transform_valid")
+                    )
+                    is True
+                    and anchors_bind_line
+                    and trendline_touch_count >= 2
+                    and book_geometry_is_inside_declared_chart(
+                        accepted_bounds=trendline_chart_bounds,
+                        bounds=public_bounds,
+                        points=public_points,
+                        line_points=public_line_points,
+                    )
+                )
+                if not trendline_contract_accepted:
+                    continue
         if is_book_rule_overlay:
             # Book-rule marks are live execution-facing evidence, so they use a
             # stricter contract than generic context geometry.  No selector
@@ -3418,6 +3505,26 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                     "anchor_wick_points": book_anchor_wick_points,
                     "touch_count": book_touch_count,
                     "strict_third_touch_confirmed": True,
+                }
+            )
+        if is_trendline_overlay and trendline_contract_accepted:
+            public_overlay.update(
+                {
+                    "geometry_contract_accepted": True,
+                    "geometry_status": "VISIBLE_TO_LATEST_X",
+                    "chart_bounds": trendline_chart_bounds,
+                    "anchor_wick_points": trendline_anchor_wick_points,
+                    "touch_count": trendline_touch_count,
+                    "trendline_validation": _safe_public_text(
+                        overlay.get("trendline_validation"),
+                        "Wick-anchor validation",
+                        limit=96,
+                    ),
+                    "validation_reason": _safe_public_text(
+                        overlay.get("validation_reason"),
+                        "Two wick anchors bind the visible line",
+                        limit=160,
+                    ),
                 }
             )
         public_overlay.update(

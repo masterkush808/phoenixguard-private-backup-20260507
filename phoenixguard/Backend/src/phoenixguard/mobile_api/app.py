@@ -175,6 +175,7 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
             "local_swings",
             "supply_demand",
             "trendlines",
+            "order_positioning",
             "triggers",
             "targets",
             "invalidation",
@@ -188,10 +189,21 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
     ),
     "zones": frozenset({"supply_demand", "book_rules"}),
     "plan": frozenset(
-        {"council", "triggers", "targets", "invalidation", "book_rules"}
+        {
+            "council",
+            "order_positioning",
+            "triggers",
+            "targets",
+            "invalidation",
+            "book_rules",
+        }
     ),
-    "market_context": frozenset({"market_context"}),
-    "history": frozenset({"history", "major_swings", "local_swings"}),
+    "market_context": frozenset(
+        {"market_context", "book_rules", "supply_demand", "order_positioning"}
+    ),
+    "history": frozenset(
+        {"history", "major_swings", "local_swings", "order_positioning"}
+    ),
 }
 
 def _env_float_at_least(name: str, default: float, minimum: float) -> float:
@@ -5359,6 +5371,68 @@ def _merge_operator_projection_input(
     return projection_input
 
 
+def _operator_projection_input_for_current_frame(
+    projection_context: Mapping[str, object],
+    compact_live_state: Mapping[str, object],
+    operator_session_snapshot: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep book geometry atomic without discarding same-frame V3 overlays."""
+
+    session_tracking = _mapping_to_plain_dict(
+        operator_session_snapshot.get("tracking_summary")
+    )
+    session_book_signal = _mapping_to_plain_dict(
+        session_tracking.get("book_rule_action_signal_v3")
+    )
+    session_book_rows = _sequence_mappings(
+        session_tracking.get("book_rule_overlay_rows_v3")
+    )
+
+    def projection_frame_id(source: Mapping[str, object]) -> int:
+        return int(
+            _epoch_float(
+                source.get("display_frame_id")
+                or source.get("frame_id")
+                or source.get("chart_frame_id"),
+                0.0,
+            )
+        )
+
+    session_frame_id = projection_frame_id(operator_session_snapshot)
+    compact_frame_id = projection_frame_id(compact_live_state)
+    session_book_frame_id = int(
+        _epoch_float(session_book_signal.get("frame_id"), 0.0)
+    )
+    session_is_atomic_book_frame = bool(
+        session_frame_id > 0
+        and session_book_frame_id == session_frame_id
+        and session_book_rows
+        and all(
+            int(_epoch_float(row.get("frame_id"), 0.0)) == session_frame_id
+            for row in session_book_rows
+        )
+    )
+    if session_is_atomic_book_frame and compact_frame_id != session_frame_id:
+        # A newer capture may already be analyzing. Keep the completed study
+        # bitmap, identity, signal, and book geometry on their older atomic
+        # frame rather than mixing in objects from another picture.
+        return _merge_operator_projection_input(
+            operator_session_snapshot,
+            operator_session_snapshot,
+            operator_session_snapshot,
+        )
+
+    # The normalized compact bundle owns all accepted CV objects. When it is
+    # on the same frame as the book contract, merging it is mandatory: falling
+    # back to the tracker snapshot here silently removes trendlines, zones,
+    # triggers, targets, invalidation, and the current candle.
+    return _merge_operator_projection_input(
+        projection_context,
+        compact_live_state,
+        operator_session_snapshot,
+    )
+
+
 def create_app(
     service: MobileApiService | None = None,
     observer_service: SignalObserverService | None = None,
@@ -6061,9 +6135,13 @@ def create_app(
             "anchor_time_span",
             "anchor_evidence",
             "anchor_evidence_status",
+            "anchor_quality",
             "touch_points",
             "trendline_touch_points",
             "touch_count",
+            "trendline_validation",
+            "validation_reason",
+            "skill_gate",
             "wick_probe_count",
             "line_obstruction_count",
             "body_cross_fraction",
@@ -8011,55 +8089,11 @@ def create_app(
             _apply_compact_overlay_identity(compact_live_state_response(live_state))
         )
         projection_context = _bounded_operator_projection_context(live_state)
-        operator_session_snapshot = read_window_tracker_session(
-            requested_session_id
+        projection_input = _operator_projection_input_for_current_frame(
+            projection_context,
+            compact_live_state,
+            live_state,
         )
-        session_tracking = _mapping_to_plain_dict(
-            operator_session_snapshot.get("tracking_summary")
-        )
-        session_book_signal = _mapping_to_plain_dict(
-            session_tracking.get("book_rule_action_signal_v3")
-        )
-        session_book_rows = _sequence_mappings(
-            session_tracking.get("book_rule_overlay_rows_v3")
-        )
-        session_frame_id = int(
-            _epoch_float(
-                operator_session_snapshot.get("display_frame_id")
-                or operator_session_snapshot.get("chart_frame_id")
-                or operator_session_snapshot.get("frame_id"),
-                0.0,
-            )
-        )
-        session_book_frame_id = int(
-            _epoch_float(session_book_signal.get("frame_id"), 0.0)
-        )
-        session_is_atomic_book_frame = bool(
-            session_frame_id > 0
-            and session_book_frame_id == session_frame_id
-            and session_book_rows
-            and all(
-                int(_epoch_float(row.get("frame_id"), 0.0))
-                == session_frame_id
-                for row in session_book_rows
-            )
-        )
-        if session_is_atomic_book_frame:
-            # A newer capture may already be analyzing while the compact live
-            # projection advances. Keep the latest completed study bitmap,
-            # signal, identity, and book geometry as one atomic authority
-            # instead of crossing their frame lineages.
-            projection_input = _merge_operator_projection_input(
-                operator_session_snapshot,
-                operator_session_snapshot,
-                operator_session_snapshot,
-            )
-        else:
-            projection_input = _merge_operator_projection_input(
-                projection_context,
-                compact_live_state,
-                operator_session_snapshot,
-            )
         operator_state = build_operator_workspace_v1(projection_input)
         projection_source = cast(Mapping[str, object], projection_input)
         visual_observation = _mapping_to_plain_dict(
@@ -8189,7 +8223,7 @@ def create_app(
                 full_projection_input = _merge_operator_projection_input(
                     _bounded_operator_projection_context(full_live_state),
                     full_compact_state,
-                    operator_session_snapshot,
+                    full_live_state,
                 )
                 full_projection_source = cast(
                     Mapping[str, object],

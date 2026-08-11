@@ -32235,6 +32235,17 @@ class ContinuousWindowTrackerService:
         with self._lock:
             payload = self._require_session(normalized_session_id)
             previous = _normalize_capture_source_v3(payload.get("capture_source_v3", {}))
+            previous_stream = _mapping_to_dict(previous.get("stream", {}))
+            study_reclaim_attempts = max(
+                0,
+                int(
+                    _float_or(
+                        previous_stream.get("study_reclaim_attempts", 0),
+                        0.0,
+                    )
+                    or 0
+                ),
+            )
             if conditional_claim:
                 current_public = _public_capture_source_v3(
                     self._capture_source_with_transport_heartbeat_v3(
@@ -32307,6 +32318,7 @@ class ContinuousWindowTrackerService:
                     "accepted_frames": 0,
                     "duplicate_frames": 0,
                     "last_error": "",
+                    "study_reclaim_attempts": study_reclaim_attempts,
                 },
             }
             payload["capture_source_v3"] = source_state
@@ -32733,6 +32745,91 @@ class ContinuousWindowTrackerService:
                 source_type=source_type,
                 coordinate_space=coordinate_space,
             )
+            source_stream = _mapping_to_dict(source.get("stream", {}))
+            study_reclaim_attempts = max(
+                0,
+                int(
+                    _float_or(
+                        source_stream.get("study_reclaim_attempts", 0),
+                        0.0,
+                    )
+                    or 0
+                ),
+            )
+            study_reclaim_limit = _env_int(
+                "PHOENIXGUARD_FRAME_STUDY_LEASE_RECLAIM_LIMIT",
+                2,
+                0,
+            )
+            source_state = str(source.get("state", "") or "").strip().upper()
+            source_reason = str(source.get("reason_code", "") or "").strip().upper()
+            capture_is_healthy = bool(
+                source_render_fresh
+                and str(capture_status or "").strip().lower()
+                in {"active", "pending"}
+                and max(0, int(decoder_frame_age_ms or 0)) <= 20_000
+            )
+            if (
+                source_state == "ERROR"
+                and source_reason == "FRAME_STUDY_NOT_ACCEPTED"
+                and source_stream.get("processing") is not True
+                and capture_is_healthy
+                and study_reclaim_attempts < study_reclaim_limit
+            ):
+                payload = self._require_session(normalized_session_id)
+                released_epoch = _now_epoch()
+                released_stream = {
+                    "study_reclaim_attempts": study_reclaim_attempts + 1,
+                    "last_failed_frame_id": max(
+                        0,
+                        int(
+                            _float_or(
+                                source_stream.get("last_failed_frame_id", 0),
+                                0.0,
+                            )
+                            or 0
+                        ),
+                    ),
+                    "last_failure_reason_code": source_reason,
+                    "last_failure_error_type": str(
+                        source_stream.get("last_failure_error_type", "") or ""
+                    )[:96],
+                    "last_error": (
+                        "The failed frame lease was released for one fresh "
+                        "same-source recapture."
+                    ),
+                }
+                released = {
+                    **_default_capture_source_v3(
+                        state="NO_SOURCE",
+                        message=(
+                            "The failed frame lease was released. The locked "
+                            "chart source must reclaim and submit fresh pixels."
+                        ),
+                    ),
+                    "state_revision": int(source.get("state_revision", 0) or 0)
+                    + 1,
+                    "reason_code": "SOURCE_RECLAIM_REQUIRED",
+                    "updated_at": released_epoch,
+                    "stream": released_stream,
+                }
+                payload["capture_source_v3"] = released
+                payload["status"] = "external_source_reclaim_required"
+                payload["tracking_enabled"] = False
+                self._revoke_capture_source_decision_authority(
+                    payload,
+                    message=str(released["message"]),
+                    reason_code="SOURCE_RECLAIM_REQUIRED",
+                    clear_artifacts=False,
+                )
+                payload["updated_at"] = _epoch_to_utc_iso(released_epoch)
+                payload["__control_write_v3"] = True
+                self._external_source_transport_heartbeats.pop(
+                    normalized_session_id,
+                    None,
+                )
+                self._save_session(payload)
+                return _public_capture_source_v3(released)
             previous = _mapping_to_dict(
                 self._external_source_transport_heartbeats.get(
                     normalized_session_id,
@@ -33613,6 +33710,7 @@ class ContinuousWindowTrackerService:
                 stream["last_analysis_completed_epoch"] = (
                     analysis_completed_epoch
                 )
+                stream["study_reclaim_attempts"] = 0
                 stream["processing"] = False
                 stream["processing_frame_id"] = 0
                 heartbeat = _mapping_to_dict(
