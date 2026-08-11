@@ -18,7 +18,7 @@ def _anchor(**overrides: object) -> dict[str, object]:
         "x_norm": 0.40,
         "y_norm": 0.50,
         "price_norm": 0.50,
-        "event_step_x_norm": 0.025,
+        "event_step_x_norm": 0.006,
         "verified_latest_close": True,
         "source": "TRACKER_LATEST_CLOSE",
     }
@@ -31,7 +31,7 @@ def _ohlc_quantiles() -> tuple[
     dict[str, list[float]],
     dict[str, list[float]],
 ]:
-    base = [
+    base_cycle = [
         0.52,
         0.49,
         0.535,
@@ -44,6 +44,11 @@ def _ohlc_quantiles() -> tuple[
         0.555,
         0.59,
         0.57,
+    ]
+    base = [
+        min(0.95, max(0.05, value + 0.001 * cycle))
+        for cycle in range(6)
+        for value in base_cycle
     ]
     close = {
         "p10": [value - 0.02 for value in base],
@@ -148,8 +153,8 @@ def test_quantile_decoder_emits_atomic_connected_v3_geometry() -> None:
     assert isinstance(points, list)
     assert isinstance(candles, list)
     assert isinstance(scenarios, list)
-    assert len(points) == 13
-    assert len(candles) == 12
+    assert len(points) == FORECAST_HORIZON_STEPS + 1
+    assert len(candles) == FORECAST_HORIZON_STEPS
     assert len(scenarios) == 3
     assert points[0] == [0.40, 0.50]
     assert all(right[0] > left[0] for left, right in zip(points, points[1:]))
@@ -162,7 +167,10 @@ def test_quantile_decoder_emits_atomic_connected_v3_geometry() -> None:
     }
     assert sum(bool(scenario["selected"]) for scenario in scenarios) == 1
     assert all(scenario["line_points"][0] == points[0] for scenario in scenarios)
-    assert all(len(scenario["forecast_candles"]) == 12 for scenario in scenarios)
+    assert all(
+        len(scenario["forecast_candles"]) == FORECAST_HORIZON_STEPS
+        for scenario in scenarios
+    )
     base_scenario = next(scenario for scenario in scenarios if scenario["role"] == "base")
     assert base_scenario["forecast_candles"] == candles
     _assert_scenario_candles_match_lines(result)
@@ -180,7 +188,9 @@ def test_quantile_decoder_emits_atomic_connected_v3_geometry() -> None:
     assert result["visual_amplification_applied"] is False
     assert result["geometry_gain"] == 1.0
 
-    assert [row["step"] for row in candles] == list(range(1, 13))
+    assert [row["step"] for row in candles] == list(
+        range(1, FORECAST_HORIZON_STEPS + 1)
+    )
     assert {row["movement_side"] for row in candles} >= {"BUY", "SELL"}
     for candle in candles:
         assert candle["high_y_norm"] <= min(
@@ -247,12 +257,12 @@ def test_uncalibrated_quantiles_never_publish_an_envelope() -> None:
 
 
 def test_sample_decoder_selects_a_coherent_medoid_not_pointwise_medians() -> None:
-    sample_a = [0.40, 0.60] * 6
-    sample_b = [0.50, 0.40] * 6
-    sample_c = [0.60, 0.50] * 6
+    sample_a = [0.40, 0.60] * (FORECAST_HORIZON_STEPS // 2)
+    sample_b = [0.50, 0.40] * (FORECAST_HORIZON_STEPS // 2)
+    sample_c = [0.60, 0.50] * (FORECAST_HORIZON_STEPS // 2)
     samples = [sample_a, sample_b, sample_c]
     independent_median = _pointwise_median(samples)
-    assert independent_median == [0.50] * 12
+    assert independent_median == [0.50] * FORECAST_HORIZON_STEPS
 
     result = decode_forecast_path_geometry_v3(
         anchor=_anchor(y_norm=0.50, price_norm=0.50),
@@ -318,7 +328,7 @@ def test_sample_scenarios_keep_their_own_connected_ohlc_paths() -> None:
 
 
 def test_sampled_calibrated_envelope_contains_the_coherent_medoid() -> None:
-    shape = [
+    shape_cycle = [
         0.51,
         0.49,
         0.52,
@@ -332,6 +342,11 @@ def test_sampled_calibrated_envelope_contains_the_coherent_medoid() -> None:
         0.56,
         0.54,
     ]
+    shape = [
+        value + 0.001 * cycle
+        for cycle in range(6)
+        for value in shape_cycle
+    ]
     samples = [[value + offset for value in shape] for offset in (-0.04, -0.02, 0, 0.02, 0.04)]
 
     result = decode_forecast_path_geometry_v3(
@@ -343,7 +358,7 @@ def test_sampled_calibrated_envelope_contains_the_coherent_medoid() -> None:
     quantiles = cast(dict[str, list[list[float]]], result["forecast_quantiles"])
     assert result["selected_sample_index"] == 2
     assert result["forecast_band_points"]
-    for step in range(1, 13):
+    for step in range(1, FORECAST_HORIZON_STEPS + 1):
         # Higher normalized price becomes a smaller normalized chart y.
         assert quantiles["p90"][step][1] <= quantiles["p50"][step][1]
         assert quantiles["p50"][step][1] <= quantiles["p10"][step][1]
@@ -369,7 +384,7 @@ def test_decoder_preserves_true_displacement_without_monotonic_forcing() -> None
 
 
 def test_shared_viewport_fit_preserves_all_routes_turns_and_ohlc_without_flat_tail() -> None:
-    base = [
+    base_cycle = [
         0.12,
         0.06,
         0.09,
@@ -382,6 +397,11 @@ def test_shared_viewport_fit_preserves_all_routes_turns_and_ohlc_without_flat_ta
         -0.24,
         -0.36,
         -0.31,
+    ]
+    base = [
+        value - 0.01 * cycle
+        for cycle in range(6)
+        for value in base_cycle
     ]
     close = {
         "p10": [value - 0.12 for value in base],
@@ -435,8 +455,8 @@ def test_shared_viewport_fit_preserves_all_routes_turns_and_ohlc_without_flat_ta
         candles = cast(list[dict[str, Any]], scenario["forecast_candles"])
         source = source_by_role[role]
         assert points[0] == [0.40, 0.82]
-        assert len(points) == 13
-        assert len(candles) == 12
+        assert len(points) == FORECAST_HORIZON_STEPS + 1
+        assert len(candles) == FORECAST_HORIZON_STEPS
         assert all(0.035 - 1e-12 <= point[1] <= 0.965 + 1e-12 for point in points)
         assert len({round(point[1], 12) for point in points[-8:]}) > 4
         for index, price in enumerate(source, start=1):
@@ -485,7 +505,7 @@ def test_crossed_quantiles_fail_atomically() -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        ("incomplete", "exactly 12"),
+        ("incomplete", f"exactly {FORECAST_HORIZON_STEPS}"),
         ("nonfinite", "finite number"),
         ("crossed_ohlc", "lower/close/upper geometry crosses"),
     ],
@@ -516,7 +536,10 @@ def test_incomplete_sample_bundle_and_event_slot_overflow_fail_atomically() -> N
     with pytest.raises(ForecastPathGeometryError, match="at least three"):
         decode_forecast_path_geometry_v3(
             anchor=_anchor(),
-            sampled_trajectories=[[0.50] * 12, [0.51] * 12],
+            sampled_trajectories=[
+                [0.50] * FORECAST_HORIZON_STEPS,
+                [0.51] * FORECAST_HORIZON_STEPS,
+            ],
         )
 
     close, upper, lower = _ohlc_quantiles()

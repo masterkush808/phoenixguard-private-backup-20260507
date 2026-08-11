@@ -99,7 +99,7 @@ function Wait-HttpOk {
     throw "Timed out waiting for $Url"
 }
 
-function Quote-PowerShellLiteral {
+function ConvertTo-PowerShellLiteral {
     param([Parameter(Mandatory = $true)][string]$Value)
     return "'" + ($Value -replace "'", "''") + "'"
 }
@@ -143,7 +143,7 @@ $apiProcess = $null
 $webProcess = $null
 
 if (-not $SkipApi) {
-    $apiCommand = "& $(Quote-PowerShellLiteral -Value $PythonPath) -m uvicorn Business.api.business_mock_api:app --host $ApiHost --port $ApiPort --log-level info"
+    $apiCommand = "& $(ConvertTo-PowerShellLiteral -Value $PythonPath) -m uvicorn Business.api.business_mock_api:app --host $ApiHost --port $ApiPort --log-level info"
     $apiProcess = Start-HiddenPowerShell -Name "api" -WorkingDirectory $RepoRoot -CommandLine $apiCommand
     Wait-HttpOk -Url "$ApiBaseUrl/healthz" -TimeoutSec 60
     Write-Host "Mock FastAPI ready at $ApiBaseUrl"

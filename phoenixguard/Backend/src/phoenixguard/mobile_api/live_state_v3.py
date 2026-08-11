@@ -1840,10 +1840,11 @@ def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
     )
     base_valid = _bool(valid_value, True) if valid_found else True
     title_requirement_satisfied = bool(title_valid or title_optional_for_study)
+    url_requirement_satisfied = bool(url_valid or title_optional_for_study)
     valid = bool(
         base_valid
         and not wrong_surface
-        and url_valid
+        and url_requirement_satisfied
         and title_requirement_satisfied
         and pixel_fingerprint_valid
     )
@@ -1879,7 +1880,20 @@ def _broker_source_block_reason(broker_source: Mapping[str, Any]) -> str:
     invalid_fields = [
         label
         for label, valid in (
-            ("url", _bool(broker_source.get("url_valid"), True)),
+            (
+                "url",
+                _bool(
+                    broker_source.get(
+                        "url_requirement_satisfied",
+                        _bool(broker_source.get("url_valid"), True)
+                        or _bool(
+                            broker_source.get("title_optional_for_study"),
+                            False,
+                        ),
+                    ),
+                    True,
+                ),
+            ),
             (
                 "title",
                 _bool(
@@ -2167,6 +2181,8 @@ def _compact_tracking_summary(tracking: Mapping[str, Any]) -> dict[str, Any]:
         "broker_source",
         "broker_source_lock",
         "broker_surface",
+        "book_rule_action_signal_v3",
+        "book_rule_overlay_rows_v3",
         "candle_extraction",
         "candle_movement_context",
         "candle_movement_context_v3",
@@ -2213,6 +2229,7 @@ def _compact_latest_signal(signal: Mapping[str, Any]) -> dict[str, Any]:
         "broker_execution_state",
         "broker_source",
         "broker_source_lock",
+        "book_rule_action_signal_v3",
         "candle_extraction",
         "candle_movement_context",
         "candle_movement_context_v3",
@@ -2953,6 +2970,7 @@ def build_live_state_v3(
         "state_version": _int(session.get("state_version")),
         "chart_transform_id": chart_transform_id,
         "broker_source_lock_id": broker_source_lock_id,
+        "market": symbol,
         "symbol": symbol,
         "timeframe": timeframe,
         "market_selector_visual_fingerprint": _text(
@@ -3086,6 +3104,7 @@ def build_live_state_v3(
         "state_version": live_visual_state["state_version"],
         "chart_transform_id": live_visual_state["chart_transform_id"],
         "broker_source_lock_id": live_visual_state["broker_source_lock_id"],
+        "market": live_visual_state["market"],
         "symbol": live_visual_state["symbol"],
         "timeframe": live_visual_state["timeframe"],
         "market_selector_visual_fingerprint": live_visual_state[

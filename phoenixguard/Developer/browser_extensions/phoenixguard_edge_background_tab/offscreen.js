@@ -26,7 +26,8 @@ import {
   sourceControlKillEndpoint,
   sourceControlKillPayload,
   sourceControlStatusEndpoint,
-  sourceOrigin
+  sourceOrigin,
+  validateConfig
 } from "./common.js";
 
 const videoHost = document.getElementById("captureVideos");
@@ -34,6 +35,8 @@ const frameCanvas = document.getElementById("frameCanvas");
 const probeCanvas = document.getElementById("probeCanvas");
 const frameContext = frameCanvas.getContext("2d", {alpha: false});
 const probeContext = probeCanvas.getContext("2d", {alpha: false, willReadFrequently: true});
+const CONTRACT_STEADY_POLL_MS = 30_000;
+const RECONNECT_BACKOFF_MS = Object.freeze([1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
 
 let activeSession = null;
 let candidateSession = null;
@@ -52,6 +55,8 @@ let lastTransportHeartbeatStartedAtMs = 0;
 let lastVisualChangeAtMs = 0;
 let transportHeartbeatInFlight = false;
 let sourceRecoveryInFlight = null;
+let contractRefreshInFlight = null;
+let reconnectAttempt = 0;
 let serverArmed = false;
 let signatureRequired = false;
 let status = initialStatus();
@@ -81,6 +86,63 @@ function errorText(value) {
   } catch {
     return String(value);
   }
+}
+
+function resetReconnectBackoff() {
+  reconnectAttempt = 0;
+}
+
+function nextReconnectDelayMs() {
+  const index = Math.min(reconnectAttempt, RECONNECT_BACKOFF_MS.length - 1);
+  reconnectAttempt += 1;
+  const base = RECONNECT_BACKOFF_MS[index];
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.min(1_000, base * 0.15)));
+  return base + jitter;
+}
+
+function scheduleContractRefresh(delayMs = 0) {
+  contractTimer = clearTimer(contractTimer);
+  if (!activeSession || samplingPausedForSelector) return;
+  const requestedDelay = Number(delayMs);
+  const delay = requestedDelay > 0 ? Math.max(250, requestedDelay) : nextReconnectDelayMs();
+  contractTimer = setTimeout(() => void refreshServerContract(), delay);
+}
+
+async function fetchWithTimeout(resource, init = {}, timeoutMs = 15_000) {
+  const controller = new AbortController();
+  const boundedTimeoutMs = Math.max(1_000, Number(timeoutMs) || 15_000);
+  const timeout = setTimeout(() => controller.abort(), boundedTimeoutMs);
+  try {
+    return await fetch(resource, {...init, signal: controller.signal});
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`PhoenixGuard request timed out after ${boundedTimeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function refreshPersistedConfig(session) {
+  if (!session || session.stopped || session !== activeSession) return false;
+  const response = await chrome.runtime.sendMessage({type: "GET_CAPTURE_CONFIG_V1"});
+  if (!response?.ok) throw new Error(response?.error || "The persisted capture configuration is unavailable.");
+  const validation = validateConfig(response.config || {});
+  if (!validation.ok) throw new Error(validation.reason);
+  if (!activeSession || activeSession !== session || session.stopped) return false;
+  const previous = session.config;
+  const next = validation.config;
+  const routeChanged = previous.baseUrl !== next.baseUrl ||
+    previous.sessionId !== next.sessionId ||
+    previous.sourceId !== next.sourceId;
+  session.config = next;
+  if (routeChanged) {
+    session.sourceGeneration = 0;
+    session.sourceLeaseId = "";
+    status.frameId = 0;
+  }
+  return true;
 }
 
 function currentVideoAge(session = activeSession) {
@@ -420,7 +482,7 @@ async function claimSource(session, expectedSourceControl = null) {
   if (expectedSourceControl && typeof expectedSourceControl === "object") {
     body.expected_source_control = {...expectedSourceControl};
   }
-  const response = await fetch(sourceControlClaimEndpoint(session.config), {
+  const response = await fetchWithTimeout(sourceControlClaimEndpoint(session.config), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${session.config.token}`,
@@ -428,7 +490,7 @@ async function claimSource(session, expectedSourceControl = null) {
     },
     body: JSON.stringify(body),
     cache: "no-store"
-  });
+  }, 15_000);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(errorText(payload.detail || payload.message || `Source claim returned HTTP ${response.status}.`));
@@ -446,11 +508,11 @@ async function claimSource(session, expectedSourceControl = null) {
 }
 
 async function fetchSourceControl(session) {
-  const response = await fetch(sourceControlStatusEndpoint(session.config), {
+  const response = await fetchWithTimeout(sourceControlStatusEndpoint(session.config), {
     method: "GET",
     headers: {Authorization: `Bearer ${session.config.token}`},
     cache: "no-store"
-  });
+  }, 15_000);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(errorText(payload.detail || payload.message || `Source status returned HTTP ${response.status}.`));
@@ -462,9 +524,22 @@ async function fetchSourceControl(session) {
     : {};
 }
 
-async function reclaimSourceAfterOwnerlessApiRestartOnce(session) {
+function sourceOwnedBySession(source, session) {
+  const state = String(source?.state || "").toUpperCase();
+  const generation = Math.max(0, Math.trunc(Number(source?.source_generation) || 0));
+  return ["VALIDATING", "LIVE", "STALE"].includes(state) &&
+    String(source?.source_id || "") === session.config.sourceId &&
+    String(source?.sequence_id || "") === session.sequenceId &&
+    String(source?.source_type || "") === "browser_tab_roi_capture" &&
+    generation > 0 && generation === session.sourceGeneration &&
+    Boolean(session.sourceLeaseId);
+}
+
+async function reclaimSourceAfterOwnerlessApiRestartOnce(session, observedSource = null) {
   if (!session || session.stopped || session !== activeSession) return false;
-  const source = await fetchSourceControl(session);
+  const latestPendingFrame = pendingFrame;
+  const source = observedSource || await fetchSourceControl(session);
+  if (sourceOwnedBySession(source, session)) return true;
   const recovery = ownerlessSourceRecoveryFence(source);
   if (!recovery.ok || !recovery.expectedSourceControl) return false;
   if (session.stopped || session !== activeSession) return false;
@@ -483,35 +558,50 @@ async function reclaimSourceAfterOwnerlessApiRestartOnce(session) {
   lastQueuedAt = 0;
   lastUploadStartedAtMs = 0;
   previousQueuedProbe = null;
-  pendingFrame = null;
+  pendingFrame = latestPendingFrame;
   serverArmed = true;
+  resetReconnectBackoff();
   await notifyStatus({
     phase: "starting",
     message: "PhoenixGuard restarted; the already-authorized Edge chart stream was reclaimed without opening or focusing a tab.",
     lastError: ""
   });
+  if (pendingFrame) scheduleUpload(0);
   if (!sampleTimer) sampleTimer = setTimeout(sampleFrame, 150);
   return true;
 }
 
-async function reclaimSourceAfterOwnerlessApiRestart(session) {
+async function reclaimSourceAfterOwnerlessApiRestart(session, observedSource = null) {
   if (!sourceRecoveryInFlight) {
-    sourceRecoveryInFlight = reclaimSourceAfterOwnerlessApiRestartOnce(session).finally(() => {
+    sourceRecoveryInFlight = reclaimSourceAfterOwnerlessApiRestartOnce(session, observedSource).finally(() => {
       sourceRecoveryInFlight = null;
     });
   }
   return Boolean(await sourceRecoveryInFlight);
 }
 
+async function ensureSourceContinuity(session) {
+  const source = await fetchSourceControl(session);
+  if (sourceOwnedBySession(source, session)) return true;
+  return reclaimSourceAfterOwnerlessApiRestart(session, source);
+}
+
 async function recoverOrStopSupersededSession(session, reason) {
   let recovered = false;
   try {
-    recovered = await reclaimSourceAfterOwnerlessApiRestart(session);
+    await refreshPersistedConfig(session);
+    recovered = await ensureSourceContinuity(session);
   } catch (error) {
     console.debug("Ownerless chart-source recovery was not accepted.", error);
   }
   if (!recovered && activeSession === session && !session.stopped) {
-    await stopAllCapture(reason, true, false);
+    serverArmed = false;
+    await notifyStatus({
+      phase: "waiting_for_ingest",
+      message: "The chart tab and region remain locked while PhoenixGuard restores this session's source lease.",
+      lastError: reason
+    });
+    scheduleContractRefresh();
   }
   return recovered;
 }
@@ -550,7 +640,7 @@ async function heartbeatSource(session, evidence = {}) {
       overlay_authority: false,
       decision_authority: false
     } : null;
-    const response = await fetch(sourceControlHeartbeatEndpoint(session.config), {
+    const response = await fetchWithTimeout(sourceControlHeartbeatEndpoint(session.config), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.config.token}`,
@@ -578,7 +668,7 @@ async function heartbeatSource(session, evidence = {}) {
       })),
       cache: "no-store",
       signal: controller.signal
-    });
+    }, 15_000);
     const payload = await response.json().catch(() => ({}));
     if (response.ok) return;
     const detail = errorText(payload.detail || payload.message || `HTTP ${response.status}`);
@@ -598,14 +688,17 @@ async function heartbeatSource(session, evidence = {}) {
     if (response.status === 401 || response.status === 403) {
       serverArmed = false;
       await notifyStatus({
-        phase: "configuration_required",
-        message: "Source heartbeat rejected the token or source scope. Fix options, then reselect the chart.",
+        phase: "waiting_for_ingest",
+        message: "PhoenixGuard is reloading the persisted capture credential; the chart tab and ROI remain locked.",
         lastError: detail
       });
+      scheduleContractRefresh(250);
     }
   } catch (error) {
     if (error?.name !== "AbortError") {
       console.debug("PhoenixGuard source heartbeat is temporarily unavailable.", error);
+      serverArmed = false;
+      scheduleContractRefresh();
     }
   } finally {
     clearTimeout(timeout);
@@ -616,7 +709,7 @@ async function heartbeatSource(session, evidence = {}) {
 async function killSource(session, reason) {
   if (!session?.config?.token) return;
   try {
-    await fetch(sourceControlKillEndpoint(session.config), {
+    await fetchWithTimeout(sourceControlKillEndpoint(session.config), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.config.token}`,
@@ -630,7 +723,7 @@ async function killSource(session, reason) {
         reason
       })),
       cache: "no-store"
-    });
+    }, 15_000);
   } catch (error) {
     console.debug("PhoenixGuard source-control kill acknowledgement unavailable.", error);
   }
@@ -663,6 +756,7 @@ function resetFramePipeline() {
   lastTransportHeartbeatStartedAtMs = 0;
   lastVisualChangeAtMs = 0;
   transportHeartbeatInFlight = false;
+  resetReconnectBackoff();
   serverArmed = false;
   signatureRequired = false;
   status = initialStatus({
@@ -672,12 +766,18 @@ function resetFramePipeline() {
   });
 }
 
-async function refreshServerContract() {
+async function refreshServerContractOnce() {
   contractTimer = clearTimer(contractTimer);
-  if (!activeSession || samplingPausedForSelector) return;
-  const config = activeSession.config;
+  if (!activeSession || samplingPausedForSelector) return false;
+  const session = activeSession;
   try {
-    const response = await fetch(frameIngestConfigEndpoint(config), {method: "GET", cache: "no-store"});
+    if (!(await refreshPersistedConfig(session))) return false;
+    const config = session.config;
+    const response = await fetchWithTimeout(
+      frameIngestConfigEndpoint(config),
+      {method: "GET", cache: "no-store"},
+      10_000
+    );
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(`Frame-ingest config returned HTTP ${response.status}.`);
     const advertisedInterval = Number(payload.min_interval_sec ?? payload.readiness?.min_interval_sec ?? 10);
@@ -691,10 +791,11 @@ async function refreshServerContract() {
       serverArmed = false;
       await notifyStatus({
         phase: "configuration_required",
-        message: "Frame ingest requires an HMAC signing secret. Save it in extension options and reselect the chart.",
+        message: "Frame ingest requires an HMAC signing secret; the chart tab and ROI remain locked while configuration is refreshed.",
         lastError: "Missing required frame-ingest signing secret."
       });
-      return;
+      scheduleContractRefresh();
+      return false;
     }
     if (!serverArmed) {
       await notifyStatus({
@@ -702,10 +803,22 @@ async function refreshServerContract() {
         message: "The chart region is locked, but PhoenixGuard frame ingest is not armed yet.",
         lastError: ""
       });
-      contractTimer = setTimeout(refreshServerContract, 30_000);
-      return;
+      scheduleContractRefresh();
+      return false;
     }
-    const session = activeSession;
+    if (!activeSession || activeSession !== session || session.stopped) return false;
+    const sourceReady = await ensureSourceContinuity(session);
+    if (!sourceReady) {
+      serverArmed = false;
+      await notifyStatus({
+        phase: "waiting_for_ingest",
+        message: "PhoenixGuard is armed; the preserved chart stream is waiting to reclaim its exact session owner.",
+        lastError: "A different or incomplete source owner currently blocks the conditional reclaim."
+      });
+      scheduleContractRefresh();
+      return false;
+    }
+    resetReconnectBackoff();
     const transport = await refreshCaptureHealth(session);
     if (!activeSession || activeSession !== session || samplingPausedForSelector) return;
     await notifyStatus({
@@ -720,7 +833,8 @@ async function refreshServerContract() {
         : activeSession.captureHealth?.lastError || `Capture transport is ${transport.reason}.`
     });
     if (transport.healthy) void drainLatestFrame();
-    contractTimer = setTimeout(refreshServerContract, 30_000);
+    scheduleContractRefresh(CONTRACT_STEADY_POLL_MS);
+    return transport.healthy;
   } catch (error) {
     serverArmed = false;
     await notifyStatus({
@@ -728,8 +842,18 @@ async function refreshServerContract() {
       message: "The chart region remains locked; PhoenixGuard ingest is temporarily unreachable.",
       lastError: errorText(error)
     });
-    contractTimer = setTimeout(refreshServerContract, 15_000);
+    scheduleContractRefresh();
+    return false;
   }
+}
+
+function refreshServerContract() {
+  if (!contractRefreshInFlight) {
+    contractRefreshInFlight = refreshServerContractOnce().finally(() => {
+      contractRefreshInFlight = null;
+    });
+  }
+  return contractRefreshInFlight;
 }
 
 function captureProbe() {
@@ -997,7 +1121,11 @@ async function uploadFrame(frame) {
     headers["X-PhoenixGuard-Signature"] = `v1=${signature}`;
   }
 
-  const response = await fetch(endpoint, {method: "POST", headers, body: form, cache: "no-store"});
+  const response = await fetchWithTimeout(
+    endpoint,
+    {method: "POST", headers, body: form, cache: "no-store"},
+    120_000
+  );
   const payload = await response.json().catch(() => ({}));
   status.frameId = frameId;
   if (!response.ok) {
@@ -1051,22 +1179,26 @@ async function drainLatestFrame() {
     status.rejectedFrames += 1;
     const httpStatus = Number(error?.httpStatus || 0);
     if (httpStatus === 409) {
-      await recoverOrStopSupersededSession(
+      const recovered = await recoverOrStopSupersededSession(
         session,
         "Another source now owns PhoenixGuard; the older Edge chart stream was stopped."
       );
+      if (recovered && !pendingFrame) pendingFrame = frame;
     } else if (httpStatus === 410) {
       if (activeSession === session && !session.stopped) {
         await stopAllCapture("The PhoenixGuard source was explicitly stopped; select the chart again to resume.", true, false);
       }
     } else if (httpStatus === 401 || httpStatus === 403) {
       serverArmed = false;
+      if (!pendingFrame) pendingFrame = frame;
       await notifyStatus({
-        phase: "configuration_required",
-        message: "Frame ingest rejected the token or source scope. Fix options, then reselect the chart.",
+        phase: "waiting_for_ingest",
+        message: "PhoenixGuard is reloading the persisted capture credential; the chart tab and ROI remain locked.",
         lastError: errorText(error)
       });
+      scheduleContractRefresh(250);
     } else if (httpStatus === 429) {
+      if (!pendingFrame) pendingFrame = frame;
       await notifyStatus({
         phase: "waiting_for_ingest",
         message: "PhoenixGuard is applying its advertised upload interval; the newest chart frame remains authoritative.",
@@ -1074,13 +1206,14 @@ async function drainLatestFrame() {
       });
       scheduleUpload(minIntervalMs);
     } else {
+      if (!pendingFrame) pendingFrame = frame;
+      serverArmed = false;
       await notifyStatus({
         phase: "degraded",
         message: "Chart capture continues in the background while frame ingest recovers.",
         lastError: errorText(error)
       });
-      contractTimer = clearTimer(contractTimer);
-      contractTimer = setTimeout(refreshServerContract, 15_000);
+      scheduleContractRefresh();
     }
   } finally {
     uploadInFlight = false;
@@ -1307,6 +1440,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === "UPDATE_LOCKED_TAB_METADATA_V1") {
     void updateLockedTabMetadata(message).then(sendResponse);
+    return true;
+  }
+  if (message.type === "REFRESH_CAPTURE_CONTINUITY_V1") {
+    if (!activeSession || activeSession.stopped) {
+      sendResponse({ok: true, active: false, ready: false, status});
+      return false;
+    }
+    void refreshServerContract().then((ready) => {
+      sendResponse({ok: true, active: true, ready: Boolean(ready), status});
+    }).catch((error) => {
+      sendResponse({ok: false, active: true, ready: false, error: errorText(error), status});
+    });
     return true;
   }
   if (message.type === "GET_STATUS") {

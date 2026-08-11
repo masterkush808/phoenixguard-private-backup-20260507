@@ -180,11 +180,16 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
             "invalidation",
             "market_context",
             "council",
+            "book_rules",
         }
     ),
-    "structure": frozenset({"current_candles", "major_swings", "local_swings", "trendlines"}),
-    "zones": frozenset({"supply_demand"}),
-    "plan": frozenset({"council", "triggers", "targets", "invalidation"}),
+    "structure": frozenset(
+        {"current_candles", "major_swings", "local_swings", "trendlines", "book_rules"}
+    ),
+    "zones": frozenset({"supply_demand", "book_rules"}),
+    "plan": frozenset(
+        {"council", "triggers", "targets", "invalidation", "book_rules"}
+    ),
     "market_context": frozenset({"market_context"}),
     "history": frozenset({"history", "major_swings", "local_swings"}),
 }
@@ -891,6 +896,20 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "geometry_role",
         "reaction_window_anchor",
         "source_bounds",
+        # Strict book-rule geometry is public presentation evidence. These
+        # fields have already crossed the operator sanitizer and are retained
+        # here so the final snapshot boundary cannot erase their proof.
+        "book_rule_ids",
+        "book_playbook",
+        "book_action_side",
+        "closed_candle_key",
+        "book_geometry_role",
+        "geometry_contract_accepted",
+        "geometry_status",
+        "chart_bounds",
+        "anchor_wick_points",
+        "touch_count",
+        "strict_third_touch_confirmed",
     }
 )
 
@@ -909,6 +928,7 @@ _SAFE_OPERATOR_PUBLIC_FAMILIES = frozenset(
         "council",
         "history",
         "market_context",
+        "book_rules",
     }
 )
 _RETIRED_OPERATOR_FORECAST_TYPES = frozenset(
@@ -1675,6 +1695,39 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             # retired forward-study vocabulary before any saved row can be
             # merged into a current V3 operator frame.
             continue
+        if family == "book_rules":
+            bounds = row.get("bounds")
+            chart_bounds = row.get("chart_bounds")
+            if not (
+                row.get("geometry_contract_accepted") is True
+                and str(row.get("instrument_identity_status") or "").upper()
+                == "LOCKED"
+                and str(row.get("coordinate_space") or "").lower() == "chart"
+                and str(row.get("coordinate_units") or "").lower() == "pixels"
+                and isinstance(bounds, Sequence)
+                and not isinstance(bounds, (str, bytes, bytearray))
+                and len(bounds) == 4
+                and isinstance(chart_bounds, Sequence)
+                and not isinstance(chart_bounds, (str, bytes, bytearray))
+                and len(chart_bounds) == 4
+            ):
+                continue
+            if overlay_kind == "book_rule_line":
+                anchor_wick_points = row.get("anchor_wick_points")
+                line_points = row.get("line_points")
+                if not (
+                    row.get("strict_third_touch_confirmed") is True
+                    and int(_epoch_float(row.get("touch_count"), 0.0)) >= 3
+                    and isinstance(anchor_wick_points, Sequence)
+                    and not isinstance(
+                        anchor_wick_points, (str, bytes, bytearray)
+                    )
+                    and len(anchor_wick_points) == 2
+                    and isinstance(line_points, Sequence)
+                    and not isinstance(line_points, (str, bytes, bytearray))
+                    and len(line_points) >= 2
+                ):
+                    continue
         positioning_keys = (
             "positioning_mode",
             "positioning_status",
@@ -4015,6 +4068,7 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
                 "pipeline_latency_sec",
                 "signal_id",
                 "market_study_v3",
+                "book_rule_action_signal_v3",
             )
             if key in latest_signal_row
         }
@@ -4035,6 +4089,8 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
                 "display_region",
                 "pipeline_timing",
                 "market_study_v3",
+                "book_rule_action_signal_v3",
+                "book_rule_overlay_rows_v3",
             )
             if key in tracking_summary_row
         }
@@ -5058,6 +5114,8 @@ def _bounded_operator_projection_context(
             "candle_movement_context",
             "candle_movement_context_v3",
             "market_study_v3",
+            "book_rule_action_signal_v3",
+            "book_rule_overlay_rows_v3",
         ):
             if key in raw_tracking_mapping:
                 if key == "market_study_v3":
@@ -5075,15 +5133,23 @@ def _bounded_operator_projection_context(
 
     raw_latest_signal = live_state.get("latest_signal")
     if isinstance(raw_latest_signal, Mapping):
+        raw_latest_signal_mapping = cast(Mapping[str, object], raw_latest_signal)
+        latest_signal_context: dict[str, object] = {}
         latest_study = bounded_market_study(
-            cast(Mapping[str, object], raw_latest_signal).get(
-                "market_study_v3"
-            )
+            raw_latest_signal_mapping.get("market_study_v3")
         )
         if latest_study:
-            context["latest_signal"] = {
-                "market_study_v3": latest_study,
-            }
+            latest_signal_context["market_study_v3"] = latest_study
+        latest_book_rules = bounded_value(
+            raw_latest_signal_mapping.get("book_rule_action_signal_v3"),
+            sequence_limit=64,
+        )
+        if isinstance(latest_book_rules, Mapping) and latest_book_rules:
+            latest_signal_context["book_rule_action_signal_v3"] = dict(
+                cast(Mapping[str, object], latest_book_rules)
+            )
+        if latest_signal_context:
+            context["latest_signal"] = latest_signal_context
 
     history_rows: list[object] = []
     for history_key in ("recent_studies", "history"):
@@ -5138,6 +5204,7 @@ def _bounded_operator_projection_context(
 def _merge_operator_projection_input(
     service_snapshot: Mapping[str, object],
     compact_live_state: Mapping[str, object],
+    book_rule_geometry_source: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Merge live display authority with bounded stable context for one projection.
 
@@ -5228,6 +5295,67 @@ def _merge_operator_projection_input(
         projection_input["recent_studies"] = list(
             cast(Sequence[object], recent_studies)
         )
+
+    # Keep book-rule source geometry on an internal-only handoff.  The compact
+    # and service projections can each carry a differently bounded copy of the
+    # same rule contract; recursive merging is correct for the report fields
+    # but must not erase the geometry-bearing copy before the strict operator
+    # sanitizer validates it.  This key is consumed by
+    # ``build_operator_workspace_v1`` and is never returned by a public DTO.
+    book_rule_overlay_rows: list[dict[str, object]] = []
+    seen_book_rule_overlays: set[tuple[str, str]] = set()
+    geometry_sources = (
+        book_rule_geometry_source or {},
+        service_snapshot,
+        compact_live_state,
+    )
+    for source in geometry_sources:
+        tracking = _mapping_to_plain_dict(source.get("tracking_summary"))
+        latest_signal = _mapping_to_plain_dict(source.get("latest_signal"))
+        for row in _sequence_mappings(
+            tracking.get("book_rule_overlay_rows_v3")
+        ):
+            row_id = str(
+                row.get("id")
+                or row.get("overlay_id")
+                or row.get("object_id")
+                or ""
+            ).strip()
+            row_frame = str(row.get("frame_id") or "").strip()
+            dedup_key = (row_id, row_frame)
+            if not row_id or dedup_key in seen_book_rule_overlays:
+                continue
+            seen_book_rule_overlays.add(dedup_key)
+            book_rule_overlay_rows.append(dict(row))
+            if len(book_rule_overlay_rows) >= 96:
+                break
+        for candidate in (
+            tracking.get("book_rule_action_signal_v3"),
+            latest_signal.get("book_rule_action_signal_v3"),
+            source.get("book_rule_action_signal_v3"),
+        ):
+            contract = _mapping_to_plain_dict(candidate)
+            for row in _sequence_mappings(contract.get("overlays")):
+                row_id = str(
+                    row.get("id")
+                    or row.get("overlay_id")
+                    or row.get("object_id")
+                    or ""
+                ).strip()
+                row_frame = str(row.get("frame_id") or "").strip()
+                dedup_key = (row_id, row_frame)
+                if not row_id or dedup_key in seen_book_rule_overlays:
+                    continue
+                seen_book_rule_overlays.add(dedup_key)
+                book_rule_overlay_rows.append(dict(row))
+                if len(book_rule_overlay_rows) >= 96:
+                    break
+            if len(book_rule_overlay_rows) >= 96:
+                break
+        if len(book_rule_overlay_rows) >= 96:
+            break
+    if book_rule_overlay_rows:
+        projection_input["_book_rule_overlay_rows_v3"] = book_rule_overlay_rows
     return projection_input
 
 
@@ -6330,6 +6458,7 @@ def create_app(
                 "broker_source_lock",
                 "promotion_failure_audit_v3",
                 "market_study_v3",
+                "book_rule_action_signal_v3",
             },
         )
         compact_tracking_source = _mapping_to_plain_dict(
@@ -6359,6 +6488,8 @@ def create_app(
                 "broker_surface",
                 "pipeline_timing",
                 "market_study_v3",
+                "book_rule_action_signal_v3",
+                "book_rule_overlay_rows_v3",
             },
         )
         model_result = _mapping_to_plain_dict(compact.get("model_council_result"))
@@ -6667,6 +6798,50 @@ def create_app(
                         public_payload["visual_observation_v3"] = dict(
                             cast(Mapping[str, object], direct_observation)
                         )
+                    direct_tracking = _mapping_to_plain_dict(
+                        direct_payload.get("tracking_summary")
+                    )
+                    direct_book_rules = direct_tracking.get(
+                        "book_rule_action_signal_v3"
+                    )
+                    if isinstance(direct_book_rules, Mapping):
+                        public_tracking = _mapping_to_plain_dict(
+                            public_payload.get("tracking_summary")
+                        )
+                        public_tracking["book_rule_action_signal_v3"] = dict(
+                            cast(Mapping[str, object], direct_book_rules)
+                        )
+                        public_payload["tracking_summary"] = public_tracking
+                    direct_book_rule_overlays = direct_tracking.get(
+                        "book_rule_overlay_rows_v3"
+                    )
+                    if isinstance(direct_book_rule_overlays, Sequence) and not isinstance(
+                        direct_book_rule_overlays,
+                        (str, bytes, bytearray),
+                    ):
+                        public_tracking = _mapping_to_plain_dict(
+                            public_payload.get("tracking_summary")
+                        )
+                        public_tracking["book_rule_overlay_rows_v3"] = [
+                            dict(cast(Mapping[str, object], row))
+                            for row in cast(Sequence[object], direct_book_rule_overlays)[:32]
+                            if isinstance(row, Mapping)
+                        ]
+                        public_payload["tracking_summary"] = public_tracking
+                    direct_latest_signal = _mapping_to_plain_dict(
+                        direct_payload.get("latest_signal")
+                    )
+                    direct_latest_book_rules = direct_latest_signal.get(
+                        "book_rule_action_signal_v3"
+                    )
+                    if isinstance(direct_latest_book_rules, Mapping):
+                        public_latest_signal = _mapping_to_plain_dict(
+                            public_payload.get("latest_signal")
+                        )
+                        public_latest_signal["book_rule_action_signal_v3"] = dict(
+                            cast(Mapping[str, object], direct_latest_book_rules)
+                        )
+                        public_payload["latest_signal"] = public_latest_signal
         # The compact sidecar is intentionally not rewritten for every browser
         # heartbeat.  Overlay the bounded in-process pulse after any sidecar
         # merge so even the hottest response-cache path reports current source
@@ -7836,10 +8011,55 @@ def create_app(
             _apply_compact_overlay_identity(compact_live_state_response(live_state))
         )
         projection_context = _bounded_operator_projection_context(live_state)
-        projection_input = _merge_operator_projection_input(
-            projection_context,
-            compact_live_state,
+        operator_session_snapshot = read_window_tracker_session(
+            requested_session_id
         )
+        session_tracking = _mapping_to_plain_dict(
+            operator_session_snapshot.get("tracking_summary")
+        )
+        session_book_signal = _mapping_to_plain_dict(
+            session_tracking.get("book_rule_action_signal_v3")
+        )
+        session_book_rows = _sequence_mappings(
+            session_tracking.get("book_rule_overlay_rows_v3")
+        )
+        session_frame_id = int(
+            _epoch_float(
+                operator_session_snapshot.get("display_frame_id")
+                or operator_session_snapshot.get("chart_frame_id")
+                or operator_session_snapshot.get("frame_id"),
+                0.0,
+            )
+        )
+        session_book_frame_id = int(
+            _epoch_float(session_book_signal.get("frame_id"), 0.0)
+        )
+        session_is_atomic_book_frame = bool(
+            session_frame_id > 0
+            and session_book_frame_id == session_frame_id
+            and session_book_rows
+            and all(
+                int(_epoch_float(row.get("frame_id"), 0.0))
+                == session_frame_id
+                for row in session_book_rows
+            )
+        )
+        if session_is_atomic_book_frame:
+            # A newer capture may already be analyzing while the compact live
+            # projection advances. Keep the latest completed study bitmap,
+            # signal, identity, and book geometry as one atomic authority
+            # instead of crossing their frame lineages.
+            projection_input = _merge_operator_projection_input(
+                operator_session_snapshot,
+                operator_session_snapshot,
+                operator_session_snapshot,
+            )
+        else:
+            projection_input = _merge_operator_projection_input(
+                projection_context,
+                compact_live_state,
+                operator_session_snapshot,
+            )
         operator_state = build_operator_workspace_v1(projection_input)
         projection_source = cast(Mapping[str, object], projection_input)
         visual_observation = _mapping_to_plain_dict(
@@ -7858,13 +8078,33 @@ def create_app(
         )
         if waiting_for_new_frame:
             if safe_snapshot is not None:
-                operator_state["overlays"] = _stale_diagnostic_operator_overlays(
-                    safe_snapshot.get("overlays")
+                surface_frame_id = current_surface.get("frame_id")
+                current_book_rows = [
+                    row
+                    for row in _operator_overlay_rows_for_frame(
+                        operator_state.get("overlays"),
+                        surface_frame_id,
+                    )
+                    if (
+                        str(row.get("family") or "").strip().lower()
+                        == "book_rules"
+                        or str(row.get("kind") or "").strip().lower().startswith(
+                            "book_rule"
+                        )
+                    )
+                ]
+                operator_state["overlays"] = _merge_safe_operator_overlay_rows(
+                    current_book_rows,
+                    _stale_diagnostic_operator_overlays(
+                        safe_snapshot.get("overlays")
+                    ),
+                    frame_id=surface_frame_id,
                 )
                 # Saved geometry is recovery evidence, never transform
                 # authority.  Snapshot loading already proved it equals the
-                # current exact scene contract, so retain the freshly built
-                # surface and reuse only its same-frame diagnostic rows.
+                # current exact scene contract. Preserve current book rows
+                # that already passed the exact-frame sanitizer, then reuse
+                # only the snapshot's same-frame diagnostic rows.
         else:
             current_lineage = _operator_overlay_lineage(
                 projection_source
@@ -7923,6 +8163,18 @@ def create_app(
                         projection_source,
                         operator_state,
                     )
+            elif not snapshot_is_current and current_rows:
+                # The current atomic projection is already validated and owns
+                # this exact frame. Persist it directly instead of rebuilding
+                # an INSPECTOR projection while the stream advances; that
+                # expensive fallback created a permanent one-frame race and
+                # discarded otherwise-valid book geometry.
+                safe_snapshot = _persist_operator_overlay_snapshot(
+                    requested_session_id,
+                    projection_source,
+                    operator_state,
+                )
+                saved_rows = list(current_rows)
             elif not snapshot_is_current:
                 full_live_state = build_live_state_v3_for_session(
                     requested_session_id,
@@ -7937,6 +8189,7 @@ def create_app(
                 full_projection_input = _merge_operator_projection_input(
                     _bounded_operator_projection_context(full_live_state),
                     full_compact_state,
+                    operator_session_snapshot,
                 )
                 full_projection_source = cast(
                     Mapping[str, object],

@@ -31,26 +31,38 @@ function Initialize-PhoenixGuardEdgeTabCaptureEnvironment {
         }
     }
 
+    $storedTokenValid = $storedToken.Length -ge 64
     $generatedLocally = $false
-    if ([string]::IsNullOrWhiteSpace($configuredToken)) {
-        if ($storedToken.Length -ge 64) {
-            $configuredToken = $storedToken
-        } else {
-            $tokenBytes = New-Object byte[] 32
-            $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-            try {
-                $generator.GetBytes($tokenBytes)
-            } finally {
-                $generator.Dispose()
-            }
-            $configuredToken = [System.BitConverter]::ToString($tokenBytes).Replace('-', '').ToLowerInvariant()
+    $persistedTokenReused = $false
+    if ($storedTokenValid -and ([string]::IsNullOrWhiteSpace($configuredToken) -or $locallyManaged)) {
+        # A locally managed credential is immutable across backend process
+        # replacement. This keeps an installed Edge extension's persisted
+        # credential valid and avoids any browser reload or reconfiguration.
+        $configuredToken = $storedToken
+        $persistedTokenReused = $true
+        $locallyManaged = $true
+    } elseif ([string]::IsNullOrWhiteSpace($configuredToken)) {
+        $tokenBytes = New-Object byte[] 32
+        $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try {
+            $generator.GetBytes($tokenBytes)
+        } finally {
+            $generator.Dispose()
+        }
+        $configuredToken = [System.BitConverter]::ToString($tokenBytes).Replace('-', '').ToLowerInvariant()
+        $temporaryTokenPath = "$tokenPath.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
             [System.IO.File]::WriteAllText(
-                $tokenPath,
+                $temporaryTokenPath,
                 $configuredToken,
                 (New-Object System.Text.UTF8Encoding($false))
             )
-            $generatedLocally = $true
+            Move-Item -LiteralPath $temporaryTokenPath -Destination $tokenPath -Force
+        } finally {
+            Remove-Item -LiteralPath $temporaryTokenPath -Force -ErrorAction SilentlyContinue
         }
+        $storedToken = $configuredToken
+        $generatedLocally = $true
         [Environment]::SetEnvironmentVariable(
             'PHOENIXGUARD_FRAME_INGEST_TOKEN',
             $configuredToken,
@@ -62,17 +74,36 @@ function Initialize-PhoenixGuardEdgeTabCaptureEnvironment {
             'Process'
         )
         $locallyManaged = $true
-    } elseif ($locallyManaged -and -not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+    } elseif ($locallyManaged -and -not $storedTokenValid) {
         # The canonical kill switch may clear runtime/live after the token was
         # generated but before child processes start. The nested launcher calls
         # this initializer again and restores only its own locally managed
         # credential; an operator-supplied environment token is never persisted.
-        [System.IO.File]::WriteAllText(
-            $tokenPath,
-            $configuredToken,
-            (New-Object System.Text.UTF8Encoding($false))
-        )
+        $temporaryTokenPath = "$tokenPath.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            [System.IO.File]::WriteAllText(
+                $temporaryTokenPath,
+                $configuredToken,
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            Move-Item -LiteralPath $temporaryTokenPath -Destination $tokenPath -Force
+        } finally {
+            Remove-Item -LiteralPath $temporaryTokenPath -Force -ErrorAction SilentlyContinue
+        }
         $storedToken = $configuredToken
+    }
+
+    [Environment]::SetEnvironmentVariable(
+        'PHOENIXGUARD_FRAME_INGEST_TOKEN',
+        $configuredToken,
+        'Process'
+    )
+    if ($locallyManaged) {
+        [Environment]::SetEnvironmentVariable(
+            'PHOENIXGUARD_FRAME_INGEST_TOKEN_LOCAL_MANAGED',
+            '1',
+            'Process'
+        )
     }
 
     $normalizedInterval = [Math]::Max(1.0, [double]$MinIntervalSec)
@@ -98,6 +129,7 @@ function Initialize-PhoenixGuardEdgeTabCaptureEnvironment {
         Armed = -not [string]::IsNullOrWhiteSpace($configuredToken)
         TokenPath = $tokenPathForOperator
         GeneratedLocally = $generatedLocally
+        PersistedTokenReused = $persistedTokenReused
         MinIntervalSec = $normalizedInterval
     }
 }

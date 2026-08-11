@@ -153,6 +153,9 @@ _OVERLAY_PRESENTATION: dict[str, tuple[str, str, str]] = {
     "TARGET": ("target", "Target area", "plan"),
     "RISK": ("risk", "Risk limit", "plan"),
     "MOVEMENT": ("movement", "Price movement", "movement"),
+    "BOOK_RULE_LINE": ("book_rule", "Book rule line", "plan"),
+    "BOOK_RULE_ZONE": ("book_rule", "Book rule reaction area", "plan"),
+    "BOOK_RULE_CANDLE": ("book_rule", "Book rule candle", "plan"),
 }
 
 _LAYER_GROUPS = {
@@ -168,6 +171,7 @@ _LAYER_GROUPS = {
     "invalidation": "plan",
     "active_council_decision": "plan",
     "historical_replay": "history",
+    "book_rules": "plan",
 }
 
 # This is the complete public overlay vocabulary.  It intentionally omits the
@@ -189,6 +193,7 @@ _LAYER_FAMILIES = {
     "active_council_decision": "council",
     "historical_replay": "history",
     "smart_money": "market_context",
+    "book_rules": "book_rules",
 }
 
 _TYPE_FAMILIES = {
@@ -233,6 +238,9 @@ _TYPE_FAMILIES = {
     "TARGET": "targets",
     "RISK": "invalidation",
     "MOVEMENT": "current_candles",
+    "BOOK_RULE_LINE": "book_rules",
+    "BOOK_RULE_ZONE": "book_rules",
+    "BOOK_RULE_CANDLE": "book_rules",
 }
 
 _FAMILY_FALLBACK_LAYERS = {
@@ -249,6 +257,7 @@ _FAMILY_FALLBACK_LAYERS = {
     "council": "active_council_decision",
     "history": "historical_replay",
     "market_context": "market_context",
+    "book_rules": "book_rules",
 }
 
 _PUBLIC_LAYER_ALIASES = {
@@ -300,6 +309,9 @@ _PUBLIC_OVERLAY_KINDS: dict[str, tuple[str, str]] = {
     "TARGET": ("target_area", "Target area"),
     "RISK": ("risk_limit", "Risk limit"),
     "MOVEMENT": ("price_movement", "Price movement"),
+    "BOOK_RULE_LINE": ("book_rule_line", "Book rule line"),
+    "BOOK_RULE_ZONE": ("book_rule_zone", "Book rule reaction area"),
+    "BOOK_RULE_CANDLE": ("book_rule_candle", "Book rule candle"),
     "OUTLOOK": ("possible_path", "Possible path"),
 }
 
@@ -2759,7 +2771,7 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         and _explicit_bool(payload.get("timeframe_identity_confirmed")) is True
         and bool(current_symbol)
         and bool(current_timeframe)
-        and current_selector_fingerprint.startswith("selector_v2_")
+        and current_selector_fingerprint.startswith(("selector_v2_", "selector_v3_"))
     )
     fast_chart_identity_locked = bool(current_chart_identity)
     wgc_identity_locked_without_selector = (
@@ -2857,13 +2869,67 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
     approved_reference_object_ids = {
         id(row) for row in reference_positioning_rows
     }
+    # The merged live projection can contain a bounded public book contract and
+    # a geometry-bearing direct contract at the same time.  Do not stop at the
+    # first truthy copy: the public copy intentionally retains the rule report
+    # while it may omit private source geometry.  Every row still passes the
+    # strict frame, instrument, selector, coordinate-plane, and anchor checks
+    # below before it can cross the operator boundary.
+    book_rule_overlay_rows = [
+        row
+        for candidate in (
+            tracking_summary.get("book_rule_action_signal_v3"),
+            latest_signal.get("book_rule_action_signal_v3"),
+            payload.get("book_rule_action_signal_v3"),
+        )
+        for row in _rows(_mapping(candidate).get("overlays"))
+    ]
+    book_rule_overlay_rows.extend(
+        _rows(payload.get("_book_rule_overlay_rows_v3"))
+    )
+    book_rule_overlay_rows.extend(
+        _rows(tracking_summary.get("book_rule_overlay_rows_v3"))
+    )
+
+    def book_geometry_is_inside_declared_chart(
+        *,
+        accepted_bounds: Sequence[float],
+        bounds: Sequence[float],
+        points: Sequence[Sequence[float]],
+        line_points: Sequence[Sequence[float]],
+    ) -> bool:
+        if len(accepted_bounds) != 4 or len(bounds) != 4:
+            return False
+        left, top, right, bottom = (float(value) for value in accepted_bounds)
+        if right <= left or bottom <= top:
+            return False
+        tolerance = 0.75
+        geometry_points = [
+            [float(bounds[0]), float(bounds[1])],
+            [float(bounds[2]), float(bounds[3])],
+            *points,
+            *line_points,
+        ]
+        return all(
+            len(point) >= 2
+            and left - tolerance <= float(point[0]) <= right + tolerance
+            and top - tolerance <= float(point[1]) <= bottom + tolerance
+            for point in geometry_points
+        )
+
     source_rows = [
+        *book_rule_overlay_rows,
         *positioning_rows,
         *_overlay_rows(payload),
     ]
     for index, overlay in enumerate(source_rows[:256]):
         source_object_id = id(overlay)
         raw_type = _text(overlay.get("type") or overlay.get("overlay_type") or overlay.get("kind"), "").upper()
+        is_book_rule_overlay = raw_type in {
+            "BOOK_RULE_LINE",
+            "BOOK_RULE_ZONE",
+            "BOOK_RULE_CANDLE",
+        }
         layer = _text(overlay.get("layer"), "").lower()
         trusted_positioning_row = bool(
             source_object_id in trusted_positioning_object_ids
@@ -2932,13 +2998,33 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 )
             )
         )
-        if enforce_instrument_identity_contract and not (
-            current_identity_locked
+        # Book-rule rows are emitted by the in-process V3 rule engine with an
+        # exact selector, symbol, timeframe, and frame lock.  The compact live
+        # payload does not repeat the legacy top-level identity booleans, so
+        # requiring those redundant aliases drops otherwise stricter rows at
+        # the operator bridge.  Accept only the complete row-to-surface match;
+        # frame and geometry acceptance are still enforced below.
+        book_identity_matches_surface = bool(
+            is_book_rule_overlay
             and overlay_identity_locked
+            and bool(current_symbol)
+            and bool(current_timeframe)
+            and bool(current_selector_fingerprint)
             and canonical_instrument_token(overlay_symbol)
             == canonical_instrument_token(current_symbol)
             and overlay_timeframe == current_timeframe
-            and selector_identity_matches
+            and overlay_selector_fingerprint == current_selector_fingerprint
+        )
+        if enforce_instrument_identity_contract and not (
+            (
+                current_identity_locked
+                and overlay_identity_locked
+                and canonical_instrument_token(overlay_symbol)
+                == canonical_instrument_token(current_symbol)
+                and overlay_timeframe == current_timeframe
+                and selector_identity_matches
+            )
+            or book_identity_matches_surface
         ):
             continue
         source_positioning_mode = _text(
@@ -3028,6 +3114,14 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         ) is True
         if display_frame_id is None or frame_mismatch or explicit_mismatch:
             continue
+        if is_book_rule_overlay and (historical or stale):
+            # Book geometry is a current-scenario surface only. Historical or
+            # stale rows must never be redrawn on a live bitmap. Waiting for a
+            # changed/closed candle is not staleness when this row still owns
+            # the exact displayed frame, selector, identity, and chart plane;
+            # rejecting that state makes valid book overlays disappear while
+            # an unchanged forming candle is being observed.
+            continue
         if not historical and stale:
             continue
         latest_candle = bool(
@@ -3069,6 +3163,11 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         public_points = _point_pairs(overlay.get("points"))
         public_line_points = _point_pairs(overlay.get("line_points"))
         coordinate_units = _coordinate_units(overlay)
+        coordinate_space = _coordinate_space(overlay)
+        book_chart_bounds: list[float] = []
+        book_anchor_wick_points: list[list[float]] = []
+        book_touch_count = 0
+        book_geometry_role = ""
         if latest_candle:
             # A one-point close anchor is intentionally published only for the
             # latest candle and only when it is corroborated by this frame's
@@ -3088,6 +3187,115 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             # A label with no verified chart geometry is exactly the floating
             # overlay failure this contract is designed to prevent.
             continue
+        if is_book_rule_overlay:
+            # Book-rule marks are live execution-facing evidence, so they use a
+            # stricter contract than generic context geometry.  No selector
+            # fallback, normalized coordinate inference, or cross-frame reuse
+            # is permitted here.
+            if not (
+                _explicit_bool(overlay.get("geometry_contract_accepted")) is True
+                and
+                book_identity_matches_surface
+                and coordinate_space == "chart"
+                and coordinate_units == "pixels"
+            ):
+                continue
+            book_chart_bounds = _bounds(overlay.get("chart_bounds"))
+            if not book_geometry_is_inside_declared_chart(
+                accepted_bounds=book_chart_bounds,
+                bounds=public_bounds,
+                points=public_points,
+                line_points=public_line_points,
+            ):
+                continue
+            if chart_plane_bounds and not book_geometry_is_inside_declared_chart(
+                accepted_bounds=chart_plane_bounds,
+                bounds=book_chart_bounds,
+                points=(),
+                line_points=(),
+            ):
+                continue
+
+            role_evidence = " ".join(
+                _text(value, "", limit=120).upper()
+                for value in (
+                    overlay.get("book_geometry_role"),
+                    overlay.get("geometry_role"),
+                    overlay.get("role"),
+                    overlay.get("label"),
+                    overlay.get("book_playbook"),
+                    " ".join(str(value) for value in list(overlay.get("book_rule_ids") or [])[:16]),
+                )
+            )
+            if "HLZ" in role_evidence:
+                book_geometry_role = "HLZ"
+            elif "REJECT" in role_evidence:
+                book_geometry_role = "REJECTION"
+            elif any(token in role_evidence for token in ("ACTION", "ENTRY", "TRIGGER")):
+                book_geometry_role = "ACTION_BOX"
+            elif "SUPPLY" in role_evidence:
+                book_geometry_role = "SUPPLY"
+            elif "DEMAND" in role_evidence:
+                book_geometry_role = "DEMAND"
+            elif "RESIST" in role_evidence:
+                book_geometry_role = "RESISTANCE"
+            elif "SUPPORT" in role_evidence:
+                book_geometry_role = "SUPPORT"
+            elif any(
+                token in role_evidence
+                for token in (
+                    "SMC",
+                    "ORDER BLOCK",
+                    "ORDER_BLOCK",
+                    "BREAKER",
+                    "MITIGATION",
+                    "FAIR VALUE GAP",
+                    "FAIR_VALUE_GAP",
+                    "FVG",
+                    "LIQUIDITY",
+                )
+            ):
+                book_geometry_role = "SMC"
+            elif "WICK" in role_evidence or raw_type == "BOOK_RULE_CANDLE":
+                book_geometry_role = "WICK"
+            elif raw_type == "BOOK_RULE_LINE":
+                book_geometry_role = "WICK_TRENDLINE"
+            else:
+                book_geometry_role = "REACTION_ZONE"
+
+            if raw_type == "BOOK_RULE_LINE":
+                book_anchor_wick_points = _point_pairs(
+                    overlay.get("anchor_wick_points"),
+                    limit=2,
+                )
+                book_touch_count = _integer(overlay.get("touch_count"))
+                tolerance = 0.75
+                distinct_anchors = bool(
+                    len(book_anchor_wick_points) == 2
+                    and (
+                        abs(book_anchor_wick_points[0][0] - book_anchor_wick_points[1][0])
+                        > tolerance
+                        or abs(book_anchor_wick_points[0][1] - book_anchor_wick_points[1][1])
+                        > tolerance
+                    )
+                )
+                anchors_bind_line = bool(
+                    len(public_line_points) >= 2
+                    and len(book_anchor_wick_points) == 2
+                    and all(
+                        abs(public_line_points[index][axis] - book_anchor_wick_points[index][axis])
+                        <= tolerance
+                        for index in range(2)
+                        for axis in range(2)
+                    )
+                )
+                if not (
+                    _explicit_bool(overlay.get("geometry_contract_accepted")) is True
+                    and distinct_anchors
+                    and anchors_bind_line
+                    and book_touch_count >= 3
+                ):
+                    continue
         seen.add(dedup_key)
         public_overlay: dict[str, object] = {
             "id": object_id,
@@ -3108,11 +3316,11 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 "historical"
                 if historical
                 else "stale_diagnostic"
-                if waiting_for_new_frame
+                if waiting_for_new_frame and not is_book_rule_overlay
                 else "current"
             ),
             "frame_id": overlay_frame,
-            "coordinate_space": _coordinate_space(overlay),
+            "coordinate_space": coordinate_space,
             "coordinate_units": coordinate_units,
             "symbol": overlay_symbol,
             "timeframe": overlay_timeframe,
@@ -3172,11 +3380,106 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                     **source_bounds_contract,
                 }
             )
+        if raw_type in {"BOOK_RULE_LINE", "BOOK_RULE_ZONE", "BOOK_RULE_CANDLE"}:
+            public_overlay.update(
+                {
+                    "label": _safe_public_text(
+                        overlay.get("label"),
+                        public_kind_label,
+                        limit=72,
+                    ),
+                    "book_rule_ids": [
+                        _safe_identifier(value, "book-rule")
+                        for value in list(overlay.get("book_rule_ids") or [])[:16]
+                    ],
+                    "book_playbook": _safe_public_text(
+                        overlay.get("book_playbook"),
+                        "Book rule",
+                        limit=64,
+                    ),
+                    "book_action_side": _side(
+                        overlay.get("book_action_side"),
+                        overlay.get("side"),
+                    ),
+                    "closed_candle_key": _safe_identifier(
+                        overlay.get("closed_candle_key"),
+                        "closed-candle",
+                    ),
+                    "book_geometry_role": book_geometry_role,
+                    "geometry_contract_accepted": True,
+                    "geometry_status": "BOUNDS_ACCEPTED_CURRENT_CHART",
+                    "chart_bounds": book_chart_bounds,
+                }
+            )
+        if raw_type == "BOOK_RULE_LINE":
+            public_overlay.update(
+                {
+                    "geometry_status": "ANCHORS_VALID_STRICT_THIRD_TOUCH",
+                    "anchor_wick_points": book_anchor_wick_points,
+                    "touch_count": book_touch_count,
+                    "strict_third_touch_confirmed": True,
+                }
+            )
         public_overlay.update(
             _overlay_identity_and_revisions(overlay, public_overlay)
         )
         output.append(public_overlay)
     return output
+
+
+def _book_rule_action_contract_v3(value: object) -> dict[str, object]:
+    source = _mapping(value)
+    if _text(source.get("schema_version")).upper() != "PG_BOOK_RULE_ACTION_SIGNAL_V3":
+        return {}
+    scalar_keys = (
+        "schema_version",
+        "provider_role",
+        "priority",
+        "status",
+        "action",
+        "watch_side",
+        "actionable",
+        "confidence",
+        "confidence_percent",
+        "score_margin",
+        "playbook",
+        "scenario",
+        "trigger",
+        "invalidation",
+        "strategy_family_count",
+        "active_strategy_count",
+        "watching_strategy_count",
+        "overlay_count",
+        "overlay_contract",
+        "technical_indicators_used",
+        "execution_authority",
+        "frame_id",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "pair",
+        "timeframe",
+        "display_frame_id",
+        "market_selector_visual_fingerprint",
+        "instrument_identity_status",
+        "surface_semantic_identity",
+    )
+    result: dict[str, object] = {
+        key: source[key] for key in scalar_keys if key in source
+    }
+    for key in (
+        "opposing_force",
+        "structure",
+        "strict_trendlines",
+        "hlz",
+        "candlestick",
+        "strategy_report",
+        "active_strategy_ids",
+        "rule_traceability",
+    ):
+        bounded = _bounded_hidden_state_value(source.get(key))
+        if bounded not in (None, {}, []):
+            result[key] = bounded
+    return result
 
 
 def _continuous_study_history_summary(study: Mapping[str, object]) -> str:
@@ -10438,6 +10741,13 @@ def build_operator_workspace_v1(
         tracking_summary.get("market_study_v3")
         or _mapping(source.get("latest_signal")).get("market_study_v3")
     )
+    book_rule_action_signal_v3 = _book_rule_action_contract_v3(
+        tracking_summary.get("book_rule_action_signal_v3")
+        or _mapping(source.get("latest_signal")).get(
+            "book_rule_action_signal_v3"
+        )
+        or source.get("book_rule_action_signal_v3")
+    )
     aligned_chart_identity = _aligned_current_chart_identity_v3(
         source, display_frame
     )
@@ -10598,6 +10908,11 @@ def build_operator_workspace_v1(
             "history_count": len(history),
             "market_study_v3": (
                 {} if heartbeat_identity_mismatch else market_study_v3
+            ),
+            "book_rule_action_signal_v3": (
+                {}
+                if heartbeat_identity_mismatch
+                else book_rule_action_signal_v3
             ),
             "stream": stream,
             "capture_source": capture_transport,

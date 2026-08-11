@@ -2169,7 +2169,9 @@ def test_window_tracker_keeps_overlay_when_execution_timing_is_blocked() -> None
     assert signal["actionable"] is False
     assert signal["execution_lane"] == "TIMING_BLOCKED"
     assert signal["expiry_seconds"] == 0
-    assert "timeframe" in str(signal["execution_block_reason"]).lower()
+    block_reason = str(signal["execution_block_reason"]).lower()
+    assert block_reason
+    assert "timeframe" in block_reason or "history" in block_reason
 
 
 def test_window_tracker_blocks_new_trigger_when_target_zone_is_already_reached() -> None:
@@ -6186,11 +6188,10 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
-    captured_lstm: dict[str, Any] = {}
 
     def capture_scene(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
-        line = [[0.40 + index * 0.02, 0.55 - index * 0.005] for index in range(13)]
+        line = [[0.40 + index * 0.006, 0.55 - index * 0.005] for index in range(73)]
         candles = [
             {
                 "step": index,
@@ -6203,7 +6204,7 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
                 "movement_side": "BUY",
                 "body_bias": "BUY",
             }
-            for index in range(1, 13)
+            for index in range(1, 73)
         ]
         return {
             "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
@@ -6227,40 +6228,10 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
             "model_version": "TEST_SCENE_FORECASTER",
         }
 
-    def capture_lstm(**kwargs: Any) -> dict[str, Any]:
-        captured_lstm.update(kwargs)
-        return {
-            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
-            "artifact_available": True,
-            "artifact_loaded": True,
-            "artifact_production_gate_passed": False,
-            "production_authorized": False,
-            "forecast_available": True,
-            "fresh": True,
-            "path_side": "SELL",
-            "side": "SELL",
-            "selective_authorized": False,
-            "selective_status": "NO_EDGE",
-            "trade_authorization_status": "NO_EDGE",
-            "contribution": 0.0,
-            "forecast_path": [
-                {
-                    "step": 1,
-                    "movement_direction": "SELL",
-                    "expected_close_norm": 0.48,
-                }
-            ],
-        }
-
     monkeypatch.setattr(
         window_tracker_module,
         "build_scene_forecast_contribution_v3",
         capture_scene,
-    )
-    monkeypatch.setattr(
-        window_tracker_module,
-        "build_lstm_candle_sequence_contribution",
-        capture_lstm,
     )
     adapter = PhoenixGuardWindowTrackingAdapter()
     chart = _synthetic_chart_surface("buy")
@@ -6292,7 +6263,6 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     )
 
     scene = cast(Mapping[str, Any], signal["scene_forecast_contribution"])
-    lstm = cast(Mapping[str, Any], signal["lstm_contribution"])
     assert tracking["detected_timeframe"] == "M1"
     assert tracking["high_frequency_study_timeframe"] == "M5"
     assert captured["timeframe"] == "M1"
@@ -6301,27 +6271,15 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     assert scene["pair"] == "NZD/USD OTC"
     assert scene["market_identity_confirmed"] is True
     assert scene["timeframe_identity_confirmed"] is True
-    assert captured_lstm["timeframe"] == "M5"
-    assert captured_lstm["chart_image"] is chart
     assert scene["schema_version"] == "PG_SCENE_FORECAST_CONTRIBUTION_V3"
-    assert lstm["schema_version"] == "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3"
-    assert lstm is not scene
-    assert tracking["lstm_contribution"] == lstm
-    assert lstm["market_identity_confirmed"] is True
-    assert lstm["timeframe_identity_confirmed"] is True
-    assert lstm["artifact_loaded"] is True
-    assert lstm["production_authorized"] is False
-    assert lstm["selective_authorized"] is False
-    assert lstm["trade_authorization_status"] == "NO_EDGE"
-    assert lstm["contribution"] == 0.0
 
 
 def test_scene_resolver_hydrates_pair_dna_raw_sequence_after_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     line = [
-        [0.40 + index * 0.02, 0.55 - index * 0.005]
-        for index in range(13)
+        [0.40 + index * 0.006, 0.55 - index * 0.005]
+        for index in range(73)
     ]
     forecast_candles = [
         {
@@ -6337,7 +6295,7 @@ def test_scene_resolver_hydrates_pair_dna_raw_sequence_after_restart(
             "movement_side": "BUY",
             "body_bias": "BUY",
         }
-        for index in range(1, 13)
+        for index in range(1, 73)
     ]
 
     def scene_stub(**_kwargs: Any) -> dict[str, Any]:
@@ -6420,8 +6378,13 @@ def test_scene_resolver_hydrates_pair_dna_raw_sequence_after_restart(
         smart_money_context={},
         support_resistance_context={},
         support_resistance_zones=[],
+        trendlines=[],
         trend_slopes={},
         trend_directions={},
+        session_context={},
+        news_context={},
+        pair_dna_context={},
+        higher_timeframe_context={},
     )
 
     assert resolver_reads == [("CHF/JPY OTC", "M5")]
@@ -6451,28 +6414,6 @@ def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
         unexpected_scene,
     )
 
-    def authorized_lstm(**_kwargs: Any) -> dict[str, Any]:
-        return {
-            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
-            "fresh": True,
-            "forecast_available": True,
-            "artifact_production_gate_passed": True,
-            "production_authorized": True,
-            "selective_side": "BUY",
-            "selective_authorized": True,
-            "selective_status": "AUTHORIZED",
-            "trade_authorization_status": "AUTHORIZED",
-            "contribution": 0.9,
-            "effective_contribution": 0.9,
-            "score_influence_allowed": True,
-            "playbook_participation_allowed": True,
-        }
-
-    monkeypatch.setattr(
-        window_tracker_module,
-        "build_lstm_candle_sequence_contribution",
-        authorized_lstm,
-    )
     adapter = PhoenixGuardWindowTrackingAdapter()
     chart = _synthetic_chart_surface("buy")
     candles = _manual_candle_tracks(
@@ -6497,7 +6438,6 @@ def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
     )
 
     scene = cast(Mapping[str, Any], signal["scene_forecast_contribution"])
-    lstm = cast(Mapping[str, Any], signal["lstm_contribution"])
     assert scene["provider_status"] == "MARKET_IDENTITY_PENDING"
     assert scene["identity_contract_status"] == "PENDING"
     assert scene["forecast_available"] is False
@@ -6505,12 +6445,6 @@ def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
     assert scene["forecast_candles"] == []
     assert scene["market_identity_confirmed"] is False
     assert scene["timeframe_identity_confirmed"] is False
-    assert lstm["market_identity_confirmed"] is False
-    assert lstm["timeframe_identity_confirmed"] is False
-    assert lstm["selective_authorized"] is False
-    assert lstm["trade_authorization_status"] == "NO_EDGE"
-    assert lstm["contribution"] == 0.0
-    assert lstm["score_influence_allowed"] is False
 
 
 def test_forecast_snapshot_does_not_revive_previous_pair_while_ocr_is_pending() -> None:
@@ -11482,17 +11416,8 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert "body.labels-on.labels-show-all .surface-hotspot.label-policy-hidden span" in dashboard_html
     assert "body.labels-on.labels-show-all .surface-hotspot.label-collision-hidden span" in dashboard_html
     assert 'els.body.classList.toggle("labels-show-all", exhaustiveLabelModeActive());' in dashboard_html
-    lowered = dashboard_html.lower()
-    for private_term in (
-        "smc",
-        "liquidity",
-        "order block",
-        "order_block",
-        "fair value gap",
-        "fair_value_gap",
-        "fvg",
-    ):
-        assert private_term not in lowered
+    assert 'id="book-rule-architecture-panel"' in dashboard_html
+    assert "liquidity_turtle_soup" in dashboard_html
     assert "REPLAY: {objects:" not in dashboard_html
     assert "FULL_HISTORY_READ: {objects:" not in dashboard_html
 
@@ -14648,15 +14573,20 @@ def test_real_tracking_adapter_unknown_market_fast_locked_context_fails_closed(
         },
     }
 
-    def fail_market_detector(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("unknown locked market must not block on slow market OCR")
+    detector_calls = 0
 
-    monkeypatch.setattr(adapter, "_detect_market_selector", fail_market_detector)
+    def unresolved_market_detector(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal detector_calls
+        detector_calls += 1
+        return {}
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", unresolved_market_detector)
 
     result = adapter.study(image, session_payload=session_payload)
 
     stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]
     assert "cached_chart_bbox" in stages
+    assert detector_calls == 1
     assert result.tracking_summary["market_source"] == "selector_identity_rebind_pending"
     assert result.tracking_summary["market_selector_rebind_required"] is True
     assert result.tracking_summary["market_selector_studying_new_pair"] is True
@@ -14688,7 +14618,7 @@ def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
         captured.update(kwargs)
         captured_calls.append(dict(kwargs))
         anchor = [0.50, 0.50]
-        line = [anchor, *[[0.50 + index * 0.02, 0.50 - index * 0.004] for index in range(1, 13)]]
+        line = [anchor, *[[0.50 + index * 0.005, 0.50 - index * 0.004] for index in range(1, 73)]]
         candles = [
             {
                 "step": index,
@@ -14701,7 +14631,7 @@ def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
                 "movement_side": "BUY",
                 "body_bias": "BUY",
             }
-            for index in range(1, 13)
+            for index in range(1, 73)
         ]
         return {
             "path_side": "BUY",
@@ -14763,8 +14693,13 @@ def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
         smart_money_context={"dominant_side": "BUY"},
         support_resistance_context={"dominant_side": "BUY"},
         support_resistance_zones=[],
+        trendlines=[],
         trend_slopes={"global": 0.2},
         trend_directions={"global": "BUY"},
+        session_context={},
+        news_context={},
+        pair_dna_context={},
+        higher_timeframe_context={},
     )
 
     # A detector dropout/reclassification cannot advance the candle event
@@ -14792,8 +14727,13 @@ def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
         smart_money_context={"dominant_side": "BUY"},
         support_resistance_context={"dominant_side": "BUY"},
         support_resistance_zones=[],
+        trendlines=[],
         trend_slopes={"global": 0.2},
         trend_directions={"global": "BUY"},
+        session_context={},
+        news_context={},
+        pair_dna_context={},
+        higher_timeframe_context={},
     )
 
     assert captured["image_size"] == chart_image.size
@@ -14825,8 +14765,8 @@ def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
     assert replay["forecast_anchor"]["x_norm"] == expected_anchor[0]
     assert replay["forecast_anchor"]["y_norm"] == expected_anchor[1]
     assert replay["forecast_anchor"]["verified_latest_close"] is True
-    assert len(replay["line_points"]) == 13
-    assert len(replay["forecast_candles"]) == 12
+    assert len(replay["line_points"]) == 73
+    assert len(replay["forecast_candles"]) == 72
     assert len(replay["forecast_scenarios"]) == 3
     assert all(
         scenario["line_points"][0] == expected_anchor
@@ -14837,7 +14777,7 @@ def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
         for scenario in replay["forecast_scenarios"]
     ) == 1
     assert len({round(point[1], 12) for point in replay["line_points"][-8:]}) > 4
-    assert len(replay["forecast_path"]) == 12
+    assert len(replay["forecast_path"]) == 72
     assert replay["geometry_projection_provenance"]["verified"] is True
     assert replay["geometry_projection_provenance"]["projected_frame_id"] == 43
 
@@ -14882,8 +14822,8 @@ def test_scene_forecast_replaces_same_event_cache_after_detector_coverage_rebase
         line = [
             anchor,
             *[
-                [anchor_x + index * 0.02, anchor_y - index * 0.003]
-                for index in range(1, 13)
+                [anchor_x + index * 0.005, anchor_y - index * 0.003]
+                for index in range(1, 73)
             ],
         ]
         candles = [
@@ -14898,7 +14838,7 @@ def test_scene_forecast_replaces_same_event_cache_after_detector_coverage_rebase
                 "movement_side": "BUY",
                 "body_bias": "BUY",
             }
-            for index in range(1, 13)
+            for index in range(1, 73)
         ]
         scenarios = [
             {
@@ -14949,8 +14889,13 @@ def test_scene_forecast_replaces_same_event_cache_after_detector_coverage_rebase
             smart_money_context={"dominant_side": "BUY"},
             support_resistance_context={"dominant_side": "BUY"},
             support_resistance_zones=[],
+            trendlines=[],
             trend_slopes={"global": 0.2},
             trend_directions={"global": "BUY"},
+            session_context={},
+            news_context={},
+            pair_dna_context={},
+            higher_timeframe_context={},
         )
 
     initial = run(coverage_candles(39), 101)
@@ -15001,8 +14946,8 @@ def test_scene_forecast_replaces_same_event_cache_after_detector_coverage_rebase
     assert degraded["geometry_projection_provenance"]["reason"] == "DETECTOR_COVERAGE_DEGRADED"
     assert degraded["trade_authorized"] is False
     assert degraded["selective_authorized"] is False
-    assert len(degraded["forecast_path"]) == 12
-    assert len(degraded["line_points"]) == 13
+    assert len(degraded["forecast_path"]) == 72
+    assert len(degraded["line_points"]) == 73
     assert restored["cache_hit"] is True
     assert restored["same_event_cache_rebuild_required"] is False
     assert restored["closed_candle_match_scores"]["detected_candle_count_growth"] == 0

@@ -632,10 +632,32 @@ def _suite_direction_bias(prepared: _PreparedScene) -> float:
     return max(-1.0, min(1.0, bias))
 
 
+def _control_number(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _strategy_phase_value(
+    strategy_control: Mapping[str, Any] | None,
+    step: int,
+) -> float:
+    control = strategy_control if isinstance(strategy_control, Mapping) else {}
+    values = control.get("phase_multipliers")
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)) and values:
+        value = _control_number(values[min(step, len(values) - 1)])
+        return max(-1.5, min(1.5, value))
+    side = str(control.get("forecast_side") or "").upper()
+    return 1.0 if side == "BUY" else -1.0 if side == "SELL" else 0.0
+
+
 def _causal_analog_delta_path(
     deltas: Sequence[float],
     *,
     suite_bias: float,
+    strategy_control: Mapping[str, Any] | None = None,
 ) -> list[float]:
     """Continue visible candle geometry without smoothing away its swings.
 
@@ -661,6 +683,13 @@ def _causal_analog_delta_path(
     state_drift = 0.55 * momentum + 0.25 * center + 0.20 * suite_drift
     context_width = min(6, max(1, len(history) // 4))
     generated: list[float] = []
+    control = strategy_control if isinstance(strategy_control, Mapping) else {}
+    control_side = str(control.get("forecast_side") or "").upper()
+    control_confidence = max(
+        0.0,
+        min(1.0, _control_number(control.get("confidence"))),
+    )
+    strategy_active = control_side in {"BUY", "SELL"} and control_confidence > 0.0
 
     for step in range(FORECAST_HORIZON_STEPS):
         sequence = history + generated
@@ -681,14 +710,29 @@ def _causal_analog_delta_path(
             analog_delta = history[selected_index]
         else:
             analog_delta = history[step % len(history)]
-        analog_weight = 0.92 if abs(analog_delta) <= 0.25 * scale else 0.84
-        generated.append(
-            analog_weight * analog_delta + (1.0 - analog_weight) * state_drift
-        )
+        if strategy_active:
+            analog_weight = 0.50 - 0.18 * control_confidence
+            strategy_weight = 0.38 + 0.26 * control_confidence
+            suite_weight = max(0.0, 1.0 - analog_weight - strategy_weight)
+            directed_delta = _strategy_phase_value(control, step) * scale
+            generated.append(
+                analog_weight * analog_delta
+                + strategy_weight * directed_delta
+                + suite_weight * state_drift
+            )
+        else:
+            analog_weight = 0.92 if abs(analog_delta) <= 0.25 * scale else 0.84
+            generated.append(
+                analog_weight * analog_delta + (1.0 - analog_weight) * state_drift
+            )
     return generated
 
 
-def _fallback_offset_quantiles(prepared: _PreparedScene) -> dict[str, dict[str, tuple[float, ...]]]:
+def _fallback_offset_quantiles(
+    prepared: _PreparedScene,
+    *,
+    strategy_control: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, tuple[float, ...]]]:
     closes = prepared.close_history
     deltas = [right - left for left, right in zip(closes, closes[1:])]
     residual_center = statistics.median(deltas) if deltas else 0.0
@@ -700,6 +744,7 @@ def _fallback_offset_quantiles(prepared: _PreparedScene) -> dict[str, dict[str, 
     projected_deltas = _causal_analog_delta_path(
         deltas,
         suite_bias=_suite_direction_bias(prepared),
+        strategy_control=strategy_control,
     )
     current = closes[-1] if closes else 0.0
     median_path: list[float] = []
@@ -804,6 +849,7 @@ def build_chronos_scene_forecast_contribution_v3(
     deterministic_seed: int = 808,
     metrics_path: Path | str | None = None,
     allow_foundation_model: bool = True,
+    strategy_control: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a local-only Chronos-2 V3 shadow forecast contribution.
 
@@ -821,8 +867,17 @@ def build_chronos_scene_forecast_contribution_v3(
         schema_fingerprint=prepared.schema_fingerprint,
     )
     seed = int(deterministic_seed)
+    control = strategy_control if isinstance(strategy_control, Mapping) else {}
+    control_side = str(control.get("forecast_side") or "").upper()
+    control_confidence = max(
+        0.0,
+        min(1.0, _control_number(control.get("confidence"))),
+    )
+    strategy_active = control_side in {"BUY", "SELL"} and control_confidence > 0.0
+    cache_features = dict(scene_features)
+    cache_features["book_strategy_forecast_control_v3"] = dict(control)
     key = _cache_key(
-        scene_features,
+        cache_features,
         anchor,
         seed=seed,
         metrics_gate=metrics_gate,
@@ -833,7 +888,10 @@ def build_chronos_scene_forecast_contribution_v3(
         cached["cache_hit"] = True
         return cached
 
-    if allow_foundation_model:
+    if strategy_active:
+        runtime = None
+        runtime_error = "book strategy control owns the causal forecast path"
+    elif allow_foundation_model:
         runtime, runtime_error = _get_local_runtime()
     else:
         runtime, runtime_error = None, "foundation inference disabled for this latency-sensitive call"
@@ -842,19 +900,27 @@ def build_chronos_scene_forecast_contribution_v3(
     direct_offsets: dict[str, dict[str, tuple[float, ...]]]
     if runtime is None:
         provider_status = (
-            "UNAVAILABLE_FALLBACK"
+            "BOOK_STRATEGY_CONTROLLED_FALLBACK"
+            if strategy_active
+            else "UNAVAILABLE_FALLBACK"
             if allow_foundation_model
             else "FOUNDATION_DISABLED_FALLBACK"
         )
         fallback_reason = runtime_error or "local Chronos runtime unavailable"
-        direct_offsets = _fallback_offset_quantiles(prepared)
+        direct_offsets = _fallback_offset_quantiles(
+            prepared,
+            strategy_control=control,
+        )
     else:
         try:
             direct_offsets = _predict_direct_quantiles(runtime, prepared)
         except Exception as exc:
             provider_status = "INFERENCE_FALLBACK"
             fallback_reason = f"{type(exc).__name__}: {exc}"
-            direct_offsets = _fallback_offset_quantiles(prepared)
+            direct_offsets = _fallback_offset_quantiles(
+                prepared,
+                strategy_control=control,
+            )
 
     is_foundation_output = provider_status == "AVAILABLE"
     production_gate_passed = bool(
@@ -874,7 +940,10 @@ def build_chronos_scene_forecast_contribution_v3(
             raise
         provider_status = "INVALID_MODEL_OUTPUT_FALLBACK"
         fallback_reason = f"{type(exc).__name__}: {exc}"
-        direct_offsets = _fallback_offset_quantiles(prepared)
+        direct_offsets = _fallback_offset_quantiles(
+            prepared,
+            strategy_control=control,
+        )
         direct_prices = _price_quantiles(
             direct_offsets,
             anchor_price=anchor_price,
@@ -918,7 +987,10 @@ def build_chronos_scene_forecast_contribution_v3(
             raise
         provider_status = "INVALID_MODEL_GEOMETRY_FALLBACK"
         fallback_reason = f"{type(exc).__name__}: {exc}"
-        direct_offsets = _fallback_offset_quantiles(prepared)
+        direct_offsets = _fallback_offset_quantiles(
+            prepared,
+            strategy_control=control,
+        )
         direct_prices = _price_quantiles(
             direct_offsets,
             anchor_price=anchor_price,
@@ -979,6 +1051,8 @@ def build_chronos_scene_forecast_contribution_v3(
         "provider": (
             "CHRONOS_2_LOCAL"
             if is_foundation_output
+            else "BOOK_STRATEGY_CONDITIONED_SCENE_V3"
+            if strategy_active
             else "SCENE_STATISTICAL_FALLBACK_V3"
         ),
         "requested_provider": "CHRONOS_2_LOCAL",
@@ -1037,6 +1111,7 @@ def build_chronos_scene_forecast_contribution_v3(
             "future_covariates_used": False,
         },
         "direct_quantiles": direct_public,
+        "book_strategy_forecast_control_v3": dict(control),
         "trajectory_sampler": {
             "method": "DETERMINISTIC_EMPIRICAL_GAUSSIAN_COPULA",
             "seed": seed,
@@ -1048,7 +1123,9 @@ def build_chronos_scene_forecast_contribution_v3(
         "fallback": {
             "active": not is_foundation_output,
             "method": (
-                "RESIDUAL_LIBRARY_STATISTICAL"
+                "BOOK_RULE_CONDITIONED_CAUSAL_ANALOG"
+                if strategy_active
+                else "RESIDUAL_LIBRARY_STATISTICAL"
                 if not is_foundation_output
                 else "NONE"
             ),
@@ -1062,6 +1139,8 @@ def build_chronos_scene_forecast_contribution_v3(
         "interpretation": (
             "Local Chronos-2 zero-shot shadow forecast with coherent residual-copula trajectories."
             if is_foundation_output
+            else "Visible book rules control a future-blind 72-candle path with native impulse, rest, pullback, and continuation geometry."
+            if strategy_active
             else "Chronos was unavailable or invalid; a deterministic non-LSTM residual-library diagnostic path is shown."
         ),
     }

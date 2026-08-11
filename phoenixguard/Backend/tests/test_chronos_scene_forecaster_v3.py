@@ -37,7 +37,7 @@ class _FakePipeline:
         self.calls += 1
         self.last_inputs = inputs
         self.last_kwargs = kwargs
-        close = [
+        close_cycle = [
             0.18,
             -0.08,
             0.24,
@@ -50,6 +50,11 @@ class _FakePipeline:
             0.27,
             0.47,
             0.34,
+        ]
+        close = [
+            value + 0.01 * cycle
+            for cycle in range(6)
+            for value in close_cycle
         ]
         open_rows = [0.0, *close[:-1]]
         high = [max(left, right) + 0.16 for left, right in zip(open_rows, close)]
@@ -145,7 +150,7 @@ def _anchor() -> dict[str, Any]:
         "y_norm": 0.50,
         "price_norm": 0.50,
         "target_scale_norm": 0.01,
-        "event_step_x_norm": 0.03,
+        "event_step_x_norm": 0.006,
         "verified_latest_close": True,
         "source": "TRACKER_LATEST_CLOSE",
     }
@@ -206,8 +211,8 @@ def test_local_chronos_boundary_is_lazy_singleton_cached_and_past_only(
     assert pipeline.calls == 1
     assert first["cache_hit"] is False
     assert second["cache_hit"] is True
-    assert len(first["line_points"]) == 13
-    assert len(first["forecast_candles"]) == 12
+    assert len(first["line_points"]) == 73
+    assert len(first["forecast_candles"]) == 72
     assert len(first["forecast_scenarios"]) == 3
     assert first["line_points"][0] == [0.55, 0.50]
     assert first["zero_shot"] is True
@@ -232,7 +237,7 @@ def test_local_chronos_boundary_is_lazy_singleton_cached_and_past_only(
         "close_offset",
     ]
     assert first["scene_feature_contract"]["future_covariates_used"] is False
-    assert pipeline.last_kwargs["prediction_length"] == 12
+    assert pipeline.last_kwargs["prediction_length"] == 72
     assert pipeline.last_kwargs["cross_learning"] is False
 
 
@@ -249,7 +254,7 @@ def test_explicit_walk_forward_metrics_gate_enables_calibrated_envelope_only(
                 "schema_version": provider.METRICS_SCHEMA_VERSION,
                 "model_id": provider.MODEL_ID,
                 "scene_schema_fingerprint": scene["schema_fingerprint"],
-                "horizon_steps": 12,
+                "horizon_steps": 72,
                 "walk_forward_validated": True,
                 "leakage_audit_passed": True,
                 "production_gate_passed": True,
@@ -311,11 +316,11 @@ def test_unavailable_model_returns_complete_non_lstm_diagnostic_fallback(
     assert first["requested_provider"] == "CHRONOS_2_LOCAL"
     assert first["provider_status"] == "UNAVAILABLE_FALLBACK"
     assert first["forecast_available"] is True
-    assert len(first["line_points"]) == 13
-    assert len(first["forecast_candles"]) == 12
+    assert len(first["line_points"]) == 73
+    assert len(first["forecast_candles"]) == 72
     assert len(first["forecast_scenarios"]) == 3
     assert first["fallback"]["active"] is True
-    assert first["fallback"]["method"] == "RESIDUAL_LIBRARY_STATISTICAL_NON_LSTM"
+    assert first["fallback"]["method"] == "RESIDUAL_LIBRARY_STATISTICAL"
     assert "chronos intentionally unavailable" in first["fallback"]["reason"]
     assert first["fallback"]["calibrated"] is False
     assert first["fallback"]["trade_authorized"] is False
@@ -349,8 +354,8 @@ def test_unavailable_fallback_stays_complete_at_chart_boundary(
     )
 
     assert result["fallback"]["active"] is True
-    assert len(result["line_points"]) == 13
-    assert len(result["forecast_candles"]) == 12
+    assert len(result["line_points"]) == 73
+    assert len(result["forecast_candles"]) == 72
     assert any(
         not 0.0 <= value <= 1.0
         for target in result["direct_quantiles"].values()
@@ -378,7 +383,7 @@ def test_unavailable_fallback_stays_complete_at_chart_boundary(
         )
 
 
-def test_latency_sensitive_call_skips_foundation_loader_and_keeps_twelve_events(
+def test_latency_sensitive_call_skips_foundation_loader_and_keeps_seventy_two_events(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -398,7 +403,7 @@ def test_latency_sensitive_call_skips_foundation_loader_and_keeps_twelve_events(
     assert result["requested_provider"] == "CHRONOS_2_LOCAL"
     assert result["provider_status"] == "FOUNDATION_DISABLED_FALLBACK"
     assert result["fallback"]["active"] is True
-    assert len(result["forecast_candles"]) == 12
+    assert len(result["forecast_candles"]) == 72
     assert math.isclose(sum(result["raw_side_probabilities"].values()), 1.0)
     assert result["side_probabilities"] == {}
 
@@ -424,7 +429,7 @@ def test_invalid_foundation_quantiles_fail_over_without_promoting_model(
     assert "quantiles cross" in result["fallback"]["reason"]
     assert result["production_authorized"] is False
     assert result["probability_calibrated"] is False
-    assert len(result["forecast_candles"]) == 12
+    assert len(result["forecast_candles"]) == 72
 
 
 def test_residual_sampler_is_deterministic_and_seeded(

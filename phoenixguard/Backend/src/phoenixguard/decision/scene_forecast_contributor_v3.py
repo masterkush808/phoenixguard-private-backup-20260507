@@ -12,6 +12,9 @@ from typing import Any, cast
 from phoenixguard.decision.chronos_scene_forecaster_v3 import (
     build_chronos_scene_forecast_contribution_v3,
 )
+from phoenixguard.decision.book_strategy_forecast_v3 import (
+    build_book_strategy_forecast_control_v3,
+)
 from phoenixguard.decision.scene_forecast_features_v3 import (
     extract_scene_forecast_features_v3,
 )
@@ -957,7 +960,7 @@ def _axis_value(candle: Mapping[str, Any], *keys: str) -> float | None:
 
 
 def _candle_x(candle: Mapping[str, Any]) -> float | None:
-    center = _axis_value(candle, "center_x", "center_x_px", "x_center")
+    center = _axis_value(candle, "center_x", "center_x_px", "x_center", "x_center_px")
     if center is not None:
         return center
     bbox = candle.get("bbox")
@@ -2954,17 +2957,70 @@ def build_scene_forecast_contribution_v3(
     smart_money_context: Mapping[str, Any] | None = None,
     support_resistance_context: Mapping[str, Any] | None = None,
     support_resistance_zones: Sequence[Mapping[str, Any]] | None = None,
+    trendlines: Sequence[Mapping[str, Any]] | None = None,
     trend_slopes: Mapping[str, Any] | None = None,
     trend_directions: Mapping[str, Any] | None = None,
+    book_strategy: Mapping[str, Any] | None = None,
+    playbook_ai_intelligence: Mapping[str, Any] | None = None,
+    session_context: Mapping[str, Any] | None = None,
+    news_context: Mapping[str, Any] | None = None,
+    pair_dna_context: Mapping[str, Any] | None = None,
+    higher_timeframe_context: Mapping[str, Any] | None = None,
     allow_foundation_model: bool = False,
     event_key_override: str = "",
 ) -> dict[str, Any]:
+    strategy_control = build_book_strategy_forecast_control_v3(
+        candles=candles,
+        timeframe=timeframe,
+        trendlines=trendlines,
+        support_resistance_context=support_resistance_context,
+        support_resistance_zones=support_resistance_zones,
+        smart_money_context=smart_money_context,
+        behavior_payload=behavior_payload,
+        decision_kernel=decision_kernel,
+        trend_directions=trend_directions,
+        book_strategy=book_strategy,
+        playbook_ai_intelligence=playbook_ai_intelligence,
+        session_context=session_context,
+        news_context=news_context,
+        pair_dna_context=pair_dna_context,
+        higher_timeframe_context=higher_timeframe_context,
+    )
+    strategy_side = str(strategy_control.get("forecast_side") or "NEUTRAL").upper()
+    strategy_confidence = _finite(strategy_control.get("confidence")) or 0.0
+    conditioned_kernel = dict(decision_kernel or {})
+    if strategy_side in {"BUY", "SELL"} and strategy_confidence > 0.0:
+        buy_probability = 0.5 + (
+            0.5 * strategy_confidence
+            if strategy_side == "BUY"
+            else -0.5 * strategy_confidence
+        )
+        buy_probability = max(0.0, min(1.0, buy_probability))
+        conditioned_kernel.update(
+            {
+                "dominant_side": strategy_side,
+                "direction": strategy_side,
+                "belief_buy": buy_probability,
+                "belief_sell": 1.0 - buy_probability,
+                "p_next_buy": buy_probability,
+                "p_next_sell": 1.0 - buy_probability,
+                "buy_evidence": _finite(strategy_control.get("buy_score")) or 0.0,
+                "sell_evidence": _finite(strategy_control.get("sell_score")) or 0.0,
+                "net_bias": (
+                    1.0 if strategy_side == "BUY" else -1.0
+                ) * strategy_confidence,
+                "bias_strength": strategy_confidence,
+                "structure_alignment": strategy_confidence,
+                "usable_bias": strategy_confidence,
+                "book_strategy_controlled": True,
+            }
+        )
     scene_features = extract_scene_forecast_features_v3(
         candles=candles,
         projection=projection,
         candle_statistics=candle_statistics,
         behavior_payload=behavior_payload,
-        decision_kernel=decision_kernel,
+        decision_kernel=conditioned_kernel,
         smart_money_context=smart_money_context,
         support_resistance_context=support_resistance_context,
         support_resistance_zones=support_resistance_zones,
@@ -2979,12 +3035,18 @@ def build_scene_forecast_contribution_v3(
         pair=pair,
         timeframe=timeframe,
     )
-    seed = int(event_key[:8], 16)
+    seed_material = event_key
+    if len(seed_material) < 8 or any(character not in "0123456789abcdefABCDEF" for character in seed_material[:8]):
+        seed_material = hashlib.sha256(seed_material.encode("utf-8")).hexdigest()
+    seed = int(seed_material[:8], 16)
+    scene_features_with_control = dict(scene_features)
+    scene_features_with_control["book_strategy_forecast_control_v3"] = strategy_control
     provider = build_chronos_scene_forecast_contribution_v3(
-        scene_features=scene_features,
+        scene_features=scene_features_with_control,
         anchor=anchor,
         deterministic_seed=seed,
         allow_foundation_model=allow_foundation_model,
+        strategy_control=strategy_control,
     )
     provider_model = cast(Mapping[str, Any], provider.get("model", {}))
     requested_model_version = str(provider_model.get("model_id") or "").strip()
@@ -2992,6 +3054,7 @@ def build_scene_forecast_contribution_v3(
     result = dict(provider)
     result.update(
         {
+            "book_strategy_forecast_control_v3": strategy_control,
             "schema_version": SCENE_FORECAST_CONTRIBUTION_SCHEMA_V3,
             "stack_version": "PHOENIXGUARD_V3",
             "skill": "MULTIMODAL_SCENE_FORECAST",

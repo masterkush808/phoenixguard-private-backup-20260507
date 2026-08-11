@@ -39,6 +39,9 @@ from phoenixguard.core.timing_policy_v3 import (
 from phoenixguard.core.utils import utc_now_iso
 from phoenixguard.paths import PROJECT_ROOT
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
+from phoenixguard.decision.book_rule_action_signal_v3 import (
+    build_book_rule_action_signal_v3,
+)
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
 from phoenixguard.decision.order_positioning_evidence_v3 import (
@@ -2612,6 +2615,54 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
     return value
 
 
+_BOOK_RULE_ACTION_MAX_STRATEGY_ROWS = 32
+_BOOK_RULE_ACTION_MAX_OVERLAY_ROWS = 32
+
+
+def _compact_book_rule_action_signal_v3(value: Any) -> dict[str, Any]:
+    """Preserve the complete bounded book report instead of the generic 8-row cap."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    source = cast(Mapping[str, Any], value)
+    if str(source.get("schema_version") or "").strip().upper() != "PG_BOOK_RULE_ACTION_SIGNAL_V3":
+        return {}
+    compact_source = {
+        str(key): item
+        for key, item in source.items()
+        if str(key) not in {"strategy_report", "active_strategy_ids", "overlays"}
+    }
+    compact = cast(
+        dict[str, Any],
+        _compact_live_state_observability_value(compact_source),
+    )
+    strategy_rows = _sequence_of_mappings(source.get("strategy_report"))[
+        :_BOOK_RULE_ACTION_MAX_STRATEGY_ROWS
+    ]
+    if strategy_rows:
+        compact["strategy_report"] = [
+            _compact_live_state_observability_value(row) for row in strategy_rows
+        ]
+    active_strategy_ids = [
+        str(item)[:128]
+        for item in list(cast(Sequence[Any], source.get("active_strategy_ids") or []))
+        if str(item).strip()
+    ][:_BOOK_RULE_ACTION_MAX_STRATEGY_ROWS]
+    if active_strategy_ids:
+        compact["active_strategy_ids"] = active_strategy_ids
+    overlay_rows = _sequence_of_mappings(source.get("overlays"))[
+        :_BOOK_RULE_ACTION_MAX_OVERLAY_ROWS
+    ]
+    if overlay_rows:
+        compact["overlays"] = [
+            _compact_live_state_observability_value(row) for row in overlay_rows
+        ]
+    return cast(
+        dict[str, Any],
+        _strip_private_shadow_forecast_fields_v3(compact),
+    )
+
+
 _ORDER_POSITIONING_SOURCE_SNAPSHOT_LIMIT = 24
 
 
@@ -2704,6 +2755,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "market_selector_visual_changed",
         "market_source",
         "market_study_v3",
+        "book_rule_action_signal_v3",
         "micro_candle_forecast",
         "model_action",
         "no_trade_reason",
@@ -2786,6 +2838,10 @@ def _compact_live_state_latest_signal_payload(value: Any) -> Any:
                 compact_two_candle = _compact_persisted_two_candle_study(item)
                 if compact_two_candle:
                     payload[key] = compact_two_candle
+            elif key == "book_rule_action_signal_v3":
+                compact_book_rules = _compact_book_rule_action_signal_v3(item)
+                if compact_book_rules:
+                    payload[key] = compact_book_rules
             else:
                 payload[key] = _compact_live_state_observability_value(item)
     return payload
@@ -4013,6 +4069,8 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "market_selector_visual_fingerprint",
         "market_source",
         "market_study_v3",
+        "book_rule_action_signal_v3",
+        "book_rule_overlay_rows_v3",
         "high_frequency_forecast",
         "impulse_delta",
         "impulse_direction",
@@ -4160,6 +4218,19 @@ def _compact_live_state_market_payload(value: Any) -> Any:
                 compact_sources = _compact_order_positioning_sources_v3(item)
                 if compact_sources:
                     payload[key] = compact_sources
+            elif key == "book_rule_action_signal_v3":
+                compact_book_rules = _compact_book_rule_action_signal_v3(item)
+                if compact_book_rules:
+                    payload[key] = compact_book_rules
+            elif key == "book_rule_overlay_rows_v3":
+                compact_book_overlays = _sequence_of_mappings(item)[
+                    :_BOOK_RULE_ACTION_MAX_OVERLAY_ROWS
+                ]
+                if compact_book_overlays:
+                    payload[key] = [
+                        _compact_live_state_observability_value(row)
+                        for row in compact_book_overlays
+                    ]
             else:
                 payload[key] = _compact_live_state_observability_value(item)
     return payload
@@ -9106,6 +9177,40 @@ def _history_entry_matches_study_namespace_v3(
     )
 
 
+def _current_completed_market_study_v3(
+    signal: Mapping[str, Any],
+    tracking: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the newest valid completed study from the current publication."""
+
+    candidates: list[dict[str, Any]] = []
+    for raw_candidate in (
+        tracking.get("market_study_v3"),
+        signal.get("market_study_v3"),
+    ):
+        candidate = _mapping_to_dict(raw_candidate)
+        symbol, timeframe = _market_study_namespace_v3(candidate)
+        if (
+            str(candidate.get("status") or "").strip().upper() == "STUDIED"
+            and str(candidate.get("closed_candle_key") or "").strip()
+            and symbol
+            and timeframe
+        ):
+            candidates.append(candidate)
+    if not candidates:
+        return {}
+    return max(
+        candidates,
+        key=lambda row: (
+            int(_float_or(row.get("closed_candle_sequence"), 0.0) or 0),
+            _float_or(
+                row.get("published_epoch", row.get("observed_epoch", 0.0)),
+                0.0,
+            ),
+        ),
+    )
+
+
 def _study_entry(
     signal: Mapping[str, Any],
     tracking: Mapping[str, Any],
@@ -9126,9 +9231,7 @@ def _study_entry(
         tracking.get("support_resistance_context", signal.get("support_resistance_context", {}))
     )
     execution_timing = _mapping_to_dict(tracking.get("execution_timing", signal.get("execution_timing", {})))
-    market_study_v3 = _mapping_to_dict(
-        signal.get("market_study_v3") or tracking.get("market_study_v3")
-    )
+    market_study_v3 = _current_completed_market_study_v3(signal, tracking)
     observed_at = str(
         captured_at
         or signal.get("capture_started_at")
@@ -9158,6 +9261,12 @@ def _study_entry(
         "published_epoch": published_epoch,
         "frame_id": max(0, int(frame_id or 0)),
         "source_capture_id": str(source_capture_id or ""),
+        "closed_candle_key": str(
+            market_study_v3.get("closed_candle_key") or ""
+        ),
+        "closed_candle_sequence": int(
+            _float_or(market_study_v3.get("closed_candle_sequence"), 0.0) or 0
+        ),
         "action": str(signal.get("action", "HOLD") or "HOLD"),
         "execution_action": str(signal.get("execution_action", "HOLD") or "HOLD"),
         "entry_state": str(signal.get("entry_state", "WAIT") or "WAIT"),
@@ -22483,8 +22592,13 @@ class PhoenixGuardWindowTrackingAdapter:
         smart_money_context: Mapping[str, Any],
         support_resistance_context: Mapping[str, Any],
         support_resistance_zones: Sequence[Mapping[str, Any]],
+        trendlines: Sequence[Mapping[str, Any]],
         trend_slopes: Mapping[str, Any],
         trend_directions: Mapping[str, Any],
+        session_context: Mapping[str, Any],
+        news_context: Mapping[str, Any],
+        pair_dna_context: Mapping[str, Any],
+        higher_timeframe_context: Mapping[str, Any],
     ) -> dict[str, Any]:
         pair = str(market or "UNKNOWN_MARKET").strip().upper()
         timeframe_key = str(timeframe or "M5").strip().upper()
@@ -22829,8 +22943,13 @@ class PhoenixGuardWindowTrackingAdapter:
                 smart_money_context=smart_money_context,
                 support_resistance_context=support_resistance_context,
                 support_resistance_zones=support_resistance_zones,
+                trendlines=trendlines,
                 trend_slopes=trend_slopes,
                 trend_directions=trend_directions,
+                session_context=session_context,
+                news_context=news_context,
+                pair_dna_context=pair_dna_context,
+                higher_timeframe_context=higher_timeframe_context,
                 # Chronos-2 remains a local shadow challenger until its
                 # time-aware metrics gate passes. The live selected path uses
                 # the deterministic full-suite fallback rather than promoting
@@ -24225,6 +24344,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 session_payload=session_payload,
             )
         )
+        scene_trendlines_v3 = derive_trendline_overlays(
+            candles[-_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES:]
+        )
         if market_identity_confirmed and timeframe_identity_confirmed:
             scene_forecast_contribution = self._build_scene_forecast_contribution(
                 candles=candles,
@@ -24245,6 +24367,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 smart_money_context=smart_money_context,
                 support_resistance_context=support_resistance_context,
                 support_resistance_zones=support_resistance_zones,
+                trendlines=scene_trendlines_v3,
                 trend_slopes={
                     "global": global_slope,
                     "local": local_slope,
@@ -24257,6 +24380,10 @@ class PhoenixGuardWindowTrackingAdapter:
                     "current": impulse_direction,
                     "impulse": impulse_direction,
                 },
+                session_context=session_payload,
+                news_context=session_payload,
+                pair_dna_context=behavior_payload,
+                higher_timeframe_context=major_trend_context,
             )
             scene_forecast_contribution.update(
                 {
@@ -24293,6 +24420,36 @@ class PhoenixGuardWindowTrackingAdapter:
                     "min_timeframe_confidence": min_timeframe_identity_confidence,
                 }
             )
+        book_rule_action_signal_v3 = build_book_rule_action_signal_v3(
+            control=_mapping_to_dict(
+                scene_forecast_contribution.get(
+                    "book_strategy_forecast_control_v3",
+                    {},
+                )
+            ),
+            candles=candles,
+            trendlines=scene_trendlines_v3,
+            support_resistance_zones=support_resistance_zones,
+            pair=market,
+            timeframe=timeframe,
+            frame_id=frame_index,
+            closed_candle_key=str(
+                scene_forecast_contribution.get("closed_candle_key", "") or ""
+            ),
+            closed_candle_sequence=int(
+                scene_forecast_contribution.get("closed_candle_sequence", 0) or 0
+            ),
+            market_selector_visual_fingerprint=market_selector_fingerprint,
+            chart_bounds=[
+                0.0,
+                0.0,
+                float(chart_image.size[0]),
+                float(chart_image.size[1]),
+            ],
+            identity_confirmed=bool(
+                market_identity_confirmed and timeframe_identity_confirmed
+            ),
+        )
         high_frequency_forecast = build_high_frequency_candle_forecast(
             candles=candles,
             image_size=chart_image.size,
@@ -24359,7 +24516,7 @@ class PhoenixGuardWindowTrackingAdapter:
         projection["next_behavior_state"] = str(behavior_payload.get("next_most_likely_state", "sideways_pause") or "sideways_pause")
         projection["decision_kernel"] = decision_kernel
         tracked_public = candles[-_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES:]
-        trendlines_v3 = derive_trendline_overlays(tracked_public)
+        trendlines_v3 = scene_trendlines_v3
         trendline_geometry_contract_v3 = _trendline_geometry_contract_v3(
             trendlines_v3,
             observed_candle_count=len(tracked_public),
@@ -24496,6 +24653,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "micro_candle_forecast": high_frequency_forecast,
             "two_candle_study": _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {})),
             "scene_forecast_contribution": scene_forecast_contribution,
+            "book_rule_action_signal_v3": book_rule_action_signal_v3,
+            "book_rule_overlay_rows_v3": list(
+                book_rule_action_signal_v3.get("overlays") or []
+            ),
             "countertrend_lane": countertrend_lane,
             "box_context": _mapping_to_dict(behavior_payload.get("box_context", {})),
             "trend_context": _mapping_to_dict(behavior_payload.get("trend_context", {})),
@@ -24590,6 +24751,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "micro_candle_forecast": high_frequency_forecast,
             "two_candle_study": _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {})),
             "scene_forecast_contribution": scene_forecast_contribution,
+            "book_rule_action_signal_v3": book_rule_action_signal_v3,
             "global_local_control": control_state,
             "control_owner": str(control_state.get("owner", "balanced")),
             "control_direction": str(control_state.get("direction", "HOLD")),
@@ -28432,13 +28594,13 @@ class PhoenixGuardWindowTrackingAdapter:
                 # identity.  Edge tab capture has a stable content coordinate
                 # contract, so require the proven selector anchor instead of
                 # letting those later badges compete on glyph score alone.
-                # The selected timeframe control sits immediately after the
-                # selected-pair box at about 18% of the full broker width. The
-                # OCR ROI is 42% of that width, so its stable local anchor is
-                # about 44%, not 33%. The older anchor landed on the pair box
-                # and rejected a clearly visible M5 chip in letterboxed Edge
-                # tabCapture frames before glyph scoring could publish it.
-                primary_anchor_x = float(roi.shape[1]) * 0.44
+                # Current 1920-wide Edge rasters place M5 near x=270 in an
+                # 806-pixel ROI (33%). The audited legacy 1628-wide layout
+                # places it near x=310 in a 684-pixel ROI (45%). Select the
+                # measured responsive-layout anchor instead of letting both
+                # lanes compete, which would admit later notification badges.
+                primary_anchor_ratio = 0.33 if width >= 1800 else 0.45
+                primary_anchor_x = float(roi.shape[1]) * primary_anchor_ratio
                 anchor_xs = (primary_anchor_x,)
                 trusted_anchor_tolerance_x = max(
                     22.0,
@@ -39755,6 +39917,16 @@ class ContinuousWindowTrackerService:
         previous_external_evidence_lineage = _mapping_to_dict(
             fresh_for_index.get("external_evidence_lineage_v3", {})
         )
+        if not previous_external_evidence_lineage:
+            previous_external_evidence_lineage = _external_evidence_lineage_v3(
+                _mapping_to_dict(fresh_for_index.get("capture_source_v3", {})),
+                model_frame_id=previous_model_frame,
+                study_surface_signature=previous_study_signature,
+                published_epoch=_float_or(
+                    fresh_for_index.get("last_capture_epoch", 0.0),
+                    0.0,
+                ),
+            )
         previous_observation = _mapping_to_dict(fresh_for_index.get("visual_observation_v3", {}))
         last_recovery_attempt_epoch = _float_or(
             previous_observation.get("last_recovery_attempt_epoch"),
@@ -39771,8 +39943,17 @@ class ContinuousWindowTrackerService:
         duplicate_study_surface = bool(
             duplicate_evidence_guard_armed
             and previous_model_frame > 0
-            and previous_study_signature
-            and study_surface_signature == previous_study_signature
+            and (
+                (
+                    previous_study_signature
+                    and study_surface_signature == previous_study_signature
+                )
+                or (
+                    using_external_frame
+                    and previous_window_signature
+                    and window_signature == previous_window_signature
+                )
+            )
         )
         recovered_new_frame = False
         recovery_attempted = False
@@ -41885,9 +42066,9 @@ class ContinuousWindowTrackerService:
         _write_json_atomic(decision_path, decision_payload)
         mark_stage("decision_write")
 
-        current_market_study_v3 = _mapping_to_dict(
-            latest_signal.get("market_study_v3")
-            or tracking_summary.get("market_study_v3")
+        current_market_study_v3 = _current_completed_market_study_v3(
+            latest_signal,
+            tracking_summary,
         )
         current_study_namespace = _market_study_namespace_v3(
             current_market_study_v3
@@ -41912,15 +42093,27 @@ class ContinuousWindowTrackerService:
                 f"{int(capture_started_epoch * 1000.0)}"
             ),
         )
-        history = (
-            [newest_history_entry, *retained_history]
-            if _history_entry_matches_study_namespace_v3(
-                newest_history_entry,
-                current_study_namespace,
-            )
-            else []
-        )
-        history = history[:24]
+        history_candidates = list(retained_history)
+        if _history_entry_matches_study_namespace_v3(
+            newest_history_entry,
+            current_study_namespace,
+        ):
+            history_candidates.insert(0, newest_history_entry)
+        history: list[dict[str, Any]] = []
+        seen_closed_candle_keys: set[str] = set()
+        for item in history_candidates:
+            item_study = _mapping_to_dict(item.get("market_study_v3"))
+            closed_candle_key = str(
+                item.get("closed_candle_key")
+                or item_study.get("closed_candle_key")
+                or ""
+            ).strip()
+            if not closed_candle_key or closed_candle_key in seen_closed_candle_keys:
+                continue
+            seen_closed_candle_keys.add(closed_candle_key)
+            history.append(item)
+            if len(history) >= 24:
+                break
 
         with (
             self._external_source_publication_guard_v3(
@@ -43148,9 +43341,9 @@ class ContinuousWindowTrackerService:
             if isinstance(raw_public_recent_studies, list)
             else ()
         )
-        current_public_study = _mapping_to_dict(
-            latest_signal.get("market_study_v3")
-            or tracking_summary.get("market_study_v3")
+        current_public_study = _current_completed_market_study_v3(
+            latest_signal,
+            tracking_summary,
         )
         current_public_namespace = _market_study_namespace_v3(
             current_public_study

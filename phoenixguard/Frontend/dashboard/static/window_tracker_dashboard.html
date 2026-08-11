@@ -828,6 +828,205 @@
       border-bottom: 1px solid var(--line);
     }
 
+    .book-rule-signal {
+      margin: 16px clamp(10px, 1.5vw, 22px) 0;
+      overflow: hidden;
+      border: 1px solid rgba(242, 200, 102, 0.34);
+      border-radius: 12px;
+      background:
+        linear-gradient(112deg, rgba(242, 200, 102, 0.09), transparent 38%),
+        rgba(10, 11, 8, 0.9);
+      box-shadow: inset 4px 0 0 var(--hold), 0 18px 50px rgba(0, 0, 0, 0.2);
+    }
+
+    .book-rule-signal[data-priority="HIGH"] {
+      border-width: 2px;
+      box-shadow: inset 5px 0 0 var(--hold), 0 22px 60px rgba(0, 0, 0, 0.28);
+    }
+
+    .surface-hotspot.family-book-rules {
+      border-width: 2px;
+      border-color: rgba(242, 200, 102, 0.92);
+      background: rgba(242, 200, 102, 0.1);
+    }
+
+    .surface-hotspot.family-book-rules[data-book-geometry-role="HLZ"] {
+      border-style: double;
+      background: rgba(91, 226, 177, 0.11);
+    }
+
+    .surface-hotspot.family-book-rules[data-book-geometry-role="REJECTION"] {
+      border-color: var(--warn);
+      background: rgba(255, 170, 77, 0.12);
+    }
+
+    .surface-hotspot.family-book-rules[data-book-geometry-role="ACTION_BOX"] {
+      border-color: var(--gold-pale);
+      background: rgba(242, 200, 102, 0.16);
+    }
+
+    .surface-hotspot.family-book-rules[data-book-geometry-role="SUPPORT"],
+    .surface-hotspot.family-book-rules[data-book-geometry-role="DEMAND"] {
+      border-color: var(--up);
+      background: rgba(82, 215, 154, 0.12);
+    }
+
+    .surface-hotspot.family-book-rules[data-book-geometry-role="RESISTANCE"],
+    .surface-hotspot.family-book-rules[data-book-geometry-role="SUPPLY"] {
+      border-color: var(--down);
+      background: rgba(255, 107, 107, 0.12);
+    }
+
+    .surface-hotspot.family-book-rules[data-book-geometry-role="SMC"] {
+      border-style: dashed;
+      border-color: rgba(105, 211, 255, 0.9);
+      background: rgba(105, 211, 255, 0.1);
+    }
+
+    .book-rule-wick-anchor {
+      fill: var(--gold-pale);
+      stroke: rgba(8, 10, 8, 0.95);
+      stroke-width: 1.5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .book-rule-signal[data-action="BUY"] { box-shadow: inset 4px 0 0 var(--up), 0 18px 50px rgba(0, 0, 0, 0.2); }
+    .book-rule-signal[data-action="SELL"] { box-shadow: inset 4px 0 0 var(--down), 0 18px 50px rgba(0, 0, 0, 0.2); }
+    .book-rule-signal[data-action="AVOID"] { box-shadow: inset 4px 0 0 var(--warn), 0 18px 50px rgba(0, 0, 0, 0.2); }
+
+    .book-rule-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .book-rule-title {
+      margin: 0;
+      color: var(--gold-pale);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .book-rule-priority {
+      color: var(--gold);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 760;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .book-rule-core {
+      display: grid;
+      grid-template-columns: minmax(210px, 0.7fr) minmax(280px, 1.3fr);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .book-rule-action,
+    .book-rule-scenario {
+      min-width: 0;
+      padding: 18px;
+    }
+
+    .book-rule-action { border-right: 1px solid var(--line); }
+
+    .book-rule-label,
+    .book-rule-fact span,
+    .book-rule-strategies span {
+      display: block;
+      color: var(--quiet);
+      font-size: 9px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .book-rule-action strong {
+      display: block;
+      margin-top: 5px;
+      color: var(--hold);
+      font-family: var(--font-display);
+      font-size: clamp(28px, 3vw, 46px);
+      line-height: 1;
+    }
+
+    .book-rule-signal[data-action="BUY"] .book-rule-action strong { color: var(--up); }
+    .book-rule-signal[data-action="SELL"] .book-rule-action strong { color: var(--down); }
+    .book-rule-signal[data-action="AVOID"] .book-rule-action strong { color: var(--warn); }
+
+    .book-rule-action small,
+    .book-rule-scenario p {
+      display: block;
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .book-rule-scenario strong {
+      display: block;
+      margin-top: 5px;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.4;
+    }
+
+    .book-rule-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .book-rule-fact {
+      min-width: 0;
+      padding: 13px 15px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .book-rule-fact:nth-child(4n) { border-right: 0; }
+
+    .book-rule-fact strong {
+      display: block;
+      margin-top: 5px;
+      overflow-wrap: break-word;
+      color: var(--ink);
+      font-size: 10px;
+      font-weight: 620;
+      line-height: 1.45;
+    }
+
+    .book-rule-strategies {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      gap: 16px;
+      padding: 14px 18px;
+    }
+
+    .book-rule-strategies strong {
+      overflow-wrap: break-word;
+      color: var(--gold-pale);
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 980px) {
+      .book-rule-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .book-rule-fact:nth-child(2n) { border-right: 0; }
+    }
+
+    @media (max-width: 680px) {
+      .book-rule-head { align-items: flex-start; flex-direction: column; }
+      .book-rule-core { grid-template-columns: 1fr; }
+      .book-rule-action { border-right: 0; border-bottom: 1px solid var(--line); }
+      .book-rule-grid { grid-template-columns: 1fr; }
+      .book-rule-fact { border-right: 0; }
+      .book-rule-strategies { grid-template-columns: 1fr; gap: 6px; }
+    }
+
     .decision-audit-summary {
       min-width: 0;
     }
@@ -1204,6 +1403,12 @@
       stroke-dasharray: 7 5;
     }
 
+    .surface-trendline.family-book-rules {
+      stroke-width: 3;
+      stroke-dasharray: none;
+      filter: drop-shadow(0 0 3px rgba(242, 200, 102, 0.48));
+    }
+
     .surface-trendline.group-history {
       stroke: var(--overlay-history);
       stroke-dasharray: 4 6;
@@ -1282,6 +1487,12 @@
       border-color: var(--overlay-plan);
       border-style: dashed;
       background: rgba(185, 154, 252, 0.035);
+    }
+
+    .surface-hotspot.family-book-rules {
+      border-width: 2px;
+      border-style: solid;
+      box-shadow: 0 0 0 1px rgba(242, 200, 102, 0.16), inset 0 0 22px rgba(242, 200, 102, 0.035);
     }
 
     .surface-hotspot.group-history {
@@ -2949,6 +3160,39 @@
         </div>
       </section>
 
+      <section class="book-rule-signal" id="book-rule-architecture-panel" data-action="WAIT" data-priority="HIGH" aria-label="High-priority current book-rule action live V3" aria-live="polite">
+        <header class="book-rule-head">
+          <h3 class="book-rule-title">Current scenario action and book rules - live V3</h3>
+          <span class="book-rule-priority" id="book-rule-status">High priority - waiting for current closed-candle rules</span>
+        </header>
+        <div class="book-rule-core">
+          <div class="book-rule-action">
+            <span class="book-rule-label">Action now</span>
+            <strong id="book-rule-action">WAIT</strong>
+            <small id="book-rule-action-detail">No closed-candle book action is published yet.</small>
+          </div>
+          <div class="book-rule-scenario">
+            <span class="book-rule-label">Current book scenario</span>
+            <strong id="book-rule-scenario">Waiting for the complete rule stack</strong>
+            <p id="book-rule-trigger">The trigger will appear after the latest completed candle is evaluated.</p>
+          </div>
+        </div>
+        <div class="book-rule-grid">
+          <div class="book-rule-fact"><span>Invalidation</span><strong id="book-rule-invalidation">No active scenario</strong></div>
+          <div class="book-rule-fact"><span>HLZ sequence</span><strong id="book-rule-hlz">Not evaluated</strong></div>
+          <div class="book-rule-fact"><span>Structure events</span><strong id="book-rule-structure">Not evaluated</strong></div>
+          <div class="book-rule-fact"><span>Strict trendlines</span><strong id="book-rule-trendlines">Not evaluated</strong></div>
+          <div class="book-rule-fact"><span>Candlestick catalogue</span><strong id="book-rule-candles">Not evaluated</strong></div>
+          <div class="book-rule-fact"><span>Opposing force</span><strong id="book-rule-opposing-force">Not evaluated</strong></div>
+          <div class="book-rule-fact"><span>Rule provenance</span><strong id="book-rule-provenance">Not evaluated</strong></div>
+          <div class="book-rule-fact"><span>Rule overlays</span><strong id="book-rule-overlays">0 exact chart marks</strong></div>
+        </div>
+        <div class="book-rule-strategies">
+          <span>All strategy families</span>
+          <strong id="book-rule-setups">Waiting for the full non-indicator book catalogue.</strong>
+        </div>
+      </section>
+
       <details class="evidence-details">
         <summary>Technical contracts and evidence</summary>
         <div class="evidence-list">
@@ -3032,6 +3276,7 @@
             <span class="overlay-family-label">Market context &amp; trade map</span>
             <div class="layer-filter-list" aria-label="Market context and trade map overlays">
               <button class="layer-filter" type="button" data-overlay-family="market_context" aria-pressed="true">Reaction map <span class="layer-count" data-layer-count="market_context">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="book_rules" aria-pressed="true">Book rules <span class="layer-count" data-layer-count="book_rules">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="council" aria-pressed="true">Combined analysis <span class="layer-count" data-layer-count="council">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="order_positioning" aria-pressed="true">Order areas <span class="layer-count" data-layer-count="order_positioning">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="triggers" aria-pressed="true">Entry triggers <span class="layer-count" data-layer-count="triggers">0</span></button>
@@ -3220,6 +3465,7 @@
       "targets",
       "invalidation",
       "market_context",
+      "book_rules",
       "council",
       "history",
     ]);
@@ -3232,16 +3478,17 @@
       live: [
         "current_candles",
         "market_context",
+        "book_rules",
         "council",
         "order_positioning",
         "triggers",
         "targets",
         "invalidation",
       ],
-      market_context: ["market_context", "supply_demand", "order_positioning"],
+      market_context: ["market_context", "book_rules", "supply_demand", "order_positioning"],
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
-      plan: ["council", "order_positioning", "triggers", "targets", "invalidation"],
+      plan: ["book_rules", "council", "order_positioning", "triggers", "targets", "invalidation"],
       history: ["history", "major_swings", "local_swings", "order_positioning"],
     });
     const PUBLIC_OVERLAY_KINDS = new Set([
@@ -3287,6 +3534,9 @@
       "upside_break_area",
       "downside_break_area",
       "plan_failure_area",
+      "book_rule_line",
+      "book_rule_zone",
+      "book_rule_candle",
     ]);
     const GROUP_EXPLANATIONS = Object.freeze({
       movement: "This mark belongs to the newest observed price movement.",
@@ -3297,6 +3547,7 @@
     });
     const FAMILY_EXPLANATIONS = Object.freeze({
       chart_bounds: "This outline identifies the chart area used to anchor every visual mark.",
+      book_rules: "These marks are exact chart geometries selected by the active closed-candle book rules.",
       current_candles: "This mark is attached to the newest observed price candle.",
       major_swings: "This mark tracks the larger market leg visible in the chart history.",
       local_swings: "This mark tracks a nearer pullback or continuation inside the larger move.",
@@ -4874,6 +5125,7 @@
         setConnectionState("updating", "Connecting");
       }
       try {
+        state.lastRefreshError = "";
         const payload = await requestJson(operatorStateUrl(requestedView));
         if (sequence !== state.requestSequence) {
           return;
@@ -4883,6 +5135,7 @@
         }
         renderOperatorState(payload);
       } catch (error) {
+        state.lastRefreshError = safeText(error && error.message, "Unknown operator refresh failure");
         if (!state.payload) {
           renderUnavailableState(error);
         } else {
@@ -5314,7 +5567,147 @@
         + ". Observation only; never entry permission.";
     }
 
-    function marketStudyContract(payload) {
+    function bookRuleArchitectureContract(payload) {
+      const source = safeObject(payload);
+      const session = safeObject(state.liveSession);
+      const surface = safeObject(source.surface);
+      const market = safeObject(source.market);
+      const latestSignal = safeObject(source.latest_signal);
+      const tracking = safeObject(
+        source.tracking_summary
+          || source.tracking
+          || session.tracking_summary
+          || latestSignal.tracking_summary
+      );
+      const sessionTracking = safeObject(session.tracking_summary);
+      const candidates = [
+        tracking.book_rule_action_signal_v3,
+        source.book_rule_action_signal_v3,
+        latestSignal.book_rule_action_signal_v3,
+        sessionTracking.book_rule_action_signal_v3,
+        safeObject(session.latest_signal).book_rule_action_signal_v3,
+      ];
+      const expectedFrame = safeText(surface.frame_id, "");
+      const expectedPair = canonicalMarketToken(market.symbol);
+      const expectedTimeframe = canonicalMarketToken(market.timeframe);
+      const expectedSelector = safeText(surface.market_selector_visual_fingerprint, "");
+      const selected = candidates.map(safeObject).find(function (candidate) {
+        if (safeText(candidate.schema_version, "") !== "PG_BOOK_RULE_ACTION_SIGNAL_V3") {
+          return false;
+        }
+        const identity = safeObject(candidate.overlay_contract);
+        const frame = safeText(candidate.frame_id || candidate.display_frame_id, "");
+        const pair = canonicalMarketToken(candidate.pair || candidate.symbol || candidate.market);
+        const timeframe = canonicalMarketToken(candidate.timeframe || candidate.tf);
+        const selector = safeText(
+          candidate.market_selector_visual_fingerprint
+            || identity.market_selector_visual_fingerprint,
+          "",
+        );
+        const identityStatus = safeText(
+          candidate.instrument_identity_status || identity.instrument_identity_status,
+          "",
+        ).toUpperCase();
+        const operatorOwnedCurrentSignal = Boolean(
+          safeText(source.schema_version, "") === "PG_OPERATOR_WORKSPACE_V1"
+          && safeText(candidate.provider_role, "") === "PRIMARY_BOOK_RULE_SIGNAL_PROVIDER"
+          && safeText(candidate.overlay_contract, "") === "EXACT_CURRENT_CHART_PIXELS_NO_FLOATING_GEOMETRY"
+          && candidate.current_scenario_only === true
+          && candidate.execution_authority === false
+        );
+        return Boolean(expectedFrame && frame === expectedFrame)
+          && Boolean(expectedPair && pair === expectedPair)
+          && Boolean(expectedTimeframe && timeframe === expectedTimeframe)
+          && Boolean(expectedSelector && selector === expectedSelector)
+          && (identityStatus === "LOCKED" || operatorOwnedCurrentSignal);
+      });
+      if (!selected) {
+        return {};
+      }
+      const currentOnly = Object.assign({}, selected);
+      [
+        "horizon",
+        "horizons",
+        "forecast_horizon",
+        "forecast_horizons",
+        "prediction_horizon",
+        "prediction_horizons",
+      ].forEach(function (key) { delete currentOnly[key]; });
+      return currentOnly;
+    }
+
+    function boundedBookText(value, fallback, limit) {
+      const text = safeText(value, fallback).replace(/\s+/g, " ").trim();
+      const maximum = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 96;
+      return text.slice(0, maximum);
+    }
+
+    function renderBookRuleArchitecture(payload) {
+      const control = bookRuleArchitectureContract(payload);
+      const setText = (id, value) => {
+        const node = document.getElementById(id);
+        if (node) node.textContent = value;
+      };
+      if (!Object.keys(control).length) {
+        const panel = document.getElementById("book-rule-architecture-panel");
+        if (panel) panel.dataset.action = "WAIT";
+        setText("book-rule-status", "High priority - waiting for current frame-locked rules");
+        setText("book-rule-action", "WAIT");
+        setText("book-rule-action-detail", "No same-frame, pair-locked book action is published.");
+        setText("book-rule-scenario", "Waiting for the current closed-candle rule stack");
+        setText("book-rule-trigger", "No stale or cross-chart rule is displayed.");
+        setText("book-rule-invalidation", "No active current scenario");
+        setText("book-rule-hlz", "Not evaluated on this frame");
+        setText("book-rule-structure", "Not evaluated on this frame");
+        setText("book-rule-trendlines", "No accepted same-frame line");
+        setText("book-rule-candles", "Not evaluated on this frame");
+        setText("book-rule-opposing-force", "Not evaluated on this frame");
+        setText("book-rule-provenance", "No current rule trace");
+        setText("book-rule-overlays", "0 accepted current-chart marks");
+        setText("book-rule-setups", "Waiting for current frame-locked strategy families.");
+        return;
+      }
+      const panel = document.getElementById("book-rule-architecture-panel");
+      const action = String(control.action || "WAIT").toUpperCase();
+      const watchSide = String(control.watch_side || "NEUTRAL").toUpperCase();
+      const confidenceValue = Number(control.confidence_percent);
+      const confidence = Number.isFinite(confidenceValue) ? `${Math.round(confidenceValue)}%` : "unscored";
+      const structure = safeObject(control.structure);
+      const trendlines = safeObject(control.strict_trendlines);
+      const hlz = safeObject(control.hlz);
+      const candle = safeObject(control.candlestick);
+      const opposing = safeObject(control.opposing_force);
+      const trace = safeObject(control.rule_traceability);
+      const strategies = safeList(control.strategy_report);
+      const active = strategies.filter((row) => String(safeObject(row).status || "").toUpperCase() === "ACTIVE");
+      const watching = strategies.filter((row) => String(safeObject(row).status || "").toUpperCase() === "WATCHING");
+      const strategyCopy = active.length
+        ? `ACTIVE: ${active.slice(0, 14).map((row) => boundedBookText(safeObject(row).label, "Book rule", 56)).join("; ")}`
+        : watching.length
+          ? `WATCHING: ${watching.slice(0, 14).map((row) => boundedBookText(safeObject(row).label, "Book rule", 56)).join("; ")}`
+          : "No complete strategy family is active on the latest closed candle.";
+      const detail = action === "WAIT" && ["BUY", "SELL"].includes(watchSide)
+        ? `Watch ${watchSide} - ${confidence} book confidence - trigger not complete`
+        : `${confidence} book confidence - ${String(control.playbook || "UNRESOLVED").replace(/_/g, " ")}`;
+
+      if (panel) panel.dataset.action = ["BUY", "SELL", "AVOID"].includes(action) ? action : "WAIT";
+      setText("book-rule-status", `High priority - primary rule provider - ${boundedBookText(String(control.status || "ACTIVE").replace(/_/g, " "), "ACTIVE", 32)}`);
+      setText("book-rule-action", action);
+      setText("book-rule-action-detail", boundedBookText(detail, "Current book action is unresolved.", 120));
+      setText("book-rule-scenario", boundedBookText(control.scenario, "No complete directional book setup is aligned.", 180));
+      setText("book-rule-trigger", boundedBookText(control.trigger, "Wait for completed-candle rule confirmation.", 180));
+      setText("book-rule-invalidation", boundedBookText(control.invalidation, "No active scenario", 120));
+      setText("book-rule-hlz", `ready ${Boolean(hlz.entry_sequence_ready)} - stop hunt ${Boolean(hlz.stop_hunt)} - BMS ${Boolean(hlz.bms)} - RTO ${Boolean(hlz.rto)}`);
+      setText("book-rule-structure", `major ${structure.major_side || "neutral"} - inner ${structure.inner_side || "neutral"} - BMS ${Number(structure.bms_event_count || 0)} - SMS ${Number(structure.sms_event_count || 0)}`);
+      setText("book-rule-trendlines", `${Number(trendlines.valid_count || 0)} strict valid - ${Number(trendlines.outer_valid_count || 0)} outer/HTF - touch ${Boolean(trendlines.current_touch)}`);
+      setText("book-rule-candles", `${candle.selected_pattern || "No location-valid pattern"} - ${Number(candle.qualified_count || 0)} qualified / ${Number(candle.catalog_pattern_count || 0)} catalogued`);
+      setText("book-rule-opposing-force", opposing.present ? `${opposing.conflicted ? "CONFLICT - " : "PRESENT - "}${opposing.summary || "opposing structure"}` : opposing.summary || "No stronger opposing book force confirmed");
+      setText("book-rule-provenance", `${Number(trace.active_rule_count || 0)} active / ${Number(trace.evaluated_rule_count || 0)} evaluated - ${Number(trace.book_page_reference_count || 0)} book/page references`);
+      setText("book-rule-overlays", `${Number(control.overlay_count || 0)} exact current-chart marks`);
+      setText("book-rule-setups", boundedBookText(`${strategyCopy} (${active.length} active, ${watching.length} watching, ${strategies.length} evaluated)`, "No current setup", 640));
+    }
+
+    function marketStudyFromPayload(payload) {
       const source = safeObject(payload);
       const tracking = safeObject(source.tracking || source.tracking_summary);
       const latestSignal = safeObject(source.latest_signal);
@@ -5327,6 +5720,12 @@
           || source.behavioral_study
           || source.study,
       );
+    }
+
+    function marketStudyContract(payload) {
+      const source = safeObject(payload);
+      renderBookRuleArchitecture(source);
+      return marketStudyFromPayload(source);
     }
 
     function marketRegressionStudy(payload) {
@@ -6743,6 +7142,9 @@
       );
       const hiddenState = safeObject(latent.hidden_state);
       const control = safeObject(latent.control);
+      const directionalConsensus = safeObject(
+        latent.directional_consensus_v3 || control.directional_consensus_v3,
+      );
       const components = safeObject(latent.directional_components);
       const buy = safeObject(components.BUY || components.buy);
       const sell = safeObject(components.SELL || components.sell);
@@ -7778,6 +8180,7 @@
 
     function overlayFamilyTitle(family) {
       const labels = {
+        book_rules: "Book rules",
         market_context: "Reaction map",
         order_positioning: "Order areas",
         current_candles: "Current price",
@@ -8367,6 +8770,12 @@
       // Non-browser capture transports can prove identity without a selector.
       // When a browser surface publishes one, every row must carry that exact
       // proof; absent or mismatched rows fail closed.
+      if (
+        overlayFamily(row) === "book_rules"
+        && (!surfaceSelectorFingerprint || !rowSelectorFingerprint)
+      ) {
+        return false;
+      }
       if (surfaceSelectorFingerprint !== rowSelectorFingerprint) {
         return false;
       }
@@ -8426,6 +8835,10 @@
         units: overlay.coordinate_units,
         bounds: overlay.bounds || overlay.bbox || null,
         points: overlay.line_points || overlay.points || overlay.path || null,
+        chartBounds: overlay.chart_bounds || null,
+        wickAnchors: overlay.anchor_wick_points || null,
+        touchCount: overlay.touch_count || 0,
+        bookGeometryRole: overlay.book_geometry_role || "",
       });
     }
 
@@ -8606,10 +9019,19 @@
         safeText(overlay.type, ""),
         safeText(overlay.role, ""),
       ].join(" ").toLowerCase();
-      if (!identity.includes("trendline")) {
+      if (!identity.includes("trendline") && overlayKind(overlay) !== "book_rule_line") {
         return true;
       }
       if (overlay.geometry_contract_accepted !== true) {
+        return false;
+      }
+      if (
+        overlayKind(overlay) === "book_rule_line"
+        && (
+          overlay.strict_third_touch_confirmed !== true
+          || Number(overlay.touch_count || 0) < 3
+        )
+      ) {
         return false;
       }
       const status = safeText(overlay.geometry_status, "").toUpperCase();
@@ -8650,6 +9072,64 @@
         }
       }
       return true;
+    }
+
+    function bookRuleOverlayGeometryAccepted(overlay) {
+      if (overlayFamily(overlay) !== "book_rules") {
+        return true;
+      }
+      const kind = overlayKind(overlay);
+      if (!["book_rule_line", "book_rule_zone", "book_rule_candle"].includes(kind)) {
+        return false;
+      }
+      if (
+        safeText(overlay.instrument_identity_status, "").toUpperCase() !== "LOCKED"
+        || safeText(overlay.coordinate_space, "").toLowerCase() !== "chart"
+        || safeText(overlay.coordinate_units, "").toLowerCase() !== "pixels"
+        || overlay.geometry_contract_accepted !== true
+        || safeText(overlay.lifecycle, "").toLowerCase() !== "current"
+        || overlay.stale === true
+        || overlay.frame_mismatch === true
+        || overlay.artifact_frame_mismatch === true
+      ) {
+        return false;
+      }
+      const chartBounds = safeList(overlay.chart_bounds).slice(0, 4).map(Number);
+      const bounds = safeList(overlay.bounds || overlay.bbox).slice(0, 4).map(Number);
+      if (
+        chartBounds.length !== 4
+        || bounds.length !== 4
+        || !chartBounds.every(Number.isFinite)
+        || !bounds.every(Number.isFinite)
+        || chartBounds[2] <= chartBounds[0]
+        || chartBounds[3] <= chartBounds[1]
+        || bounds[2] <= bounds[0]
+        || bounds[3] <= bounds[1]
+      ) {
+        return false;
+      }
+      const tolerance = 0.75;
+      const rawPoints = [
+        [bounds[0], bounds[1]],
+        [bounds[2], bounds[3]],
+        ...safeList(overlay.points),
+        ...safeList(overlay.line_points),
+        ...safeList(overlay.anchor_wick_points),
+      ];
+      if (!rawPoints.every(function (point) {
+        if (!Array.isArray(point) || point.length < 2) return false;
+        const x = Number(point[0]);
+        const y = Number(point[1]);
+        return Number.isFinite(x)
+          && Number.isFinite(y)
+          && x >= chartBounds[0] - tolerance
+          && x <= chartBounds[2] + tolerance
+          && y >= chartBounds[1] - tolerance
+          && y <= chartBounds[3] + tolerance;
+      })) {
+        return false;
+      }
+      return kind !== "book_rule_line" || strictTrendlineOverlayAccepted(overlay);
     }
 
     function overlayPoints(overlay) {
@@ -8732,6 +9212,13 @@
     }
 
     function overlayLabel(overlay) {
+      if (overlayFamily(overlay) === "book_rules") {
+        return boundedBookText(
+          overlay.label || overlay.kind_label,
+          overlayFamilyTitle("book_rules"),
+          72,
+        );
+      }
       if (overlayFamily(overlay) === "order_positioning") {
         return orderAreaDisplayLabel(overlay);
       }
@@ -8789,13 +9276,16 @@
       if (!box) {
         return null;
       }
-      const exactOrderAreaBounds = family === "order_positioning";
-      const visibleWidth = exactOrderAreaBounds
+      const exactGeometryBounds = family === "order_positioning" || family === "book_rules";
+      const visibleWidth = exactGeometryBounds
         ? box[2] - box[0]
         : Math.max(10, box[2] - box[0]);
-      const visibleHeight = exactOrderAreaBounds
+      const visibleHeight = exactGeometryBounds
         ? box[3] - box[1]
         : Math.max(10, box[3] - box[1]);
+      if (visibleWidth <= 0 || visibleHeight <= 0) {
+        return null;
+      }
       button.type = "button";
       button.className = "surface-hotspot group-" + group
         + " family-" + familyClass
@@ -8814,7 +9304,14 @@
       button.dataset.overlayKind = overlayKind(overlay);
       button.dataset.overlayLayer = safeText(overlay.layer, "");
       button.dataset.priority = String(overlayPriority(overlay));
-      if (exactOrderAreaBounds) {
+      if (family === "book_rules") {
+        button.dataset.bookGeometryRole = boundedBookText(
+          safeText(overlay.book_geometry_role, "REACTION_ZONE").toUpperCase(),
+          "REACTION_ZONE",
+          32,
+        );
+      }
+      if (family === "order_positioning") {
         const positioningMode = orderPositioningMode(overlay);
         if (positioningMode) {
           button.dataset.positioningMode = positioningMode;
@@ -8843,7 +9340,7 @@
       const topPercent = percent(box[1], state.naturalHeight);
       const widthPercent = percent(visibleWidth, state.naturalWidth);
       const heightPercent = percent(visibleHeight, state.naturalHeight);
-      if (exactOrderAreaBounds) {
+      if (family === "order_positioning") {
         const hitPadding = 10;
         button.dataset.hitPadding = String(hitPadding);
         button.style.left = "calc(" + leftPercent + "% - " + hitPadding + "px)";
@@ -8896,6 +9393,23 @@
       );
       polyline.dataset.overlayId = safeText(overlay.id, "");
       polyline.dataset.overlayFamilyId = family;
+      if (family === "book_rules") {
+        const ruleLine = document.createElementNS(namespace, "g");
+        ruleLine.setAttribute("class", "surface-book-rule-line");
+        ruleLine.dataset.overlayId = safeText(overlay.id, "");
+        ruleLine.dataset.overlayFamilyId = family;
+        ruleLine.appendChild(polyline);
+        points.slice(0, 2).forEach(function (point, index) {
+          const anchor = document.createElementNS(namespace, "circle");
+          anchor.setAttribute("cx", String(point[0]));
+          anchor.setAttribute("cy", String(point[1]));
+          anchor.setAttribute("r", "4");
+          anchor.setAttribute("class", "book-rule-wick-anchor");
+          anchor.dataset.anchorIndex = String(index + 1);
+          ruleLine.appendChild(anchor);
+        });
+        return ruleLine;
+      }
       return polyline;
     }
     function createChartBoundsOutline(overlay, bounds) {
@@ -8934,6 +9448,9 @@
         positioningMode: orderPositioningMode(overlay),
         positioningStatus: overlay.positioning_status,
         positioningBasis: overlay.positioning_basis,
+        bookGeometryRole: overlay.book_geometry_role,
+        strictThirdTouch: overlay.strict_third_touch_confirmed === true,
+        touchCount: Number(overlay.touch_count || 0),
       });
     }
 
@@ -9437,7 +9954,9 @@
 
     function completedCandleHistoryRows(payload) {
       const source = safeObject(payload);
-      const study = marketStudyContract(source);
+      // History extraction must be pure. Session heartbeats do not carry the
+      // operator surface contract and must never reset the live book card.
+      const study = marketStudyFromPayload(source);
       const closedCandleKey = safeText(study.closed_candle_key, "");
       if (!closedCandleKey) {
         return [];
@@ -9534,9 +10053,9 @@
       return {
         id: safeText(row.event_id || row.id, "history-" + index + "-" + safeText(row.observed_at || row.timestamp, index)),
         observed_at: eventEpochSeconds(row.observed_at || row.timestamp || row.created_at_epoch),
-        closedKey: safeText(row.closed_candle_key, ""),
-        closedSequence: Number(row.closed_candle_sequence || safeObject(row.sequence_position).ordinal || 0),
-        side: studyDirection(row.actual_side || row.actual || row.side || row.direction || row.action),
+        closedKey: safeText(row.closed_candle_key || rowStudy.closed_candle_key, ""),
+        closedSequence: Number(row.closed_candle_sequence || rowStudy.closed_candle_sequence || safeObject(row.sequence_position).ordinal || 0),
+        side: studyDirection(row.actual_side || row.actual || row.side || row.direction || rowDirectionalRead || row.action),
         majorSide: studyDirection(rowRegression.major_trend || row.major_trend || row.major_trend_context || safeObject(row.trends).major),
         innerSide: studyDirection(rowRegression.inner_trend || row.inner_trend || row.local_trend || safeObject(row.trends).inner),
         regressionSide: studyDirection(rowDirectionalRead || row.regression_direction || safeObject(row.regression).direction),
@@ -9607,9 +10126,10 @@
     }
 
     function combinedHistory(payload) {
-      const serverRows = safeList(payload.history).length
-        ? safeList(payload.history)
-        : safeList(payload.session_history);
+      const liveSession = safeObject(state.liveSession);
+      const serverRows = safeList(payload.history)
+        .concat(safeList(payload.session_history))
+        .concat(safeList(liveSession.recent_studies));
       const sourceRows = state.completedStudyHistory.concat(serverRows);
       const items = decorateHistoryItems(sourceRows.map(normalizeHistoryItem));
       const byIdentity = new Map();
@@ -9741,7 +10261,8 @@
         .map(safeObject)
         .filter(function (overlay) {
           return !overlayIsDiagnostic(overlay)
-            && overlayIdentityMatchesPayload(overlay, committedOperatorState);
+            && overlayIdentityMatchesPayload(overlay, committedOperatorState)
+            && bookRuleOverlayGeometryAccepted(overlay);
         });
       const nextVisualBundleKey = JSON.stringify({
         frameId: surface.frame_id,
@@ -9812,6 +10333,7 @@
           overlayRenderStats: Object.assign({}, state.overlayRenderStats),
           visibleOverlayCount: state.lastRenderedOverlayCount,
           heartbeatTimerActive: Boolean(state.heartbeatIntervalTimer),
+          lastRefreshError: safeText(state.lastRefreshError, ""),
         };
       },
     };

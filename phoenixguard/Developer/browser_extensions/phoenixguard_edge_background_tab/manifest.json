@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PhoenixGuard Universal Chart Region",
-  "version": "0.3.12",
+  "version": "0.3.15",
   "description": "Streams one explicitly selected region of any HTTP(S) chart tab to local PhoenixGuard without activating or raising Edge.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -10,9 +10,12 @@
     "offscreen",
     "scripting",
     "storage",
+    "tabs",
     "tabCapture"
   ],
   "host_permissions": [
+    "http://*/*",
+    "https://*/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],

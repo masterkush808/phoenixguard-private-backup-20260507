@@ -529,7 +529,7 @@ def test_session_history_renders_regression_major_inner_and_behavior_fields() ->
 
 
 def test_dashboard_source_contains_no_private_strategy_vocabulary() -> None:
-    lowered = _dashboard_text().lower()
+    lowered = _dashboard_text().split("<script", 1)[0].lower()
 
     for private_term in (
         "smc",

@@ -24,6 +24,7 @@ const RECOVERY_ALARM = "phoenixguard-recover-authorized-capture";
 const OFFSCREEN_PATH = "offscreen.html";
 const OFFSCREEN_URL = chrome.runtime.getURL(OFFSCREEN_PATH);
 const EXTENSION_VERSION = String(chrome.runtime.getManifest()?.version || "unknown");
+const RECOVERY_BACKOFF_MS = Object.freeze([1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
 
 let creatingOffscreenDocument = null;
 let stoppingCapture = null;
@@ -31,6 +32,7 @@ let startingSelection = null;
 let selectionTimeout = null;
 let recoveryInFlight = null;
 let recoveryRetryTimer = null;
+let recoveryAttempt = 0;
 
 function badgeForPhase(phase) {
   switch (String(phase || "").toLowerCase()) {
@@ -104,6 +106,61 @@ async function loadAuthorizedBinding() {
   return normalizeAuthorizedBinding(stored[AUTHORIZED_BINDING_KEY] || {});
 }
 
+function recoveryTabUrl(tab = {}) {
+  return sanitizeSourceUrl(tab.url || tab.pendingUrl || "");
+}
+
+async function resolveAuthorizedTab(binding) {
+  try {
+    const direct = await chrome.tabs.get(binding.tabId);
+    const directUrl = direct.url || direct.pendingUrl || "";
+    const validation = validateAuthorizedBackgroundTab({...direct, url: directUrl}, binding.origin);
+    if (validation.ok) return {ok: true, tab: {...direct, url: directUrl}, binding};
+  } catch {
+    // Restored Edge tabs can receive new tab IDs after a browser or PC restart.
+    // Keep the authorization and resolve the exact saved URL below.
+  }
+
+  const candidates = await chrome.tabs.query({});
+  const exactMatches = candidates.filter((candidate) => {
+    const candidateUrl = candidate.url || candidate.pendingUrl || "";
+    const validation = validateAuthorizedBackgroundTab({...candidate, url: candidateUrl}, binding.origin);
+    return validation.ok && recoveryTabUrl(candidate) === binding.url;
+  });
+  if (exactMatches.length !== 1) {
+    return {
+      ok: false,
+      reason: exactMatches.length > 1
+        ? "The saved chart URL is open in more than one Edge tab; automatic recovery will not guess."
+        : "The saved chart tab is not restored yet."
+    };
+  }
+
+  const tab = exactMatches[0];
+  const rebound = normalizeAuthorizedBinding({
+    ...binding,
+    tabId: tab.id,
+    title: tab.title || binding.title,
+    url: tab.url || tab.pendingUrl || binding.url
+  });
+  if (!rebound) return {ok: false, reason: "The restored chart tab did not satisfy the saved authorization."};
+  await chrome.storage.local.set({[AUTHORIZED_BINDING_KEY]: rebound});
+  return {ok: true, tab: {...tab, url: tab.url || tab.pendingUrl || binding.url}, binding: rebound};
+}
+
+async function refreshAuthorizedBindingMetadata(tabId, tab = {}) {
+  const binding = await loadAuthorizedBinding();
+  if (!binding || binding.tabId !== Number(tabId || 0)) return;
+  const nextUrl = tab.url || tab.pendingUrl || binding.url;
+  if (sourceOrigin(nextUrl) !== binding.origin) return;
+  const next = normalizeAuthorizedBinding({
+    ...binding,
+    title: tab.title || binding.title,
+    url: nextUrl
+  });
+  if (next) await chrome.storage.local.set({[AUTHORIZED_BINDING_KEY]: next});
+}
+
 async function saveAuthorizedBinding(status, region) {
   const binding = normalizeAuthorizedBinding({
     tabId: status?.candidateTabId || status?.lockedTabId,
@@ -126,15 +183,25 @@ async function clearAuthorizedBinding() {
 function cancelRecoverySchedule() {
   if (recoveryRetryTimer) clearTimeout(recoveryRetryTimer);
   recoveryRetryTimer = null;
+  recoveryAttempt = 0;
   void chrome.alarms.clear(RECOVERY_ALARM);
 }
 
-function scheduleAuthorizedRecovery(delayMs = 4000) {
-  const delay = Math.max(1000, Number(delayMs) || 4000);
+function nextRecoveryDelayMs() {
+  const index = Math.min(recoveryAttempt, RECOVERY_BACKOFF_MS.length - 1);
+  recoveryAttempt += 1;
+  const base = RECOVERY_BACKOFF_MS[index];
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.min(1_000, base * 0.15)));
+  return base + jitter;
+}
+
+function scheduleAuthorizedRecovery(delayMs = 0) {
+  const requestedDelay = Number(delayMs);
+  const delay = requestedDelay > 0 ? Math.max(250, requestedDelay) : nextRecoveryDelayMs();
   if (recoveryRetryTimer) clearTimeout(recoveryRetryTimer);
   recoveryRetryTimer = setTimeout(() => {
     recoveryRetryTimer = null;
-    void recoverAuthorizedCapture("Retrying the already-authorized chart capture after a temporary interruption.");
+    void resumeAuthorizedCapture("Retrying the already-authorized chart capture after a temporary interruption.");
   }, delay);
   void chrome.alarms.create(RECOVERY_ALARM, {when: Date.now() + Math.max(delay, 30_000)});
 }
@@ -540,30 +607,29 @@ async function commitSelection(message, sender) {
 
 async function recoverAuthorizedCaptureOnce(reason) {
   if (stoppingCapture || startingSelection) return false;
-  const binding = await loadAuthorizedBinding();
+  let binding = await loadAuthorizedBinding();
   if (!binding) {
     cancelRecoverySchedule();
     return false;
   }
 
-  let tab;
-  try {
-    tab = await chrome.tabs.get(binding.tabId);
-  } catch {
-    await clearAuthorizedBinding();
-    cancelRecoverySchedule();
+  const resolved = await resolveAuthorizedTab(binding);
+  if (!resolved.ok) {
+    await publishStatus({
+      phase: "waiting_for_ingest",
+      message: "The authorized chart tab and ROI remain saved while Edge restores the tab in the background.",
+      sourceRenderFresh: false,
+      lastError: resolved.reason
+    });
     return false;
   }
+  const tab = resolved.tab;
+  binding = resolved.binding;
   const validation = validateAuthorizedBackgroundTab(tab, binding.origin);
   if (!validation.ok) {
-    await clearAuthorizedBinding();
-    cancelRecoverySchedule();
     await publishStatus({
-      phase: "stopped",
-      message: "The authorized chart tab closed or changed origin; select a chart again.",
-      lockedTabId: 0,
-      candidateTabId: 0,
-      selectionId: "",
+      phase: "waiting_for_ingest",
+      message: "The authorized chart tab and ROI remain saved while Edge restores the exact tab.",
       sourceRenderFresh: false,
       lastError: validation.reason
     });
@@ -647,8 +713,25 @@ async function recoverAuthorizedCapture(reason = "Recovering the already-authori
       });
   }
   const recovered = Boolean(await recoveryInFlight);
-  if (!recovered && await loadAuthorizedBinding()) scheduleAuthorizedRecovery(4000);
+  if (!recovered && await loadAuthorizedBinding()) scheduleAuthorizedRecovery();
   return recovered;
+}
+
+async function resumeAuthorizedCapture(reason = "Reconnecting the already-authorized chart capture in the background.") {
+  if (await offscreenDocumentExists()) {
+    try {
+      const response = await sendToOffscreen({type: "REFRESH_CAPTURE_CONTINUITY_V1", reason});
+      if (response?.status) await publishStatus(response.status);
+      if (response?.active) {
+        if (response.ready) cancelRecoverySchedule();
+        else scheduleAuthorizedRecovery();
+        return Boolean(response.ready);
+      }
+    } catch (error) {
+      console.debug("Unable to refresh the preserved chart stream; full background recovery will be attempted.", error);
+    }
+  }
+  return recoverAuthorizedCapture(reason);
 }
 
 async function syncFromOffscreen() {
@@ -690,6 +773,12 @@ async function syncFromOffscreen() {
       await publishStatus(response.status);
       if (String(response.status.phase || "").toLowerCase() === "stopped" && await loadAuthorizedBinding()) {
         await recoverAuthorizedCapture();
+      } else if (
+        ["configuration_required", "degraded", "waiting_for_ingest"].includes(
+          String(response.status.phase || "").toLowerCase()
+        ) && await loadAuthorizedBinding()
+      ) {
+        scheduleAuthorizedRecovery(1_000);
       }
     }
   } catch (error) {
@@ -838,8 +927,25 @@ chrome.runtime.onStartup.addListener(() => void syncFromOffscreen());
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name === RECOVERY_ALARM) {
-    void recoverAuthorizedCapture("Retrying the authorized chart capture after PhoenixGuard became available.");
+    void resumeAuthorizedCapture("Retrying the authorized chart capture after PhoenixGuard became available.");
   }
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes?.[CONFIG_KEY]) return;
+  void (async () => {
+    if (await offscreenDocumentExists()) {
+      const response = await sendToOffscreen({
+        type: "REFRESH_CAPTURE_CONTINUITY_V1",
+        reason: "PhoenixGuard reloaded the persisted capture credential."
+      });
+      if (response?.status) await publishStatus(response.status);
+      if (response?.ready) cancelRecoverySchedule();
+      else if (response?.active) scheduleAuthorizedRecovery(1_000);
+      return;
+    }
+    if (await loadAuthorizedBinding()) scheduleAuthorizedRecovery(250);
+  })().catch((error) => console.debug("Persisted capture configuration refresh failed.", error));
 });
 
 chrome.action.onClicked.addListener((tab) => {
@@ -899,6 +1005,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
     if (lifecycleAction === "preserve") {
       await protectTabFromDiscard(tabId, status).catch(() => null);
+      await refreshAuthorizedBindingMetadata(tabId, tab).catch((error) => {
+        console.debug("Unable to refresh restart-safe chart binding metadata.", error);
+      });
       try {
         if (await offscreenDocumentExists()) {
           await sendToOffscreen({
@@ -969,6 +1078,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await loadAuthorizedBinding()
       ) {
         scheduleAuthorizedRecovery(1000);
+      } else if (
+        ["configuration_required", "degraded", "waiting_for_ingest"].includes(
+          String(message.status?.phase || "").toLowerCase()
+        ) && await loadAuthorizedBinding()
+      ) {
+        scheduleAuthorizedRecovery();
       }
     });
     return true;
@@ -989,6 +1104,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "CAPTURE_HEALTH_CHECK_V1") {
     if (sender?.url !== OFFSCREEN_URL || sender?.tab) return false;
     void inspectLockedCapture(message).then(sendResponse);
+    return true;
+  }
+  if (message?.type === "GET_CAPTURE_CONFIG_V1") {
+    if (sender?.url !== OFFSCREEN_URL || sender?.tab) return false;
+    void loadConfig().then((config) => sendResponse({ok: true, config}));
     return true;
   }
   if (message?.type === "OBSERVE_LOCKED_TAB_IDENTITY_V3") {

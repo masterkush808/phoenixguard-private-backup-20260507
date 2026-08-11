@@ -189,7 +189,7 @@ def test_cycle_duration_falls_back_to_observed_closed_candle_segments() -> None:
     assert result["control"]["status"] == "AWAITING_STRUCTURAL_CONFIRMATION"
 
 
-def test_structural_control_requires_third_touch_and_overrides_local_pullback() -> None:
+def test_structural_control_requires_stable_confirmation_before_overriding_local_pullback() -> None:
     study = {
         "hidden_state_discovery_v3": {
             "hidden_state": {
@@ -235,11 +235,19 @@ def test_structural_control_requires_third_touch_and_overrides_local_pullback() 
         major_trend_side="SELL",
     )
     control = reconciled["hidden_state_discovery_v3"]["control"]
-    assert control["side"] == "SELL"
+    assert control["side"] == "UNRESOLVED"
     assert control["local_leg_side"] == "BUY"
-    assert control["status"] == "STRUCTURALLY_CONFIRMED_CONTROL"
-    assert control["reaction_side"] == "SELL"
-    assert control["reaction_status"] == "CLOSED_CANDLE_REACTION_CONFIRMED"
+    assert control["status"] == "DIRECTION_CONFLICT"
+    consensus = control["directional_consensus_v3"]
+    assert consensus["raw_candidate_side"] == "SELL"
+    assert consensus["sell_score"] > consensus["buy_score"]
+    assert consensus["pending_switch_side"] == "SELL"
+    assert consensus["pending_switch_confirmations"] == 1
+    assert consensus["switch_confirmations_required"] == 3
+    opposing = control["structural_evidence"]["opposing_line"]
+    assert opposing["direction"] == "SELL"
+    assert opposing["confirmed"] is True
+    assert opposing["current_touch"] is True
 
     developing = _reconcile_latent_state_control_v3(
         study,
@@ -255,7 +263,8 @@ def test_structural_control_requires_third_touch_and_overrides_local_pullback() 
         major_trend_side="SELL",
     )["hidden_state_discovery_v3"]["control"]
     assert developing["side"] == "UNRESOLVED"
-    assert developing["status"] == "AWAITING_THIRD_TOUCH_CONFIRMATION"
+    assert developing["directional_consensus_v3"]["raw_candidate_side"] == "SELL"
+    assert developing["structural_evidence"]["confirmed_trendline_count"] == 0
 
 
 def test_strict_wick_role_is_independent_of_slope_direction() -> None:

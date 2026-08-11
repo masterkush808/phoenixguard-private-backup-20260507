@@ -205,9 +205,9 @@ def test_scene_contributor_consumes_suite_and_returns_complete_candle_locked_pat
     assert result["schema_version"] == SCENE_FORECAST_CONTRIBUTION_SCHEMA_V3
     assert result["skill"] == "MULTIMODAL_SCENE_FORECAST"
     assert result["forecast_available"] is True
-    assert len(result["line_points"]) == 13
-    assert len(result["forecast_candles"]) == 12
-    assert len(result["forecast_path"]) == 12
+    assert len(result["line_points"]) == 73
+    assert len(result["forecast_candles"]) == 72
+    assert len(result["forecast_path"]) == 72
     assert len(result["forecast_scenarios"]) == 3
     assert result["forecast_anchor"]["verified_latest_close"] is True
     assert math.isclose(result["forecast_anchor"]["x_norm"], 310.0 / 800.0)
@@ -217,9 +217,9 @@ def test_scene_contributor_consumes_suite_and_returns_complete_candle_locked_pat
     assert result["production_authorized"] is False
     assert result["selective_authorized"] is False
     assert result["trade_authorized"] is False
-    assert result["provider"] == "SCENE_STATISTICAL_FALLBACK_V3"
-    assert result["provider_status"] == "FOUNDATION_DISABLED_FALLBACK"
-    assert result["model_version"] == "SCENE_STATISTICAL_FALLBACK_V3"
+    assert result["provider"] == "BOOK_STRATEGY_CONDITIONED_SCENE_V3"
+    assert result["provider_status"] == "BOOK_STRATEGY_CONTROLLED_FALLBACK"
+    assert result["model_version"] == "BOOK_STRATEGY_CONDITIONED_SCENE_V3"
     assert result["requested_model_version"] == "chronos-2-small"
     consumed = result["scene_feature_audit"]["consumed_fields"]
     assert "projection.confidence" in consumed
@@ -1243,7 +1243,7 @@ def test_conflicting_source_times_fail_closed_even_with_a_new_bar_id() -> None:
 
 
 def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() -> None:
-    base = [
+    base_cycle = [
         0.52,
         0.49,
         0.535,
@@ -1256,6 +1256,11 @@ def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() ->
         0.555,
         0.59,
         0.57,
+    ]
+    base = [
+        min(0.95, max(0.05, value + 0.001 * cycle))
+        for cycle in range(6)
+        for value in base_cycle
     ]
     close = {
         "p10": [value - 0.04 for value in base],
@@ -1277,7 +1282,7 @@ def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() ->
             "x_norm": 0.40,
             "y_norm": 0.50,
             "price_norm": 0.50,
-            "event_step_x_norm": 0.025,
+            "event_step_x_norm": 0.006,
             "verified_latest_close": True,
         },
         close_quantiles=close,
@@ -1296,7 +1301,7 @@ def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() ->
             "x_norm": 0.72,
             "y_norm": 0.86,
             "price_norm": 0.14,
-            "event_step_x_norm": 0.02,
+            "event_step_x_norm": 0.0035,
             "verified_latest_close": True,
             "source": "TRACKER_LATEST_CLOSED_CANDLE",
         },
@@ -1305,8 +1310,8 @@ def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() ->
     expected_origin = [0.72, 0.86]
     assert issued["line_points"] == original_points
     assert reanchored["line_points"][0] == expected_origin
-    assert len(reanchored["line_points"]) == 13
-    assert len(reanchored["forecast_candles"]) == 12
+    assert len(reanchored["line_points"]) == 73
+    assert len(reanchored["forecast_candles"]) == 72
     assert len(reanchored["forecast_scenarios"]) == 3
     assert all(
         scenario["line_points"][0] == expected_origin
@@ -1318,7 +1323,7 @@ def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() ->
     ) == 1
     assert [row["movement_side"] for row in reanchored["forecast_candles"]] == original_movements
     assert len({round(point[1], 12) for point in reanchored["line_points"][-8:]}) > 4
-    assert len(reanchored["forecast_path"]) == 12
+    assert len(reanchored["forecast_path"]) == 72
     assert all(
         0.0 <= float(value) <= 1.0
         for point in reanchored["forecast_band_points"]
@@ -1346,7 +1351,7 @@ def test_cached_geometry_reanchor_is_atomic_across_routes_ohlc_and_interval() ->
     )
 
 
-def test_diagnostic_fallback_uses_causal_suite_direction_as_a_covariate() -> None:
+def test_book_strategy_control_owns_causal_suite_direction_without_same_candle_flip() -> None:
     common: dict[str, Any] = {
         "candles": _candles(),
         "image_size": (800, 300),
@@ -1366,6 +1371,7 @@ def test_diagnostic_fallback_uses_causal_suite_direction_as_a_covariate() -> Non
     }
     buy = build_scene_forecast_contribution_v3(
         **common,
+        event_key_override="suite-direction-buy",
         decision_kernel={
             "belief_buy": 0.9,
             "belief_hold": 0.05,
@@ -1378,6 +1384,7 @@ def test_diagnostic_fallback_uses_causal_suite_direction_as_a_covariate() -> Non
     )
     sell = build_scene_forecast_contribution_v3(
         **common,
+        event_key_override="suite-direction-sell",
         decision_kernel={
             "belief_buy": 0.05,
             "belief_hold": 0.05,
@@ -1390,12 +1397,16 @@ def test_diagnostic_fallback_uses_causal_suite_direction_as_a_covariate() -> Non
     )
 
     assert buy["fallback"]["suite_features_used"] is True
+    assert buy["fallback"]["method"] == "BOOK_RULE_CONDITIONED_CAUSAL_ANALOG"
     assert buy["fallback"]["suite_direction_bias"] > 0.0
-    assert sell["fallback"]["suite_direction_bias"] < 0.0
+    assert sell["fallback"]["suite_direction_bias"] == buy["fallback"]["suite_direction_bias"]
+    assert sell["book_strategy_forecast_control_v3"]["forecast_side"] == buy[
+        "book_strategy_forecast_control_v3"
+    ]["forecast_side"]
     assert buy["line_points"][-1][1] < sell["line_points"][-1][1]
 
 
-def test_scenario_selection_switches_side_line_and_all_twelve_candles_atomically() -> None:
+def test_scenario_selection_switches_side_line_and_all_seventy_two_candles_atomically() -> None:
     result = build_scene_forecast_contribution_v3(
         candles=_candles(),
         image_size=(800, 300),
@@ -1417,7 +1428,7 @@ def test_scenario_selection_switches_side_line_and_all_twelve_candles_atomically
     assert next(row for row in selected["forecast_scenarios"] if row["selected"])[
         "role"
     ] == "bear"
-    assert len(selected["forecast_path"]) == 12
+    assert len(selected["forecast_path"]) == 72
     assert selected["next_1_direction"] == selected["forecast_path"][0][
         "movement_direction"
     ]

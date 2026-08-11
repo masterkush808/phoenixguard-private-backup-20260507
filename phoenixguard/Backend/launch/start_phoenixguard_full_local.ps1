@@ -341,6 +341,7 @@ if ($runtimeDir -ne $legacyRuntimeDir) {
 $edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
     -RuntimeDir $runtimeDir `
     -MinIntervalSec 4.0
+Write-Host "Edge tab-capture credential: $(if ($edgeTabCapture.PersistedTokenReused) { 'REUSED' } elseif ($edgeTabCapture.GeneratedLocally) { 'CREATED' } else { 'OPERATOR-MANAGED' }) (no secret printed)"
 
 function Start-TrackerChildProcess {
     param(
@@ -453,7 +454,9 @@ if (-not $NoKillExisting) {
         if ($processRowsAvailable) {
             $processRows | Where-Object {
                 $commandLine = [string]$_.CommandLine
+                $processName = [string]$_.Name
                 ([int]$_.ProcessId) -ne $currentPid -and
+                    $processName -notin @('msedge.exe', 'msedgewebview2.exe') -and
                     (Test-PhoenixGuardOwnedCommandLine -CommandLine $commandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns)
             } | ForEach-Object {
                 [void]$targetProcessIds.Add([int]$_.ProcessId)
@@ -469,7 +472,11 @@ if (-not $NoKillExisting) {
                         if ($processRowsAvailable) {
                             $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
                             $ownerCommandLine = [string]$owner.CommandLine
-                            if (Test-PhoenixGuardOwnedCommandLine -CommandLine $ownerCommandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns) {
+                            $ownerName = [string]$owner.Name
+                            if (
+                                $ownerName -notin @('msedge.exe', 'msedgewebview2.exe') -and
+                                (Test-PhoenixGuardOwnedCommandLine -CommandLine $ownerCommandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns)
+                            ) {
                                 [void]$targetProcessIds.Add($ownerPid)
                             }
                         }
@@ -486,7 +493,10 @@ if (-not $NoKillExisting) {
         }
         while ($queue.Count -gt 0) {
             $parentId = $queue.Dequeue()
-            $processRows | Where-Object { [int]$_.ParentProcessId -eq $parentId } | ForEach-Object {
+            $processRows | Where-Object {
+                [int]$_.ParentProcessId -eq $parentId -and
+                [string]$_.Name -notin @('msedge.exe', 'msedgewebview2.exe')
+            } | ForEach-Object {
                 $childId = [int]$_.ProcessId
                 if ($childId -ne $currentPid -and $targetProcessIds.Add($childId)) {
                     $queue.Enqueue($childId)
@@ -495,6 +505,10 @@ if (-not $NoKillExisting) {
         }
 
         foreach ($processId in $targetProcessIds) {
+            $liveProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($liveProcess -and $liveProcess.ProcessName -in @('msedge', 'msedgewebview2')) {
+                continue
+            }
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }
         if ($targetProcessIds.Count -eq 0) {
@@ -566,9 +580,22 @@ try {
         $existingEdgeCapture = Wait-PhoenixGuardExistingEdgeCapture `
             -SourceBaseUrl $baseUrl `
             -SourceSessionId $SessionId `
-            -TimeoutSec 12.0
+            -TimeoutSec 35.0
         if ($existingEdgeCapture) {
             Write-Host 'Existing Edge extension stream: DETECTED (no browser launch, tab switch, or new source claim)'
+        }
+        $restoreWindowsRegionBinding = (
+            $env:PHOENIXGUARD_RESTORE_WINDOWS_REGION_CAPTURE -eq '1' -and
+            -not $existingEdgeCapture -and
+            -not ($NoBrowser -and [bool]$edgeTabCapture.Armed)
+        )
+        if (
+            $NoBrowser -and
+            [bool]$edgeTabCapture.Armed -and
+            $env:PHOENIXGUARD_RESTORE_WINDOWS_REGION_CAPTURE -eq '1' -and
+            -not $existingEdgeCapture
+        ) {
+            Write-Host 'Windows saved-source restoration: SUPPRESSED while the authorized Edge extension completes bounded recovery'
         }
         $windowsRegionCaptureScript = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_windows_region_capture.py'
         if (Test-Path -LiteralPath $windowsRegionCaptureScript -PathType Leaf) {
@@ -577,7 +604,7 @@ try {
                 $windowsRegionCaptureProcess = Start-WindowsRegionCaptureChildProcess `
                     -ChildBaseUrl $baseUrl `
                     -ChildSessionId $SessionId `
-                    -RestoreSavedBinding:($env:PHOENIXGUARD_RESTORE_WINDOWS_REGION_CAPTURE -eq '1' -and -not $existingEdgeCapture)
+                    -RestoreSavedBinding:$restoreWindowsRegionBinding
                 $sourceReadyDeadline = (Get-Date).AddSeconds(8)
                 while ((Get-Date) -lt $sourceReadyDeadline -and -not $windowsRegionCaptureProcess.HasExited) {
                     if (Test-Path -LiteralPath $windowsRegionCaptureStatusPath -PathType Leaf) {

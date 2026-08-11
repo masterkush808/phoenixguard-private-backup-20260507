@@ -553,10 +553,10 @@ if (-not $env:PHOENIXGUARD_DISK_GUARD_ENABLED) {
     $env:PHOENIXGUARD_DISK_GUARD_ENABLED = '1'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES) {
-    $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES = '256MB'
+    $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES = '512MB'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES) {
-    $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES = '192MB'
+    $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES = '384MB'
 }
 if (-not $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC) {
     $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC = '60'
@@ -595,7 +595,9 @@ $targetProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
 if ($processRowsAvailable) {
     $processRows | Where-Object {
         $commandLine = [string]$_.CommandLine
+        $processName = [string]$_.Name
         ([int]$_.ProcessId) -ne $currentPid -and
+            $processName -notin @('msedge.exe', 'msedgewebview2.exe') -and
             (Test-PhoenixGuardOwnedCommandLine -CommandLine $commandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns)
     } | ForEach-Object {
         [void]$targetProcessIds.Add([int]$_.ProcessId)
@@ -624,18 +626,20 @@ if (-not $processRowsAvailable) {
             Write-Warning "Stale or invalid closed-port runtime lock will not be used as PID authority."
         }
     }
-    Write-Warning "Using repository-scoped psutil cleanup because process command-line inspection is unavailable."
-    & $pythonPath `
-        '.\Developer\developer_tools\phoenixguard_kill_switch.py' `
-        --kill-only `
-        --session-id $SessionId `
-        --base-url 'http://127.0.0.1:8793' `
-        --ports '8793,8767,8787,18180,18181,3210,3310,7861'
-    if ($LASTEXITCODE -ne 0) {
-        throw "Repository-scoped PhoenixGuard cleanup failed; runtime deletion is blocked."
+    if ($null -ne $validatedRuntimeLock) {
+        foreach ($ownedPid in @($validatedRuntimeLock.Pids)) {
+            $ownedProcess = Get-Process -Id ([int]$ownedPid) -ErrorAction SilentlyContinue
+            if ($ownedProcess -and $ownedProcess.ProcessName -notin @('msedge', 'msedgewebview2')) {
+                [void]$targetProcessIds.Add([int]$ownedPid)
+            }
+        }
+        $lockFallbackStopped = $targetProcessIds.Count
+        Write-Warning "Using only validated runtime-lock PIDs because command-line inspection is unavailable; Edge and WebView remain excluded."
+    } elseif (Test-LocalTcpPortOpen -Port 8793) {
+        throw "PhoenixGuard port 8793 is active without attributable process metadata; refusing cleanup so Edge can never be stopped."
+    } else {
+        Write-Warning "Process command-line inspection is unavailable and no PhoenixGuard listener is active; cleanup has nothing attributable to stop."
     }
-    $lockFallbackStopped = 1
-    Start-Sleep -Seconds 3
 }
 try {
     foreach ($cleanupPort in @(8793, 18181, 18180, 8787, 3210, 3310)) {
@@ -645,7 +649,11 @@ try {
                 if ($processRowsAvailable) {
                     $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
                     $ownerCommandLine = [string]$owner.CommandLine
-                    if (Test-PhoenixGuardOwnedCommandLine -CommandLine $ownerCommandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns) {
+                    $ownerName = [string]$owner.Name
+                    if (
+                        $ownerName -notin @('msedge.exe', 'msedgewebview2.exe') -and
+                        (Test-PhoenixGuardOwnedCommandLine -CommandLine $ownerCommandLine -RepositoryRoot $ProjectRoot -TargetPattern $targetPatterns)
+                    ) {
                         [void]$targetProcessIds.Add($ownerPid)
                     }
                 }
@@ -661,7 +669,10 @@ foreach ($processId in $targetProcessIds) {
 }
 while ($queue.Count -gt 0) {
     $parentId = $queue.Dequeue()
-    $processRows | Where-Object { [int]$_.ParentProcessId -eq $parentId } | ForEach-Object {
+    $processRows | Where-Object {
+        [int]$_.ParentProcessId -eq $parentId -and
+        [string]$_.Name -notin @('msedge.exe', 'msedgewebview2.exe')
+    } | ForEach-Object {
         $childId = [int]$_.ProcessId
         if ($childId -ne $currentPid -and $targetProcessIds.Add($childId)) {
             $queue.Enqueue($childId)
@@ -669,6 +680,10 @@ while ($queue.Count -gt 0) {
     }
 }
 foreach ($processId in $targetProcessIds) {
+    $liveProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($liveProcess -and $liveProcess.ProcessName -in @('msedge', 'msedgewebview2')) {
+        continue
+    }
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
 }
 if ($targetProcessIds.Count -gt 0) {

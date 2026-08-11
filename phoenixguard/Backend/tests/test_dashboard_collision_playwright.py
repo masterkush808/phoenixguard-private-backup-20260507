@@ -222,6 +222,10 @@ def _operator_payload(
                 "bounds": [0.14, 0.24, 0.86, 0.36],
                 "points": [[0.14, 0.36], [0.48, 0.30], [0.86, 0.24]],
                 "line_points": [[0.14, 0.36], [0.48, 0.30], [0.86, 0.24]],
+                "anchor_wick_points": [[0.14, 0.36], [0.48, 0.30]],
+                "chart_bounds": [0.0, 0.0, 1.0, 1.0],
+                "geometry_contract_accepted": True,
+                "geometry_status": "VISIBLE_TO_LATEST_X",
                 "confidence": 0.74,
                 "lifecycle": "current",
                 "frame_id": 42,
@@ -459,7 +463,7 @@ def _make_retention_timing_admissible(
 @pytest.fixture(scope="module")
 def chromium_browser() -> Generator[Browser, None, None]:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        browser = playwright.chromium.launch(channel="chrome", headless=True)
         yield browser
         browser.close()
 
@@ -4294,9 +4298,11 @@ def test_exact_dual_target_contract_projects_chart_pixels_on_both_artifacts(
     support.update(
         {
             "bounds": [100.0, 200.0, 300.0, 400.0],
-            "points": [[100.0, 200.0], [300.0, 400.0]],
-            "line_points": [[100.0, 200.0], [300.0, 400.0]],
-            "coordinate_space": "chart",
+                "points": [[100.0, 200.0], [300.0, 400.0]],
+                "line_points": [[100.0, 200.0], [300.0, 400.0]],
+                "anchor_wick_points": [[100.0, 200.0], [300.0, 400.0]],
+                "chart_bounds": [0.0, 0.0, 975.0, 701.0],
+                "coordinate_space": "chart",
             "coordinate_units": "pixels",
         }
     )

@@ -626,6 +626,7 @@ def freeze_native_forecast(
         smart_money_context=summary.get("smart_money_context") if isinstance(summary.get("smart_money_context"), Mapping) else {},
         support_resistance_context=summary.get("support_resistance_context") if isinstance(summary.get("support_resistance_context"), Mapping) else {},
         support_resistance_zones=summary.get("support_resistance_zones") if isinstance(summary.get("support_resistance_zones"), list) else [],
+        trendlines=summary.get("trendlines_v3") if isinstance(summary.get("trendlines_v3"), list) else [],
         trend_slopes={
             "global": summary.get("global_slope"),
             "local": summary.get("local_slope"),
@@ -637,6 +638,12 @@ def freeze_native_forecast(
             "impulse": summary.get("impulse_direction"),
             "major": summary.get("major_trend_direction"),
         },
+        book_strategy=summary.get("book_strategy") if isinstance(summary.get("book_strategy"), Mapping) else {},
+        playbook_ai_intelligence=summary.get("playbook_ai_intelligence") if isinstance(summary.get("playbook_ai_intelligence"), Mapping) else {},
+        session_context=summary.get("session_payload") if isinstance(summary.get("session_payload"), Mapping) else summary.get("session_context") if isinstance(summary.get("session_context"), Mapping) else {},
+        news_context=summary.get("news_context") if isinstance(summary.get("news_context"), Mapping) else {},
+        pair_dna_context=summary.get("pair_dna") if isinstance(summary.get("pair_dna"), Mapping) else summary.get("pair_profile") if isinstance(summary.get("pair_profile"), Mapping) else {},
+        higher_timeframe_context=summary.get("major_trend_context") if isinstance(summary.get("major_trend_context"), Mapping) else {},
         allow_foundation_model=False,
         event_key_override=event_key,
     )

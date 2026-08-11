@@ -83,15 +83,45 @@ def _candle_geometry(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
         if not isinstance(candle, Mapping):
             continue
         box = _bounds(candle.get("bbox") or candle.get("bounds") or candle.get("box"))
+        wick_top = _first_number(
+            candle,
+            (
+                "wick_top",
+                "wick_top_px",
+                "wick_top_y",
+                "wick_top_y_px",
+                "top_y",
+                "top_y_px",
+                "top",
+            ),
+        )
+        wick_bottom = _first_number(
+            candle,
+            (
+                "wick_bottom",
+                "wick_bottom_px",
+                "wick_bottom_y",
+                "wick_bottom_y_px",
+                "bottom_y",
+                "bottom_y_px",
+                "bottom",
+            ),
+        )
+        explicit_center_x = _first_number(
+            candle,
+            ("center_x", "center_x_px", "x_center", "x_center_px", "x"),
+        )
         if box is not None:
-            left, top, right, bottom = box
-            center_x = _first_number(candle, ("center_x", "x_center", "x"))
+            left, box_top, right, box_bottom = box
+            top = wick_top if wick_top is not None else box_top
+            bottom = wick_bottom if wick_bottom is not None else box_bottom
+            center_x = explicit_center_x
             if center_x is None:
                 center_x = (left + right) / 2.0
         else:
-            center_x = _first_number(candle, ("center_x", "x_center", "x"))
-            top = _first_number(candle, ("wick_top_px", "wick_top_y", "top"))
-            bottom = _first_number(candle, ("wick_bottom_px", "wick_bottom_y", "bottom"))
+            center_x = explicit_center_x
+            top = wick_top
+            bottom = wick_bottom
             width = _first_number(candle, ("width", "body_width")) or 2.0
             if center_x is None or top is None or bottom is None or bottom <= top:
                 continue
@@ -103,6 +133,7 @@ def _candle_geometry(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
             {
                 "index": index,
                 "center_x": float(center_x),
+                "projection_x": float(center_x if explicit_center_x is not None else right),
                 "top": float(top),
                 "bottom": float(bottom),
                 "left": float(left),
@@ -276,12 +307,15 @@ def normalize_trendline_geometry_v3(
         matched_touch_indices.append(match_index)
         matched_touch_points.append(point)
     slope = (second[1] - first[1]) / dx
-    raw_projection = [right, first[1] + slope * (right - first[0])]
+    latest_candle = max(candles, key=lambda candle: float(candle["center_x"]))
+    latest_x = float(latest_candle.get("projection_x", latest_candle["center_x"]))
+    projection_x = min(right, latest_x)
+    raw_projection = [projection_x, first[1] + slope * (projection_x - first[0])]
     current_projection_visible = top <= raw_projection[1] <= bottom
     normalized_points = [first, second]
     extension_omitted = True
     geometry_status = "ANCHORS_VALID_EXTENSION_OUTSIDE_CHART"
-    if right <= second[0] + tolerance:
+    if projection_x <= second[0] + tolerance:
         geometry_status = "ANCHORS_VALID_AT_LATEST_X"
     elif current_projection_visible:
         normalized_points.append(raw_projection)
@@ -290,6 +324,7 @@ def normalize_trendline_geometry_v3(
     xs = [point[0] for point in normalized_points]
     ys = [point[1] for point in normalized_points]
     extension_end = normalized_points[-1]
+    strategy_touch_confirmed = len(matched_touch_indices) >= 3
     row.update(
         {
             "points": [[round(x, 6), round(y, 6)] for x, y in normalized_points],
@@ -299,6 +334,17 @@ def normalize_trendline_geometry_v3(
             "touch_points": matched_touch_points,
             "touch_candle_indices": matched_touch_indices,
             "touch_count": len(matched_touch_indices),
+            "strategy_touch_confirmed": strategy_touch_confirmed,
+            "strategy_maturity": (
+                "CONFIRMED_THREE_TOUCH_WICK_LINE"
+                if strategy_touch_confirmed
+                else "TWO_ANCHOR_GEOMETRY_CANDIDATE"
+            ),
+            "third_touch_index": (
+                matched_touch_indices[2]
+                if len(matched_touch_indices) >= 3
+                else None
+            ),
             "bounds": [
                 round(min(xs), 6),
                 round(min(ys), 6),
@@ -311,7 +357,7 @@ def normalize_trendline_geometry_v3(
             "extension_clipped": False,
             "extension_omitted": extension_omitted,
             "current_projection_visible": current_projection_visible,
-            "current_projection_x": round(right, 6),
+            "current_projection_x": round(projection_x, 6),
             "visible_extension_end": [round(extension_end[0], 6), round(extension_end[1], 6)],
             "raw_projection_end": [round(raw_projection[0], 6), round(raw_projection[1], 6)],
             "chart_bounds": [round(left, 6), round(top, 6), round(right, 6), round(bottom, 6)],
