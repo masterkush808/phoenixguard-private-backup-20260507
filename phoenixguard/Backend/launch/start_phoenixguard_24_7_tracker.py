@@ -1003,7 +1003,7 @@ def main() -> int:
     parser.add_argument("--host", default=os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8793")))
     parser.add_argument("--session-id", default=os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788"))
-    parser.add_argument("--capture-interval", type=float, default=float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "30.0")))
+    parser.add_argument("--capture-interval", type=float, default=float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "1.0")))
     parser.add_argument("--window-query", default=os.getenv("PHOENIXGUARD_BROKER_WINDOW_QUERY", "Pocket Option"))
     parser.add_argument("--window-hwnd", type=int, default=_parse_positive_int(os.getenv("PHOENIXGUARD_BROKER_WINDOW_HWND", "0")))
     parser.add_argument(
@@ -1064,8 +1064,8 @@ def main() -> int:
     # the expensive model cadence: duplicate/rest frames are rejected and only
     # the latest material keyframe can wake the existing V3 study worker.
     os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_ENABLED", "1")
-    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_FPS", "0.25")
-    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC", "15.0")
+    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_FPS", "1.0")
+    os.environ.setdefault("PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC", "3.0")
     base_url = f"http://{args.host}:{args.port}"
     dashboard_url = f"{base_url}/v3/mobile/window-tracker/dashboard/{args.session_id}?launch_epoch_ms={int(time.time() * 1000.0)}"
     configured_focus_region = _parse_focus_region(args.focus_region)

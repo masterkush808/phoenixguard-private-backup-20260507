@@ -4,7 +4,7 @@ param(
     [string]$ApiHost = $(if ($env:PHOENIXGUARD_MOBILE_API_HOST) { $env:PHOENIXGUARD_MOBILE_API_HOST } else { '127.0.0.1' }),
     [int]$ApiPort = $(if ($env:PHOENIXGUARD_MOBILE_API_PORT) { [int]$env:PHOENIXGUARD_MOBILE_API_PORT } else { 8793 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
-    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }),
+    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [ValidateSet('FULL', 'TRACKER_ONLY', 'TRACKER_PLUS_COUNCIL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED')]
     [Alias('Profile')]
     [string]$LaunchProfile = 'FULL',
@@ -340,7 +340,7 @@ if ($runtimeDir -ne $legacyRuntimeDir) {
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Initialize-PhoenixGuardEdgeTabCapture.ps1')
 $edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
     -RuntimeDir $runtimeDir `
-    -MinIntervalSec 4.0
+    -MinIntervalSec 1.0
 Write-Host "Edge tab-capture credential: $(if ($edgeTabCapture.PersistedTokenReused) { 'REUSED' } elseif ($edgeTabCapture.GeneratedLocally) { 'CREATED' } else { 'OPERATOR-MANAGED' }) (no secret printed)"
 
 function Start-TrackerChildProcess {

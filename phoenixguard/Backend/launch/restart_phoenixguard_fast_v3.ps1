@@ -5,7 +5,7 @@ param(
     [string]$SessionId = 'pocket-live-8788',
     [string]$BrokerWindowQuery = 'The Most Innovative Trading Platform',
     [string]$FocusRegion = '0.03,0.13,0.87,0.96',
-    [double]$CaptureIntervalSec = 30.0,
+    [double]$CaptureIntervalSec = 1.0,
     [int]$ReadyTimeoutSec = 150
 )
 
@@ -91,6 +91,14 @@ $env:PHOENIXGUARD_FRAME_INGEST_LOCAL_MANAGED = '1'
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path $runtimeDir 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path $runtimeDir 'logs_live'
+$env:PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC = '1'
+$env:PHOENIXGUARD_FRAME_INGEST_RULE_MIN_INTERVAL_SEC = '1'
+$env:PHOENIXGUARD_CPU_STREAM_ENABLED = '1'
+$env:PHOENIXGUARD_CPU_STREAM_FPS = '1.0'
+$env:PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC = '3.0'
+# The direct bias bridge consumes the completed visual study, not Model Council.
+# Publish that same-frame study immediately while slower council work continues.
+$env:PHOENIXGUARD_DIRECT_BIAS_EARLY_PUBLISH = '1'
 # Full book-rule/CV studies exceed the legacy lightweight default on this
 # machine. Retain the engine's existing hard maximum and bounded single-worker
 # mailbox instead of discarding valid work at 45 seconds.

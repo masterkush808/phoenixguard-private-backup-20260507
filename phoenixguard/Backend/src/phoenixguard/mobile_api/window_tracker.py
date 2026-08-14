@@ -41284,8 +41284,14 @@ class ContinuousWindowTrackerService:
             latest_signal["market"] = ""
             latest_signal["market_confidence"] = 0.0
             payload["market"] = ""
+        direct_bias_early_publish = (
+            str(os.getenv("PHOENIXGUARD_DIRECT_BIAS_EARLY_PUBLISH", "0") or "0")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
         publish_visual_before_council = (
-            not _atomic_display_state_required_v3()
+            (not _atomic_display_state_required_v3() or direct_bias_early_publish)
             and str(os.getenv("PHOENIXGUARD_PUBLISH_VISUAL_OVERLAY_BEFORE_COUNCIL", "1") or "1")
             .strip()
             .lower()
@@ -41314,7 +41320,11 @@ class ContinuousWindowTrackerService:
                 "freshness_window_sec": visual_ready_freshness_window_sec,
                 "stages": list(stage_timings),
                 "partial_publish": True,
-                "partial_publish_reason": "visual_overlay_ready_before_model_council",
+                "partial_publish_reason": (
+                    "direct_bias_visual_study_ready_before_model_council"
+                    if direct_bias_early_publish
+                    else "visual_overlay_ready_before_model_council"
+                ),
             }
             tracking_summary["pipeline_timing"] = visual_ready_timing
             latest_signal["timestamp"] = visual_ready_at

@@ -4,7 +4,7 @@ param(
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'The Most Innovative Trading Platform' }),
     [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
-    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }),
+    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [int]$WarmupSeconds = 20,
     [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }),
     [ValidateSet('chrome', 'default', 'edge')]
@@ -49,8 +49,8 @@ Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_BACKGROUND_WARMUP_
 # profile. The V3 study lane is only awakened for material keyframes or its
 # bounded watchdog heartbeat.
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_ENABLED' -Value '1'
-Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_FPS' -Value '0.25'
-Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC' -Value '15.0'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_FPS' -Value '1.0'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_CPU_STREAM_SNAPSHOT_FALLBACK_SEC' -Value '3.0'
 $normalizedBrokerQuery = $BrokerWindowQuery.Trim().ToLowerInvariant()
 if ([string]::IsNullOrWhiteSpace([string]$env:PHOENIXGUARD_MT4_BRIDGE_ENABLED)) {
     $pocketOptionOnly = $normalizedBrokerQuery.Contains('pocket option') -or $normalizedBrokerQuery.Contains('innovative trading platform')
@@ -470,6 +470,7 @@ $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = '3'
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = '1'
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = '300'
 $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = '960'
+$env:PHOENIXGUARD_DIRECT_BIAS_EARLY_PUBLISH = '1'
 # A display-only heartbeat advances the visible frame without a matching model
 # result.  Keep the operator surface on the last atomic chart + study bundle;
 # the full capture worker publishes the next bundle when inference completes.
@@ -548,7 +549,7 @@ if ($runtimeDir -ne $legacyRuntimeDir) {
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Initialize-PhoenixGuardEdgeTabCapture.ps1')
 $edgeTabCapture = Initialize-PhoenixGuardEdgeTabCaptureEnvironment `
     -RuntimeDir $runtimeDir `
-    -MinIntervalSec 4.0
+    -MinIntervalSec 1.0
 if (-not $env:PHOENIXGUARD_DISK_GUARD_ENABLED) {
     $env:PHOENIXGUARD_DISK_GUARD_ENABLED = '1'
 }

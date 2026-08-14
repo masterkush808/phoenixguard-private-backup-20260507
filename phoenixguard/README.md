@@ -147,7 +147,7 @@ fresh 10-file processes, enables warning failures, uses one worker, and caps eac
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live
 dashboard without any floating editor window.
 
-Preferred developer kill switch:
+Preferred developer stack restart (PowerShell terminal 1):
 
 ```powershell
 .\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
@@ -155,8 +155,20 @@ Preferred developer kill switch:
 
 This Python wrapper asks the API to stop the tracker if it is reachable, kills detected PhoenixGuard
 parents and children, clears V3 runtime/cache state, then relaunches the canonical `FINAL_LIVE` stack
-through `Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser`. To inspect what it would stop
-without touching the running stack:
+through `Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser`. Its default capture interval is
+one second. Wait for `kill_switch: verified` before starting the direct bridge in a second PowerShell
+terminal:
+
+```powershell
+.\.venv-live\Scripts\python.exe .\Backend\launch\phoenixguard_direct_trade_bridge.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --signal-source bias --poll-seconds 1 --timeout 5 --fixed-expiry-seconds 180 --max-trades-per-candle 1 --cooldown-after-trades 0 --cooldown-seconds 0 --flip-guard-seconds 0 --max-signal-age-seconds 15
+```
+
+The bridge consumes the current PhoenixGuard visual bias, rejects observations older than 15 seconds,
+and executes at most one entry per observed candle. It reads the saved trigger calibration, including
+its five-second pre-click delay. Running the kill switch again stops the existing bridge as part of
+duplicate-process cleanup, so relaunch the bridge command only after the replacement stack is verified.
+
+To inspect what the kill switch would stop without touching the running stack:
 
 ```powershell
 .\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py --dry-run
@@ -327,7 +339,9 @@ Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard
 
 Use `--kill-only` when you only want the stop step, `--skip-clean` when you want to preserve current
 runtime/cache state, `--disable-shooter` when you want the tracker/API without the package reporter,
-and `--open-browser` when you want the launcher to open the dashboard.
+and `--open-browser` when you want the launcher to open the dashboard. After a normal restart reports
+`kill_switch: verified`, start the direct bias bridge with the second-terminal command in
+[Fast Safe Restart](#fast-safe-restart).
 
 Manual fallback:
 

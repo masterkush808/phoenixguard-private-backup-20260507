@@ -16,6 +16,7 @@ from urllib.error import URLError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SESSION_ID = "pocket-live-8788"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
+DEFAULT_CAPTURE_INTERVAL_SEC = 1.0
 DEFAULT_PORTS = (8793, 8767, 8787, 18180, 18181, 3210, 3310, 7861)
 
 KNOWN_STACK_TOKENS = (
@@ -26,6 +27,7 @@ KNOWN_STACK_TOKENS = (
     "start_phoenixguard_mobile_api.ps1",
     "start_phoenixguard_mobile_api.py",
     "start_phoenixguard_share.ps1",
+    "phoenixguard_direct_trade_bridge.py",
     "start-phoenixguardvmmonitor.ps1",
     "start-phoenixguardvmshare.ps1",
     "shooter.py",
@@ -448,7 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--capture-interval-sec", type=float, default=30.0)
+    parser.add_argument("--capture-interval-sec", type=float, default=DEFAULT_CAPTURE_INTERVAL_SEC)
     parser.add_argument("--warmup-seconds", type=int, default=20)
     parser.add_argument("--shooter-poll-sec", type=float, default=30.0)
     parser.add_argument("--broker-window-query", default="")

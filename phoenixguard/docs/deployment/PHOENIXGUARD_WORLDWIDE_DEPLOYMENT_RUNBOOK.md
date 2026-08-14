@@ -255,7 +255,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
   -Branch "main" `
   -SessionId "pocket-live-8788" `
   -BrokerWindowQuery "The Most Innovative Trading Platform" `
-  -CaptureIntervalSec 30 `
+  -CaptureIntervalSec 1 `
   -DashboardBrowser edge `
   -RegisterScheduledTasks
 ```
