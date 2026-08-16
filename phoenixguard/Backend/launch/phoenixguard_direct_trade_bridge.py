@@ -104,6 +104,7 @@ DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
 DEFAULT_SIGNAL_SOURCE = "bias"
 DEFAULT_FLIP_GUARD_SECONDS = 0.0
 DEFAULT_MAX_TRADES_PER_CANDLE = 1
+DEFAULT_MAX_TRADES_PER_SESSION = 5
 DEFAULT_COOLDOWN_AFTER_TRADES = 0
 DEFAULT_COOLDOWN_SECONDS = 0.0
 HYBRID_READY_ENTRY_STATES = frozenset({"READY", "SNIPER_READY", "TRIGGER_READY", "TRIGGERED", "ACTIVE", "EXECUTE"})
@@ -129,6 +130,7 @@ class _BridgeTriggerState:
         rearm_seconds: float = 0.0,
         flip_guard_seconds: float = DEFAULT_FLIP_GUARD_SECONDS,
         max_trades_per_candle: int = DEFAULT_MAX_TRADES_PER_CANDLE,
+        max_trades_per_session: int = DEFAULT_MAX_TRADES_PER_SESSION,
         lock_side_per_candle: bool = False,
         cooldown_after_trades: int = DEFAULT_COOLDOWN_AFTER_TRADES,
         cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS,
@@ -139,6 +141,7 @@ class _BridgeTriggerState:
         self._rearm_seconds: float = max(0.0, float(rearm_seconds))
         self._flip_guard_seconds: float = max(0.0, float(flip_guard_seconds))
         self._max_trades_per_candle: int = max(0, int(max_trades_per_candle))
+        self._max_trades_per_session: int = max(0, int(max_trades_per_session))
         self._lock_side_per_candle: bool = bool(lock_side_per_candle)
         self._active_candle_key: str = ""
         self._trades_this_candle: int = 0
@@ -159,11 +162,12 @@ class _BridgeTriggerState:
 
     def should_trigger(self, trade: Mapping[str, object]) -> tuple[bool, str]:
         now = time.time()
+        if self._max_trades_per_session > 0 and self._executed_trade_count >= self._max_trades_per_session:
+            return False, "session_trade_limit_reached"
         if self._cooldown_until_epoch > 0.0:
             if now < self._cooldown_until_epoch:
                 return False, "cooldown_active"
             self._cooldown_until_epoch = 0.0
-            self._executed_trade_count = 0
 
         side = _upper(trade.get("side"))
         last_side: str = self._last_side
@@ -221,9 +225,9 @@ class _BridgeTriggerState:
             self._last_emit_epoch = time.time()
             if side in {"BUY", "SELL"}:
                 self._candle_side = side
+        self._executed_trade_count += 1
         if self._cooldown_after_trades <= 0 or self._cooldown_seconds <= 0.0:
             return
-        self._executed_trade_count += 1
         if self._executed_trade_count >= self._cooldown_after_trades:
             self._cooldown_until_epoch = time.time() + self._cooldown_seconds
 
@@ -1139,11 +1143,34 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
         # still controls *where* that direction may enter.
         entry_timing = _bias_entry_timing_context(payload, side=direct_side)
         entry_timing_ready = bool(entry_timing.get("ready"))
+        latest_signal = _mapping_or_empty(payload.get("latest_signal"))
+        execution_timing = _mapping_or_empty(latest_signal.get("execution_timing"))
+        execution_side = _upper(latest_signal.get("execution_action"))
+        execution_permission = _upper(latest_signal.get("execution_permission"))
+        execution_actionable = latest_signal.get("actionable") is True
+        explicit_entry_allowed = execution_timing.get("entry_allowed") is True
+        execution_authorized = (
+            execution_permission == "EXECUTE"
+            and execution_actionable
+            and execution_side == direct_side
+            and explicit_entry_allowed
+            and entry_timing_ready
+        )
+        if execution_authorized:
+            reject_reason = ""
+        elif execution_permission != "EXECUTE" or not execution_actionable:
+            reject_reason = "PhoenixGuard has not granted EXECUTE permission for this visual bias."
+        elif execution_side != direct_side:
+            reject_reason = "PhoenixGuard execution side does not match the current visual bias."
+        elif not explicit_entry_allowed:
+            reject_reason = "PhoenixGuard has not explicitly allowed this entry position; wait for pullback/reclaim confirmation."
+        else:
+            reject_reason = _text(entry_timing.get("reason")) or "PhoenixGuard entry timing is not ready."
         return {
             "signal_id": f"direct_visual_{int(direct_observed_epoch * 1000)}",
             "side": direct_side,
-            "actionable": entry_timing_ready,
-            "reject_reason": "" if entry_timing_ready else _text(entry_timing.get("reason")),
+            "actionable": execution_authorized,
+            "reject_reason": reject_reason,
             "summary": f"PhoenixGuard current candle vision is {direct_side}.",
             "symbol": market,
             "timeframe": timeframe,
@@ -1161,7 +1188,7 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
             "candle_key": candle_key,
             "candle_sequence": candle_sequence,
             "timeframe_seconds": timeframe_seconds,
-            "execution_permission": "DIRECT_VISUAL_BIAS",
+            "execution_permission": execution_permission,
             "signal_age_seconds": max(0.0, time.time() - direct_observed_epoch),
             "freshness_window_seconds": 0.0,
             "freshness_score": 1.0,
@@ -2415,6 +2442,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--flip-guard-seconds", type=float, default=DEFAULT_FLIP_GUARD_SECONDS)
     parser.add_argument("--fixed-expiry-seconds", type=int, default=180)
     parser.add_argument("--max-trades-per-candle", type=int, default=DEFAULT_MAX_TRADES_PER_CANDLE)
+    parser.add_argument(
+        "--max-trades-per-session",
+        type=int,
+        default=DEFAULT_MAX_TRADES_PER_SESSION,
+        help="Hard cap on executed trades for this bridge process; 0 disables the cap.",
+    )
     parser.add_argument("--block-opposite-side-same-candle", action="store_true")
     parser.add_argument("--cooldown-after-trades", type=int, default=DEFAULT_COOLDOWN_AFTER_TRADES)
     parser.add_argument("--cooldown-seconds", type=float, default=DEFAULT_COOLDOWN_SECONDS)
@@ -2480,6 +2513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rearm_seconds=float(args.rearm_seconds),
             flip_guard_seconds=float(args.flip_guard_seconds),
             max_trades_per_candle=int(args.max_trades_per_candle),
+            max_trades_per_session=int(args.max_trades_per_session),
             lock_side_per_candle=bool(args.block_opposite_side_same_candle)
             and not bool(args.allow_opposite_side_same_candle),
             cooldown_after_trades=int(args.cooldown_after_trades),
