@@ -8,7 +8,6 @@
     "python.analysis.logLevel": "Error",
     "python.testing.autoTestDiscoverOnSaveEnabled": false,
     "python.analysis.exclude": [
-        "**/.*",
         "**/.codex_runtime/**",
         "**/.pytest_cache/**",
         "**/.venv*/**",

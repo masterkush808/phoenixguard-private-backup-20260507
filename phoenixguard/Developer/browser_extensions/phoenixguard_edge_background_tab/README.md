@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 -->
 
-Current unpacked release: **0.3.15**.
+Current unpacked release: **0.3.12**.
 
 This unpacked Microsoft Edge MV3 extension streams one explicitly selected rectangle from any normal HTTP(S) chart tab to the local PhoenixGuard V3 frame-ingest service. Once the badge reads `LIVE`, the chart tab may be inactive, covered, or inside a minimized Edge window while its individual tab stream continues. PhoenixGuard never raises Edge, activates the selected tab, or clicks the chart.
 
