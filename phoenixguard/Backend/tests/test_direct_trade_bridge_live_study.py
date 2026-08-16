@@ -1396,12 +1396,7 @@ def test_bias_mode_uses_fresh_direct_visual_bias_instead_of_stale_full_study():
         "display_published_epoch": now_epoch - 100.0,
         "latest_signal": {
             "action": "BUY",
-            "execution_action": "SELL",
-            "execution_permission": "EXECUTE",
-            "actionable": True,
-            "entry_state": "TRIGGER_READY",
             "published_epoch": now_epoch - 90.0,
-            "execution_timing": {"entry_allowed": True},
         },
         "direct_visual_bias_v3": {
             "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
@@ -1475,13 +1470,10 @@ def test_direct_visual_bias_uses_listener_liveness_by_default_and_honors_entry_w
         },
     }
 
-    with pytest.raises(bridge.TradeRejected, match="EXECUTE permission"):
+    with pytest.raises(bridge.TradeRejected, match="pullback/reclaim"):
         bridge._resolve_trade_payload(payload, signal_source="bias")
 
     payload["latest_signal"] = {
-        "execution_action": "BUY",
-        "execution_permission": "EXECUTE",
-        "actionable": True,
         "entry_state": "TRIGGER_READY",
         "execution_timing": {"entry_allowed": True},
     }
@@ -1537,13 +1529,6 @@ def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch):
     now_epoch = time.time()
     event = {
         "session_id": "pocket-live-8788",
-        "latest_signal": {
-            "execution_action": "BUY",
-            "execution_permission": "EXECUTE",
-            "actionable": True,
-            "entry_state": "TRIGGER_READY",
-            "execution_timing": {"entry_allowed": True},
-        },
         "direct_visual_bias_v3": {
             "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
             "side": "BUY",

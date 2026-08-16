@@ -1143,34 +1143,11 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
         # still controls *where* that direction may enter.
         entry_timing = _bias_entry_timing_context(payload, side=direct_side)
         entry_timing_ready = bool(entry_timing.get("ready"))
-        latest_signal = _mapping_or_empty(payload.get("latest_signal"))
-        execution_timing = _mapping_or_empty(latest_signal.get("execution_timing"))
-        execution_side = _upper(latest_signal.get("execution_action"))
-        execution_permission = _upper(latest_signal.get("execution_permission"))
-        execution_actionable = latest_signal.get("actionable") is True
-        explicit_entry_allowed = execution_timing.get("entry_allowed") is True
-        execution_authorized = (
-            execution_permission == "EXECUTE"
-            and execution_actionable
-            and execution_side == direct_side
-            and explicit_entry_allowed
-            and entry_timing_ready
-        )
-        if execution_authorized:
-            reject_reason = ""
-        elif execution_permission != "EXECUTE" or not execution_actionable:
-            reject_reason = "PhoenixGuard has not granted EXECUTE permission for this visual bias."
-        elif execution_side != direct_side:
-            reject_reason = "PhoenixGuard execution side does not match the current visual bias."
-        elif not explicit_entry_allowed:
-            reject_reason = "PhoenixGuard has not explicitly allowed this entry position; wait for pullback/reclaim confirmation."
-        else:
-            reject_reason = _text(entry_timing.get("reason")) or "PhoenixGuard entry timing is not ready."
         return {
             "signal_id": f"direct_visual_{int(direct_observed_epoch * 1000)}",
             "side": direct_side,
-            "actionable": execution_authorized,
-            "reject_reason": reject_reason,
+            "actionable": entry_timing_ready,
+            "reject_reason": "" if entry_timing_ready else _text(entry_timing.get("reason")),
             "summary": f"PhoenixGuard current candle vision is {direct_side}.",
             "symbol": market,
             "timeframe": timeframe,
@@ -1188,7 +1165,7 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
             "candle_key": candle_key,
             "candle_sequence": candle_sequence,
             "timeframe_seconds": timeframe_seconds,
-            "execution_permission": execution_permission,
+            "execution_permission": "DIRECT_VISUAL_BIAS",
             "signal_age_seconds": max(0.0, time.time() - direct_observed_epoch),
             "freshness_window_seconds": 0.0,
             "freshness_score": 1.0,
