@@ -7,6 +7,7 @@ import {dirname, resolve} from "node:path";
 import {
   DECODER_PROGRESS_TIMEOUT_MS,
   SAMPLE_FPS,
+  SAMPLE_INTERVAL_MS,
   boundedHeartbeatIdentityObservation,
   canonicalFrameSignaturePayload,
   captureDiscardPolicy,
@@ -481,7 +482,8 @@ test("capture discard policy is temporary and preserves an existing protected ta
 
 test("status contract reports ROI capture, freshness, and immutable no-focus policy", () => {
   const status = initialStatus();
-  assert.equal(SAMPLE_FPS, 0.25);
+  assert.equal(SAMPLE_FPS, 1.0);
+  assert.equal(SAMPLE_INTERVAL_MS, 1_000);
   assert.equal(DECODER_PROGRESS_TIMEOUT_MS, 90_000);
   assert.equal(status.schemaVersion, "PG_EDGE_REGION_CAPTURE_STATUS_V3");
   assert.equal(status.captureMode, "tab_region");
@@ -494,14 +496,17 @@ test("manifest and package are version-locked, least-privilege MV3, and document
   const packageMetadata = JSON.parse(await readFile(resolve(extensionRoot, "package.json"), "utf8"));
   const readme = await readFile(resolve(extensionRoot, "README.md"), "utf8");
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.3.12");
+  assert.equal(manifest.version, "0.3.15");
   assert.equal(packageMetadata.version, manifest.version);
   assert.equal(readme.includes(`Current unpacked release: **${manifest.version}**.`), true);
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["activeTab", "alarms", "offscreen", "scripting", "storage", "tabCapture"].sort()
+    ["activeTab", "alarms", "offscreen", "scripting", "storage", "tabs", "tabCapture"].sort()
   );
-  assert.deepEqual([...manifest.host_permissions].sort(), ["http://127.0.0.1/*", "http://localhost/*"].sort());
+  assert.deepEqual(
+    [...manifest.host_permissions].sort(),
+    ["http://*/*", "https://*/*", "http://127.0.0.1/*", "http://localhost/*"].sort()
+  );
   assert.equal(manifest.commands["lock-full-viewport"].suggested_key.windows, "Ctrl+Shift+7");
   assert.equal(manifest.commands["lock-full-viewport"].global, undefined);
   assert.equal(manifest.commands["select-chart-region"].suggested_key.windows, "Ctrl+Shift+8");
@@ -544,7 +549,7 @@ test("runtime contains ROI lease lineage and no focus-changing API", async () =>
   assert.match(serviceWorkerSource, /CAPTURE_HEALTH_CHECK_V1/);
   assert.match(serviceWorkerSource, /lockedTabLifecycleAction/);
   assert.match(offscreenSource, /captureTransportDecision/);
-  assert.match(offscreenSource, /contractTimer = setTimeout\(refreshServerContract, 30_000\)/);
+  assert.match(offscreenSource, /contractTimer = setTimeout\(\(\) => void refreshServerContract\(\), delay\)/);
   assert.equal(offscreenSource.includes("No freshly presented tab video frame inside the bounded freshness window."), false);
   assert.match(source, /autoDiscardable: false/);
   assert.match(source, /autoDiscardable: true/);

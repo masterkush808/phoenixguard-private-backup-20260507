@@ -1,5 +1,5 @@
-export const SAMPLE_INTERVAL_MS = 4_000;
-export const SAMPLE_FPS = 0.25;
+export const SAMPLE_INTERVAL_MS = 1_000;
+export const SAMPLE_FPS = 1.0;
 export const SELECTION_TIMEOUT_MS = 60_000;
 export const DECODER_PROGRESS_TIMEOUT_MS = 90_000;
 export const CAPTURE_HEALTH_POLL_MS = 10_000;

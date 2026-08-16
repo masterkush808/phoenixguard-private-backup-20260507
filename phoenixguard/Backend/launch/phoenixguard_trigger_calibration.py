@@ -17,18 +17,24 @@ from _pg_bootstrap import ensure_project_paths
 
 PROJECT_ROOT = ensure_project_paths()
 
-def _default_live_runtime_dir(project_root: Path | None = None) -> Path:
-    resolved_project_root = project_root or PROJECT_ROOT
-    configured_runtime_dir = str(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or "").strip()
-    if configured_runtime_dir:
-        return Path(configured_runtime_dir).expanduser()
+def _default_calibration_dir(project_root: Path | None = None) -> Path:
+    """Return the durable, user-owned calibration location.
+
+    This is deliberately outside the replaceable live-runtime directory.  The
+    launcher may rotate runtime output, but it must never rotate the operator's
+    saved button positions.
+    """
+    configured_dir = str(os.getenv("PHOENIXGUARD_CALIBRATION_DIR") or "").strip()
+    if configured_dir:
+        return Path(configured_dir).expanduser()
     local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
     if local_app_data:
-        return Path(local_app_data).expanduser() / "PhoenixGuard" / "runtime" / "live"
-    return resolved_project_root / "runtime" / "live"
+        return Path(local_app_data).expanduser() / "PhoenixGuard" / "calibration"
+    resolved_project_root = project_root or PROJECT_ROOT
+    return resolved_project_root / "data" / "calibration"
 
 
-DEFAULT_OUTPUT = _default_live_runtime_dir() / "trigger_calibration_manifest.json"
+DEFAULT_OUTPUT = _default_calibration_dir() / "trigger_calibration_manifest.json"
 DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 0.0
 DEFAULT_PRE_CLICK_DELAY_SECONDS = 5.0
 DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
@@ -68,7 +74,7 @@ def _build_manifest(
     pointer_move_duration_seconds: float,
 ) -> dict[str, Any]:
     return {
-        "version": "phoenixguard_trigger_calibration_v1",
+        "version": "phoenixguard_trigger_calibration_v2",
         "broker": "Pocket Option",
         "mode": "fixed_amount_fixed_expiry",
         "fixed_amount": float(fixed_amount),
@@ -97,7 +103,7 @@ def _build_manifest(
             "pre_click_delay_seconds": float(pre_click_delay_seconds),
             "pointer_move_duration_seconds": float(pointer_move_duration_seconds),
         },
-        "notes": "The bridge will focus the chart, use one saved pacing wait, then click the BUY or SELL target based on the live PhoenixGuard action. Time and amount remain fixed to the values below.",
+        "notes": "Durable operator calibration. The bridge will focus the chart, use one saved pacing wait, then click the BUY or SELL target only after PhoenixGuard permits the live direction and entry position. Time and amount remain fixed to the values below.",
     }
 
 
@@ -127,7 +133,7 @@ def main() -> int:
     args = parser.parse_args()
 
     print("PhoenixGuard trigger calibration")
-    print("This records the chart focus point and the BUY/SELL click points for your Pocket Option trigger.")
+    print("This records the chart focus point and the BUY/SELL click points in a durable calibration store.")
     print("The bridge will use the live PhoenixGuard trade signal and send the order to the calibrated trigger.")
     print("Time and amount are fixed, so no time input or amount adjustment is required during live trading.")
     print("\nCalibration flow:")

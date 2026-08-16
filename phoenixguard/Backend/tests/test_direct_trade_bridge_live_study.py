@@ -734,7 +734,7 @@ def test_bridge_trigger_state_blocks_immediate_opposite_side_flip_with_guard():
     assert state.should_trigger({"side": "SELL", "signal_id": "sig-2", "published_epoch": 2.0, "candle_key": "c-1", "timeframe_seconds": 300}) == (False, "opposite_side_blocked_same_candle")
 
 
-def test_bridge_trigger_state_has_no_default_candle_limit():
+def test_bridge_trigger_state_defaults_to_one_trade_per_candle():
     bridge = _load_bridge_module()
     state = bridge._BridgeTriggerState(rearm_seconds=0.0, flip_guard_seconds=0.0)
 
@@ -742,7 +742,7 @@ def test_bridge_trigger_state_has_no_default_candle_limit():
     second = {"side": "BUY", "signal_id": "sig-2", "published_epoch": 2.0, "candle_key": "c-42", "timeframe_seconds": 300}
 
     assert state.should_trigger(first) == (True, "triggered")
-    assert state.should_trigger(second) == (True, "triggered")
+    assert state.should_trigger(second) == (False, "candle_trade_limit_reached")
 
 
 def test_bridge_trigger_state_can_limit_trades_per_candle_when_requested():
@@ -1071,15 +1071,15 @@ def test_bias_mode_uses_fresh_observation_timestamp_instead_of_stale_signal_age_
     assert trade["signal_age_seconds"] < 2.0
 
 
-def test_bridge_defaults_trigger_manifest_to_launcher_runtime_root(monkeypatch, tmp_path):
+def test_bridge_defaults_trigger_manifest_to_durable_user_store(monkeypatch, tmp_path):
     local_app_data = tmp_path / "localappdata"
-    runtime_dir = local_app_data / "PhoenixGuard" / "runtime" / "live"
-    runtime_dir.mkdir(parents=True)
-    manifest_path = runtime_dir / "trigger_calibration_manifest.json"
+    manifest_path = local_app_data / "PhoenixGuard" / "calibration" / "trigger_calibration_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text("{}", encoding="utf-8")
 
     monkeypatch.delenv("PHOENIXGUARD_RUNTIME_DIR", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_RUNTIME_LOCK_PATH", raising=False)
+    monkeypatch.delenv("PHOENIXGUARD_CALIBRATION_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_localappdata")
@@ -1165,15 +1165,16 @@ def test_read_fresh_trade_does_not_spin_until_timeout_on_a_stale_snapshot(monkey
     assert calls == 1
 
 
-def test_trigger_calibration_defaults_output_to_launcher_runtime_root(monkeypatch, tmp_path):
+def test_trigger_calibration_defaults_output_to_durable_user_store(monkeypatch, tmp_path):
     local_app_data = tmp_path / "localappdata"
-    runtime_dir = local_app_data / "PhoenixGuard" / "runtime" / "live"
+    calibration_dir = local_app_data / "PhoenixGuard" / "calibration"
 
     monkeypatch.delenv("PHOENIXGUARD_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("PHOENIXGUARD_CALIBRATION_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
     calibration = _load_calibration_module("phoenixguard_trigger_calibration_localappdata")
-    assert calibration.DEFAULT_OUTPUT == runtime_dir / "trigger_calibration_manifest.json"
+    assert calibration.DEFAULT_OUTPUT == calibration_dir / "trigger_calibration_manifest.json"
 
 
 def test_trigger_calibration_writes_atomic_primary_and_backup(tmp_path):
@@ -1427,6 +1428,41 @@ def test_bias_mode_rejects_stale_direct_visual_bias():
             signal_source="bias",
             max_signal_age_seconds=15.0,
         )
+
+
+def test_direct_visual_bias_uses_listener_liveness_by_default_and_honors_entry_wait():
+    bridge = _load_bridge_module("phoenixguard_direct_visual_bias_listener_liveness")
+    stale_epoch = time.time() - 3_600.0
+    payload = {
+        "latest_signal": {
+            "entry_state": "WAIT_FOR_TRIGGER",
+            "execution_timing": {
+                "entry_allowed": False,
+                "block_reason": "Wait for the BUY pullback/reclaim.",
+            },
+        },
+        "direct_visual_bias_v3": {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "side": "BUY",
+            "market": "USD/JPY OTC",
+            "timeframe": "M5",
+            "observed_epoch": stale_epoch,
+        },
+    }
+
+    with pytest.raises(bridge.TradeRejected, match="pullback/reclaim"):
+        bridge._resolve_trade_payload(payload, signal_source="bias")
+
+    payload["latest_signal"] = {
+        "entry_state": "TRIGGER_READY",
+        "execution_timing": {"entry_allowed": True},
+    }
+    trade = bridge._resolve_trade_payload(payload, signal_source="bias")
+
+    assert bridge.DEFAULT_MAX_SIGNAL_AGE_SECONDS == 0.0
+    assert trade["side"] == "BUY"
+    assert trade["entry_timing_ready"] is True
+    assert trade["valid_until_epoch"] == 0.0
 
 
 def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch, tmp_path):

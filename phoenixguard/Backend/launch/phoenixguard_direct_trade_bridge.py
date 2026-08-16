@@ -83,14 +83,27 @@ DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_HEARTBEAT_SECONDS = 3.0
 DEFAULT_LISTENER_RECONNECT_SECONDS = 1.0
-DEFAULT_TRIGGER_MANIFEST = _default_live_runtime_dir() / "trigger_calibration_manifest.json"
+def _default_calibration_dir(project_root: Path | None = None) -> Path:
+    configured_dir = str(os.getenv("PHOENIXGUARD_CALIBRATION_DIR") or "").strip()
+    if configured_dir:
+        return Path(configured_dir).expanduser()
+    local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
+    if local_app_data:
+        return Path(local_app_data).expanduser() / "PhoenixGuard" / "calibration"
+    return (project_root or PROJECT_ROOT) / "data" / "calibration"
+
+
+DEFAULT_TRIGGER_MANIFEST = _default_calibration_dir() / "trigger_calibration_manifest.json"
 DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 0.0
 DEFAULT_PRE_CLICK_DELAY_SECONDS = 5.0
 DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
-DEFAULT_MAX_SIGNAL_AGE_SECONDS = 15.0
+# Listener delivery is the liveness contract.  A stable trend/bias may remain
+# correct for hours, so an unchanged observation timestamp is not a stale
+# stream.  Operators can opt into a positive age cap for polling diagnostics.
+DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
 DEFAULT_SIGNAL_SOURCE = "bias"
 DEFAULT_FLIP_GUARD_SECONDS = 0.0
-DEFAULT_MAX_TRADES_PER_CANDLE = 0
+DEFAULT_MAX_TRADES_PER_CANDLE = 1
 DEFAULT_COOLDOWN_AFTER_TRADES = 0
 DEFAULT_COOLDOWN_SECONDS = 0.0
 HYBRID_READY_ENTRY_STATES = frozenset({"READY", "SNIPER_READY", "TRIGGER_READY", "TRIGGERED", "ACTIVE", "EXECUTE"})
@@ -1122,20 +1135,27 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
             f"direct:{market}:{timeframe}:{candle_sequence}"
         )
         confidence = _normalize_score(direct_bias.get("confidence"))
+        # The direct visual side selects direction; the published timing state
+        # still controls *where* that direction may enter.
+        entry_timing = _bias_entry_timing_context(payload, side=direct_side)
+        entry_timing_ready = bool(entry_timing.get("ready"))
         return {
             "signal_id": f"direct_visual_{int(direct_observed_epoch * 1000)}",
             "side": direct_side,
-            "actionable": True,
-            "reject_reason": "",
+            "actionable": entry_timing_ready,
+            "reject_reason": "" if entry_timing_ready else _text(entry_timing.get("reason")),
             "summary": f"PhoenixGuard current candle vision is {direct_side}.",
             "symbol": market,
             "timeframe": timeframe,
             "expiry_seconds": 300,
             "published_epoch": direct_observed_epoch,
             "observed_epoch": direct_observed_epoch,
-            "valid_until_epoch": direct_observed_epoch + 300.0,
+            # A listener update is the liveness proof for direct visual bias.
+            # Do not turn a stable multi-hour trend into an expired signal just
+            # because its direction did not change.
+            "valid_until_epoch": 0.0,
             "source": "phoenixguard_direct_visual_bias_v3",
-            "entry_state": "CURRENT_VISUAL_BIAS",
+            "entry_state": _text(entry_timing.get("state") or "CURRENT_VISUAL_BIAS"),
             "dominant_score": confidence,
             "study_count": 1,
             "candle_key": candle_key,
@@ -1152,11 +1172,11 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
             "current_visual_source": _text(direct_bias.get("source")),
             "current_visual_stage": "CURRENT_CANDLE",
             "current_visual_summary": f"Latest detected candle is {direct_side}.",
-            "entry_timing_ready": True,
-            "entry_timing_state": "CURRENT_VISUAL_BIAS",
-            "entry_timing_class": "direct_visual_bias",
-            "entry_timing_reason": "Fresh PhoenixGuard candle vision is available.",
-            "entry_timing_source": _text(direct_bias.get("source")),
+            "entry_timing_ready": entry_timing_ready,
+            "entry_timing_state": _text(entry_timing.get("state") or "CURRENT_VISUAL_BIAS"),
+            "entry_timing_class": _text(entry_timing.get("timing_class") or "direct_visual_bias"),
+            "entry_timing_reason": _text(entry_timing.get("reason") or "Fresh PhoenixGuard candle vision is available."),
+            "entry_timing_source": _text(entry_timing.get("source") or direct_bias.get("source")),
             "trigger_token": f"{candle_key}|{direct_side}",
         }
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
@@ -1924,6 +1944,7 @@ def _calibration_manifest_paths(project_root: Path) -> list[Path]:
         seen_runtime_dirs.add(key)
         runtime_candidates.append(normalized)
 
+    add_runtime_dir(_default_calibration_dir(project_root))
     add_runtime_dir(_default_live_runtime_dir(project_root))
     runtime_lock_path = _runtime_lock_path()
     add_runtime_dir(runtime_lock_path.parent)
