@@ -8,7 +8,8 @@ import sys
 import time
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Iterator, Mapping, Sequence, cast
+from urllib import error, request
 
 _PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
@@ -81,6 +82,7 @@ DEFAULT_SESSION_ID = _DEFAULT_STACK_SESSION_ID
 DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_HEARTBEAT_SECONDS = 3.0
+DEFAULT_LISTENER_RECONNECT_SECONDS = 1.0
 DEFAULT_TRIGGER_MANIFEST = _default_live_runtime_dir() / "trigger_calibration_manifest.json"
 DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 0.0
 DEFAULT_PRE_CLICK_DELAY_SECONDS = 5.0
@@ -277,6 +279,9 @@ def _freshness_context(
 ) -> dict[str, object]:
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
     active_now_epoch = float(now_epoch if now_epoch is not None else time.time())
+    direct_visual_bias = (
+        _upper(signal.get("source")) == "PHOENIXGUARD_DIRECT_VISUAL_BIAS_V3"
+    )
     published_epoch = _float(
         signal.get("published_epoch")
         or latest_signal.get("published_epoch")
@@ -284,9 +289,22 @@ def _freshness_context(
         or payload.get("last_capture_epoch"),
         0.0,
     )
-    last_capture_epoch = _float(payload.get("last_capture_epoch"), 0.0)
-    display_capture_epoch = _float(payload.get("display_capture_epoch"), 0.0)
-    display_published_epoch = _float(payload.get("display_published_epoch"), 0.0)
+    last_capture_epoch = _float(
+        signal.get("observed_epoch")
+        if direct_visual_bias
+        else payload.get("last_capture_epoch"),
+        0.0,
+    )
+    display_capture_epoch = (
+        0.0
+        if direct_visual_bias
+        else _float(payload.get("display_capture_epoch"), 0.0)
+    )
+    display_published_epoch = (
+        0.0
+        if direct_visual_bias
+        else _float(payload.get("display_published_epoch"), 0.0)
+    )
     signal_age_seconds = _float(signal.get("signal_age_seconds"), 0.0)
     published_age_seconds = max(0.0, active_now_epoch - published_epoch) if published_epoch > 0.0 else 0.0
     capture_age_seconds = max(0.0, active_now_epoch - last_capture_epoch) if last_capture_epoch > 0.0 else 0.0
@@ -313,6 +331,11 @@ def _freshness_context(
         "freshness_window_seconds": freshness_window_seconds,
         "freshness_score": freshness_score,
         "pipeline_latency_seconds": pipeline_latency_seconds,
+        "freshness_basis": (
+            "direct_visual_bias_capture"
+            if direct_visual_bias
+            else "completed_live_study"
+        ),
     }
 
 
@@ -361,6 +384,35 @@ def _session_compact_live_state_path(session_id: str) -> Path:
     )
 
 
+def _session_direct_visual_bias_path(session_id: str) -> Path:
+    return (
+        _default_live_runtime_dir()
+        / "data_live"
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / _text(session_id)
+        / "direct_visual_bias_v3.json"
+    )
+
+
+def _attach_direct_visual_bias(
+    payload: Mapping[str, object], session_id: str
+) -> dict[str, object]:
+    merged = dict(payload)
+    sidecar_path = _session_direct_visual_bias_path(session_id)
+    if not sidecar_path.is_file():
+        return merged
+    try:
+        direct_bias = _load_cached_live_state(sidecar_path)
+    except Exception:
+        return merged
+    if _upper(direct_bias.get("schema_version")) != "PG_DIRECT_VISUAL_BIAS_V3":
+        return merged
+    merged["direct_visual_bias_v3"] = direct_bias
+    return merged
+
+
 def _payload_live_epoch(payload: Mapping[str, object]) -> float:
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
     visual_observation = _mapping_or_empty(payload.get("visual_observation_v3"))
@@ -398,7 +450,7 @@ def _read_live_state(*, base_url: str, session_id: str, timeout_sec: float) -> d
     if local_payload is not None and _payload_live_epoch(local_payload) > 0.0:
         local_payload["_bridge_state_source"] = "local_runtime_file"
         local_payload["_bridge_state_epoch"] = _payload_live_epoch(local_payload)
-        return local_payload
+        return _attach_direct_visual_bias(local_payload, session_id)
 
     url = base_url.rstrip("/") + f"/v1/mobile/live/state/v3/{session_id}?mode=CLEAN_LIVE&compact=1"
     api_payload: dict[str, object] | None = None
@@ -414,16 +466,102 @@ def _read_live_state(*, base_url: str, session_id: str, timeout_sec: float) -> d
         payload = _prefer_fresher_live_payload(api_payload, local_payload)
         payload["_bridge_state_source"] = "local_runtime_file" if local_epoch > api_epoch else "mobile_api"
         payload["_bridge_state_epoch"] = _payload_live_epoch(payload)
-        return payload
+        return _attach_direct_visual_bias(payload, session_id)
     if local_payload is not None:
         local_payload["_bridge_state_source"] = "local_runtime_file"
         local_payload["_bridge_state_epoch"] = _payload_live_epoch(local_payload)
-        return local_payload
+        return _attach_direct_visual_bias(local_payload, session_id)
     if api_payload is not None:
         api_payload["_bridge_state_source"] = "mobile_api"
         api_payload["_bridge_state_epoch"] = _payload_live_epoch(api_payload)
-        return api_payload
+        return _attach_direct_visual_bias(api_payload, session_id)
     raise RuntimeError(f"Unable to read live state from mobile API or local runtime file: {api_error}")
+
+
+def _iter_phoenixguard_session_updates(
+    *,
+    base_url: str,
+    session_id: str,
+    timeout_sec: float,
+) -> Iterator[dict[str, object]]:
+    """Yield PhoenixGuard-published session updates without bridge-side polling."""
+
+    stream_url = (
+        base_url.rstrip("/")
+        + f"/v1/mobile/window-tracker/sessions/{session_id}/stream"
+    )
+    stream_request = request.Request(
+        stream_url,
+        headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
+    )
+    try:
+        with request.urlopen(
+            stream_request,
+            timeout=max(3.0, float(timeout_sec)),
+        ) as response:
+            event_name = ""
+            data_lines: list[str] = []
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line:
+                    if event_name == "SESSION_UPDATE" and data_lines:
+                        try:
+                            decoded = json.loads("\n".join(data_lines))
+                        except json.JSONDecodeError:
+                            decoded = None
+                        if isinstance(decoded, Mapping):
+                            yield dict(cast(Mapping[str, object], decoded))
+                    event_name = ""
+                    data_lines = []
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+    except (OSError, TimeoutError, error.URLError) as exc:
+        raise RuntimeError(
+            f"PhoenixGuard listener stream is unavailable: {exc}"
+        ) from exc
+
+
+def _trade_from_listener_payload(
+    payload: Mapping[str, object],
+    *,
+    base_url: str,
+    session_id: str,
+    score_threshold: float,
+    fixed_expiry_seconds_override: int | None,
+    max_signal_age_seconds: float,
+    signal_source: str,
+) -> dict[str, object]:
+    """Resolve one producer-published update without rereading live state."""
+
+    trade = _resolve_trade_payload(
+        payload,
+        score_threshold=score_threshold,
+        max_signal_age_seconds=max_signal_age_seconds,
+        signal_source=signal_source,
+    )
+    if fixed_expiry_seconds_override is not None and int(
+        fixed_expiry_seconds_override
+    ) > 0:
+        trade["expiry_seconds"] = int(fixed_expiry_seconds_override)
+    return {
+        "dry_run": True,
+        **trade,
+        "base_url": base_url,
+        "session_id": session_id,
+        "state_source": "phoenixguard_session_stream",
+        "state_epoch": _float(
+            _mapping_or_empty(payload.get("direct_visual_bias_v3")).get(
+                "observed_epoch"
+            ),
+            0.0,
+        ),
+    }
 
 
 def _read_fresh_trade(
@@ -956,6 +1094,71 @@ def _dominant_side_from_study_payload(payload: Mapping[str, object]) -> tuple[st
 
 
 def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
+    direct_bias = _mapping_or_empty(payload.get("direct_visual_bias_v3"))
+    direct_side = _upper(direct_bias.get("side"))
+    direct_observed_epoch = _float(direct_bias.get("observed_epoch"), 0.0)
+    if (
+        _upper(direct_bias.get("schema_version")) == "PG_DIRECT_VISUAL_BIAS_V3"
+        and direct_side in {"BUY", "SELL"}
+        and direct_observed_epoch > 0.0
+    ):
+        timeframe = _text(direct_bias.get("timeframe") or "M5")
+        timeframe_seconds = int(
+            _float(
+                direct_bias.get("timeframe_seconds"),
+                _timeframe_seconds_from_text(timeframe, default_seconds=300),
+            )
+        )
+        candle_sequence = int(
+            _float(
+                direct_bias.get("candle_sequence"),
+                direct_observed_epoch // max(1, timeframe_seconds),
+            )
+        )
+        market = _text(
+            direct_bias.get("market") or "USER_LOCKED_ACTIVE_CHART"
+        )
+        candle_key = _text(direct_bias.get("candle_key")) or (
+            f"direct:{market}:{timeframe}:{candle_sequence}"
+        )
+        confidence = _normalize_score(direct_bias.get("confidence"))
+        return {
+            "signal_id": f"direct_visual_{int(direct_observed_epoch * 1000)}",
+            "side": direct_side,
+            "actionable": True,
+            "reject_reason": "",
+            "summary": f"PhoenixGuard current candle vision is {direct_side}.",
+            "symbol": market,
+            "timeframe": timeframe,
+            "expiry_seconds": 300,
+            "published_epoch": direct_observed_epoch,
+            "observed_epoch": direct_observed_epoch,
+            "valid_until_epoch": direct_observed_epoch + 300.0,
+            "source": "phoenixguard_direct_visual_bias_v3",
+            "entry_state": "CURRENT_VISUAL_BIAS",
+            "dominant_score": confidence,
+            "study_count": 1,
+            "candle_key": candle_key,
+            "candle_sequence": candle_sequence,
+            "timeframe_seconds": timeframe_seconds,
+            "execution_permission": "DIRECT_VISUAL_BIAS",
+            "signal_age_seconds": max(0.0, time.time() - direct_observed_epoch),
+            "freshness_window_seconds": 0.0,
+            "freshness_score": 1.0,
+            "pipeline_latency_seconds": _float(
+                direct_bias.get("pipeline_latency_seconds"), 0.0
+            ),
+            "current_visual_side": direct_side,
+            "current_visual_source": _text(direct_bias.get("source")),
+            "current_visual_stage": "CURRENT_CANDLE",
+            "current_visual_summary": f"Latest detected candle is {direct_side}.",
+            "entry_timing_ready": True,
+            "entry_timing_state": "CURRENT_VISUAL_BIAS",
+            "entry_timing_class": "direct_visual_bias",
+            "entry_timing_reason": "Fresh PhoenixGuard candle vision is available.",
+            "entry_timing_source": _text(direct_bias.get("source")),
+            "trigger_token": f"{candle_key}|{direct_side}",
+        }
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
     thesis = _mapping_or_empty(payload.get("signal_thesis_v3"))
     visual = _mapping_or_empty(payload.get("visual_observation_v3"))
@@ -2163,14 +2366,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="phoenixguard_direct_trade_bridge.py",
         description=(
-            "Direct trade bridge for PhoenixGuard. It reads the live observation state and trades the "
-            "current actionable signal directly through the user-calibrated trigger boxes. This path "
-            "intentionally bypasses the package and reporter wait cycle."
+            "Direct trade bridge for PhoenixGuard. It listens to PhoenixGuard's live session stream "
+            "and trades only a fresh current visual bias through the user-calibrated trigger boxes."
         ),
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
-    parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+    parser.add_argument(
+        "--transport",
+        choices=("listener", "poll"),
+        default="listener",
+        help="Use PhoenixGuard's producer stream (default); poll is compatibility-only.",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=DEFAULT_POLL_SECONDS,
+        help="Compatibility polling cadence; ignored by the default listener transport.",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--calibration-path", default="")
     parser.add_argument("--trigger-manifest", default="")
@@ -2206,17 +2419,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         instance_lock.acquire()
         if args.once:
             try:
-                result = _trade_once(
-                    base_url=args.base_url,
-                    session_id=args.session_id,
-                    calibration_path=selected_manifest_path,
-                    dry_run=args.dry_run,
-                    score_threshold=args.score_threshold,
-                    timeout_sec=max(0.25, float(args.timeout)),
-                    fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
-                    max_signal_age_seconds=float(args.max_signal_age_seconds),
-                    signal_source=str(args.signal_source),
-                )
+                if str(args.transport) == "listener":
+                    listener = _iter_phoenixguard_session_updates(
+                        base_url=str(args.base_url),
+                        session_id=str(args.session_id),
+                        timeout_sec=max(3.0, float(args.timeout)),
+                    )
+                    result = _trade_from_listener_payload(
+                        next(listener),
+                        base_url=str(args.base_url),
+                        session_id=str(args.session_id),
+                        score_threshold=float(args.score_threshold),
+                        fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
+                        max_signal_age_seconds=float(args.max_signal_age_seconds),
+                        signal_source=str(args.signal_source),
+                    )
+                else:
+                    result = _trade_once(
+                        base_url=args.base_url,
+                        session_id=args.session_id,
+                        calibration_path=selected_manifest_path,
+                        dry_run=args.dry_run,
+                        score_threshold=args.score_threshold,
+                        timeout_sec=max(0.25, float(args.timeout)),
+                        fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
+                        max_signal_age_seconds=float(args.max_signal_age_seconds),
+                        signal_source=str(args.signal_source),
+                    )
             except TradeRejected as exc:
                 wait_payload: dict[str, object] = {"triggered": False, "reason": str(exc)}
                 if exc.details:
@@ -2235,20 +2464,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             cooldown_after_trades=int(args.cooldown_after_trades),
             cooldown_seconds=float(args.cooldown_seconds),
         )
+        session_listener: Iterator[dict[str, object]] | None = (
+            _iter_phoenixguard_session_updates(
+                base_url=str(args.base_url),
+                session_id=str(args.session_id),
+                timeout_sec=max(3.0, float(args.timeout)),
+            )
+            if str(args.transport) == "listener"
+            else None
+        )
         while True:
             try:
-                result = _trade_once(
-                    base_url=args.base_url,
-                    session_id=args.session_id,
-                    calibration_path=selected_manifest_path,
-                    dry_run=args.dry_run,
-                    score_threshold=args.score_threshold,
-                    timeout_sec=max(0.25, float(args.timeout)),
-                    execute_trade=False,
-                    fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
-                    max_signal_age_seconds=float(args.max_signal_age_seconds),
-                    signal_source=str(args.signal_source),
-                )
+                if session_listener is not None:
+                    result = _trade_from_listener_payload(
+                        next(session_listener),
+                        base_url=str(args.base_url),
+                        session_id=str(args.session_id),
+                        score_threshold=float(args.score_threshold),
+                        fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
+                        max_signal_age_seconds=float(args.max_signal_age_seconds),
+                        signal_source=str(args.signal_source),
+                    )
+                else:
+                    result = _trade_once(
+                        base_url=args.base_url,
+                        session_id=args.session_id,
+                        calibration_path=selected_manifest_path,
+                        dry_run=args.dry_run,
+                        score_threshold=args.score_threshold,
+                        timeout_sec=max(0.25, float(args.timeout)),
+                        execute_trade=False,
+                        fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
+                        max_signal_age_seconds=float(args.max_signal_age_seconds),
+                        signal_source=str(args.signal_source),
+                    )
                 should_fire, reason = trigger_state.should_trigger(result)
                 if not should_fire:
                     print(
@@ -2265,7 +2514,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ensure_ascii=True,
                         )
                     )
-                    time.sleep(max(0.1, float(args.poll_seconds)))
+                    if session_listener is None:
+                        time.sleep(max(0.1, float(args.poll_seconds)))
                     continue
 
                 if args.dry_run:
@@ -2309,7 +2559,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(error_payload, sort_keys=True, ensure_ascii=True))
             except MissingCalibration as exc:
                 print(json.dumps({"triggered": False, "reason": f"missing calibration: {exc}"}, sort_keys=True, ensure_ascii=True))
-            time.sleep(max(0.1, float(args.poll_seconds)))
+            except (RuntimeError, StopIteration) as exc:
+                if session_listener is None:
+                    raise
+                print(
+                    json.dumps(
+                        {
+                            "triggered": False,
+                            "reason": str(exc) or "PhoenixGuard listener stream ended.",
+                            "listener": "reconnecting",
+                        },
+                        sort_keys=True,
+                        ensure_ascii=True,
+                    )
+                )
+                time.sleep(DEFAULT_LISTENER_RECONNECT_SECONDS)
+                session_listener = _iter_phoenixguard_session_updates(
+                    base_url=str(args.base_url),
+                    session_id=str(args.session_id),
+                    timeout_sec=max(3.0, float(args.timeout)),
+                )
+            if session_listener is None:
+                time.sleep(max(0.1, float(args.poll_seconds)))
     except KeyboardInterrupt:
         return 0
     except Exception as exc:  # pragma: no cover - CLI error path.

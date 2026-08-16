@@ -76,14 +76,20 @@ class ProcessRow:
 
 
 def _powershell_json(script: str) -> object:
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        cwd=str(PROJECT_ROOT),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15.0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "PowerShell process inspection timed out after 15 seconds"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "PowerShell command failed")
     output = proc.stdout.strip()

@@ -737,6 +737,39 @@ def test_direct_window_tracker_stream_uses_compact_signature_gate(
     assert changed_payload is not None
     assert changed_payload["capture_count"] == 2
 
+    direct_bias_path = session_dir / "direct_visual_bias_v3.json"
+    direct_bias_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+                "session_id": "pocket-live-8788",
+                "side": "SELL",
+                "market": "USD/JPY OTC",
+                "timeframe": "M5",
+                "frame_id": 73,
+                "observed_epoch": 123.4,
+                "published_epoch": 123.6,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state, direct_bias_signature, direct_bias_payload = probe(
+        "pocket-live-8788", changed_signature
+    )
+    assert state == "updated"
+    assert direct_bias_signature != changed_signature
+    assert direct_bias_payload is not None
+    assert direct_bias_payload["direct_visual_bias_v3"] == {
+        "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+        "session_id": "pocket-live-8788",
+        "side": "SELL",
+        "market": "USD/JPY OTC",
+        "timeframe": "M5",
+        "frame_id": 73,
+        "observed_epoch": 123.4,
+        "published_epoch": 123.6,
+    }
+
     cpu_stream_path = session_dir / "cpu_stream_v3.json"
     cpu_stream_path.write_text(
         json.dumps(
@@ -767,19 +800,30 @@ def test_direct_window_tracker_stream_uses_compact_signature_gate(
     direct_reads: list[str] = []
 
     def counted_read_text(path: Path, *args: object, **kwargs: object) -> str:
-        if path in {session_path, compact_path, cpu_stream_path}:
+        if path in {
+            session_path,
+            compact_path,
+            cpu_stream_path,
+            direct_bias_path,
+        }:
             direct_reads.append(path.name)
         return original_read_text(path, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "read_text", counted_read_text)
-    state, cpu_signature, cpu_payload = probe("pocket-live-8788", changed_signature)
+    state, cpu_signature, cpu_payload = probe(
+        "pocket-live-8788", direct_bias_signature
+    )
 
     assert state == "updated"
     assert cpu_signature != changed_signature
     assert cpu_payload is not None
-    assert set(cpu_payload) == {"session_id", "cpu_stream_v3"}
+    assert set(cpu_payload) == {
+        "session_id",
+        "cpu_stream_v3",
+        "direct_visual_bias_v3",
+    }
     assert cast(dict[str, object], cpu_payload["cpu_stream_v3"])["observed_frames"] == 41
-    assert direct_reads == ["cpu_stream_v3.json"]
+    assert direct_reads == ["cpu_stream_v3.json", "direct_visual_bias_v3.json"]
 
     fingerprint = cast(
         Callable[[Mapping[str, object]], str],
@@ -819,7 +863,7 @@ def test_direct_window_tracker_stream_uses_compact_signature_gate(
     assert state == "updated"
     assert next_cpu_signature != cpu_signature
     assert next_cpu_payload is not None
-    assert direct_reads == ["cpu_stream_v3.json"]
+    assert direct_reads == ["cpu_stream_v3.json", "direct_visual_bias_v3.json"]
     assert fingerprint(next_cpu_payload) != first_cpu_fingerprint
 
 
@@ -928,7 +972,11 @@ def test_session_stream_emits_cpu_only_updates_for_heartbeat_and_frame_sequence(
         )
 
     write_cpu_stream(heartbeat=101.0, frame_seq=41)
-    app = create_app()
+    class FullTrackerMustNotRun:
+        def get_session_snapshot(self, _session_id: str) -> dict[str, object]:
+            raise AssertionError("The stream must use the direct producer sidecars.")
+
+    app = create_app(window_tracker_service=FullTrackerMustNotRun())
 
     class CapturedStreamingResponse:
         def __init__(self, content: object, **_kwargs: object) -> None:

@@ -2168,6 +2168,24 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 source_generation=int(source_generation or 0),
                 metadata=metadata,
             )
+            tracker = get_tracker()
+            direct_bias_publisher = getattr(
+                tracker,
+                "publish_direct_visual_bias_from_external_frame_v3",
+                None,
+            )
+            if callable(direct_bias_publisher):
+                direct_bias_publisher(
+                    str(session_id or "").strip(),
+                    image,
+                    source_id=str(source_id or "").strip(),
+                    sequence_id=str(sequence_id or "").strip(),
+                    source_generation=int(source_generation or 0),
+                    source_lease_id=str(source_lease_id or "").strip(),
+                    capture_epoch_ms=int(capture_epoch_ms or 0),
+                    frame_id=int(frame_id or 0),
+                    metadata=metadata,
+                )
             job = FrameAnalysisJob(
                 session_id=str(session_id or "").strip(),
                 image=image,
@@ -2181,7 +2199,7 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 source_generation=int(source_generation or 0),
                 source_lease_id=str(source_lease_id or "").strip(),
                 metadata=metadata,
-                tracker=get_tracker(),
+                tracker=tracker,
                 audit_context=_analysis_audit_context(auth_context),
                 audit_fields=dict(audit_base),
                 identity_key=identity_key,

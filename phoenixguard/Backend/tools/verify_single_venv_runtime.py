@@ -102,14 +102,22 @@ class PowerShellJsonResult:
 def _powershell_json(command: str) -> PowerShellJsonResult:
     if os.name != "nt":
         return PowerShellJsonResult(ok=True, payload=[], error="")
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        cwd=str(PROJECT_ROOT),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15.0,
+        )
+    except subprocess.TimeoutExpired:
+        return PowerShellJsonResult(
+            ok=False,
+            payload=[],
+            error="PowerShell runtime inspection timed out after 15 seconds",
+        )
     if proc.returncode != 0:
         return PowerShellJsonResult(ok=False, payload=[], error=proc.stderr.strip() or proc.stdout.strip())
     if not proc.stdout.strip():

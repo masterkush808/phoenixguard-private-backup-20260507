@@ -160,7 +160,7 @@ one second. Wait for `kill_switch: verified` before starting the direct bridge i
 terminal:
 
 ```powershell
-.\.venv-live\Scripts\python.exe .\Backend\launch\phoenixguard_direct_trade_bridge.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --signal-source bias --poll-seconds 1 --timeout 5 --fixed-expiry-seconds 180 --max-trades-per-candle 1 --cooldown-after-trades 0 --cooldown-seconds 0 --flip-guard-seconds 0 --max-signal-age-seconds 15
+.\.venv-live\Scripts\python.exe .\Backend\launch\phoenixguard_direct_trade_bridge.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --transport listener --signal-source bias --timeout 30 --fixed-expiry-seconds 180 --max-trades-per-candle 1 --cooldown-after-trades 0 --cooldown-seconds 0 --flip-guard-seconds 0 --max-signal-age-seconds 15
 ```
 
 The bridge consumes the current PhoenixGuard visual bias, rejects observations older than 15 seconds,

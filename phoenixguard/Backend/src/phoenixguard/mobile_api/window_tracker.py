@@ -16839,6 +16839,56 @@ class PhoenixGuardWindowTrackingAdapter:
             if len(tracked_candles) > live_max_tracked_candles:
                 tracked_candles = tracked_candles[-live_max_tracked_candles:]
         mark_study_stage("extract_candle_tracks")
+        direct_bias_callback = study_session_payload.get(
+            "_direct_bias_publish_callback_v3"
+        )
+        if callable(direct_bias_callback) and tracked_candles:
+            latest_candle = dict(tracked_candles[-1])
+            latest_side = _upper_action(
+                latest_candle.get("direction"), fallback="HOLD"
+            )
+            if latest_side in {"BUY", "SELL"}:
+                latest_body_height = _clip01(
+                    latest_candle.get("body_height_pct", 0.0)
+                )
+                try:
+                    direct_bias_callback(
+                        {
+                            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+                            "side": latest_side,
+                            "confidence": round(
+                                max(0.5, min(1.0, 0.55 + latest_body_height * 0.45)),
+                                4,
+                            ),
+                            "market": str(
+                                market_selector.get("value")
+                                or previous_signal.get("market")
+                                or previous_tracking.get("detected_market")
+                                or ""
+                            ).strip(),
+                            "timeframe": str(
+                                timeframe_selector.get("value")
+                                or previous_signal.get("focus_timeframe")
+                                or previous_tracking.get("detected_timeframe")
+                                or "M5"
+                            )
+                            .strip()
+                            .upper(),
+                            "observed_epoch": _float_or(
+                                study_session_payload.get(
+                                    "_capture_started_epoch_v3"
+                                ),
+                                _now_epoch(),
+                            ),
+                            "current_candle": latest_candle,
+                            "source_binding_token_v3": source_binding_token_v3,
+                            "candle_extraction_mode": candle_extraction_mode,
+                        }
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Unable to publish direct visual bias after candle extraction."
+                    )
         tracking_summary, latest_signal = self._build_signal_payloads(
             chart_image,
             chart_region,
@@ -29269,6 +29319,7 @@ class ContinuousWindowTrackerService:
         # fences each entry, and public payload construction overlays only a
         # matching, still-fresh heartbeat.
         self._external_source_transport_heartbeats: dict[str, dict[str, Any]] = {}
+        self._direct_visual_bias_lock_v3 = threading.RLock()
         # Hot lease validation must not parse the multi-megabyte session on
         # every extension heartbeat.  Entries are fenced by the authoritative
         # session file stat and mirrored in a tiny restart-safe sidecar.
@@ -32987,6 +33038,11 @@ class ContinuousWindowTrackerService:
             self._external_source_transport_heartbeats[
                 normalized_session_id
             ] = heartbeat
+            if capture_is_healthy and not sticky_pending:
+                self._refresh_direct_visual_bias_from_heartbeat_v3(
+                    normalized_session_id,
+                    heartbeat,
+                )
             overlaid = self._capture_source_with_transport_heartbeat_v3(
                 normalized_session_id,
                 source,
@@ -33686,6 +33742,39 @@ class ContinuousWindowTrackerService:
             }
             payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
             self._save_session(payload)
+
+        try:
+            direct_bias_observation = self._direct_visual_bias_from_frame_v3(image)
+            if direct_bias_observation:
+                direct_bias_observation.update(
+                    {
+                        "market": str(
+                            prevalidated_identity_surface.get("detected_market")
+                            or payload.get("market")
+                            or ""
+                        ),
+                        "timeframe": str(
+                            prevalidated_identity_surface.get("detected_timeframe")
+                            or normalized_timeframe
+                            or "M5"
+                        ),
+                        "observed_epoch": capture_epoch,
+                        "source_binding_token_v3": (
+                            f"{normalized_source_id}|{source_payload['sequence_id']}|"
+                            f"{source_generation}"
+                        ),
+                    }
+                )
+                self._publish_direct_visual_bias_v3(
+                    normalized_session_id,
+                    direct_bias_observation,
+                    frame_id=int(frame_id or 0),
+                    fallback_payload=payload,
+                )
+        except Exception:
+            LOGGER.exception(
+                "Unable to publish direct visual bias from external frame ingest."
+            )
 
         frame_failure_reason_code = ""
         frame_failure_error_type = ""
@@ -40997,6 +41086,19 @@ class ContinuousWindowTrackerService:
             study_payload["_study_latency_budget_enforced_v3"] = (
                 live_study_budget_enforced
             )
+            def publish_direct_bias_observation_v3(
+                observation: Mapping[str, Any],
+            ) -> dict[str, Any]:
+                return self._publish_direct_visual_bias_v3(
+                    session_id,
+                    observation,
+                    frame_id=int(payload.get("frame_index", 0) or 0) + 1,
+                    fallback_payload=payload,
+                )
+
+            study_payload["_direct_bias_publish_callback_v3"] = (
+                publish_direct_bias_observation_v3
+            )
             study = self.tracking_adapter.study(study_surface_image, session_payload=study_payload)
             study_call_elapsed_sec = max(
                 0.0,
@@ -42844,6 +42946,259 @@ class ContinuousWindowTrackerService:
 
     def _compact_live_state_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "compact_live_state.json"
+
+    def _direct_visual_bias_sidecar_path_v3(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "direct_visual_bias_v3.json"
+
+    @staticmethod
+    def _direct_visual_bias_from_frame_v3(image: Image.Image) -> dict[str, Any]:
+        surface = image.convert("RGB")
+        maximum_width = 480
+        if surface.width > maximum_width:
+            resized_height = max(
+                64,
+                int(
+                    round(
+                        float(surface.height)
+                        * (float(maximum_width) / float(surface.width))
+                    )
+                ),
+            )
+            surface = surface.resize(
+                (maximum_width, resized_height), Image.Resampling.BILINEAR
+            )
+        tracks = extract_candle_tracks_adaptive_v3(
+            np.asarray(surface, dtype=np.uint8),
+            x_bounds=(0.03, 0.75),
+            top_ratio=0.05,
+            bottom_candidates=(0.62, 0.74, 0.86),
+            minimum_track_length=6,
+        )
+        if not tracks:
+            return {}
+        latest_candle = max(
+            tracks,
+            key=lambda row: float(
+                cast(Sequence[Any], row.get("bbox", [0.0, 0.0, 0.0, 0.0]))[
+                    2
+                ]
+            ),
+        )
+        side = _upper_action(latest_candle.get("direction"), fallback="HOLD")
+        if side not in {"BUY", "SELL"}:
+            return {}
+        body_height = _clip01(latest_candle.get("body_height_pct", 0.0))
+        return {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "side": side,
+            "confidence": round(
+                max(0.5, min(1.0, 0.55 + body_height * 0.45)), 4
+            ),
+            "current_candle": dict(latest_candle),
+            "candle_extraction_mode": "fast_external_frame_palette_v3",
+        }
+
+    def _publish_direct_visual_bias_v3(
+        self,
+        session_id: str,
+        observation: Mapping[str, Any],
+        *,
+        frame_id: int,
+        fallback_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        side = _upper_action(observation.get("side"), fallback="HOLD")
+        if side not in {"BUY", "SELL"}:
+            return {}
+        observed_epoch = _float_or(observation.get("observed_epoch"), 0.0)
+        if observed_epoch <= 0.0:
+            return {}
+        timeframe = str(
+            observation.get("timeframe")
+            or fallback_payload.get("timeframe")
+            or "M5"
+        ).strip().upper() or "M5"
+        timeframe_seconds = _timeframe_seconds(timeframe, default=300)
+        market = str(
+            observation.get("market")
+            or fallback_payload.get("market")
+            or "USER_LOCKED_ACTIVE_CHART"
+        ).strip() or "USER_LOCKED_ACTIVE_CHART"
+        candle_sequence = int(observed_epoch // max(1, timeframe_seconds))
+        published_epoch = _now_epoch()
+        payload = {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "session_id": str(session_id),
+            "side": side,
+            "actionable": True,
+            "confidence": _clip01(observation.get("confidence", 0.5)),
+            "market": market,
+            "timeframe": timeframe,
+            "timeframe_seconds": timeframe_seconds,
+            "candle_sequence": candle_sequence,
+            "candle_key": f"direct:{market}:{timeframe}:{candle_sequence}",
+            "frame_id": max(1, int(frame_id)),
+            "observed_epoch": observed_epoch,
+            "published_epoch": published_epoch,
+            "pipeline_latency_seconds": round(
+                max(0.0, published_epoch - observed_epoch), 3
+            ),
+            "source": "phoenixguard_candle_palette_v3",
+            "source_binding_token_v3": str(
+                observation.get("source_binding_token_v3") or ""
+            ),
+            "candle_extraction_mode": str(
+                observation.get("candle_extraction_mode") or ""
+            ),
+            "current_candle": _mapping_to_dict(
+                observation.get("current_candle")
+            ),
+        }
+        sidecar_path = self._direct_visual_bias_sidecar_path_v3(session_id)
+        with self._direct_visual_bias_lock_v3:
+            previous = _mapping_to_dict(_read_json(sidecar_path, {}))
+            previous_observed_epoch = _float_or(
+                previous.get("observed_epoch"), 0.0
+            )
+            if previous_observed_epoch >= observed_epoch:
+                return previous
+            _write_json_atomic(sidecar_path, payload)
+        return payload
+
+    def _refresh_direct_visual_bias_from_heartbeat_v3(
+        self,
+        session_id: str,
+        heartbeat: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Refresh unchanged vision only from its exact fresh source lease."""
+
+        sidecar_path = self._direct_visual_bias_sidecar_path_v3(session_id)
+        with self._direct_visual_bias_lock_v3:
+            previous = _mapping_to_dict(_read_json(sidecar_path, {}))
+            if (
+                str(previous.get("schema_version", "") or "").strip().upper()
+                != "PG_DIRECT_VISUAL_BIAS_V3"
+            ):
+                return {}
+            expected_binding = (
+                f"{str(heartbeat.get('source_id', '') or '').strip()}|"
+                f"{str(heartbeat.get('sequence_id', '') or '').strip()}|"
+                f"{max(0, int(_float_or(heartbeat.get('source_generation'), 0.0) or 0))}"
+            )
+            if (
+                str(previous.get("source_binding_token_v3", "") or "").strip()
+                != expected_binding
+            ):
+                return previous
+            capture_epoch = _float_or(heartbeat.get("capture_epoch"), 0.0)
+            previous_observed_epoch = _float_or(
+                previous.get("observed_epoch"), 0.0
+            )
+            if capture_epoch <= previous_observed_epoch:
+                return previous
+            published_epoch = _now_epoch()
+            refreshed = dict(previous)
+            refreshed.update(
+                {
+                    "observed_epoch": capture_epoch,
+                    "published_epoch": published_epoch,
+                    "pipeline_latency_seconds": round(
+                        max(0.0, published_epoch - capture_epoch),
+                        3,
+                    ),
+                    "source": "phoenixguard_candle_palette_v3_unchanged_heartbeat",
+                    "unchanged_frame_heartbeat": True,
+                }
+            )
+            _write_json_atomic(sidecar_path, refreshed)
+        return refreshed
+
+    def direct_visual_bias_snapshot_v3(self, session_id: str) -> dict[str, Any]:
+        return _mapping_to_dict(
+            _read_json(self._direct_visual_bias_sidecar_path_v3(session_id), {})
+        )
+
+    def publish_direct_visual_bias_from_external_frame_v3(
+        self,
+        session_id: str,
+        image: Image.Image,
+        *,
+        source_id: str,
+        sequence_id: str,
+        source_generation: int,
+        source_lease_id: str,
+        capture_epoch_ms: int,
+        frame_id: int,
+        metadata: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Publish current candle vision before the full-study mailbox runs."""
+
+        normalized_session_id = _slugify(
+            str(session_id or "").strip(),
+            "external-frame-feed",
+        )
+        capture_epoch = (
+            float(capture_epoch_ms) / 1000.0
+            if int(capture_epoch_ms or 0) > 0
+            else _now_epoch()
+        )
+        source_type = str(
+            metadata.get("source_type", "external_frame_feed")
+            or "external_frame_feed"
+        ).strip()
+        coordinate_space = str(
+            metadata.get("coordinate_space", "external_frame_v1")
+            or "external_frame_v1"
+        ).strip()
+        with self._lock:
+            session_payload = self._require_session(normalized_session_id)
+            self._require_external_ingest_lease(
+                _mapping_to_dict(session_payload.get("capture_source_v3", {})),
+                source_id=str(source_id or "").strip(),
+                sequence_id=str(sequence_id or "").strip(),
+                source_generation=max(0, int(source_generation or 0)),
+                source_lease_id=str(source_lease_id or "").strip(),
+                source_type=source_type,
+                coordinate_space=coordinate_space,
+            )
+        source_payload: dict[str, Any] = {
+            "source_id": str(source_id or "").strip(),
+            "source_type": source_type,
+            "sequence_id": str(sequence_id or "").strip(),
+            "source_generation": max(0, int(source_generation or 0)),
+            "coordinate_space": coordinate_space,
+            "metadata": dict(metadata),
+        }
+        identity = _edge_tab_bracket_identity_surface_v3(image, source_payload)
+        observation = self._direct_visual_bias_from_frame_v3(image)
+        if not observation:
+            return {}
+        observation.update(
+            {
+                "market": str(
+                    identity.get("detected_market")
+                    or session_payload.get("market")
+                    or ""
+                ),
+                "timeframe": str(
+                    identity.get("detected_timeframe")
+                    or session_payload.get("timeframe")
+                    or "M5"
+                ),
+                "observed_epoch": capture_epoch,
+                "source_binding_token_v3": (
+                    f"{str(source_id or '').strip()}|"
+                    f"{str(sequence_id or '').strip()}|"
+                    f"{max(0, int(source_generation or 0))}"
+                ),
+                "candle_extraction_mode": "fast_ingest_boundary_palette_v3",
+            }
+        )
+        return self._publish_direct_visual_bias_v3(
+            normalized_session_id,
+            observation,
+            frame_id=max(1, int(frame_id or 0)),
+            fallback_payload=session_payload,
+        )
 
     def _external_source_lease_sidecar_path_v3(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "external_source_lease_v3.json"

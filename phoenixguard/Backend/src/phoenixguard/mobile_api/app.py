@@ -567,6 +567,7 @@ _DirectWindowTrackerStreamFileSignature = tuple[str, int, int]
 _DirectWindowTrackerStreamSignature = tuple[
     _DirectWindowTrackerStreamFileSignature,
     _DirectWindowTrackerStreamFileSignature | None,
+    _DirectWindowTrackerStreamFileSignature | None,
 ]
 
 
@@ -602,6 +603,29 @@ def _read_direct_cpu_stream_sidecar_v3(
     return "ok", payload
 
 
+def _read_direct_visual_bias_sidecar_v3(
+    path: Path,
+    *,
+    session_id: str,
+) -> tuple[str, dict[str, object]]:
+    """Read the bounded fresh-candle sidecar used by the direct bridge."""
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "retry", {}
+    if not isinstance(raw, Mapping):
+        return "invalid", {}
+    payload = dict(cast(Mapping[str, object], raw))
+    if (
+        str(payload.get("schema_version", "") or "")
+        != "PG_DIRECT_VISUAL_BIAS_V3"
+        or str(payload.get("session_id", "") or "") != session_id
+    ):
+        return "invalid", {}
+    return "ok", payload
+
+
 def _direct_window_tracker_stream_snapshot(
     session_id: str,
     previous_signature: _DirectWindowTrackerStreamSignature | None,
@@ -610,7 +634,7 @@ def _direct_window_tracker_stream_snapshot(
     _DirectWindowTrackerStreamSignature | None,
     dict[str, object] | None,
 ]:
-    """Read only changed compact/CPU sidecars for the low-latency stream."""
+    """Read only changed compact/runtime sidecars for the low-latency stream."""
 
     if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
         "0",
@@ -630,9 +654,12 @@ def _direct_window_tracker_stream_snapshot(
         return "unavailable", previous_signature, None
     cpu_stream_path = session_path.with_name("cpu_stream_v3.json")
     cpu_stream_signature = _direct_stream_file_signature(cpu_stream_path)
+    direct_bias_path = session_path.with_name("direct_visual_bias_v3.json")
+    direct_bias_signature = _direct_stream_file_signature(direct_bias_path)
     signature: _DirectWindowTrackerStreamSignature = (
         source_signature,
         cpu_stream_signature,
+        direct_bias_signature,
     )
     if signature == previous_signature:
         return "unchanged", signature, None
@@ -640,6 +667,9 @@ def _direct_window_tracker_stream_snapshot(
     source_changed = previous_signature is None or previous_signature[0] != source_signature
     cpu_stream_changed = (
         previous_signature is None or previous_signature[1] != cpu_stream_signature
+    )
+    direct_bias_changed = (
+        previous_signature is None or previous_signature[2] != direct_bias_signature
     )
     payload: dict[str, object]
     if source_changed:
@@ -678,6 +708,16 @@ def _direct_window_tracker_stream_snapshot(
     elif cpu_stream_changed:
         # Explicitly clear a removed runtime record in the browser's merge state.
         payload["cpu_stream_v3"] = {}
+    if direct_bias_signature is not None:
+        sidecar_state, direct_bias_payload = _read_direct_visual_bias_sidecar_v3(
+            direct_bias_path,
+            session_id=requested_session_id,
+        )
+        if sidecar_state == "retry":
+            return "retry", previous_signature, None
+        payload["direct_visual_bias_v3"] = direct_bias_payload
+    elif direct_bias_changed:
+        payload["direct_visual_bias_v3"] = {}
     return "updated", signature, payload
 
 
@@ -732,6 +772,12 @@ def _window_tracker_stream_fingerprint_v3(payload: Mapping[str, Any]) -> str:
         if isinstance(last_decision.get("temporal_evidence"), Mapping)
         else _EMPTY_OBJECT_MAPPING,
     )
+    direct_bias = cast(
+        Mapping[str, object],
+        payload.get("direct_visual_bias_v3")
+        if isinstance(payload.get("direct_visual_bias_v3"), Mapping)
+        else _EMPTY_OBJECT_MAPPING,
+    )
     parts: dict[str, object] = {
         "capture_count": payload.get("capture_count"),
         "last_capture_epoch": payload.get("last_capture_epoch"),
@@ -762,6 +808,10 @@ def _window_tracker_stream_fingerprint_v3(payload: Mapping[str, Any]) -> str:
         "cpu_stream_generation": observer.get("stream_generation"),
         "cpu_temporal_frame_seq": temporal.get("frame_seq"),
         "cpu_temporal_state": temporal.get("state"),
+        "direct_bias_observed_epoch": direct_bias.get("observed_epoch"),
+        "direct_bias_published_epoch": direct_bias.get("published_epoch"),
+        "direct_bias_side": direct_bias.get("side"),
+        "direct_bias_frame_id": direct_bias.get("frame_id"),
     }
     return json.dumps(parts, sort_keys=True, default=str)
 
@@ -10439,15 +10489,16 @@ def create_app(
             while True:
                 now = time.time()
                 payload: dict[str, object] | None = None
-                direct_state = "unavailable"
-                if not explicit_window_tracker_service:
-                    direct_state, signature, payload = _direct_window_tracker_stream_snapshot(
-                        session_id,
-                        last_direct_signature,
-                    )
-                    if direct_state == "updated":
-                        last_direct_signature = signature
-                if explicit_window_tracker_service or direct_state == "unavailable":
+                # The direct sidecars are the live producer boundary.  Do not
+                # route an active stream through the heavier tracker service,
+                # even when that service is explicitly configured at startup.
+                direct_state, signature, payload = _direct_window_tracker_stream_snapshot(
+                    session_id,
+                    last_direct_signature,
+                )
+                if direct_state == "updated":
+                    last_direct_signature = signature
+                if direct_state == "unavailable":
                     try:
                         payload = read_window_tracker_session(session_id)
                     except KeyError:

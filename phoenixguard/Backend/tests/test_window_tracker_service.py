@@ -15149,3 +15149,155 @@ def test_session_snapshot_read_does_not_wait_for_session_commit_lock(
 
     assert snapshot["session_id"] == session_id
     assert snapshot["status"] == "awaiting_focus"
+
+
+def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
+    tmp_path: Path,
+) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "tracker")
+    session_id = "direct-visual-bias"
+    tracker.session_dir(session_id).mkdir(parents=True, exist_ok=True)
+    observed_epoch = 1_800.0
+
+    first = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+        session_id,
+        {
+            "side": "SELL",
+            "confidence": 0.87,
+            "market": "GBP/AUD OTC",
+            "timeframe": "M5",
+            "observed_epoch": observed_epoch,
+            "source_binding_token_v3": (
+                "edge-chart-region-v3|edge-lease-1|0"
+            ),
+            "current_candle": {
+                "direction": "SELL",
+                "color": "magenta",
+                "track_id": 85,
+            },
+        },
+        frame_id=40,
+        fallback_payload={},
+    )
+    second = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+        session_id,
+        {
+            "side": "BUY",
+            "confidence": 0.75,
+            "market": "GBP/AUD OTC",
+            "timeframe": "M5",
+            "observed_epoch": observed_epoch + 20.0,
+            "source_binding_token_v3": (
+                "edge-chart-region-v3|edge-lease-1|0"
+            ),
+            "current_candle": {"direction": "BUY", "track_id": 85},
+        },
+        frame_id=41,
+        fallback_payload={},
+    )
+
+    assert first["candle_key"] == second["candle_key"]
+    assert first["candle_sequence"] == second["candle_sequence"] == 6
+    assert second["side"] == "BUY"
+    assert tracker.direct_visual_bias_snapshot_v3(session_id)["frame_id"] == 41
+
+    same_frame_delayed = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+        session_id,
+        {
+            "side": "SELL",
+            "market": "GBP/AUD OTC",
+            "timeframe": "M5",
+            "observed_epoch": observed_epoch + 20.0,
+        },
+        frame_id=99,
+        fallback_payload={},
+    )
+    assert same_frame_delayed["side"] == "BUY"
+    assert same_frame_delayed["frame_id"] == 41
+
+    refreshed = tracker._refresh_direct_visual_bias_from_heartbeat_v3(  # noqa: SLF001
+        session_id,
+        {
+            "source_id": "edge-chart-region-v3",
+            "sequence_id": "edge-lease-1",
+            "source_generation": 0,
+            "capture_epoch": observed_epoch + 30.0,
+        },
+    )
+    assert refreshed["side"] == "BUY"
+    assert refreshed["observed_epoch"] == observed_epoch + 30.0
+    assert refreshed["unchanged_frame_heartbeat"] is True
+
+    stale = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+        session_id,
+        {
+            "side": "SELL",
+            "market": "GBP/AUD OTC",
+            "timeframe": "M5",
+            "observed_epoch": observed_epoch - 1.0,
+        },
+        frame_id=39,
+        fallback_payload={},
+    )
+    assert stale["side"] == "BUY"
+    assert tracker.direct_visual_bias_snapshot_v3(session_id)["frame_id"] == 41
+
+
+def test_fast_external_frame_visual_bias_reads_current_candle_palette() -> None:
+    sell = ContinuousWindowTrackerService._direct_visual_bias_from_frame_v3(  # noqa: SLF001
+        _synthetic_chart_surface("sell")
+    )
+    buy = ContinuousWindowTrackerService._direct_visual_bias_from_frame_v3(  # noqa: SLF001
+        _synthetic_chart_surface("buy")
+    )
+
+    assert sell["side"] == "SELL"
+    assert buy["side"] == "BUY"
+    assert sell["candle_extraction_mode"] == "fast_external_frame_palette_v3"
+
+
+def test_external_ingest_boundary_publishes_bias_before_full_study(
+    tmp_path: Path,
+) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "tracker")
+    session_id = "direct-ingest-boundary"
+    sequence_id = "edge-direct-bias-sequence"
+    source_id = "edge-chart-region-v3"
+    tracker.create_session(
+        session_id=session_id,
+        market="GBP/AUD OTC",
+        auto_start=False,
+    )
+    claim = tracker.claim_external_source(
+        session_id,
+        source_id=source_id,
+        sequence_id=sequence_id,
+        source_type="browser_tab_roi_capture",
+        selection_id="edge-direct-bias-selection",
+        display_name="Pocket Option chart",
+        coordinate_space="edge_tab_roi_v1",
+    )
+    observed_epoch_ms = int(time.time() * 1000)
+
+    published = tracker.publish_direct_visual_bias_from_external_frame_v3(
+        session_id,
+        _synthetic_chart_surface("sell"),
+        source_id=source_id,
+        sequence_id=sequence_id,
+        source_generation=int(claim["source_generation"]),
+        source_lease_id=str(claim["source_lease_id"]),
+        capture_epoch_ms=observed_epoch_ms,
+        frame_id=73,
+        metadata={
+            "source_type": "browser_tab_roi_capture",
+            "coordinate_space": "edge_tab_roi_v1",
+        },
+    )
+
+    assert published["side"] == "SELL"
+    assert published["frame_id"] == 73
+    assert published["market"] == "USER_LOCKED_ACTIVE_CHART"
+    assert published["candle_extraction_mode"] == "fast_ingest_boundary_palette_v3"
+    assert published["observed_epoch"] == pytest.approx(
+        observed_epoch_ms / 1000.0
+    )

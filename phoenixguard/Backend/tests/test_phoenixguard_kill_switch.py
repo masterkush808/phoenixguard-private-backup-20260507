@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = PROJECT_ROOT / "Developer" / "developer_tools" / "phoenixguard_kill_switch.py"
@@ -51,6 +53,18 @@ def test_kill_switch_relaunch_passes_one_second_capture_interval(monkeypatch):
     assert module.relaunch(args) == 0
     interval_index = captured.index("-CaptureIntervalSec") + 1
     assert captured[interval_index] == "1.0"
+
+
+def test_kill_switch_process_scan_timeout_is_bounded(monkeypatch):
+    module = _load_module()
+
+    def timeout(*_args, **_kwargs):
+        raise module.subprocess.TimeoutExpired(cmd="powershell", timeout=15.0)
+
+    monkeypatch.setattr(module.subprocess, "run", timeout)
+
+    with pytest.raises(RuntimeError, match="timed out after 15 seconds"):
+        module._powershell_json("Get-CimInstance Win32_Process")
 
 
 def test_kill_switch_scopes_the_direct_trade_bridge_as_part_of_the_stack():

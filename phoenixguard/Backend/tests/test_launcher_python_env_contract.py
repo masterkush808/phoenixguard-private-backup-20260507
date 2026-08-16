@@ -144,6 +144,8 @@ def test_single_venv_runtime_verifier_documents_runtime_state_not_environment() 
     assert "process_scan_status" in text
     assert "port_scan_status" in text
     assert "Refusing to remove unexpected environment path" in text
+    assert "timeout=15.0" in text
+    assert "except subprocess.TimeoutExpired" in text
 
 
 @pytest.mark.parametrize(

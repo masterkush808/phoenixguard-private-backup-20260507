@@ -1363,3 +1363,212 @@ def test_bridge_trigger_state_default_cooldown_is_disabled():
         }
         assert state.should_trigger(trade) == (True, "triggered")
         state.record_trade_execution()
+
+
+def test_bias_mode_uses_fresh_direct_visual_bias_instead_of_stale_full_study():
+    bridge = _load_bridge_module("phoenixguard_direct_visual_bias_fresh")
+    now_epoch = time.time()
+    payload = {
+        "session_id": "pocket-live-8788",
+        "last_capture_epoch": now_epoch - 90.0,
+        "display_capture_epoch": now_epoch - 120.0,
+        "display_published_epoch": now_epoch - 100.0,
+        "latest_signal": {
+            "action": "BUY",
+            "published_epoch": now_epoch - 90.0,
+        },
+        "direct_visual_bias_v3": {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "side": "SELL",
+            "confidence": 0.91,
+            "market": "GBP/AUD OTC",
+            "timeframe": "M5",
+            "timeframe_seconds": 300,
+            "candle_sequence": 42,
+            "candle_key": "direct:GBP/AUD OTC:M5:42",
+            "observed_epoch": now_epoch - 2.0,
+            "published_epoch": now_epoch - 1.0,
+            "pipeline_latency_seconds": 1.0,
+            "source": "phoenixguard_candle_palette_v3",
+        },
+    }
+
+    trade = bridge._resolve_trade_payload(
+        payload,
+        signal_source="bias",
+        max_signal_age_seconds=15.0,
+    )
+    freshness = bridge._freshness_context(payload, trade, now_epoch=now_epoch)
+
+    assert trade["side"] == "SELL"
+    assert trade["source"] == "phoenixguard_direct_visual_bias_v3"
+    assert trade["candle_key"] == "direct:GBP/AUD OTC:M5:42"
+    assert freshness["effective_signal_age_seconds"] < 3.0
+    assert freshness["freshness_basis"] == "direct_visual_bias_capture"
+    assert freshness["display_capture_age_seconds"] == 0.0
+
+
+def test_bias_mode_rejects_stale_direct_visual_bias():
+    bridge = _load_bridge_module("phoenixguard_direct_visual_bias_stale")
+    stale_epoch = time.time() - 20.0
+    payload = {
+        "direct_visual_bias_v3": {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "side": "BUY",
+            "market": "GBP/AUD OTC",
+            "timeframe": "M5",
+            "observed_epoch": stale_epoch,
+        }
+    }
+
+    with pytest.raises(bridge.TradeRejected, match="Live signal stale"):
+        bridge._resolve_trade_payload(
+            payload,
+            signal_source="bias",
+            max_signal_age_seconds=15.0,
+        )
+
+
+def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch, tmp_path):
+    bridge = _load_bridge_module("phoenixguard_direct_visual_bias_sidecar")
+    runtime_dir = tmp_path / "runtime" / "live"
+    session_dir = (
+        runtime_dir
+        / "data_live"
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / "pocket-live-8788"
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "compact_live_state.json").write_text(
+        json.dumps({"session_id": "pocket-live-8788", "last_capture_epoch": 100.0}),
+        encoding="utf-8",
+    )
+    (session_dir / "direct_visual_bias_v3.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+                "side": "SELL",
+                "observed_epoch": 101.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        bridge, "_default_live_runtime_dir", lambda project_root=None: runtime_dir
+    )
+
+    payload = bridge._read_live_state(
+        base_url="http://127.0.0.1:8793",
+        session_id="pocket-live-8788",
+        timeout_sec=1.0,
+    )
+
+    assert payload["direct_visual_bias_v3"]["side"] == "SELL"
+
+
+def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch):
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_listener")
+    now_epoch = time.time()
+    event = {
+        "session_id": "pocket-live-8788",
+        "direct_visual_bias_v3": {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "side": "BUY",
+            "market": "USD/JPY OTC",
+            "timeframe": "M5",
+            "observed_epoch": now_epoch,
+            "published_epoch": now_epoch,
+            "source": "phoenixguard_candle_palette_v3",
+        },
+    }
+
+    class _StreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return iter(
+                [
+                    b": heartbeat\n",
+                    b"\n",
+                    b"event: SESSION_UPDATE\n",
+                    f"data: {json.dumps(event)}\n".encode("utf-8"),
+                    b"\n",
+                ]
+            )
+
+    monkeypatch.setattr(bridge.request, "urlopen", lambda *_args, **_kwargs: _StreamResponse())
+
+    update = next(
+        bridge._iter_phoenixguard_session_updates(
+            base_url="http://127.0.0.1:8793",
+            session_id="pocket-live-8788",
+            timeout_sec=30.0,
+        )
+    )
+    trade = bridge._trade_from_listener_payload(
+        update,
+        base_url="http://127.0.0.1:8793",
+        session_id="pocket-live-8788",
+        score_threshold=0.0,
+        fixed_expiry_seconds_override=180,
+        max_signal_age_seconds=15.0,
+        signal_source="bias",
+    )
+
+    assert update == event
+    assert trade["side"] == "BUY"
+    assert trade["state_source"] == "phoenixguard_session_stream"
+    assert trade["expiry_seconds"] == 180
+
+
+def test_bridge_uses_listener_transport_by_default():
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_listener_default")
+
+    assert bridge._build_parser().parse_args([]).transport == "listener"
+
+
+def test_bridge_once_mode_uses_the_phoenixguard_listener(
+    monkeypatch,
+    capsys,
+):
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_listener_once")
+
+    class NoopLock:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self) -> None:
+            return None
+
+        def release(self) -> None:
+            return None
+
+    event = {"session_id": "pocket-live-8788", "direct_visual_bias_v3": {"side": "SELL"}}
+    monkeypatch.setattr(bridge, "_InstanceLock", NoopLock)
+    monkeypatch.setattr(
+        bridge,
+        "_iter_phoenixguard_session_updates",
+        lambda **_kwargs: iter([event]),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_trade_from_listener_payload",
+        lambda payload, **_kwargs: {
+            "side": payload["direct_visual_bias_v3"]["side"],
+            "state_source": "phoenixguard_session_stream",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_trade_once",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("poll fallback ran")),
+    )
+
+    assert bridge.main(["--once", "--dry-run", "--transport", "listener"]) == 0
+    assert '"state_source": "phoenixguard_session_stream"' in capsys.readouterr().out
