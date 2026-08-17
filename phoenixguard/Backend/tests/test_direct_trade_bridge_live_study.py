@@ -1395,7 +1395,7 @@ def test_bias_mode_uses_fresh_direct_visual_bias_instead_of_stale_full_study():
         "display_capture_epoch": now_epoch - 120.0,
         "display_published_epoch": now_epoch - 100.0,
         "latest_signal": {
-            "action": "BUY",
+            "action": "SELL",
             "published_epoch": now_epoch - 90.0,
         },
         "direct_visual_bias_v3": {
@@ -1427,6 +1427,33 @@ def test_bias_mode_uses_fresh_direct_visual_bias_instead_of_stale_full_study():
     assert freshness["effective_signal_age_seconds"] < 3.0
     assert freshness["freshness_basis"] == "direct_visual_bias_capture"
     assert freshness["display_capture_age_seconds"] == 0.0
+
+
+def test_direct_visual_bias_waits_for_reclaim_when_it_opposes_structural_bias():
+    bridge = _load_bridge_module("phoenixguard_direct_visual_bias_structural_alignment")
+    now_epoch = time.time()
+    payload = {
+        "latest_signal": {
+            "action": "BUY",
+            "entry_state": "TRIGGER_READY",
+            "execution_timing": {"entry_allowed": True},
+        },
+        "direct_visual_bias_v3": {
+            "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+            "side": "SELL",
+            "market": "USD/CAD OTC",
+            "timeframe": "M5",
+            "observed_epoch": now_epoch,
+        },
+    }
+
+    with pytest.raises(bridge.TradeRejected, match="structural BUY bias"):
+        bridge._resolve_trade_payload(payload, signal_source="bias")
+
+    payload["direct_visual_bias_v3"]["side"] = "BUY"
+    trade = bridge._resolve_trade_payload(payload, signal_source="bias")
+    assert trade["side"] == "BUY"
+    assert trade["entry_timing_ready"] is True
 
 
 def test_bias_mode_rejects_stale_direct_visual_bias():

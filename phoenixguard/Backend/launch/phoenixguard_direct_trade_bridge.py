@@ -1139,15 +1139,37 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
             f"direct:{market}:{timeframe}:{candle_sequence}"
         )
         confidence = _normalize_score(direct_bias.get("confidence"))
+        latest_signal = _mapping_or_empty(payload.get("latest_signal"))
+        thesis = _mapping_or_empty(payload.get("signal_thesis_v3"))
+        structural_bias_side = _upper(
+            latest_signal.get("action")
+            or latest_signal.get("headline_action")
+            or thesis.get("current_signal_side")
+            or thesis.get("effective_side")
+            or thesis.get("side")
+        )
+        # A red candle during a BUY pullback (or a green candle during a SELL
+        # pullback) is evidence to wait, never permission to reverse the
+        # structural bias.  The direct candle must reconfirm the same side
+        # before the existing reclaim/anti-chase timing can release a click.
+        visual_matches_structural_bias = structural_bias_side not in {"BUY", "SELL"} or direct_side == structural_bias_side
         # The direct visual side selects direction; the published timing state
         # still controls *where* that direction may enter.
         entry_timing = _bias_entry_timing_context(payload, side=direct_side)
-        entry_timing_ready = bool(entry_timing.get("ready"))
+        entry_timing_ready = bool(entry_timing.get("ready")) and visual_matches_structural_bias
+        reject_reason = ""
+        if not visual_matches_structural_bias:
+            reject_reason = (
+                f"PhoenixGuard structural {structural_bias_side} bias is active; "
+                f"wait for a {structural_bias_side} pullback/reclaim confirmation instead of taking {direct_side}."
+            )
+        elif not entry_timing_ready:
+            reject_reason = _text(entry_timing.get("reason"))
         return {
             "signal_id": f"direct_visual_{int(direct_observed_epoch * 1000)}",
             "side": direct_side,
             "actionable": entry_timing_ready,
-            "reject_reason": "" if entry_timing_ready else _text(entry_timing.get("reason")),
+            "reject_reason": reject_reason,
             "summary": f"PhoenixGuard current candle vision is {direct_side}.",
             "symbol": market,
             "timeframe": timeframe,
