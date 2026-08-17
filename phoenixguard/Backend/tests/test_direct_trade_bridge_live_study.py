@@ -252,7 +252,7 @@ def test_bridge_reports_visual_watch_instead_of_permanent_timing_side_mismatch()
     assert "not current BUY bias" not in signal["entry_timing_reason"]
 
 
-def test_bridge_bias_watch_executes_when_current_visual_candle_is_aligned_and_not_extended():
+def test_bridge_bias_watch_requires_reclaim_not_only_an_aligned_candle():
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_watch_aligned")
     payload = {
         "session_id": "pocket-live-8788",
@@ -281,11 +281,8 @@ def test_bridge_bias_watch_executes_when_current_visual_candle_is_aligned_and_no
         },
     }
 
-    result = bridge._resolve_trade_payload(payload, score_threshold=0.0, signal_source="bias")
-
-    assert result["side"] == "SELL"
-    assert result["entry_timing_ready"] is True
-    assert result["entry_timing_state"] == "LIVE_CANDLE_ALIGNED"
+    with pytest.raises(bridge.TradeRejected, match="resistance pullback"):
+        bridge._resolve_trade_payload(payload, score_threshold=0.0, signal_source="bias")
 
 
 def test_bridge_bias_watch_waits_when_current_visual_candle_opposes_bias():

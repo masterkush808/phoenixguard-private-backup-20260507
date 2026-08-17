@@ -968,15 +968,23 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
 
     if timing_wait_requested and latest_direction == normalized_side:
         reentry_confirmed = aligned_rejection or pullback_seen
+        if not reentry_confirmed:
+            return {
+                "ready": False,
+                "state": "WAIT_FOR_RECLAIM",
+                "timing_class": "visual_pullback_wait",
+                "reason": (
+                    block_reason
+                    or instruction
+                    or f"{normalized_side} bias is intact, but wait for a confirmed pullback/reclaim at the favorable area."
+                ),
+                "source": "latest_signal.market_study_v3.candle_intelligence",
+            }
         return {
             "ready": True,
-            "state": "VISUAL_REENTRY_READY" if reentry_confirmed else "LIVE_CANDLE_ALIGNED",
-            "timing_class": "pullback_rejection" if reentry_confirmed else "live_candle_alignment",
-            "reason": (
-                f"Fresh {normalized_side} confirmation followed a pullback or rejection."
-                if reentry_confirmed
-                else f"Fresh current visual candle confirms the {normalized_side} bias without an extended chase."
-            ),
+            "state": "VISUAL_REENTRY_READY",
+            "timing_class": "pullback_rejection",
+            "reason": f"Fresh {normalized_side} confirmation followed a pullback or rejection.",
             "source": "latest_signal.market_study_v3.candle_intelligence",
         }
 
