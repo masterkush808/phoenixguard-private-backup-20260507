@@ -869,6 +869,460 @@ def _current_visual_bias_context(payload: Mapping[str, object]) -> dict[str, obj
     }
 
 
+def bridge_overlay_session_id(session_id: str | None = None) -> str:
+    _, resolved_session = _resolve_stack_context(base_url=None, session_id=session_id)
+    return resolved_session
+
+
+def bridge_overlay_payload(session_id: str) -> tuple[dict[str, object], str, float]:
+    """Return (payload, payload_path, mtime_epoch) for a live bridge session."""
+    payload_path = _session_compact_live_state_path(session_id)
+    mtime = 0.0
+    if not payload_path.is_file():
+        return {}, str(payload_path), mtime
+    try:
+        raw = payload_path.read_text(encoding="utf-8")
+        mtime = payload_path.stat().st_mtime
+        parsed = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {}, str(payload_path), mtime
+    if not isinstance(parsed, Mapping):
+        return {}, str(payload_path), mtime
+    payload = _attach_direct_visual_bias(dict(cast(Mapping[str, object], parsed)), session_id)
+    return payload, str(payload_path), mtime
+
+
+def bridge_overlay_frame(
+    payload: Mapping[str, object],
+    *,
+    signal_source: str = DEFAULT_SIGNAL_SOURCE,
+) -> dict[str, object]:
+    """Build the display frame for the floating bridge-view overlay window."""
+    signal = _bias_signal_from_state(payload)
+    if not signal:
+        signal = _live_signal_from_state(payload, signal_source=signal_source)
+    visual = _current_visual_bias_context(payload)
+    placement = _mapping_or_empty(signal.get("placement_context"))
+    latest_signal = _mapping_or_empty(payload.get("latest_signal"))
+    execution_timing = _mapping_or_empty(latest_signal.get("execution_timing"))
+    thesis = _mapping_or_empty(payload.get("signal_thesis_v3"))
+    tracking_summary = _tracking_summary_from_payload(payload)
+    candle_context = _mapping_or_empty(
+        tracking_summary.get("candle_movement_context_v3")
+    )
+    current_leg = _mapping_or_empty(candle_context.get("current_leg"))
+    historical_structure = _mapping_or_empty(
+        tracking_summary.get("historical_structure")
+    )
+    price_position = _mapping_or_empty(placement.get("price_position"))
+
+    side = _upper(signal.get("side"))
+    actionable = bool(signal.get("actionable"))
+    entry_timing_state = _text(signal.get("entry_timing_state"))
+    entry_timing_class = _text(signal.get("entry_timing_class"))
+    reject_reason = _text(signal.get("reject_reason"))
+    entry_timing_reason = _text(signal.get("entry_timing_reason"))
+    reason_text = reject_reason or entry_timing_reason
+    gate_decision = _upper(placement.get("gate_decision"))
+    gate_reason = _text(placement.get("gate_reason"))
+    symbol = _text(
+        signal.get("symbol")
+        or thesis.get("symbol")
+        or payload.get("market")
+    )
+    timeframe = _text(
+        signal.get("timeframe")
+        or thesis.get("timeframe")
+        or payload.get("timeframe")
+        or "M5"
+    )
+    thesis_side = _upper(
+        thesis.get("current_signal_side")
+        or thesis.get("effective_side")
+        or thesis.get("side")
+    )
+    thesis_status = _text(thesis.get("status") or thesis.get("room_state"))
+    thesis_confidence = _float(thesis.get("confidence"), 0.0)
+    countertrend_blocked = bool(thesis.get("countertrend_blocked"))
+    blocked_countertrend_side = _upper(thesis.get("blocked_countertrend_side"))
+    opposing_force_risk = _float(execution_timing.get("opposing_force_risk"), 0.0)
+    local_position = _float(
+        price_position.get("local_position"),
+        _float(price_position.get("close_position"), 0.5),
+    )
+    global_position = _float(price_position.get("global_position"), 0.5)
+    entry_area_relation = _text(
+        placement.get("entry_area_relation")
+        or execution_timing.get("entry_area_relation")
+    )
+    historical_area_rule = _text(
+        placement.get("historical_area_rule")
+        or execution_timing.get("historical_area_rule")
+    )
+    flow_ready = bool(
+        placement.get("current_flow_continuation_ready")
+        or placement.get("breakout_confirmation")
+        or execution_timing.get("current_flow_continuation_ready")
+        or execution_timing.get("breakout_confirmation")
+    )
+    continuation_score = _float(
+        placement.get("continuation_score")
+        or execution_timing.get("continuation_score")
+        or tracking_summary.get("continuation_score"),
+        0.0,
+    )
+    major_trend = _mapping_or_empty(tracking_summary.get("major_trend_context"))
+    major_trend_side = _upper(major_trend.get("side"))
+    leg_side = _upper(current_leg.get("side"))
+    leg_candidate_side = _upper(current_leg.get("candidate_side"))
+    move_stage = _text(current_leg.get("move_stage"))
+    leg_candles = int(_float(current_leg.get("candle_count"), 0.0))
+    leg_duration_minutes = int(_float(current_leg.get("duration_minutes"), 0.0))
+
+    lines: list[dict[str, str]] = []
+    lines.append(
+        {
+            "text": f"{symbol or 'ACTIVE'} {timeframe}",
+            "color": "header",
+        }
+    )
+    lines.append({"text": "PhoenixGuard bridge view - LIVE", "color": "dim"})
+
+    side_display = side or _text(signal.get("current_visual_side")) or "WAIT"
+    actionable_label = "ACTIONABLE - TRADE READY" if actionable else "WAITING"
+    status_color = (
+        "green"
+        if actionable
+        else ("amber" if side_display not in {"", "WAIT"} else "red")
+    )
+    lines.append({"text": f"Signal: {side_display} | {actionable_label}", "color": status_color})
+    visual_side = _text(visual.get("side")) or "WAIT"
+    visual_stage = _text(visual.get("stage")) or "-"
+    lines.append({"text": f"Visual candle/leg: {visual_side} | stage: {visual_stage}", "color": "dim"})
+
+    if thesis_side:
+        thesis_line = f"Thesis: {thesis_side} {thesis_status or ''}"
+        if thesis_confidence:
+            thesis_line += f" ({thesis_confidence:.2f})"
+        if countertrend_blocked and blocked_countertrend_side:
+            thesis_line += f" | {blocked_countertrend_side} countertrend blocked"
+        lines.append({"text": thesis_line, "color": "cyan"})
+
+    lines.append(
+        {"text": f"Timing: {entry_timing_state or '-'} | {entry_timing_class or '-'}", "color": "white"}
+    )
+    if reason_text:
+        lines.append({"text": f"  reason: {reason_text}", "color": "dim"})
+    if gate_decision:
+        gate_color = (
+            "green"
+            if gate_decision == "ALLOW"
+            else ("amber" if gate_decision == "WAIT" else "red")
+        )
+        lines.append({"text": f"Placement: {gate_decision}", "color": gate_color})
+        if gate_reason:
+            lines.append({"text": f"  {gate_reason}", "color": "dim"})
+
+    placement_values: list[str] = []
+    if opposing_force_risk:
+        placement_values.append(f"opposing force {opposing_force_risk:.2f}")
+    placement_values.append(f"local {local_position:.2f} global {global_position:.2f}")
+    if entry_area_relation:
+        placement_values.append(f"area {entry_area_relation}")
+    if historical_area_rule:
+        placement_values.append(historical_area_rule)
+    if placement_values:
+        lines.append({"text": "  " + " | ".join(placement_values), "color": "dim"})
+
+    flow_parts: list[str] = []
+    flow_parts.append("FLOW LIVE" if flow_ready else "flow waiting")
+    if continuation_score:
+        flow_parts.append(f"continuation {continuation_score:.2f}")
+    if major_trend_side:
+        flow_parts.append(f"major {major_trend_side}")
+    if flow_parts:
+        lines.append({"text": "  " + " | ".join(flow_parts), "color": "dim"})
+
+    if leg_side or leg_candidate_side:
+        leg_parts: list[str] = [f"leg {leg_side or leg_candidate_side}"]
+        if move_stage:
+            leg_parts.append(move_stage)
+        if leg_candles:
+            leg_parts.append(f"{leg_candles} candles")
+        if leg_duration_minutes:
+            leg_parts.append(f"{leg_duration_minutes}m")
+        if historical_structure:
+            leg_parts.append(f"{len(historical_structure)} legs")
+        lines.append({"text": "  " + " | ".join(leg_parts), "color": "dim"})
+
+    return {
+        "lines": lines,
+        "status_color": status_color,
+        "side": side_display,
+        "visual_side": visual_side,
+        "actionable": actionable,
+        "updated": time.strftime("%H:%M:%S"),
+    }
+
+
+def _placement_timing_context(payload: Mapping[str, object], *, side: str) -> dict[str, object]:
+    """Mirror PhoenixGuard's observed placement/state for this side.
+
+    This reads the same observation state PhoenixGuard already publishes (price
+    position in the studied range, opposing-force risk, entry-area placement,
+    the historical area rule and the live-flow state of the studied move) and
+    reduces it to an explicit gate decision.  It never consumes PhoenixGuard's
+    execution-permission packages; it only makes the visible placement state
+    explicit so the bridge buys low, sells high and rides a continuing move
+    through its small rests instead of waiting it out.
+    """
+    latest_signal = _mapping_or_empty(payload.get("latest_signal"))
+    execution_timing = _mapping_or_empty(latest_signal.get("execution_timing"))
+    tracking_summary = _tracking_summary_from_payload(payload)
+    thesis = _mapping_or_empty(payload.get("signal_thesis_v3"))
+
+    normalized_side = _upper(side)
+    price_position = _mapping_or_empty(execution_timing.get("price_position"))
+    local_position = _float(
+        price_position.get("local_position"),
+        _float(price_position.get("close_position"), 0.5),
+    )
+    global_position = _float(price_position.get("global_position"), 0.5)
+    close_position = _float(price_position.get("close_position"), local_position)
+    extreme_score = _float(price_position.get("extreme_score"), 0.0)
+    extreme_label = _text(price_position.get("extreme_label"))
+
+    opposing_force_risk = _float(execution_timing.get("opposing_force_risk"), 0.0)
+    global_extreme_risk = _float(
+        execution_timing.get("global_extreme_risk"), extreme_score
+    )
+    history_area_risk = _float(execution_timing.get("history_area_risk"), 0.0)
+    history_area_label = _text(execution_timing.get("history_area_label"))
+    history_area_position = _float(execution_timing.get("history_area_position"), 0.5)
+    entry_area_relation = _text(execution_timing.get("entry_area_relation"))
+    entry_area_score = _float(execution_timing.get("entry_area_score"), 0.0)
+    entry_area_near = bool(execution_timing.get("entry_area_near"))
+    historical_area_rule = _text(execution_timing.get("historical_area_rule"))
+    must_wait_significant = bool(execution_timing.get("must_wait_for_significant_area"))
+    significant_entry_context = bool(execution_timing.get("significant_entry_context"))
+    significant_zone_entry_context = bool(
+        execution_timing.get("significant_zone_entry_context")
+    )
+    favorable_history_reclaim = bool(execution_timing.get("favorable_history_reclaim"))
+    favorable_history_rejection = bool(
+        execution_timing.get("favorable_history_rejection")
+    )
+    historical_entry_anchor = bool(execution_timing.get("historical_entry_anchor"))
+    current_flow_continuation_ready = bool(
+        execution_timing.get("current_flow_continuation_ready")
+    )
+    breakout_confirmation = bool(execution_timing.get("breakout_confirmation"))
+    clear_path_score = _float(execution_timing.get("clear_path_score"), 0.0)
+    entry_allowed = execution_timing.get("entry_allowed")
+    timing_class = _text(execution_timing.get("timing_class"))
+    block_reason = _text(execution_timing.get("block_reason"))
+    continuation_score = _float(
+        execution_timing.get("continuation_score"),
+        _float(tracking_summary.get("continuation_score"), 0.0),
+    )
+    reversal_score = _float(
+        execution_timing.get("reversal_score"),
+        _float(tracking_summary.get("reversal_score"), 0.0),
+    )
+    p_target = _float(
+        execution_timing.get("p_target_before_invalidation"), 0.0
+    )
+
+    thesis_side = _upper(
+        thesis.get("current_signal_side")
+        or thesis.get("effective_side")
+        or thesis.get("side")
+    )
+    thesis_status = _text(
+        thesis.get("status") or thesis.get("room_state")
+    )
+    thesis_confidence = _float(thesis.get("confidence"), 0.0)
+    countertrend_blocked = bool(thesis.get("countertrend_blocked"))
+    blocked_countertrend_side = _upper(thesis.get("blocked_countertrend_side"))
+    thesis_entry_zone = _mapping_or_empty(thesis.get("entry_zone"))
+    thesis_entry_area_relation = _text(
+        thesis_entry_zone.get("entry_area_relation")
+        or thesis_entry_zone.get("price_relation")
+    )
+    thesis_entry_area_score = _float(
+        thesis_entry_zone.get("entry_area_score"), 0.0
+    )
+
+    major_trend = _mapping_or_empty(tracking_summary.get("major_trend_context"))
+    major_trend_side = _upper(major_trend.get("side"))
+    major_trend_confidence = _float(major_trend.get("confidence"), 0.0)
+    estimated_control_candles = int(
+        _float(major_trend.get("estimated_control_candles"), 0.0)
+    )
+    micro_pullback_active = bool(major_trend.get("micro_pullback_active"))
+    confirmed_reversal_takeover = bool(
+        major_trend.get("confirmed_reversal_takeover")
+    )
+
+    live_flow_ready = bool(
+        current_flow_continuation_ready or breakout_confirmation
+    )
+
+    if normalized_side == "BUY":
+        low_position = min(local_position, close_position) <= 0.45
+        high_position = max(local_position, close_position) >= 0.60
+        at_area = bool(entry_area_near or entry_area_relation == "at_price")
+        favorable_placement = bool(
+            low_position
+            or at_area
+            or favorable_history_reclaim
+            or significant_entry_context
+            or historical_entry_anchor
+        )
+        wrong_extreme = bool(
+            high_position
+            and not (
+                favorable_history_reclaim
+                or historical_entry_anchor
+                or significant_zone_entry_context
+            )
+        )
+    else:
+        low_position = min(local_position, close_position) <= 0.40
+        high_position = max(local_position, close_position) >= 0.55
+        at_area = bool(entry_area_near or entry_area_relation == "at_price")
+        favorable_placement = bool(
+            high_position
+            or at_area
+            or favorable_history_rejection
+            or significant_entry_context
+            or historical_entry_anchor
+        )
+        wrong_extreme = bool(
+            low_position
+            and not (
+                favorable_history_rejection
+                or historical_entry_anchor
+                or significant_zone_entry_context
+            )
+        )
+
+    explicit_allow = bool(entry_allowed is True)
+    explicit_wait = bool(entry_allowed is False)
+    opposing_force_block = bool(
+        opposing_force_risk >= 0.68 and not live_flow_ready and not explicit_allow
+    )
+    extreme_block = bool(
+        global_extreme_risk >= 0.82 and not live_flow_ready and not explicit_allow
+    )
+    significant_wait = bool(
+        must_wait_significant and not live_flow_ready and not explicit_allow
+    )
+    explicit_placement_wait = bool(
+        explicit_wait
+        and not live_flow_ready
+        and (
+            "opposing" in timing_class.lower()
+            or "history_area" in timing_class.lower()
+            or "extreme" in timing_class.lower()
+            or "significant" in timing_class.lower()
+        )
+    )
+    wrong_side_area = bool(
+        wrong_extreme
+        and not live_flow_ready
+        and not (explicit_allow or continuation_score >= 0.54)
+    )
+
+    gate_block = bool(
+        not live_flow_ready
+        and (
+            opposing_force_block
+            or extreme_block
+            or significant_wait
+            or explicit_placement_wait
+            or wrong_side_area
+        )
+    )
+
+    reasons: list[str] = []
+    if opposing_force_block:
+        reasons.append(
+            f"opposing force risk {opposing_force_risk:.2f} is too high for a {normalized_side} entry"
+        )
+    if extreme_block:
+        reasons.append(
+            f"price is at the global/local extreme ({extreme_label or 'extreme'}) for {normalized_side}"
+        )
+    if significant_wait:
+        reasons.append("price is not at a mapped significant entry area yet")
+    if explicit_placement_wait:
+        reasons.append(
+            block_reason or f"PhoenixGuard placement state waits ({timing_class})"
+        )
+    if wrong_side_area:
+        reasons.append(
+            f"price is on the wrong side of the range for a {normalized_side} entry; wait for a pullback into the area"
+        )
+    if gate_block:
+        gate_decision = "BLOCK"
+    elif not favorable_placement and not live_flow_ready and not explicit_allow:
+        gate_decision = "WAIT"
+    else:
+        gate_decision = "ALLOW"
+
+    return {
+        "gate_decision": gate_decision,
+        "gate_block": bool(gate_block),
+        "gate_reason": "; ".join(reasons),
+        "side": normalized_side,
+        "price_position": {
+            "local_position": round(local_position, 4),
+            "global_position": round(global_position, 4),
+            "close_position": round(close_position, 4),
+            "extreme_score": round(extreme_score, 4),
+            "extreme_label": extreme_label,
+        },
+        "opposing_force_risk": round(opposing_force_risk, 4),
+        "global_extreme_risk": round(global_extreme_risk, 4),
+        "history_area_risk": round(history_area_risk, 4),
+        "history_area_label": history_area_label,
+        "history_area_position": round(history_area_position, 4),
+        "entry_area_relation": entry_area_relation,
+        "entry_area_score": round(entry_area_score, 4),
+        "entry_area_near": bool(entry_area_near),
+        "historical_area_rule": historical_area_rule or "buy_lows_sell_highs",
+        "must_wait_for_significant_area": bool(must_wait_significant),
+        "significant_entry_context": bool(significant_entry_context),
+        "favorable_history_reclaim": bool(favorable_history_reclaim),
+        "favorable_history_rejection": bool(favorable_history_rejection),
+        "current_flow_continuation_ready": bool(current_flow_continuation_ready),
+        "breakout_confirmation": bool(breakout_confirmation),
+        "live_flow_ready": bool(live_flow_ready),
+        "clear_path_score": round(clear_path_score, 4),
+        "continuation_score": round(continuation_score, 4),
+        "reversal_score": round(reversal_score, 4),
+        "p_target_before_invalidation": round(p_target, 4),
+        "entry_allowed": bool(explicit_allow),
+        "timing_class": timing_class,
+        "block_reason": block_reason,
+        "thesis_side": thesis_side,
+        "thesis_status": thesis_status,
+        "thesis_confidence": round(thesis_confidence, 4),
+        "thesis_entry_area_relation": thesis_entry_area_relation,
+        "thesis_entry_area_score": round(thesis_entry_area_score, 4),
+        "countertrend_blocked": bool(countertrend_blocked),
+        "blocked_countertrend_side": blocked_countertrend_side,
+        "major_trend_side": major_trend_side,
+        "major_trend_confidence": round(major_trend_confidence, 4),
+        "estimated_control_candles": estimated_control_candles,
+        "micro_pullback_active": bool(micro_pullback_active),
+        "confirmed_reversal_takeover": bool(confirmed_reversal_takeover),
+        "favorable_placement": bool(favorable_placement),
+        "wrong_extreme": bool(wrong_extreme),
+    }
+
+
 def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> dict[str, object]:
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
     execution_timing = _mapping_or_empty(latest_signal.get("execution_timing"))
@@ -890,13 +1344,27 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
     watch_states = HYBRID_WATCH_ENTRY_STATES | {"WAIT", "HOLD", "NOT_READY"}
     explicit_entry_allowed = execution_timing.get("entry_allowed")
 
+    placement_context = _placement_timing_context(payload, side=normalized_side)
+    placement_gate_blocked = bool(placement_context.get("gate_block"))
+    placement_reason = _text(placement_context.get("gate_reason"))
+
     if entry_state in ready_states or timing_state in ready_states or explicit_entry_allowed is True:
+        if placement_gate_blocked:
+            return {
+                "ready": False,
+                "state": "PLACEMENT_WAIT",
+                "timing_class": timing_class or "placement_wait",
+                "reason": placement_reason or "Wait for a favorable placement area before this entry.",
+                "source": "latest_signal.execution_timing",
+                "placement_context": placement_context,
+            }
         return {
             "ready": True,
             "state": timing_state or entry_state or "READY",
             "timing_class": timing_class,
             "reason": instruction or "PhoenixGuard visual entry timing is ready.",
             "source": "latest_signal.timing_signal",
+            "placement_context": placement_context,
         }
 
     candle_intelligence = _mapping_or_empty(market_study.get("candle_intelligence"))
@@ -937,15 +1405,26 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
             "timing_class": timing_class,
             "reason": block_reason or instruction or f"Wait for a fresh {normalized_side} pullback rejection/reclaim.",
             "source": "latest_signal.execution_timing",
+            "placement_context": placement_context,
         }
 
     if not latest_candle:
+        if placement_gate_blocked:
+            return {
+                "ready": False,
+                "state": "PLACEMENT_WAIT",
+                "timing_class": timing_class or "placement_wait",
+                "reason": placement_reason or "Wait for a favorable placement area before this entry.",
+                "source": "latest_signal.execution_timing",
+                "placement_context": placement_context,
+            }
         return {
             "ready": True,
             "state": "LEGACY_VISUAL_BIAS",
             "timing_class": "legacy_bias_fallback",
             "reason": "No explicit PhoenixGuard entry-timing wait was published.",
             "source": "bias_compatibility_fallback",
+            "placement_context": placement_context,
         }
 
     if latest_direction == opposite_side or latest_direction == "":
@@ -955,6 +1434,7 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
             "timing_class": "visual_pullback_wait",
             "reason": f"{normalized_side} bias remains active, but the current visual candle has not confirmed the entry.",
             "source": "latest_signal.market_study_v3.candle_intelligence.latest",
+            "placement_context": placement_context,
         }
 
     if range_multiple >= 1.25 and not aligned_rejection:
@@ -964,6 +1444,7 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
             "timing_class": "anti_chase_wait",
             "reason": f"{normalized_side} direction is valid, but the latest candle is already extended; wait for a pullback/retest.",
             "source": "latest_signal.market_study_v3.candle_intelligence.latest.ratios",
+            "placement_context": placement_context,
         }
 
     if timing_wait_requested and latest_direction == normalized_side:
@@ -979,6 +1460,7 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
                     or f"{normalized_side} bias is intact, but wait for a confirmed pullback/reclaim at the favorable area."
                 ),
                 "source": "latest_signal.market_study_v3.candle_intelligence",
+                "placement_context": placement_context,
             }
         return {
             "ready": True,
@@ -986,6 +1468,7 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
             "timing_class": "pullback_rejection",
             "reason": f"Fresh {normalized_side} confirmation followed a pullback or rejection.",
             "source": "latest_signal.market_study_v3.candle_intelligence",
+            "placement_context": placement_context,
         }
 
     if latest_direction == normalized_side and (aligned_rejection or pullback_seen):
@@ -995,16 +1478,28 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
             "timing_class": "pullback_rejection",
             "reason": f"Fresh {normalized_side} confirmation followed a pullback or rejection.",
             "source": "latest_signal.market_study_v3.candle_intelligence",
+            "placement_context": placement_context,
         }
 
     # Older PhoenixGuard payloads did not publish timing context. Preserve their
-    # bias behavior unless the visual candle positively proves a chase condition.
+    # bias behavior unless the visual candle positively proves a chase condition
+    # or the observed placement is clearly wrong for this side.
+    if placement_gate_blocked:
+        return {
+            "ready": False,
+            "state": "PLACEMENT_WAIT",
+            "timing_class": timing_class or "placement_wait",
+            "reason": placement_reason or "Wait for a favorable placement area before this entry.",
+            "source": "latest_signal.execution_timing",
+            "placement_context": placement_context,
+        }
     return {
         "ready": True,
         "state": "LEGACY_VISUAL_BIAS",
         "timing_class": "legacy_bias_fallback",
         "reason": "No explicit PhoenixGuard entry-timing wait was published.",
         "source": "bias_compatibility_fallback",
+        "placement_context": placement_context,
     }
 
 
@@ -1211,6 +1706,7 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
             "entry_timing_class": _text(entry_timing.get("timing_class") or "direct_visual_bias"),
             "entry_timing_reason": _text(entry_timing.get("reason") or "Fresh PhoenixGuard candle vision is available."),
             "entry_timing_source": _text(entry_timing.get("source") or direct_bias.get("source")),
+            "placement_context": _mapping_or_empty(entry_timing.get("placement_context")),
             "trigger_token": f"{candle_key}|{direct_side}",
         }
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
@@ -1365,6 +1861,7 @@ def _bias_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
         "entry_timing_class": "live_visual_alignment" if visual_alignment_conflict else _text(entry_timing.get("timing_class")),
         "entry_timing_reason": visual_alignment_reason or _text(entry_timing.get("reason")),
         "entry_timing_source": _text(visual_context.get("source")) if visual_alignment_conflict else _text(entry_timing.get("source")),
+        "placement_context": _mapping_or_empty(entry_timing.get("placement_context")),
         "trigger_token": f"{candle_key}|{bias_side}",
     }
 
@@ -2201,6 +2698,7 @@ def _resolve_trade_payload(
         "entry_timing_class": _text(signal.get("entry_timing_class")),
         "entry_timing_reason": _text(signal.get("entry_timing_reason")),
         "entry_timing_source": _text(signal.get("entry_timing_source")),
+        "placement_context": _mapping_or_empty(signal.get("placement_context")),
         "next_candle_bias": _text(signal.get("next_candle_bias")),
         "high_frequency_status": _text(signal.get("high_frequency_status")),
     }
