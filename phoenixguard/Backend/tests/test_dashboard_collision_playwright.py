@@ -478,6 +478,7 @@ def _dashboard_page(
     artifact_image_bytes: dict[str, bytes] | None = None,
     with_event_source: bool = False,
     session_payload: dict[str, Any] | None = None,
+    frontline: dict[str, Any] | None = None,
 ) -> Generator[Page, None, None]:
     html = _renderable_dashboard_html()
     context = browser.new_context(
@@ -515,6 +516,7 @@ def _dashboard_page(
     page.route("http://dashboard.test/**", route_dashboard)
     payload_json = json.dumps(payload).replace("</", "<\\/")
     session_payload_json = json.dumps(session_payload).replace("</", "<\\/")
+    frontline_payload_json = json.dumps(frontline).replace("</", "<\\/")
     event_source_bootstrap = (
         """
         window.__EVENT_SOURCES = [];
@@ -555,6 +557,7 @@ def _dashboard_page(
         f"""
         window.__OPERATOR_PAYLOAD = {payload_json};
         window.__SESSION_PAYLOAD = {session_payload_json};
+        window.__FRONTLINE_PAYLOAD = {frontline_payload_json};
         window.__FETCH_URLS = [];
         window.__FETCH_REQUESTS = [];
         window.__FRONTEND_HEARTBEAT_REQUESTS = [];
@@ -599,6 +602,8 @@ def _dashboard_page(
           const isOperatorState = href.includes("/v1/mobile/operator/state/v1/");
           const isSessionState = href === "/v1/mobile/window-tracker/sessions/operator-test"
             && window.__SESSION_PAYLOAD !== null;
+          const isFrontlineLatest = href.includes("/v1/mobile/frontline/latest/");
+          const hasFrontline = isFrontlineLatest && window.__FRONTLINE_PAYLOAD !== null;
           const body = isFrontendHeartbeat
             ? {{schema_version: "PG_FRONTEND_HEARTBEAT_V3", status: "ALIVE"}}
             : isPerformanceTrace
@@ -607,9 +612,11 @@ def _dashboard_page(
             ? window.__OPERATOR_PAYLOAD
             : isSessionState
             ? window.__SESSION_PAYLOAD
+            : isFrontlineLatest
+            ? window.__FRONTLINE_PAYLOAD
             : {{detail: "not found"}};
           const respond = () => new Response(JSON.stringify(body), {{
-            status: isOperatorState || isSessionState || isFrontendHeartbeat || isPerformanceTrace ? 200 : 404,
+            status: isOperatorState || isSessionState || isFrontendHeartbeat || isPerformanceTrace || hasFrontline ? 200 : 404,
             headers: {{"Content-Type": "application/json"}},
           }});
           const delay = isOperatorState
@@ -679,7 +686,14 @@ def test_live_session_stream_coalesces_updates_into_atomic_operator_refreshes(
         requests = page.evaluate(
             "start => window.__FETCH_REQUESTS.slice(start)", request_count
         )
-        assert requests == [
+        # The clearance panel polls its own /frontline/latest endpoint in
+        # parallel; it must never create a second operator/state refresh.
+        operator_requests = [
+            row
+            for row in requests
+            if "/v1/mobile/operator/state/v1/" in row["href"]
+        ]
+        assert operator_requests == [
             {
                 "href": "/v1/mobile/operator/state/v1/operator-test?view=all",
                 "method": "GET",
@@ -1746,7 +1760,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             )
         ) == static_button_ids
         assert page.locator("button[data-overlay-view]").count() == 7
-        assert page.locator("button[data-overlay-family]").count() == 13
+        assert page.locator("button[data-overlay-family]").count() == 14
         assert page.locator("button[data-label-mode]").count() == 3
         assert page.locator("input[type=range]").count() == 2
 
@@ -1802,7 +1816,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         page.locator("#layers-all").click()
         assert (
             page.locator("button[data-overlay-family][aria-pressed=true]").count()
-            == 13
+            == 14
         )
         families = page.locator("button[data-overlay-family]").evaluate_all(
             "nodes => nodes.map(node => node.dataset.overlayFamily)"
@@ -1828,7 +1842,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         request_count = page.evaluate("window.__FETCH_REQUESTS.length")
         page.locator("#refresh-view").click()
         page.wait_for_function(
-            "count => window.__FETCH_REQUESTS.length === count + 2",
+            "count => window.__FETCH_REQUESTS.length === count + 3",
             arg=request_count,
         )
 
@@ -2055,9 +2069,9 @@ def test_market_story_and_history_prefer_v3_regression_study(
 
     with _dashboard_page(chromium_browser, payload) as page:
         assert page.locator(".legacy-three-question-panel").is_hidden()
-        assert page.locator("#latent-control-rail").is_visible()
-        assert page.locator("#latent-buy-component").is_visible()
-        assert page.locator("#latent-sell-component").is_visible()
+        assert page.locator("#frontline-qwen-panel").is_visible()
+        assert page.locator("#frontline-qwen-buy").is_visible()
+        assert page.locator("#frontline-qwen-sell").is_visible()
         assert page.locator("#current-move-title").inner_text() == "From an upward market"
         assert page.locator("#inner-trend-title").inner_text() == (
             "SELL studied · completed BUY · forming moving"
@@ -2223,20 +2237,18 @@ def test_passive_decision_audit_shows_measured_outcomes_without_trade_authority(
     }
 
     with _dashboard_page(chromium_browser, payload) as page:
-        strip = page.locator("#decision-audit-strip")
-        assert strip.get_attribute("data-state") == "measured"
-        assert page.locator("#decision-audit-status").inner_text() == "POSITIVE EV PROVEN"
-        assert page.locator("#decision-audit-counts").inner_text() == (
-            "6 completed in local state · 42 Pair DNA transitions · 2 confirmed lines · 9 matured outcomes"
-        )
-        assert page.locator("#decision-audit-direction").inner_text() == "6 candles"
-        assert page.locator("#decision-audit-timing").inner_text() == "42 observed"
-        assert page.locator("#decision-audit-sweep").inner_text() == "3 / 3 touches"
-        assert page.locator("#decision-audit-calibration").inner_text() == "+4.2% low EV"
-        assert page.locator("#decision-audit-outcome").inner_text() == (
-            "SELL structural control is confirmed by primary structure and a three-touch wick line. · Outcome audit: 9 matured · direction 78% · Profitability: proven forward positive expectancy · 240 / 200 outcomes · 75% payout reference · point EV +8.0%"
-        )
-        assert "never an entry instruction" in strip.inner_text().lower()
+        assert page.locator("#decision-audit-strip").count() == 0
+        assert page.locator("#latent-control-rail").count() == 0
+        assert page.locator("#latent-buy-component").count() == 0
+        assert page.locator("#latent-sell-component").count() == 0
+        # The clearance panel replaces the retired evidence audit.
+        assert page.locator("#frontline-qwen-panel").is_visible()
+        assert page.locator("#frontline-qwen-verdict").inner_text() == "PENDING"
+        assert page.locator("#frontline-qwen-buy").is_visible()
+        assert page.locator("#frontline-qwen-sell").is_visible()
+        # Measured outcomes never grant trade authority.
+        assert page.locator("#beginner-decision-title").inner_text() == "PREPARE"
+        assert page.locator("#beginner-action-label").inner_text() == "PREPARE"
 
 
 def test_hidden_legacy_timing_forecast_never_replaces_hidden_state_control(
@@ -2247,9 +2259,14 @@ def test_hidden_legacy_timing_forecast_never_replaces_hidden_state_control(
     with _dashboard_page(chromium_browser, payload) as page:
         assert page.locator(".decision-question").count() == 3
         assert page.locator(".legacy-three-question-panel").is_hidden()
-        assert page.locator("#latent-control-rail").is_visible()
-        assert page.locator("#latent-buy-component").is_visible()
-        assert page.locator("#latent-sell-component").is_visible()
+        # The retired hidden-state rail stays absent; the clearance panel
+        # remains the visible BUY/SELL side presentation.
+        assert page.locator("#latent-control-rail").count() == 0
+        assert page.locator("#latent-buy-component").count() == 0
+        assert page.locator("#latent-sell-component").count() == 0
+        assert page.locator("#frontline-qwen-panel").is_visible()
+        assert page.locator("#frontline-qwen-buy").is_visible()
+        assert page.locator("#frontline-qwen-sell").is_visible()
         assert page.locator("#beginner-confidence").inner_text() == (
             "Entry closed · studied setup is being prepared"
         )
@@ -2496,7 +2513,7 @@ def test_hidden_unrated_projection_never_leads_and_atomic_permission_controls_en
             "support_count": 0,
             "calibrated": False,
             "calibration_grade": "UNRATED",
-            "calibration_label": (
+"calibration_label": (
                 "Calibration UNRATED · not replay-calibrated"
             ),
         }
@@ -2504,9 +2521,12 @@ def test_hidden_unrated_projection_never_leads_and_atomic_permission_controls_en
 
     with _dashboard_page(chromium_browser, payload) as page:
         assert page.locator(".legacy-three-question-panel").is_hidden()
-        assert page.locator("#latent-control-rail").is_visible()
-        assert page.locator("#latent-buy-component").is_visible()
-        assert page.locator("#latent-sell-component").is_visible()
+        assert page.locator("#latent-control-rail").count() == 0
+        assert page.locator("#latent-buy-component").count() == 0
+        assert page.locator("#latent-sell-component").count() == 0
+        assert page.locator("#frontline-qwen-panel").is_visible()
+        assert page.locator("#frontline-qwen-buy").is_visible()
+        assert page.locator("#frontline-qwen-sell").is_visible()
         projection = page.locator("#beginner-forecast-summary").inner_text()
         assert "BUY direction studied · timing range withheld" in projection
         assert "3–6" not in projection
@@ -2908,6 +2928,7 @@ def test_simple_is_default_and_explore_does_not_restore_workspace_navigation(
         assert all(
             "/v1/mobile/operator/state/v1/" in url
             or url == "/v1/mobile/window-tracker/sessions/operator-test"
+            or url.startswith("/v1/mobile/frontline/latest/")
             for url in fetch_urls
         )
 
@@ -3193,6 +3214,12 @@ def test_current_order_areas_have_independent_always_visible_controls(
             page.locator('[data-overlay-id="saved-buy-stop"]').get_attribute("class")
             or ""
         ).split()
+        # Selection re-renders the overlay set and recomputes label lanes on
+        # the next animation frame; measure only once the lane has settled.
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-id=\"saved-buy-stop\"]')"
+            "?.classList.contains('label-lane-below')"
+        )
         label_bounds = page.evaluate(
             """
             () => {
@@ -3651,52 +3678,54 @@ def test_mobile_first_viewport_contains_hidden_state_control(
         chromium_browser, _operator_payload(), viewport=viewport
     ) as page:
         assert page.locator(".legacy-three-question-panel").is_hidden()
-        box = page.locator("#latent-control-rail").bounding_box()
+        assert page.locator("#latent-control-rail").count() == 0
+        assert page.locator("#latent-buy-component").count() == 0
+        assert page.locator("#latent-sell-component").count() == 0
+        box = page.locator("#frontline-qwen-panel").bounding_box()
         assert box is not None
         assert box["y"] >= 0
         assert box["y"] + box["height"] <= viewport[1], (viewport, box)
-        assert page.locator("#latent-buy-component").is_visible()
-        assert page.locator("#latent-sell-component").is_visible()
+        assert page.locator("#frontline-qwen-buy").is_visible()
+        assert page.locator("#frontline-qwen-sell").is_visible()
 
 
 def test_hidden_state_contract_drives_buy_sell_components(
     chromium_browser: Browser,
 ) -> None:
     payload = _operator_payload()
-    payload["tracking"]["market_study_v3"] = {
-        "hidden_state_discovery_v3": {
-            "schema_version": "PG_LATENT_STATE_DISCOVERY_V3",
-            "status": "ACTIVE",
-            "study_only": True,
-            "hidden_state": {"state": "UP_SWING", "direction": "BUY", "age_candles": 2},
-            "control": {
-                "side": "BUY",
-                "candidate_side": "BUY",
-                "status": "ACTIVE_STATE",
-                "basis": "legacy_local_state_label",
-            },
-            "directional_components": {
-                "BUY": {"next_state_probability": 0.1, "outgoing_transition_support": 9},
-                "SELL": {"next_state_probability": 0.8, "outgoing_transition_support": 9},
-                "REST": {"next_state_probability": 0.1, "outgoing_transition_support": 9},
-            },
-            "state_cycle_horizon": {
-                "expected_candles": 23,
-                "duration": {"display": "1h 55m"},
-                "path": [
-                    {"state": "UP_SWING", "expected_candles": 3},
-                    {"state": "DOWN_SWING", "expected_candles": 20},
-                ],
-            },
-        }
+    payload["direct_visual_bias_v3"] = {
+        "schema_version": "PG_DIRECT_VISUAL_BIAS_V3",
+        "side": "BUY",
+        "confidence": 0.82,
+        "dominant_side": "BUY",
+    }
+    frontline = {
+        "schema_version": "PG_FRONTLINE_QWEN_V3",
+        "state": "ok",
+        "verdict": "ALLOW",
+        "confidence": 0.82,
+        "side": "BUY",
+        "reason": "The visual read supports the buy side while the sell side stays secondary.",
+        "model": "qwen3-vl-32b",
     }
 
-    with _dashboard_page(chromium_browser, payload) as page:
-        assert page.locator("#latent-control-side").inner_text() == "BUY LOCAL LEG ONLY"
-        assert page.locator("#latent-buy-status").inner_text() == "LOCAL LEG ONLY"
-        assert page.locator("#latent-sell-status").inner_text() == "NOT CONFIRMED"
-        assert "23.0 candles" in page.locator("#latent-cycle-horizon").inner_text()
-        assert "1h 55m" in page.locator("#latent-cycle-horizon").inner_text()
+    with _dashboard_page(
+        chromium_browser, payload, frontline=frontline
+    ) as page:
+        assert page.locator("#latent-control-rail").count() == 0
+        assert page.locator("#latent-buy-component").count() == 0
+        assert page.locator("#latent-sell-component").count() == 0
+        page.wait_for_function(
+            "() => document.querySelector('#frontline-qwen-verdict')?.textContent.trim() === 'ALLOW'"
+        )
+        assert page.locator("#frontline-qwen-panel").get_attribute(
+            "data-verdict"
+        ) == "ALLOW"
+        assert page.locator("#frontline-qwen-buy-state").inner_text() == "PREFERRED"
+        assert page.locator("#frontline-qwen-sell-state").inner_text() == "SECONDARY"
+        assert page.locator("#frontline-qwen-model").inner_text() == (
+            "analyst: qwen3-vl-32b"
+        )
 
 
 def test_ended_sell_pressure_and_current_up_move_keep_entry_closed_and_study_uptrend(

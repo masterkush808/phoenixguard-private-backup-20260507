@@ -1,0 +1,17 @@
+##Bridge kill process
+
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*phoenixguard_direct_trade_bridge.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+##Bridge launch process
+
+.\.venv-live\Scripts\python.exe .\Backend\launch\phoenixguard_direct_trade_bridge.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --transport listener --signal-source bias --timeout 30 --fixed-expiry-seconds 180 --max-signal-age-seconds 0 --max-trades-per-candle 2 --max-trades-per-session 5 --block-opposite-side-same-candle
+
+
+##Navigate to Repo Root + Execution Policy
+
+PowerShellSet-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
+Set-ExecutionPolicy -Scope Process Bypass -Force
+
+##Phoenix Guard launch 
+
+.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py

@@ -32,7 +32,7 @@
   "pythonVersion": "3.11",
   "stubPath": "Backend/typings",
   "venvPath": ".",
-  "venv": ".venv-dev",
+  "venv": ".venv-live",
   "reportUnknownVariableType": "error",
   "reportUnknownMemberType": "error",
   "reportUnknownArgumentType": "error",

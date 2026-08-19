@@ -17,9 +17,9 @@ $ownedMarkers = @(
     'start_phoenixguard_mobile_api.py',
     'start_phoenixguard_24_7_tracker.py',
     'start_phoenixguard_windows_region_capture.py',
-    'shooter.py',
     'phoenixguard.runtime.model_council_daemon',
     'phoenixguard_disk_growth_guard.py',
+    'phoenixguard_frontline_qwen.py',
     'uvicorn phoenixguard.mobile_api.app'
 )
 
@@ -165,10 +165,23 @@ for ($attempt = 1; $attempt -le 4 -and -not $session; $attempt++) {
     }
 }
 
+# Frontline Qwen daemon: watches the live stream, feeds the FULL untruncated
+# payload + studied chart image to the best Qwen model (free Puter API), and
+# publishes a frontline_reasoning_v3 verdict the direct trade bridge respects
+# as a veto gate.  Fails open (no token / no API) without blocking the bridge.
+$frontlineScript = Join-Path $projectRoot 'Backend\launch\phoenixguard_frontline_qwen.py'
+$frontline = Start-Process `
+    -FilePath $pythonPath `
+    -ArgumentList ('"{0}"' -f $frontlineScript) `
+    -WorkingDirectory $projectRoot `
+    -WindowStyle Hidden `
+    -PassThru
+
 [ordered]@{
     schema_version = 'PG_FAST_RESTART_V3'
     stopped_processes = $owned.Count
     tracker_pid = $tracker.Id
+    frontline_pid = $frontline.Id
     api = $baseUrl
     ingest_armed = [bool]$readiness.readiness.armed
     tracking = [bool]$session.tracking_enabled

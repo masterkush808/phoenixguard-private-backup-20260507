@@ -248,24 +248,30 @@ def test_dashboard_commits_live_answers_before_the_broker_bitmap_finishes() -> N
     assert "state.overlays = operatorOverlays;" in text[full_commit:]
 
 
-def test_dashboard_first_viewport_is_two_sided_hidden_state_control() -> None:
+def test_dashboard_first_viewport_is_market_clearance_panel() -> None:
     text = _dashboard_text()
 
-    assert '<h2 id="beginner-story-title">Hidden-state control</h2>' in text
-    assert 'class="latent-component-grid" aria-label="BUY and SELL hidden-state components"' in text
-    assert text.count('class="latent-component latent-component-') == 2
-    assert 'id="latent-buy-component"' in text
-    assert 'id="latent-sell-component"' in text
-    assert 'id="latent-control-side">ANALYZING</strong>' in text
-    assert 'id="latent-cycle-horizon">Full state-cycle horizon pending</div>' in text
     assert 'class="decision-questions legacy-three-question-panel"' in text
     assert 'aria-hidden="true" hidden' in text
     assert '.legacy-three-question-panel {' in text
     assert 'display: none !important;' in text
     assert 'function renderLatentStateControl(payload)' in text
-    assert 'study.hidden_state_discovery_v3 || study.latent_state_discovery_v3' in text
     assert 'renderLatentStateControl(payload);' in text
-    assert 'A local swing is not control. Control needs multi-candle state maturity' in text
+    assert 'class="frontline-qwen-panel" id="frontline-qwen-panel"' in text
+    assert 'id="frontline-qwen-panel" data-state="pending" data-verdict="pending"' in text
+    assert '>Market analysis clearance</h3>' in text
+    assert 'id="frontline-qwen-verdict">PENDING</strong>' in text
+    assert 'id="frontline-qwen-buy"' in text
+    assert 'id="frontline-qwen-sell"' in text
+    assert "function renderFrontlineQwen(payload, frontline)" in text
+    assert "function renderFrontlineQwenMeta(qwen, payload)" in text
+    assert "refreshFrontlineQwen(operatorState, {silent: true});" in text
+    assert "async function refreshFrontlineQwen(payload, options)" in text
+    assert '"/v1/mobile/frontline/latest/" + encodeURIComponent(SESSION_ID)' in text
+    assert "function frontlineUrl() {" in text
+    assert "analyst: " in text
+    assert "frame: " in text
+    assert "Trade clearance" in text
     assert 'safeObject(safeObject(payload).three_questions)' in text
     assert '"No lineage-matched timing source"' in text
     assert (
@@ -320,31 +326,33 @@ def test_dashboard_first_viewport_is_two_sided_hidden_state_control() -> None:
     assert "function completedCandleHistoryRows(payload)" in text
     assert "closed_candle_key" in text
     assert "function rememberCompletedStudyHistory(payload)" in text
+    assert 'id="latent-buy-component"' not in text
+    assert 'id="latent-sell-component"' not in text
+    assert 'class="latent-component-grid"' not in text
+    assert 'id="latent-control-side"' not in text
 
 
-def test_dashboard_exposes_live_hidden_state_evidence_audit() -> None:
+def test_dashboard_hides_live_hidden_state_evidence_audit() -> None:
     text = _dashboard_text()
 
-    assert 'id="decision-audit-strip" data-state="collecting"' in text
-    assert 'id="decision-audit-title">Hidden-state evidence · live audit</span>' in text
-    assert 'id="decision-audit-status">WAITING</strong>' in text
-    assert "Waiting for closed-candle state evidence." in text
-    assert "Descriptive evidence only · never an entry instruction, trade, or permission." in text
-    assert "function passiveDecisionAudit(payload)" in text
-    assert "function renderPassiveDecisionAudit(payload)" in text
-    assert "audit.can_grant_entry_permission !== false" in text
-    assert "metrics.directional_accuracy" in text
-    assert "pairDna.transition_support" in text
-    assert "structure.confirmed_trendline_count" in text
-    assert "distribution.normalized_entropy" in text
-    assert "audit.profitability_evidence_v3" in text
-    assert 'profitability.promotion_eligible === true' in text
-    assert '"POSITIVE EV PROVEN"' in text
-    assert 'status === "STRUCTURALLY_CONFIRMED_CONTROL"' in text
-    assert 'candidateSide + " LOCAL LEG ONLY"' in text
-    assert 'directionalSide + " DOMINANT STRUCTURE"' in text
-    assert 'status.startsWith("STABLE_DIRECTION")' in text
-    assert "renderPassiveDecisionAudit(payload);" in text
+    assert 'id="decision-audit-strip"' not in text
+    assert "Hidden-state evidence" not in text
+    assert "function passiveDecisionAudit(payload)" not in text
+    assert "function renderPassiveDecisionAudit(payload)" not in text
+    assert "renderPassiveDecisionAudit(payload);" not in text
+    assert "pairDna.transition_support" not in text
+    assert "distribution.normalized_entropy" not in text
+    assert "audit.profitability_evidence_v3" not in text
+    assert '"POSITIVE EV PROVEN"' not in text
+    assert 'status === "STRUCTURALLY_CONFIRMED_CONTROL"' not in text
+    assert 'candidateSide + " LOCAL LEG ONLY"' not in text
+    assert 'directionalSide + " DOMINANT STRUCTURE"' not in text
+    assert "Descriptive evidence only · never an entry instruction, trade, or permission." not in text
+    assert 'id="frontline-qwen-panel" data-state="pending" data-verdict="pending"' in text
+    assert "Trade clearance" in text
+    assert "Analyst assessment" in text
+    assert "BUY SIDE" in text
+    assert "SELL SIDE" in text
 
 
 def test_dashboard_keeps_continuous_observation_restrained_and_non_authoritative() -> None:

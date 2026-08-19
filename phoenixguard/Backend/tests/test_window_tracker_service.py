@@ -11417,7 +11417,6 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert "body.labels-on.labels-show-all .surface-hotspot.label-collision-hidden span" in dashboard_html
     assert 'els.body.classList.toggle("labels-show-all", exhaustiveLabelModeActive());' in dashboard_html
     assert 'id="book-rule-architecture-panel"' in dashboard_html
-    assert "liquidity_turtle_soup" in dashboard_html
     assert "REPLAY: {objects:" not in dashboard_html
     assert "FULL_HISTORY_READ: {objects:" not in dashboard_html
 

@@ -1758,35 +1758,25 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             # merged into a current V3 operator frame.
             continue
         if family == "book_rules":
-            bounds = row.get("bounds")
-            chart_bounds = row.get("chart_bounds")
+            bounds = _as_sequence(row.get("bounds"))
+            chart_bounds = _as_sequence(row.get("chart_bounds"))
             if not (
                 row.get("geometry_contract_accepted") is True
                 and str(row.get("instrument_identity_status") or "").upper()
                 == "LOCKED"
                 and str(row.get("coordinate_space") or "").lower() == "chart"
                 and str(row.get("coordinate_units") or "").lower() == "pixels"
-                and isinstance(bounds, Sequence)
-                and not isinstance(bounds, (str, bytes, bytearray))
                 and len(bounds) == 4
-                and isinstance(chart_bounds, Sequence)
-                and not isinstance(chart_bounds, (str, bytes, bytearray))
                 and len(chart_bounds) == 4
             ):
                 continue
             if overlay_kind == "book_rule_line":
-                anchor_wick_points = row.get("anchor_wick_points")
-                line_points = row.get("line_points")
+                anchor_wick_points = _as_sequence(row.get("anchor_wick_points"))
+                line_points = _as_sequence(row.get("line_points"))
                 if not (
                     row.get("strict_third_touch_confirmed") is True
                     and int(_epoch_float(row.get("touch_count"), 0.0)) >= 3
-                    and isinstance(anchor_wick_points, Sequence)
-                    and not isinstance(
-                        anchor_wick_points, (str, bytes, bytearray)
-                    )
                     and len(anchor_wick_points) == 2
-                    and isinstance(line_points, Sequence)
-                    and not isinstance(line_points, (str, bytes, bytearray))
                     and len(line_points) >= 2
                 ):
                     continue
@@ -9774,6 +9764,33 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
 
+    @app.get("/v1/mobile/frontline/latest")
+    @app.get("/v1/mobile/frontline/latest/{session_id}")
+    def get_frontline_reasoning_latest(session_id: str | None = None) -> dict[str, object]:
+        """Return the most recent Frontline Qwen veto verdict for the session.
+
+        The verdict is published by phoenixguard_frontline_qwen.py as a
+        ``frontline_reasoning_v3.json`` sidecar inside the tracker session dir
+        and is consumed by the direct trade bridge as a fail-safe veto gate.
+        This endpoint lets the dashboard render what the Qwen VLM is saying.
+        """
+        resolved_session_id = resolve_window_tracker_dashboard_session_id(session_id)
+        try:
+            tracker_service = get_window_tracker_service()
+            session_dir = tracker_service.session_dir(resolved_session_id)
+        except Exception:
+            return {"schema_version": "PG_FRONTLINE_REASONING_V3", "state": "unavailable", "reason": "tracker session unavailable"}
+        sidecar_path = session_dir / "frontline_reasoning_v3.json"
+        if not sidecar_path.is_file():
+            return {"schema_version": "PG_FRONTLINE_REASONING_V3", "state": "pending", "reason": "no frontline verdict published yet"}
+        try:
+            raw = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {"schema_version": "PG_FRONTLINE_REASONING_V3", "state": "unreadable", "reason": "frontline verdict sidecar could not be read"}
+        if not isinstance(raw, Mapping):
+            return {"schema_version": "PG_FRONTLINE_REASONING_V3", "state": "invalid", "reason": "frontline verdict sidecar is not an object"}
+        return dict(cast(Mapping[str, object], raw))
+
     @app.put("/v1/mobile/window-tracker/sessions/{session_id}/focus-region")
     def set_tracker_focus_region(
         session_id: str,
@@ -10813,6 +10830,7 @@ def create_app(
         create_tracker_session,
         update_tracker_session_locked_window,
         get_tracker_session,
+        get_frontline_reasoning_latest,
         set_tracker_focus_region,
         clear_tracker_focus_region,
         arm_tracker_focus_region,

@@ -30,13 +30,6 @@ def test_launchers_require_repo_venv_python_instead_of_global_python() -> None:
             "py -3.11 -m venv",
             "Activate.ps1",
         ),
-        "Business/api/start_business_mock_local.ps1": ("python -m uvicorn",),
-        "Business/api/start_phoenixguard_share.ps1": (
-            "py -3.11 -m venv",
-            "Activate.ps1",
-            "python -m pip",
-            "python $ShareRunnerPath",
-        ),
         "Backend/launch/deploy/windows/Start-PhoenixGuardVmMonitor.ps1": (
             "py -3.11 -m venv",
         ),
@@ -68,14 +61,10 @@ def test_python_resolver_points_every_python_path_to_profile_environment() -> No
 
 def test_bootstrap_uses_only_repo_venv_python() -> None:
     bootstrap_text = _read("_pg_bootstrap.py")
-    sitecustomize_text = _read("sitecustomize.py")
     assert '"phoenixguard-python.exe"' not in bootstrap_text
-    assert '"phoenixguard-python.exe"' not in sitecustomize_text
     assert "pyvenv.cfg" not in bootstrap_text
     assert "multiprocessing.set_executable" not in bootstrap_text
-    assert "multiprocessing.set_executable" not in sitecustomize_text
     assert "__PYVENV_LAUNCHER__" not in bootstrap_text
-    assert "__PYVENV_LAUNCHER__" not in sitecustomize_text
 
 
 def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -97,20 +86,6 @@ def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.Monke
     assert "PHOENIXGUARD_PYTHON_EXE is not configured PhoenixGuard python" in status["reason"]
 
 
-def test_certification_visual_tools_use_repo_venv_for_child_python() -> None:
-    for relative_path in (
-        "Backend/tools/run_final_10h_production_certification.py",
-        "Backend/tools/capture_overlay_anchor_screenshots_v3.py",
-        "Backend/tools/certify_overlay_visual_truth_v3.py",
-    ):
-        text = _read(relative_path)
-        assert "PHOENIXGUARD_PYTHON_EXE" in text
-        assert 'Scripts" / "python.exe"' in text
-        assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" not in text
-        assert "phoenixguard-python.exe" not in text
-        assert "[sys.executable" not in text
-
-
 def test_profile_installers_use_separate_locked_environments() -> None:
     expected_envs = {
         "Backend/scripts_runtime/env/install_live.ps1": ".venv-live",
@@ -125,12 +100,6 @@ def test_profile_installers_use_separate_locked_environments() -> None:
         assert "py -3.11 -m venv $venvPath" in text
         assert "Remove-Item -LiteralPath $venvPath -Recurse -Force" not in text
         assert "phoenixguard_repo_paths.pth" in text
-
-
-def test_final_certification_periodic_overlay_capture_is_lazy_loaded() -> None:
-    text = _read("Backend/tools/run_final_10h_production_certification.py")
-    assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES"' in text
-    assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES,TRIGGER,FULL_HISTORY_READ"' not in text
 
 
 def test_single_venv_runtime_verifier_documents_runtime_state_not_environment() -> None:
@@ -153,7 +122,6 @@ def test_single_venv_runtime_verifier_documents_runtime_state_not_environment() 
     (
         r'python.exe "C:\repo\Backend\launch\start_phoenixguard_24_7_tracker.py"',
         r'python.exe "C:\repo\Backend\launch\start_phoenixguard_mobile_api.py"',
-        r'python.exe "C:\repo\Backend\launch\shooter.py" signal',
         r"python.exe -m phoenixguard.runtime.model_council_daemon",
         r'python.exe "C:\repo\Backend\tools\phoenixguard_disk_growth_guard.py" --apply',
         r"python.exe -m uvicorn phoenixguard.mobile_api.app:app --port 8793",
@@ -179,7 +147,7 @@ def test_live_runtime_process_scope_excludes_pylance_and_development_tools(comma
 
 
 def test_kill_switch_targets_named_stack_roles_without_repo_wide_python_fallback() -> None:
-    text = _read("Developer/developer_tools/phoenixguard_kill_switch.py")
+    text = _read("Backend/tools/phoenixguard_kill_switch.py")
 
     assert '"phoenixguard_disk_growth_guard.py"' in text
     assert 'command = [sys.executable, str(cleaner), "--apply", "--delete"]' in text
@@ -412,9 +380,6 @@ def test_production_live_capture_is_one_second_while_slow_lanes_remain_thirty_se
         "Backend/launch/launch_live_ready.ps1": (
             "else { 1.0 }",
         ),
-        "Backend/launch/launch_full_then_shooter.ps1": (
-            "else { 1.0 }",
-        ),
         "Backend/launch/launch_phoenixguard_live_ready.ps1": (
             "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }",
             "PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }",
@@ -439,32 +404,13 @@ def test_production_live_capture_is_one_second_while_slow_lanes_remain_thirty_se
             "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }",
             "PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }",
         ),
-        "Backend/launch/shooter.py": (
-            "DEFAULT_POLL_SECONDS = 30.0",
-        ),
-        "Backend/tools/enter_now_floating_gui.py": (
-            '"--poll-ms", type=int, default=30000',
-        ),
-        "Backend/tools/start_enter_now_floating_gui.ps1": (
-            "[int]$PollMilliseconds = 30000",
-        ),
         "Backend/tools/certify_process_topology_v3.py": (
             "--capture-interval 30 --no-open-dashboard",
             "--poll 30.0 --heartbeat 4.0",
         ),
-        "Backend/tools/certify_shooter_persistence_v3.py": (
-            "--poll 30.0 --heartbeat 4.0",
-        ),
-        "Backend/launch/deploy/windows/WINDOWS_VM_CONTINUOUS_MONITOR.md": (
-            r".\.venv-live\Scripts\python.exe Backend\launch\shooter.py",
-            "--poll 30.0 --heartbeat 4.0",
-        ),
-        "Developer/developer_tools/phoenixguard_kill_switch.py": (
+        "Backend/tools/phoenixguard_kill_switch.py": (
             "DEFAULT_CAPTURE_INTERVAL_SEC = 1.0",
             '"--shooter-poll-sec", type=float, default=30.0',
-        ),
-        "Developer/deployment/windows_worker_bootstrap.ps1": (
-            "[double]$CaptureIntervalSec = 30.0",
         ),
     }
 

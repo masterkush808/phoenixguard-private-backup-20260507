@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -420,6 +421,7 @@ def test_mobile_api_development_profile_reports_job_submission_available(
 ) -> None:
     monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv-dev")
     monkeypatch.setenv("PHOENIXGUARD_PYTHON_PROFILE", "dev")
+    monkeypatch.setattr(sys, "prefix", str(Path(sys.prefix).parent / ".venv-dev"))
 
     capability = PhoenixGuardPipelineAdapter().job_submission_capability()
 

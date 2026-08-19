@@ -77,6 +77,9 @@ data/**
 !data/skill_gate_isolated_smoke.json
 
 # Local secrets and profiles
+puter_token.txt
+*.token.txt
+*_auth_token*
 deploy/windows/phoenixguard.vm-share.env.ps1
 deploy/windows/phoenixguard.vm-monitor.env.ps1
 Backend/launch/deploy/windows/phoenixguard.vm-share.env.ps1

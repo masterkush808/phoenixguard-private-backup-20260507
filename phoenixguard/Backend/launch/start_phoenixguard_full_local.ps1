@@ -135,7 +135,7 @@ $env:PHOENIXGUARD_DATA_DIR = $dataDir
 $env:PHOENIXGUARD_LOGS_DIR = $logsDir
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = $statusPath
 
-$launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $LaunchProfile
+$launchShooter = $false  # shooter.py retired and removed from the V3 stack
 $launchMt4Bridge = -not ($env:PHOENIXGUARD_MT4_BRIDGE_ENABLED -and $env:PHOENIXGUARD_MT4_BRIDGE_ENABLED.Trim().ToLowerInvariant() -in @('0', 'false', 'off', 'no'))
 $brokerClickPath = 'RETIRED_PACKAGE_REPORTER_ONLY'
 

@@ -781,6 +781,25 @@ if ($NoBrowser) {
 
 & (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_full_local.ps1') @launchArgs
 
+# Frontline Qwen daemon: watches the live session stream, feeds the FULL
+# untruncated V3 payload plus the studied chart image to the best Qwen vision
+# model (free Puter API), and publishes a frontline_reasoning_v3 verdict the
+# direct trade bridge respects as a veto gate.  Fails open (no token / no API)
+# without blocking the bridge.
+$frontlineScript = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\phoenixguard_frontline_qwen.py'
+$frontlineDaemon = $null
+if (Test-Path -LiteralPath $frontlineScript -PathType Leaf) {
+    $frontlineDaemon = Start-Process `
+        -FilePath $pythonPath `
+        -ArgumentList ('"{0}"' -f $frontlineScript) `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle Hidden `
+        -PassThru
+    Write-Host "  Frontline Qwen daemon started (pid=$($frontlineDaemon.Id))"
+} else {
+    Write-Warning "Frontline Qwen daemon script not found: $frontlineScript (skipped)"
+}
+
 Start-Sleep -Seconds ([Math]::Max(1, $WarmupSeconds))
 
 Write-Host ""
@@ -842,11 +861,9 @@ $topologyArgs = @(
     '--port',
     '8793',
     '--data-dir',
-    $env:PHOENIXGUARD_DATA_DIR
+    $env:PHOENIXGUARD_DATA_DIR,
+    '--allow-missing-shooter'
 )
-if ($DisableShooter) {
-    $topologyArgs += '--allow-missing-shooter'
-}
 if ($launchMt4Bridge) {
     $topologyArgs += '--require-bridge'
 }
@@ -876,6 +893,8 @@ $summaryPayload = [ordered]@{
     base_url = $baseUrl
     dashboard_url = $dashboardUrl
     dashboard_browser = $DashboardBrowser
+    frontline_pid = if ($null -ne $frontlineDaemon) { $frontlineDaemon.Id } else { 0 }
+    frontline_running = [bool]$frontlineDaemon
     broker_window_query = $BrokerWindowQuery
     broker_window_hwnd = $BrokerWindowHwnd
     session_id = $SessionId

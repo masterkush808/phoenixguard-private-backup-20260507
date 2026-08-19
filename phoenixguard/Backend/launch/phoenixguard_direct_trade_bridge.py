@@ -96,6 +96,7 @@ def _default_calibration_dir(project_root: Path | None = None) -> Path:
 DEFAULT_TRIGGER_MANIFEST = _default_calibration_dir() / "trigger_calibration_manifest.json"
 DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 0.0
 DEFAULT_PRE_CLICK_DELAY_SECONDS = 5.0
+DEFAULT_INTER_CLICK_DELAY_SECONDS = 0.35
 DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 # Listener delivery is the liveness contract.  A stable trend/bias may remain
 # correct for hours, so an unchanged observation timestamp is not a stale
@@ -104,9 +105,10 @@ DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
 DEFAULT_SIGNAL_SOURCE = "bias"
 DEFAULT_FLIP_GUARD_SECONDS = 0.0
 DEFAULT_MAX_TRADES_PER_CANDLE = 1
-DEFAULT_MAX_TRADES_PER_SESSION = 5
+DEFAULT_MAX_TRADES_PER_SESSION = 8
 DEFAULT_COOLDOWN_AFTER_TRADES = 0
 DEFAULT_COOLDOWN_SECONDS = 0.0
+DEFAULT_FRONTLINE_FRESHNESS_SECONDS = 180.0
 HYBRID_READY_ENTRY_STATES = frozenset({"READY", "SNIPER_READY", "TRIGGER_READY", "TRIGGERED", "ACTIVE", "EXECUTE"})
 HYBRID_WATCH_ENTRY_STATES = frozenset({"SNIPER_WATCH", "WAIT_FOR_SNIPER", "WAIT_FOR_TRIGGER", "WATCH"})
 HYBRID_FAST_CONFIDENCE_FLOOR = 0.58
@@ -284,6 +286,21 @@ def _float(value: object, default: float = 0.0) -> float:
     return default
 
 
+def _int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
 def _upper(value: object) -> str:
     return _text(value).upper()
 
@@ -430,6 +447,52 @@ def _attach_direct_visual_bias(
     return merged
 
 
+def _session_frontline_reasoning_path(session_id: str) -> Path:
+    runtime_dir = _default_live_runtime_dir()
+    data_dir = str(os.getenv("PHOENIXGUARD_DATA_DIR") or "").strip()
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = os.path.normcase(str(path))
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    if data_dir:
+        add(Path(data_dir).expanduser() / "mobile_api" / "window_tracker" / "sessions" / _text(session_id) / "frontline_reasoning_v3.json")
+    add(runtime_dir / "data_live" / "mobile_api" / "window_tracker" / "sessions" / _text(session_id) / "frontline_reasoning_v3.json")
+    add(PROJECT_ROOT / "data" / "mobile_api" / "window_tracker" / "sessions" / _text(session_id) / "frontline_reasoning_v3.json")
+    add(PROJECT_ROOT / "data" / "window_tracker" / "sessions" / _text(session_id) / "frontline_reasoning_v3.json")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+def _attach_frontline_reasoning(
+    payload: Mapping[str, object], session_id: str
+) -> dict[str, object]:
+    merged = dict(payload)
+    sidecar_path = _session_frontline_reasoning_path(session_id)
+    if not sidecar_path.is_file():
+        return merged
+    try:
+        frontline = _load_cached_live_state(sidecar_path)
+    except Exception:
+        return merged
+    if _upper(frontline.get("schema_version")) != "PG_FRONTLINE_REASONING_V3":
+        return merged
+    merged["frontline_reasoning_v3"] = frontline
+    return merged
+
+
+def _attach_live_sidecars(payload: Mapping[str, object], session_id: str) -> dict[str, object]:
+    merged = _attach_direct_visual_bias(payload, session_id)
+    return _attach_frontline_reasoning(merged, session_id)
+
+
 def _payload_live_epoch(payload: Mapping[str, object]) -> float:
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
     visual_observation = _mapping_or_empty(payload.get("visual_observation_v3"))
@@ -467,7 +530,7 @@ def _read_live_state(*, base_url: str, session_id: str, timeout_sec: float) -> d
     if local_payload is not None and _payload_live_epoch(local_payload) > 0.0:
         local_payload["_bridge_state_source"] = "local_runtime_file"
         local_payload["_bridge_state_epoch"] = _payload_live_epoch(local_payload)
-        return _attach_direct_visual_bias(local_payload, session_id)
+        return _attach_live_sidecars(local_payload, session_id)
 
     url = base_url.rstrip("/") + f"/v1/mobile/live/state/v3/{session_id}?mode=CLEAN_LIVE&compact=1"
     api_payload: dict[str, object] | None = None
@@ -483,15 +546,15 @@ def _read_live_state(*, base_url: str, session_id: str, timeout_sec: float) -> d
         payload = _prefer_fresher_live_payload(api_payload, local_payload)
         payload["_bridge_state_source"] = "local_runtime_file" if local_epoch > api_epoch else "mobile_api"
         payload["_bridge_state_epoch"] = _payload_live_epoch(payload)
-        return _attach_direct_visual_bias(payload, session_id)
+        return _attach_live_sidecars(payload, session_id)
     if local_payload is not None:
         local_payload["_bridge_state_source"] = "local_runtime_file"
         local_payload["_bridge_state_epoch"] = _payload_live_epoch(local_payload)
-        return _attach_direct_visual_bias(local_payload, session_id)
+        return _attach_live_sidecars(local_payload, session_id)
     if api_payload is not None:
         api_payload["_bridge_state_source"] = "mobile_api"
         api_payload["_bridge_state_epoch"] = _payload_live_epoch(api_payload)
-        return _attach_direct_visual_bias(api_payload, session_id)
+        return _attach_live_sidecars(api_payload, session_id)
     raise RuntimeError(f"Unable to read live state from mobile API or local runtime file: {api_error}")
 
 
@@ -553,14 +616,19 @@ def _trade_from_listener_payload(
     fixed_expiry_seconds_override: int | None,
     max_signal_age_seconds: float,
     signal_source: str,
+    frontline_required: bool = False,
+    frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> dict[str, object]:
     """Resolve one producer-published update without rereading live state."""
 
+    payload = _attach_live_sidecars(payload, session_id)
     trade = _resolve_trade_payload(
         payload,
         score_threshold=score_threshold,
         max_signal_age_seconds=max_signal_age_seconds,
         signal_source=signal_source,
+        frontline_required=frontline_required,
+        frontline_freshness_seconds=frontline_freshness_seconds,
     )
     if fixed_expiry_seconds_override is not None and int(
         fixed_expiry_seconds_override
@@ -589,6 +657,8 @@ def _read_fresh_trade(
     score_threshold: float,
     max_signal_age_seconds: float,
     signal_source: str,
+    frontline_required: bool = False,
+    frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> tuple[dict[str, object], dict[str, object]]:
     payload = _read_live_state(
         base_url=base_url,
@@ -600,6 +670,8 @@ def _read_fresh_trade(
         score_threshold=score_threshold,
         max_signal_age_seconds=max_signal_age_seconds,
         signal_source=signal_source,
+        frontline_required=frontline_required,
+        frontline_freshness_seconds=frontline_freshness_seconds,
     )
     return payload, trade
 
@@ -1462,6 +1534,15 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
                 "source": "latest_signal.market_study_v3.candle_intelligence",
                 "placement_context": placement_context,
             }
+        if placement_gate_blocked:
+            return {
+                "ready": False,
+                "state": "PLACEMENT_WAIT",
+                "timing_class": timing_class or "placement_wait",
+                "reason": placement_reason or "Wait for a favorable placement area before this entry.",
+                "source": "latest_signal.execution_timing",
+                "placement_context": placement_context,
+            }
         return {
             "ready": True,
             "state": "VISUAL_REENTRY_READY",
@@ -1472,6 +1553,15 @@ def _bias_entry_timing_context(payload: Mapping[str, object], *, side: str) -> d
         }
 
     if latest_direction == normalized_side and (aligned_rejection or pullback_seen):
+        if placement_gate_blocked:
+            return {
+                "ready": False,
+                "state": "PLACEMENT_WAIT",
+                "timing_class": timing_class or "placement_wait",
+                "reason": placement_reason or "Wait for a favorable placement area before this entry.",
+                "source": "latest_signal.execution_timing",
+                "placement_context": placement_context,
+            }
         return {
             "ready": True,
             "state": "VISUAL_REENTRY_READY",
@@ -2623,12 +2713,118 @@ def _load_boxes_from_manifest(manifest: Mapping[str, object]) -> dict[str, tuple
     return boxes
 
 
+def _frontline_gate_context(
+    payload: Mapping[str, object],
+    signal: Mapping[str, object],
+    *,
+    now_epoch: float,
+    required: bool,
+    freshness_seconds: float,
+) -> dict[str, object]:
+    """Apply the Frontline Qwen veto gate.
+
+    Qwen has veto power only: a fresh, matching verdict can block a trade the
+    bridge wanted; it can never start one.  A missing, stale, or errored
+    verdict never blocks by default (fail-safe).  When ``required`` is set the
+    bridge waits for a fresh matching verdict instead of proceeding without it.
+    """
+    verdict = _mapping_or_empty(payload.get("frontline_reasoning_v3"))
+    if not verdict:
+        if required:
+            raise TradeRejected(
+                "Frontline Qwen verdict is required but no verdict has been published yet."
+            )
+        return {"applied": False, "reason": "no_verdict"}
+
+    if _upper(verdict.get("schema_version")) != "PG_FRONTLINE_REASONING_V3":
+        if required:
+            raise TradeRejected("Frontline Qwen verdict has an incompatible schema.")
+        return {"applied": False, "reason": "schema_mismatch"}
+
+    state = _text(verdict.get("state")).lower()
+    if state not in {"ok", "mock"}:
+        if required:
+            raise TradeRejected(
+                _text(verdict.get("reason")) or f"Frontline Qwen verdict is unavailable (state={state})."
+            )
+        return {"applied": False, "reason": f"state:{state}"}
+
+    observed_epoch = _float(verdict.get("observed_epoch"), 0.0)
+    signal_epoch = _float(signal.get("observed_epoch"), _float(signal.get("published_epoch"), 0.0))
+    verdict_age = max(0.0, now_epoch - _float(verdict.get("published_epoch"), now_epoch))
+    candle_match = False
+    verdict_candle_seq = verdict.get("candle_sequence")
+    signal_candle_seq = signal.get("candle_sequence")
+    if verdict_candle_seq is not None and signal_candle_seq is not None:
+        candle_match = _int(verdict_candle_seq, -1) == _int(signal_candle_seq, -2)
+    if candle_match:
+        verdict_candle_key = _text(verdict.get("candle_key"))
+        signal_candle_key = _text(signal.get("candle_key"))
+        if verdict_candle_key and signal_candle_key:
+            candle_match = verdict_candle_key == signal_candle_key
+
+    age_window_ok = verdict_age <= max(0.0, float(freshness_seconds))
+    epoch_close = (
+        observed_epoch <= 0.0
+        or signal_epoch <= 0.0
+        or abs(observed_epoch - signal_epoch) <= max(30.0, float(freshness_seconds))
+    )
+    fresh = candle_match or (age_window_ok and epoch_close)
+    if not fresh:
+        if required:
+            raise TradeRejected(
+                "Frontline Qwen verdict has not caught up to the current candle yet."
+            )
+        return {"applied": False, "reason": "stale_or_mismatched"}
+
+    verdict_kind = _text(verdict.get("verdict")).upper()
+    verdict_side = _text(verdict.get("side")).upper()
+    signal_side = _upper(signal.get("side"))
+    vetoed = False
+    veto_reason = ""
+    if verdict_kind == "VETO":
+        vetoed = True
+        veto_reason = (
+            _text(verdict.get("reason"))
+            or f"Frontline Qwen vetoed the {signal_side or 'candidate'} entry."
+        )
+    elif verdict_side in {"BUY", "SELL"} and signal_side in {"BUY", "SELL"} and verdict_side != signal_side:
+        vetoed = True
+        veto_reason = (
+            f"Frontline Qwen read {verdict_side} while the bridge resolved {signal_side}; "
+            "wait for alignment before entering."
+        )
+    if vetoed:
+        raise TradeRejected(veto_reason)
+
+    return {
+        "applied": True,
+        "verdict": verdict_kind or "ALLOW",
+        "side": verdict_side,
+        "confidence": _float(verdict.get("confidence"), 0.0),
+        "position_quality": _text(verdict.get("position_quality")),
+        "reason": _text(verdict.get("reason")),
+        "warnings": list(
+            cast(Sequence[object], verdict.get("warnings"))
+            if isinstance(verdict.get("warnings"), Sequence)
+            and not isinstance(verdict.get("warnings"), (str, bytes, bytearray))
+            else []
+        ),
+        "model": _text(verdict.get("model")),
+        "state": state,
+        "candle_match": candle_match,
+        "age_seconds": round(verdict_age, 2),
+    }
+
+
 def _resolve_trade_payload(
     payload: Mapping[str, object],
     *,
     score_threshold: float = 0.0,
     max_signal_age_seconds: float = DEFAULT_MAX_SIGNAL_AGE_SECONDS,
     signal_source: str = DEFAULT_SIGNAL_SOURCE,
+    frontline_required: bool = False,
+    frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> dict[str, object]:
     signal = _live_signal_from_state(payload, signal_source=signal_source)
     if not signal:
@@ -2662,6 +2858,13 @@ def _resolve_trade_payload(
     _ = score_threshold
     expiry_value = signal.get("expiry_seconds")
     expiry_seconds = int(_float(expiry_value, 300.0) or 300.0)
+    frontline_context = _frontline_gate_context(
+        payload,
+        signal,
+        now_epoch=now_epoch,
+        required=frontline_required,
+        freshness_seconds=frontline_freshness_seconds,
+    )
     return {
         "signal_id": _text(signal.get("signal_id")),
         "side": _upper(signal.get("side")),
@@ -2701,6 +2904,22 @@ def _resolve_trade_payload(
         "placement_context": _mapping_or_empty(signal.get("placement_context")),
         "next_candle_bias": _text(signal.get("next_candle_bias")),
         "high_frequency_status": _text(signal.get("high_frequency_status")),
+        "frontline_applied": bool(frontline_context.get("applied")),
+        "frontline_verdict": _text(frontline_context.get("verdict")),
+        "frontline_side": _text(frontline_context.get("side")),
+        "frontline_confidence": _float(frontline_context.get("confidence"), 0.0),
+        "frontline_position_quality": _text(frontline_context.get("position_quality")),
+        "frontline_reason": _text(frontline_context.get("reason")),
+        "frontline_warnings": list(
+            cast(Sequence[object], frontline_context.get("warnings"))
+            if isinstance(frontline_context.get("warnings"), Sequence)
+            and not isinstance(frontline_context.get("warnings"), (str, bytes, bytearray))
+            else []
+        ),
+        "frontline_model": _text(frontline_context.get("model")),
+        "frontline_state": _text(frontline_context.get("state")),
+        "frontline_candle_match": bool(frontline_context.get("candle_match")),
+        "frontline_age_seconds": round(_float(frontline_context.get("age_seconds"), 0.0), 2),
     }
 
 
@@ -2714,6 +2933,10 @@ def _timing_policy_from_manifest(manifest: Mapping[str, object]) -> dict[str, fl
         "pre_click_delay_seconds": max(
             0.0,
             _float(timing.get("pre_click_delay_seconds"), DEFAULT_PRE_CLICK_DELAY_SECONDS),
+        ),
+        "inter_click_delay_seconds": max(
+            0.0,
+            _float(timing.get("inter_click_delay_seconds"), DEFAULT_INTER_CLICK_DELAY_SECONDS),
         ),
         "pointer_move_duration_seconds": max(
             0.0,
@@ -2741,14 +2964,15 @@ def _send_direct_clicks(
     move_duration = max(0.0, _float(timing.get("pointer_move_duration_seconds"), DEFAULT_POINTER_MOVE_DURATION_SECONDS))
     focus_settle_seconds = max(0.0, _float(timing.get("chart_focus_settle_seconds"), DEFAULT_CHART_FOCUS_SETTLE_SECONDS))
     pre_click_delay_seconds = max(0.0, _float(timing.get("pre_click_delay_seconds"), DEFAULT_PRE_CLICK_DELAY_SECONDS))
+    inter_click_delay_seconds = max(0.0, _float(timing.get("inter_click_delay_seconds"), DEFAULT_INTER_CLICK_DELAY_SECONDS))
 
     if chart_anchor is not None:
         cx, cy = chart_anchor
         pyautogui.moveTo(cx, cy, duration=move_duration)
         pyautogui.click(cx, cy)
-        inter_click_delay_seconds = max(focus_settle_seconds, pre_click_delay_seconds)
-        if inter_click_delay_seconds > 0.0:
-            time.sleep(inter_click_delay_seconds)
+        chart_hold_seconds = max(focus_settle_seconds, pre_click_delay_seconds)
+        if chart_hold_seconds > 0.0:
+            time.sleep(chart_hold_seconds)
     elif pre_click_delay_seconds > 0.0:
         time.sleep(pre_click_delay_seconds)
 
@@ -2769,6 +2993,11 @@ def _send_direct_clicks(
 
     x, y = boxes[key]
     pyautogui.moveTo(x, y, duration=move_duration)
+    # Every fired trade presses the same position twice: two contracts for this
+    # specific entry at the exact window PhoenixGuard mapped.
+    pyautogui.click(x, y)
+    if inter_click_delay_seconds > 0.0:
+        time.sleep(inter_click_delay_seconds)
     pyautogui.click(x, y)
 
     # Time and amount remain fixed in the Pocket Option setup. The value is logged but not typed here.
@@ -2777,6 +3006,7 @@ def _send_direct_clicks(
     return {
         "executed_side": effective_side,
         "refreshed_before_click": refreshed,
+        "press_count": 2,
     }
 
 
@@ -2855,6 +3085,8 @@ def _trade_once(
     fixed_expiry_seconds_override: int | None = None,
     max_signal_age_seconds: float = DEFAULT_MAX_SIGNAL_AGE_SECONDS,
     signal_source: str = DEFAULT_SIGNAL_SOURCE,
+    frontline_required: bool = False,
+    frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> dict[str, object]:
     resolved_base_url, resolved_session_id = _resolve_stack_context(base_url=base_url, session_id=session_id)
     payload, trade = _read_fresh_trade(
@@ -2864,6 +3096,8 @@ def _trade_once(
         score_threshold=score_threshold,
         max_signal_age_seconds=max_signal_age_seconds,
         signal_source=signal_source,
+        frontline_required=frontline_required,
+        frontline_freshness_seconds=frontline_freshness_seconds,
     )
     if fixed_expiry_seconds_override is not None and int(fixed_expiry_seconds_override) > 0:
         trade["expiry_seconds"] = int(fixed_expiry_seconds_override)
@@ -2887,6 +3121,8 @@ def _trade_once(
             score_threshold=score_threshold,
             max_signal_age_seconds=max_signal_age_seconds,
             signal_source=signal_source,
+            frontline_required=frontline_required,
+            frontline_freshness_seconds=frontline_freshness_seconds,
         )
         if fixed_expiry_seconds_override is not None and int(fixed_expiry_seconds_override) > 0:
             latest_trade["expiry_seconds"] = int(fixed_expiry_seconds_override)
@@ -2959,6 +3195,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-opposite-side-same-candle", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--frontline-required",
+        action="store_true",
+        help="Block every entry until a fresh matching Frontline Qwen verdict is published (strict mode).",
+    )
+    parser.add_argument(
+        "--frontline-freshness-seconds",
+        type=float,
+        default=DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
+        help="Maximum age of a Frontline Qwen verdict before it is treated as stale.",
+    )
     return parser
 
 
@@ -2992,6 +3239,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
                         max_signal_age_seconds=float(args.max_signal_age_seconds),
                         signal_source=str(args.signal_source),
+                        frontline_required=bool(args.frontline_required),
+                        frontline_freshness_seconds=float(args.frontline_freshness_seconds),
                     )
                 else:
                     result = _trade_once(
@@ -3004,6 +3253,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
                         max_signal_age_seconds=float(args.max_signal_age_seconds),
                         signal_source=str(args.signal_source),
+                        frontline_required=bool(args.frontline_required),
+                        frontline_freshness_seconds=float(args.frontline_freshness_seconds),
                     )
             except TradeRejected as exc:
                 wait_payload: dict[str, object] = {"triggered": False, "reason": str(exc)}
@@ -3044,6 +3295,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
                         max_signal_age_seconds=float(args.max_signal_age_seconds),
                         signal_source=str(args.signal_source),
+                        frontline_required=bool(args.frontline_required),
+                        frontline_freshness_seconds=float(args.frontline_freshness_seconds),
                     )
                 else:
                     result = _trade_once(
@@ -3057,6 +3310,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
                         max_signal_age_seconds=float(args.max_signal_age_seconds),
                         signal_source=str(args.signal_source),
+                        frontline_required=bool(args.frontline_required),
+                        frontline_freshness_seconds=float(args.frontline_freshness_seconds),
                     )
                 should_fire, reason = trigger_state.should_trigger(result)
                 if not should_fire:
@@ -3095,6 +3350,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
                             max_signal_age_seconds=float(args.max_signal_age_seconds),
                             signal_source=str(args.signal_source),
+                            frontline_required=bool(args.frontline_required),
+                            frontline_freshness_seconds=float(args.frontline_freshness_seconds),
                         )
                         refreshed_trade.clear()
                         refreshed_trade.update(latest_result)

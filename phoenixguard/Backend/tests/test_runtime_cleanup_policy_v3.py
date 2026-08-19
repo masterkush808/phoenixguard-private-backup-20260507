@@ -59,14 +59,6 @@ def test_cleanup_apply_deletes_disposable_state_and_preserves_operator_file(
     codex_runtime = tmp_path / ".codex_runtime"
     codex_runtime.mkdir()
     (codex_runtime / "old-state.json").write_text("generated", encoding="utf-8")
-    web = tmp_path / "Business" / "web"
-    (web / "test-results").mkdir(parents=True)
-    (web / "test-results" / ".last-run.json").write_text("{}", encoding="utf-8")
-    (web / "reports").mkdir()
-    smoke_image = web / "reports" / "product_dashboard_source_console_smoke.png"
-    smoke_image.write_bytes(b"generated")
-    build_info = web / "tsconfig.tsbuildinfo"
-    build_info.write_text("generated", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["clean_v3_runtime_state.py", "--apply"])
 
     assert cleaner.main() == 0
@@ -76,9 +68,6 @@ def test_cleanup_apply_deletes_disposable_state_and_preserves_operator_file(
     assert blueprint.exists()
     assert not cleanup_reports.exists()
     assert not codex_runtime.exists()
-    assert not (web / "test-results").exists()
-    assert not smoke_image.exists()
-    assert not build_info.exists()
     assert preserved.exists()
     assert capture_token.exists()
     assert not (tmp_path / "_archive").exists()
@@ -177,18 +166,6 @@ def test_cleanup_refuses_a_tree_with_a_nested_reparse_descendant(
     with pytest.raises(RuntimeError, match="containing a symlink or junction"):
         cleaner.main()
     assert protected_file.exists()
-
-
-def test_cleanup_report_generator_never_creates_archive_root() -> None:
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "Backend"
-        / "tools"
-        / "generate_v3_cleanup_reports.py"
-    ).read_text(encoding="utf-8")
-
-    assert 'ROOT / "_archive"' not in source
-    assert 'REPORT_DIR / "quarantine_manifest.json"' in source
 
 
 def test_canonical_launcher_discards_unbounded_child_stdio() -> None:

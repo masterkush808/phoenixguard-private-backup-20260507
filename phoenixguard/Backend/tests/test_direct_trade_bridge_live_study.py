@@ -430,7 +430,7 @@ def test_bridge_bias_fallback_accepts_fresh_rejection_after_pullback():
                             "candle_id": "15",
                             "direction": "BEARISH",
                             "ratios": {"range_vs_sequence_median": 0.72},
-                            "interaction": {"rejection": {"detected": True, "side": "HIGH"}},
+"interaction": {"rejection": {"detected": True, "side": "HIGH"}},
                         },
                     ],
                 },
@@ -443,6 +443,57 @@ def test_bridge_bias_fallback_accepts_fresh_rejection_after_pullback():
     assert result["side"] == "SELL"
     assert result["entry_timing_ready"] is True
     assert result["entry_timing_class"] == "pullback_rejection"
+
+
+def test_bridge_bias_reentry_still_waits_when_placement_gate_blocks_the_side():
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_reentry_placement_blocked")
+    payload = {
+        "session_id": "pocket-live-8788",
+        "latest_signal": {
+            "action": "SELL",
+            "execution_permission": "WAIT",
+            "entry_state": "WAIT_FOR_TRIGGER",
+            "published_epoch": time.time(),
+            "valid_until_epoch": time.time() + 300,
+            "execution_timing": {
+                "side": "SELL",
+                "entry_allowed": False,
+                "timing_class": "history_area_wait",
+                "block_reason": "Nearest significant support/resistance is opposing the entry before a clean trigger.",
+                "opposing_force_risk": 0.92,
+                "current_flow_continuation_ready": False,
+                "breakout_confirmation": False,
+            },
+            "timing_signal": {
+                "entry_state": "WATCH",
+                "instruction": "Wait for rejection/reclaim before entry.",
+            },
+            "market_study_v3": {
+                "closed_candle_key": "closed-reentry-blocked",
+                "closed_candle_sequence": 15,
+                "candle_intelligence": {
+                    "latest": {
+                        "candle_id": "15",
+                        "direction": "BEARISH",
+                        "ratios": {"range_vs_sequence_median": 0.72},
+                        "interaction": {"rejection": {"detected": True, "side": "HIGH"}},
+                    },
+                    "recent_candles": [
+                        {"candle_id": "14", "direction": "BULLISH"},
+                        {
+                            "candle_id": "15",
+                            "direction": "BEARISH",
+                            "ratios": {"range_vs_sequence_median": 0.72},
+                            "interaction": {"rejection": {"detected": True, "side": "HIGH"}},
+                        },
+                    ],
+                },
+            },
+        },
+    }
+
+    with pytest.raises(bridge.TradeRejected, match="opposing force risk"):
+        bridge._resolve_trade_payload(payload, score_threshold=0.0, signal_source="bias")
 
 
 def test_bridge_bias_mode_falls_back_to_market_study_when_top_level_action_is_hold():
@@ -1221,6 +1272,7 @@ def test_trigger_manifest_to_boxes_uses_saved_timing_policy():
         "timing_policy": {
             "chart_focus_settle_seconds": 5.0,
             "pre_click_delay_seconds": 8.0,
+            "inter_click_delay_seconds": 0.6,
             "pointer_move_duration_seconds": 0.5,
         },
     }
@@ -1233,6 +1285,7 @@ def test_trigger_manifest_to_boxes_uses_saved_timing_policy():
     assert timing_policy == {
         "chart_focus_settle_seconds": 5.0,
         "pre_click_delay_seconds": 8.0,
+        "inter_click_delay_seconds": 0.6,
         "pointer_move_duration_seconds": 0.5,
     }
 
@@ -1258,6 +1311,7 @@ def test_send_direct_clicks_honors_saved_delays(monkeypatch):
         timing_policy={
             "chart_focus_settle_seconds": 5.0,
             "pre_click_delay_seconds": 7.0,
+            "inter_click_delay_seconds": 0.5,
             "pointer_move_duration_seconds": 0.4,
         },
     )
@@ -1267,8 +1321,9 @@ def test_send_direct_clicks_honors_saved_delays(monkeypatch):
         ("click", 10, 20),
         ("moveTo", 30, 40, 0.4),
         ("click", 30, 40),
+        ("click", 30, 40),
     ]
-    assert recorded_sleeps == [7.0]
+    assert recorded_sleeps == [7.0, 0.5]
 
 
 def test_send_direct_clicks_refreshes_bias_after_wait_before_final_click(monkeypatch):
@@ -1294,6 +1349,7 @@ def test_send_direct_clicks_refreshes_bias_after_wait_before_final_click(monkeyp
         timing_policy={
             "chart_focus_settle_seconds": 0.0,
             "pre_click_delay_seconds": 5.0,
+            "inter_click_delay_seconds": 0.4,
             "pointer_move_duration_seconds": 0.4,
         },
         refresh_trade_before_click=refresh_trade,
@@ -1306,8 +1362,10 @@ def test_send_direct_clicks_refreshes_bias_after_wait_before_final_click(monkeyp
         ("refresh",),
         ("moveTo", 50, 60, 0.4),
         ("click", 50, 60),
+        ("sleep", 0.4),
+        ("click", 50, 60),
     ]
-    assert result == {"executed_side": "SELL", "refreshed_before_click": True}
+    assert result == {"executed_side": "SELL", "refreshed_before_click": True, "press_count": 2}
 
 
 def test_bridge_trigger_state_starts_cooldown_after_ten_executed_trades(monkeypatch):
@@ -1364,11 +1422,11 @@ def test_bridge_trigger_state_default_cooldown_is_disabled():
         state.record_trade_execution()
 
 
-def test_bridge_trigger_state_stops_after_five_executed_trades():
+def test_bridge_trigger_state_stops_after_eight_executed_trades():
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_session_trade_cap")
     state = bridge._BridgeTriggerState(max_trades_per_candle=1)
 
-    for index in range(5):
+    for index in range(8):
         trade = {
             "side": "BUY",
             "signal_id": f"sig-{index}",
@@ -1379,7 +1437,7 @@ def test_bridge_trigger_state_stops_after_five_executed_trades():
         state.record_trade_execution(trade)
 
     assert state.should_trigger(
-        {"side": "BUY", "signal_id": "sig-5", "published_epoch": 6.0, "candle_key": "c-5"}
+        {"side": "BUY", "signal_id": "sig-8", "published_epoch": 9.0, "candle_key": "c-8"}
     ) == (False, "session_trade_limit_reached")
 
 
@@ -1548,8 +1606,13 @@ def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch, tmp_pa
     assert payload["direct_visual_bias_v3"]["side"] == "SELL"
 
 
-def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch):
+def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch, tmp_path):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_listener")
+    runtime_dir = tmp_path / "runtime" / "live"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        bridge, "_default_live_runtime_dir", lambda project_root=None: runtime_dir
+    )
     now_epoch = time.time()
     event = {
         "session_id": "pocket-live-8788",

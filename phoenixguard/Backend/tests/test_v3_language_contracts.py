@@ -256,7 +256,7 @@ def test_invalid_instrument_context_state_rejected() -> None:
 
 def test_no_direct_pyautogui_action_outside_low_level_adapter() -> None:
     offenders: list[str] = []
-    for path in [ROOT / "Backend" / "launch" / "shooter.py", *list(PACKAGE_ROOT.rglob("*.py"))]:
+    for path in list(PACKAGE_ROOT.rglob("*.py")):
         text = path.read_text(encoding="utf-8", errors="ignore")
         for needle in ("pyautogui.click", "pyautogui.moveTo", "pyautogui.press", "pyautogui.hotkey", "pyautogui.typewrite"):
             if needle in text:

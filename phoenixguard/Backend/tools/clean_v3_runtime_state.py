@@ -29,17 +29,11 @@ DISPOSABLE_ROOT_PATHS = {
     ".codex/tmp",
     ".codex_runtime",
     ".ruff_cache",
-    "Business/web/.next",
-    "Business/web/test-results",
     "cleanup_reports",
     "debug.log",
     "logs",
 }
-DISPOSABLE_FILE_PATHS = {
-    "Backend/scripts_runtime/replay_trace.log",
-    "Business/web/reports/product_dashboard_source_console_smoke.png",
-    "Business/web/tsconfig.tsbuildinfo",
-}
+DISPOSABLE_FILE_PATHS = set()
 SKIP_SCAN_DIR_NAMES = {
     ".git",
     "_archive",

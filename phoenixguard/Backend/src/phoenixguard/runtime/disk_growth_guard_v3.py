@@ -10,7 +10,7 @@ import stat
 import time
 from typing import Iterable, Iterator, Mapping, Sequence
 
-from phoenixguard.paths import BUSINESS_ROOT, PROJECT_ROOT
+from phoenixguard.paths import PROJECT_ROOT
 
 
 class DiskGrowthGuardMode(str, Enum):
@@ -641,15 +641,7 @@ def build_default_targets(
             path=archive_dir,
             max_bytes=0,
             low_water_bytes=0,
-            mode=DiskGrowthGuardMode.RESET_CHILDREN,
-            min_age_seconds=0.0,
-        ),
-        DiskGrowthGuardTarget(
-            name="business_next_cache",
-            path=BUSINESS_ROOT / "web" / ".next",
-            max_bytes=min(cap, parse_size_bytes(os.getenv("PHOENIXGUARD_DISK_GUARD_NEXT_CACHE_MAX_BYTES"), default=512 * 1024 * 1024)),
-            low_water_bytes=min(low, parse_size_bytes(os.getenv("PHOENIXGUARD_DISK_GUARD_NEXT_CACHE_LOW_BYTES"), default=256 * 1024 * 1024)),
-            mode=DiskGrowthGuardMode.RESET_CHILDREN,
+mode=DiskGrowthGuardMode.RESET_CHILDREN,
             min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
         ),
     ]

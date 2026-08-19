@@ -133,11 +133,14 @@ def main() -> int:
             failures.append(label)
 
     shooter_path = ROOT / "Backend" / "launch" / "shooter.py"
-    shooter_text = shooter_path.read_text(encoding="utf-8", errors="ignore")
-    v3_guard_ok = "broker execution is retired" in shooter_text and "REPORT_ALLOWED_PACKAGE" in shooter_text
-    print(status_line("Shooter Package Reporter", v3_guard_ok, "execution retired" if v3_guard_ok else "reporter guard text missing"))
-    if not v3_guard_ok:
-        failures.append("Shooter Package Reporter")
+    if shooter_path.exists():
+        shooter_text = shooter_path.read_text(encoding="utf-8", errors="ignore")
+        v3_guard_ok = "broker execution is retired" in shooter_text and "REPORT_ALLOWED_PACKAGE" in shooter_text
+        print(status_line("Shooter Package Reporter", v3_guard_ok, "execution retired" if v3_guard_ok else "reporter guard text missing"))
+        if not v3_guard_ok:
+            failures.append("Shooter Package Reporter")
+    else:
+        print(status_line("Shooter Package Reporter", True, "retired and removed from the V3 stack"))
 
     launch_profile = mapping(manifest.get("launch_profile"))
     canonical_launcher = ROOT / str(launch_profile.get("launcher") or "")

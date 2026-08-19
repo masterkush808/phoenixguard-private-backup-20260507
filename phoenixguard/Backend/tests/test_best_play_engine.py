@@ -10,7 +10,6 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-import main
 from phoenixguard.decision.best_play_engine import analyze_best_play
 
 
@@ -214,33 +213,3 @@ def test_analyze_best_play_prefers_sell_reversal_release() -> None:
     assert "SELL" in str(analysis["recommended_play"])
     assert float(analysis["sell_play"]["risk_score"]) < 0.55
     assert float(analysis["likelihoods"]["SELL"]) > float(analysis["likelihoods"]["BUY"])
-
-
-def test_load_best_play_engine_returns_html_and_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    snapshot = _buy_snapshot()
-
-    def _build_best_play_input_snapshot(_result: dict[str, Any], **_kwargs: object) -> dict[str, object]:
-        return snapshot
-
-    def _sanitize_result_for_ui(result: dict[str, Any]) -> dict[str, Any]:
-        return result
-
-    monkeypatch.setattr(main, "_build_best_play_input_snapshot", _build_best_play_input_snapshot)
-    monkeypatch.setattr(main, "_sanitize_result_for_ui", _sanitize_result_for_ui)
-
-    html, payload = main.load_best_play_engine(
-        {
-            "action": "BUY",
-            "execution_action": "BUY",
-            "multi_timeframe": {
-                "gate_state": "confirmed",
-                "entries": [{"file_path": "lower_tf.png"}],
-            },
-        },
-        overlay_mode="history-boxes",
-    )
-
-    assert "Best Play Engine" in html
-    assert "BUY" in html
-    assert payload["analysis"]["recommended_direction"] == "BUY"
-    assert payload["input_payload"]["combined"]["label"] == "Combined Desk"

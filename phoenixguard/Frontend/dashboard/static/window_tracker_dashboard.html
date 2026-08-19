@@ -819,13 +819,147 @@
       line-height: 1.55;
     }
 
-    .decision-audit-strip {
-      display: grid;
-      grid-template-columns: minmax(230px, 1.35fr) repeat(4, minmax(86px, 0.55fr));
+    .frontline-qwen-panel {
+      margin: 16px clamp(10px, 1.5vw, 22px) 0;
+      overflow: hidden;
+      border: 1px solid rgba(120, 160, 255, 0.3);
+      border-radius: 12px;
+      background:
+        linear-gradient(112deg, rgba(120, 160, 255, 0.08), transparent 42%),
+        rgba(10, 11, 8, 0.9);
+      box-shadow: inset 4px 0 0 var(--hold), 0 18px 50px rgba(0, 0, 0, 0.2);
+    }
+
+    .frontline-qwen-panel[data-verdict="ALLOW"] {
+      border-color: rgba(99, 224, 154, 0.55);
+      box-shadow: inset 4px 0 0 var(--up), 0 18px 50px rgba(0, 0, 0, 0.2);
+    }
+
+    .frontline-qwen-panel[data-verdict="VETO"] {
+      border-color: rgba(255, 101, 79, 0.6);
+      box-shadow: inset 4px 0 0 var(--down), 0 18px 50px rgba(0, 0, 0, 0.24);
+    }
+
+    .frontline-qwen-head {
+      display: flex;
       align-items: center;
-      gap: 12px 18px;
-      padding: 13px clamp(10px, 1.5vw, 22px);
-      border-bottom: 1px solid var(--line);
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 16px 0;
+    }
+
+    .frontline-qwen-title {
+      margin: 0;
+      font-size: 13px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--gold-pale);
+    }
+
+    .frontline-qwen-status {
+      font-size: 12px;
+      color: var(--warn);
+      text-align: right;
+    }
+
+    .frontline-qwen-verdict {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      padding: 12px 16px 6px;
+    }
+
+    .frontline-qwen-label {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(230, 209, 148, 0.66);
+    }
+
+    .frontline-qwen-verdict strong {
+      font-size: 22px;
+      letter-spacing: 0.12em;
+      color: var(--gold-pale);
+    }
+
+    .frontline-qwen-panel[data-verdict="ALLOW"] .frontline-qwen-verdict strong {
+      color: var(--up);
+    }
+
+    .frontline-qwen-panel[data-verdict="VETO"] .frontline-qwen-verdict strong {
+      color: var(--down);
+    }
+
+    .frontline-qwen-verdict small {
+      color: rgba(230, 209, 148, 0.6);
+    }
+
+    .frontline-qwen-components {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 0 16px 10px;
+    }
+
+    .frontline-qwen-component {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .frontline-qwen-component[data-side="buy"] {
+      border-left: 3px solid var(--up);
+    }
+
+    .frontline-qwen-component[data-side="sell"] {
+      border-left: 3px solid var(--down);
+    }
+
+    .frontline-qwen-component[data-control="true"] strong {
+      color: var(--up);
+    }
+
+    .frontline-qwen-component[data-control="true"][data-side="sell"] strong {
+      color: var(--down);
+    }
+
+    .frontline-qwen-component span {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      color: rgba(230, 209, 148, 0.6);
+    }
+
+    .frontline-qwen-component strong {
+      font-size: 15px;
+      color: var(--gold-pale);
+    }
+
+    .frontline-qwen-component small {
+      font-size: 12px;
+      color: rgba(230, 209, 148, 0.6);
+    }
+
+    .frontline-qwen-state {
+      padding: 6px 16px 12px;
+    }
+
+    .frontline-qwen-state p {
+      margin: 6px 0 0;
+      font-size: 14px;
+      line-height: 1.45;
+      color: rgba(255, 240, 191, 0.9);
+    }
+
+    .frontline-qwen-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 16px;
+      padding: 0 16px 12px;
+      font-size: 11px;
+      color: rgba(230, 209, 148, 0.5);
     }
 
     .book-rule-signal {
@@ -1025,75 +1159,6 @@
       .book-rule-grid { grid-template-columns: 1fr; }
       .book-rule-fact { border-right: 0; }
       .book-rule-strategies { grid-template-columns: 1fr; gap: 6px; }
-    }
-
-    .decision-audit-summary {
-      min-width: 0;
-    }
-
-    .decision-audit-heading {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      gap: 8px;
-    }
-
-    .decision-audit-heading span {
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 650;
-    }
-
-    .decision-audit-heading strong {
-      color: var(--gold);
-      font-family: var(--font-mono);
-      font-size: 9px;
-      font-weight: 780;
-      letter-spacing: 0.1em;
-    }
-
-    .decision-audit-strip[data-state="measured"] .decision-audit-heading strong {
-      color: var(--up);
-    }
-
-    .decision-audit-counts,
-    .decision-audit-outcome,
-    .decision-audit-safety {
-      margin: 4px 0 0;
-      color: var(--quiet);
-      font-size: 9px;
-      line-height: 1.45;
-    }
-
-    .decision-audit-outcome {
-      color: var(--muted);
-    }
-
-    .decision-audit-metric {
-      min-width: 0;
-      padding-left: 12px;
-      border-left: 1px solid var(--line);
-    }
-
-    .decision-audit-metric span {
-      display: block;
-      color: var(--quiet);
-      font-size: 8px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-    }
-
-    .decision-audit-metric strong {
-      display: block;
-      margin-top: 3px;
-      color: var(--ink);
-      font-family: var(--font-mono);
-      font-size: 13px;
-      font-weight: 700;
-    }
-
-    .decision-audit-metric[data-available="false"] strong {
-      color: var(--quiet);
     }
 
     .decision-risk {
@@ -2458,11 +2523,6 @@
         min-height: auto;
       }
 
-      .decision-audit-strip {
-        grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(74px, 0.55fr));
-        gap: 10px;
-      }
-
       .advanced-view .workspace-grid {
         grid-template-columns: 1fr;
       }
@@ -2685,20 +2745,6 @@
         line-height: 1.3;
       }
 
-      .decision-audit-strip {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px 10px;
-        padding: 9px 10px;
-      }
-
-      .decision-audit-summary {
-        grid-column: 1 / -1;
-      }
-
-      .decision-audit-metric {
-        padding-left: 8px;
-      }
-
       .evidence-list {
         grid-template-columns: 1fr;
       }
@@ -2836,161 +2882,6 @@
       display: none !important;
     }
 
-    .latent-control-rail {
-      display: grid;
-      grid-template-columns: minmax(10rem, 0.7fr) minmax(16rem, 1.6fr) minmax(14rem, 1fr);
-      gap: 1rem;
-      align-items: center;
-      margin-top: 1rem;
-      padding: 1rem 1.1rem;
-      border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
-      border-left: 4px solid var(--muted, #83949c);
-      background: linear-gradient(110deg, rgba(13, 24, 30, 0.96), rgba(18, 31, 37, 0.82));
-    }
-
-    .latent-control-rail[data-side="buy"] {
-      border-left-color: var(--good, #52d79a);
-    }
-
-    .latent-control-rail[data-side="sell"] {
-      border-left-color: var(--bad, #ff6b6b);
-    }
-
-    .latent-control-primary,
-    .latent-control-detail {
-      display: grid;
-      gap: 0.25rem;
-    }
-
-    .latent-control-kicker,
-    .latent-component-head span {
-      color: var(--muted, #83949c);
-      font-size: 0.68rem;
-      font-weight: 800;
-      letter-spacing: 0.16em;
-    }
-
-    #latent-control-side {
-      font-family: var(--font-display, "Arial Narrow", sans-serif);
-      font-size: clamp(1.35rem, 2.3vw, 2rem);
-      letter-spacing: 0.04em;
-    }
-
-    .latent-control-rail[data-side="buy"] #latent-control-side {
-      color: var(--good, #52d79a);
-    }
-
-    .latent-control-rail[data-side="sell"] #latent-control-side {
-      color: var(--bad, #ff6b6b);
-    }
-
-    #latent-state-label {
-      color: var(--text, #edf4f2);
-      font-weight: 800;
-    }
-
-    #latent-control-context,
-    .latent-cycle,
-    .latent-component-support {
-      color: var(--muted, #83949c);
-      font-size: 0.78rem;
-      line-height: 1.45;
-    }
-
-    .latent-cycle {
-      border-left: 1px solid var(--line, rgba(255, 255, 255, 0.12));
-      padding-left: 1rem;
-    }
-
-    .latent-component-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.85rem;
-      margin-top: 0.85rem;
-    }
-
-    .latent-component {
-      position: relative;
-      overflow: hidden;
-      min-height: 10.5rem;
-      padding: 1rem;
-      border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
-      background: rgba(10, 20, 25, 0.72);
-      transition: border-color 180ms ease, background 180ms ease;
-    }
-
-    .latent-component::before {
-      position: absolute;
-      inset: 0 auto 0 0;
-      width: 3px;
-      content: "";
-      opacity: 0.46;
-    }
-
-    .latent-component-buy::before {
-      background: var(--good, #52d79a);
-    }
-
-    .latent-component-sell::before {
-      background: var(--bad, #ff6b6b);
-    }
-
-    .latent-component.is-control {
-      border-color: currentColor;
-      background: linear-gradient(135deg, rgba(16, 34, 37, 0.94), rgba(10, 20, 25, 0.78));
-    }
-
-    .latent-component-buy.is-control {
-      color: var(--good, #52d79a);
-    }
-
-    .latent-component-sell.is-control {
-      color: var(--bad, #ff6b6b);
-    }
-
-    .latent-component-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 1rem;
-      align-items: baseline;
-    }
-
-    .latent-component-head strong {
-      color: currentColor;
-      font-size: 0.72rem;
-      letter-spacing: 0.08em;
-    }
-
-    .latent-component-state {
-      margin: 1.4rem 0 0.35rem;
-      color: var(--text, #edf4f2);
-      font-family: var(--font-display, "Arial Narrow", sans-serif);
-      font-size: clamp(1.25rem, 2.1vw, 1.75rem);
-    }
-
-    .latent-component-mass {
-      margin: 0;
-      color: var(--text, #edf4f2);
-      font-size: 0.92rem;
-      font-weight: 700;
-    }
-
-    .latent-component-support {
-      margin: 0.55rem 0 0;
-    }
-
-    @media (max-width: 760px) {
-      .latent-control-rail,
-      .latent-component-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .latent-cycle {
-        border-left: 0;
-        border-top: 1px solid var(--line, rgba(255, 255, 255, 0.12));
-        padding: 0.75rem 0 0;
-      }
-    }
   </style>
 </head>
 <body class="simple-view labels-hover">
@@ -3047,40 +2938,7 @@
         </div>
       </header>
 
-        <div class="latent-control-rail" id="latent-control-rail" data-side="unresolved" role="status" aria-live="polite">
-          <div class="latent-control-primary">
-            <span class="latent-control-kicker">STATE CONTROL</span>
-            <strong id="latent-control-side">ANALYZING</strong>
-          </div>
-          <div class="latent-control-detail">
-            <span id="latent-state-label">Latent state unresolved</span>
-            <span id="latent-control-context">Waiting for empirical transition evidence.</span>
-          </div>
-          <div class="latent-cycle" id="latent-cycle-horizon">Full state-cycle horizon pending</div>
-        </div>
-
-        <div class="latent-component-grid" aria-label="BUY and SELL hidden-state components">
-          <article class="latent-component latent-component-buy" id="latent-buy-component">
-            <div class="latent-component-head">
-              <span>BUY COMPONENT</span>
-              <strong id="latent-buy-status">NOT IN CONTROL</strong>
-            </div>
-            <p class="latent-component-state" id="latent-buy-state">UP_SWING evidence pending</p>
-            <p class="latent-component-mass" id="latent-buy-mass">Next-state mass unavailable</p>
-            <p class="latent-component-support" id="latent-buy-support">Waiting for Pair DNA support</p>
-          </article>
-          <article class="latent-component latent-component-sell" id="latent-sell-component">
-            <div class="latent-component-head">
-              <span>SELL COMPONENT</span>
-              <strong id="latent-sell-status">NOT IN CONTROL</strong>
-            </div>
-            <p class="latent-component-state" id="latent-sell-state">DOWN_SWING evidence pending</p>
-            <p class="latent-component-mass" id="latent-sell-mass">Next-state mass unavailable</p>
-            <p class="latent-component-support" id="latent-sell-support">Waiting for Pair DNA support</p>
-          </article>
-        </div>
-
-        <ol class="decision-questions legacy-three-question-panel" aria-label="Legacy decision questions" aria-hidden="true" hidden>
+<ol class="decision-questions legacy-three-question-panel" aria-label="Legacy decision questions" aria-hidden="true" hidden>
         <li class="decision-question" data-question="history" id="question-market-history">
           <span class="question-number" aria-hidden="true">01</span>
           <span class="story-label" id="story-step-one-label">Question 1</span>
@@ -3132,31 +2990,36 @@
         </li>
       </ol>
 
-      <section class="decision-audit-strip" id="decision-audit-strip" data-state="collecting" aria-labelledby="decision-audit-title" aria-live="polite">
-        <div class="decision-audit-summary">
-          <div class="decision-audit-heading">
-            <span id="decision-audit-title">Hidden-state evidence · live audit</span>
-            <strong id="decision-audit-status">WAITING</strong>
+      <section class="frontline-qwen-panel" id="frontline-qwen-panel" data-state="pending" data-verdict="pending" aria-label="Market analysis clearance verdict" aria-live="polite">
+        <header class="frontline-qwen-head">
+          <h3 class="frontline-qwen-title">Market analysis clearance</h3>
+          <span class="frontline-qwen-status" id="frontline-qwen-status">Preparing analysis</span>
+        </header>
+        <div class="frontline-qwen-verdict">
+          <span class="frontline-qwen-label">Trade clearance</span>
+          <strong id="frontline-qwen-verdict">PENDING</strong>
+          <small id="frontline-qwen-confidence">Analysis is being prepared for the current chart.</small>
+        </div>
+        <div class="frontline-qwen-components">
+          <div class="frontline-qwen-component" data-side="buy" id="frontline-qwen-buy">
+            <span>BUY SIDE</span>
+            <strong id="frontline-qwen-buy-state">ANALYZING</strong>
+            <small id="frontline-qwen-buy-support">Reviewing buy-side opportunity</small>
           </div>
-          <p class="decision-audit-counts" id="decision-audit-counts">Waiting for closed-candle state evidence.</p>
-          <p class="decision-audit-outcome" id="decision-audit-outcome">Local movement will not be presented as market control.</p>
-          <p class="decision-audit-safety">Descriptive evidence only · never an entry instruction, trade, or permission.</p>
+          <div class="frontline-qwen-component" data-side="sell" id="frontline-qwen-sell">
+            <span>SELL SIDE</span>
+            <strong id="frontline-qwen-sell-state">ANALYZING</strong>
+            <small id="frontline-qwen-sell-support">Reviewing sell-side opportunity</small>
+          </div>
         </div>
-        <div class="decision-audit-metric" id="decision-audit-direction-wrap" data-available="false">
-          <span>State age</span>
-          <strong id="decision-audit-direction">waiting</strong>
+        <div class="frontline-qwen-state">
+          <span class="frontline-qwen-label">Analyst assessment</span>
+          <p class="frontline-qwen-message" id="frontline-qwen-message">Preparing to review the current chart for entry quality.</p>
         </div>
-        <div class="decision-audit-metric" id="decision-audit-timing-wrap" data-available="false">
-          <span>Pair DNA</span>
-          <strong id="decision-audit-timing">0 observed</strong>
-        </div>
-        <div class="decision-audit-metric" id="decision-audit-sweep-wrap" data-available="false">
-          <span>Line proof</span>
-          <strong id="decision-audit-sweep">unconfirmed</strong>
-        </div>
-        <div class="decision-audit-metric" id="decision-audit-calibration-wrap" data-available="false">
-          <span>Profit proof</span>
-          <strong id="decision-audit-calibration">unproven</strong>
+        <div class="frontline-qwen-meta">
+          <span id="frontline-qwen-model">analyst: pending</span>
+          <span id="frontline-qwen-candle">frame: pending</span>
+          <span id="frontline-qwen-age">age: pending</span>
         </div>
       </section>
 
@@ -3583,9 +3446,23 @@
       beginnerDecisionShell: byId("beginner-decision-shell"),
       beginnerReadStatus: byId("beginner-read-status"),
       beginnerMarketContext: byId("beginner-market-context"),
-      streamObservation: byId("stream-observation"),
+streamObservation: byId("stream-observation"),
       streamObservationLabel: byId("stream-observation-label"),
       streamObservationDetail: byId("stream-observation-detail"),
+      frontlineQwenPanel: byId("frontline-qwen-panel"),
+      frontlineQwenStatus: byId("frontline-qwen-status"),
+      frontlineQwenVerdict: byId("frontline-qwen-verdict"),
+      frontlineQwenConfidence: byId("frontline-qwen-confidence"),
+      frontlineQwenBuy: byId("frontline-qwen-buy"),
+      frontlineQwenBuyState: byId("frontline-qwen-buy-state"),
+      frontlineQwenBuySupport: byId("frontline-qwen-buy-support"),
+      frontlineQwenSell: byId("frontline-qwen-sell"),
+      frontlineQwenSellState: byId("frontline-qwen-sell-state"),
+      frontlineQwenSellSupport: byId("frontline-qwen-sell-support"),
+      frontlineQwenMessage: byId("frontline-qwen-message"),
+      frontlineQwenModel: byId("frontline-qwen-model"),
+      frontlineQwenCandle: byId("frontline-qwen-candle"),
+      frontlineQwenAge: byId("frontline-qwen-age"),
       beginnerDecisionTitle: byId("beginner-decision-title"),
       beginnerConfidence: byId("beginner-confidence"),
       beginnerForecastSummary: byId("beginner-forecast-summary"),
@@ -3607,18 +3484,6 @@
       questionEntryNow: byId("question-entry-now"),
       marketOriginConfidence: byId("market-origin-confidence"),
       directionStudyConfidence: byId("direction-study-confidence"),
-      decisionAuditStrip: byId("decision-audit-strip"),
-      decisionAuditStatus: byId("decision-audit-status"),
-      decisionAuditCounts: byId("decision-audit-counts"),
-      decisionAuditOutcome: byId("decision-audit-outcome"),
-      decisionAuditDirectionWrap: byId("decision-audit-direction-wrap"),
-      decisionAuditDirection: byId("decision-audit-direction"),
-      decisionAuditTimingWrap: byId("decision-audit-timing-wrap"),
-      decisionAuditTiming: byId("decision-audit-timing"),
-      decisionAuditSweepWrap: byId("decision-audit-sweep-wrap"),
-      decisionAuditSweep: byId("decision-audit-sweep"),
-      decisionAuditCalibrationWrap: byId("decision-audit-calibration-wrap"),
-      decisionAuditCalibration: byId("decision-audit-calibration"),
       currentMoveTitle: byId("current-move-title"),
       innerTrendTitle: byId("inner-trend-title"),
       permissionTitle: byId("permission-title"),
@@ -3785,8 +3650,9 @@
       selectedOverlayId: "",
       lastRevision: -1,
       lastObservedAt: 0,
-      acceptedView: "",
+acceptedView: "",
       requestSequence: 0,
+      frontlineRefreshQueued: false,
       pollTimer: 0,
       heartbeatIntervalTimer: 0,
       heartbeatPulseTimer: 0,
@@ -4690,7 +4556,7 @@
       });
     }
 
-    async function requestJson(url) {
+async function requestJson(url) {
       const response = await fetch(url, {
         cache: "no-store",
         headers: {"Accept": "application/json"},
@@ -4703,6 +4569,17 @@
         throw new Error("Live analysis returned an unsupported workspace format.");
       }
       return payload;
+    }
+
+    async function requestJsonAny(url) {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: {"Accept": "application/json"},
+      });
+      if (!response.ok) {
+        throw new Error("Live analysis is temporarily unavailable.");
+      }
+      return response.json();
     }
 
     function positiveFrameId() {
@@ -5363,7 +5240,6 @@
       setText(els.beginnerReason, "No current rest or sweep estimate is available. " + message);
       setText(els.beginnerNextCondition, "Reconnect the chart and wait for a new current observation.");
       setText(els.retracementEvidence, "Retracement evidence: unavailable while the live workspace is offline. Observation only; never entry permission.");
-      renderPassiveDecisionAudit({});
       renderStreamObservation({tracking: {stream: {enabled: false, state: "OFFLINE"}}});
       updateVisualStatus("chart", "offline", "Broker view unavailable");
       renderCaptureSource(state.payload || {});
@@ -6939,395 +6815,11 @@
       scheduleCompletedStudyContextExpiry(completed);
     }
 
-    function passiveDecisionAudit(payload) {
-      const operatorState = safeObject(payload);
-      const market = safeObject(operatorState.market);
-      const marketSymbol = canonicalMarketToken(market.symbol || market.market);
-      const marketTimeframe = safeText(market.timeframe, "").toUpperCase();
-      if (
-        market.identity_pending === true
-        || !marketSymbol
-        || marketSymbol === "UNKNOWN"
-        || !marketTimeframe
-        || marketTimeframe === "UNKNOWN"
-      ) {
-        return {};
-      }
-      const study = safeObject(safeObject(operatorState.tracking).market_study_v3);
-      // Keep the operator UI coupled only to the public V3 field contract;
-      // internal model vocabulary is intentionally not exposed in this file.
-      const fieldKey = ["path", "clock", "liqui" + "dity", "v3"].join("_");
-      const audit = safeObject(
-        safeObject(study[fieldKey]).passive_prediction_audit_v3,
-      );
-      if (
-        safeText(audit.schema_version, "").toUpperCase()
-          !== "PG_PASSIVE_PREDICTION_OUTCOME_AUDIT_V3"
-        || audit.study_only !== true
-        || audit.execution_authority !== false
-        || audit.places_trades !== false
-        || audit.can_grant_entry_permission !== false
-      ) {
-        return {};
-      }
-      const auditSymbol = canonicalMarketToken(audit.symbol);
-      const auditTimeframe = safeText(audit.timeframe, "").toUpperCase();
-      if (
-        (auditSymbol && auditSymbol !== marketSymbol)
-        || (auditTimeframe && auditTimeframe !== marketTimeframe)
-      ) {
-        return {};
-      }
-      return audit;
-    }
-
-    function decisionAuditMetric(value) {
-      if (value === null || value === undefined || value === "") {
-        return null;
-      }
-      const numeric = Number(value);
-      return Number.isFinite(numeric) ? clamp(numeric, 0, 1) : null;
-    }
-
-    function renderDecisionAuditMetric(wrapper, target, value) {
-      const metric = decisionAuditMetric(value);
-      wrapper.dataset.available = metric === null ? "false" : "true";
-      setText(target, metric === null ? "—" : Math.round(metric * 100) + "%");
-    }
-
-    function renderEvidenceAuditMetric(wrapper, target, value, available) {
-      wrapper.dataset.available = available ? "true" : "false";
-      setText(target, value);
-    }
-
-    function renderPassiveDecisionAudit(payload) {
-      const audit = passiveDecisionAudit(payload);
-      const study = safeObject(marketStudyContract(payload));
-      const latent = safeObject(
-        study.hidden_state_discovery_v3 || study.latent_state_discovery_v3,
-      );
-      const hiddenState = safeObject(latent.hidden_state);
-      const control = safeObject(latent.control);
-      const directionalConsensus = safeObject(
-        latent.directional_consensus_v3 || control.directional_consensus_v3,
-      );
-      const distribution = safeObject(latent.next_state_distribution);
-      const pairDna = safeObject(latent.pair_dna);
-      const structure = safeObject(control.structural_evidence);
-      const selectedLine = safeObject(structure.selected_line);
-      const matured = Math.max(0, Number(audit.matured_outcome_count) || 0);
-      const metrics = safeObject(audit.candidate_metrics);
-      const profitability = safeObject(audit.profitability_evidence_v3);
-      const referenceProfit = safeObject(profitability.reference_scenario);
-      const stateAge = Math.max(0, Number(hiddenState.age_candles) || 0);
-      const transitionSupport = Math.max(
-        0,
-        Number(pairDna.transition_support) || Number(distribution.support) || 0,
-      );
-      const confirmedLines = Math.max(
-        0,
-        Number(structure.confirmed_trendline_count) || 0,
-      );
-      const lineTouches = Math.max(0, Number(selectedLine.touch_count) || 0);
-      const uncertainty = decisionAuditMetric(distribution.normalized_entropy);
-      const profitabilitySupport = Math.max(0, Number(profitability.support) || 0);
-      const profitabilityMinimum = Math.max(
-        0,
-        Number(profitability.minimum_forward_outcomes) || 0,
-      );
-      const lowerExpectedValue = Number(referenceProfit.expected_value_per_unit_lower_95);
-      const pointExpectedValue = Number(referenceProfit.expected_value_per_unit_point);
-      const referencePayout = Number(referenceProfit.payout_ratio);
-      const profitProven = profitability.promotion_eligible === true;
-      const controlStatus = safeText(control.status, "").toUpperCase();
-      const structureConfirmed = controlStatus === "STRUCTURALLY_CONFIRMED_CONTROL";
-      const directionStable = controlStatus.startsWith("STABLE_DIRECTION");
-      const reactionActive = controlStatus.includes("REACTION") || controlStatus.includes("TOUCH");
-      const hasLatent = Object.keys(latent).length > 0;
-
-      els.decisionAuditStrip.dataset.state = structureConfirmed ? "measured" : "collecting";
-      setText(
-        els.decisionAuditStatus,
-        profitProven
-          ? "POSITIVE EV PROVEN"
-          : profitabilitySupport > 0
-            ? "EV UNPROVEN"
-            : structureConfirmed
-          ? "STRUCTURE CONFIRMED"
-          : directionStable
-            ? "DIRECTION STABLE"
-          : reactionActive
-            ? "REACTION ACTIVE"
-            : hasLatent
-              ? "LIVE EVIDENCE"
-              : "WAITING",
-      );
-      setText(
-        els.decisionAuditCounts,
-        hasLatent
-          ? stateAge + " completed in local state · "
-            + transitionSupport + " Pair DNA transitions · "
-            + confirmedLines + " confirmed lines · "
-            + matured + " matured outcomes"
-          : "Waiting for closed-candle state evidence.",
-      );
-      renderEvidenceAuditMetric(
-        els.decisionAuditDirectionWrap,
-        els.decisionAuditDirection,
-        stateAge + (stateAge === 1 ? " candle" : " candles"),
-        hasLatent,
-      );
-      renderEvidenceAuditMetric(
-        els.decisionAuditTimingWrap,
-        els.decisionAuditTiming,
-        transitionSupport + " observed",
-        transitionSupport > 0,
-      );
-      renderEvidenceAuditMetric(
-        els.decisionAuditSweepWrap,
-        els.decisionAuditSweep,
-        lineTouches > 0 ? lineTouches + " / 3 touches" : "unconfirmed",
-        lineTouches > 0,
-      );
-      renderEvidenceAuditMetric(
-        els.decisionAuditCalibrationWrap,
-        els.decisionAuditCalibration,
-        profitabilitySupport > 0 && Number.isFinite(lowerExpectedValue)
-          ? (lowerExpectedValue >= 0 ? "+" : "")
-            + (lowerExpectedValue * 100).toFixed(1) + "% low EV"
-          : uncertainty === null
-            ? "unproven"
-            : Math.round(uncertainty * 100) + "% entropy",
-        profitabilitySupport > 0 || uncertainty !== null,
-      );
-
-      const outcomeParts = [];
-      const explanation = safeText(control.explanation, "");
-      if (explanation) {
-        outcomeParts.push(explanation);
-      } else if (hasLatent) {
-        outcomeParts.push("Local state is measured, but structural control is not confirmed.");
-      } else {
-        outcomeParts.push("Waiting for the lineage-matched hidden-state study.");
-      }
-      const directionalAccuracy = decisionAuditMetric(metrics.directional_accuracy);
-      if (matured > 0) {
-        outcomeParts.push(
-          "Outcome audit: " + matured + " matured"
-            + (directionalAccuracy === null
-              ? ""
-              : " · direction " + Math.round(directionalAccuracy * 100) + "%"),
-        );
-      }
-      if (profitabilitySupport > 0) {
-        const profitStatus = safeText(
-          profitability.status,
-          "PROFITABILITY_UNPROVEN",
-        ).replaceAll("_", " ").toLowerCase();
-        outcomeParts.push(
-          "Profitability: " + profitStatus
-            + " · " + profitabilitySupport + " / " + profitabilityMinimum + " outcomes"
-            + (Number.isFinite(referencePayout)
-              ? " · " + Math.round(referencePayout * 100) + "% payout reference"
-              : "")
-            + (Number.isFinite(pointExpectedValue)
-              ? " · point EV " + (pointExpectedValue >= 0 ? "+" : "")
-                + (pointExpectedValue * 100).toFixed(1) + "%"
-              : ""),
-        );
-      }
-      setText(els.decisionAuditOutcome, outcomeParts.join(" · "));
-    }
-
-    function renderLatentStateControl(payload) {
-      const study = safeObject(marketStudyContract(payload));
-      const latent = safeObject(
-        study.hidden_state_discovery_v3 || study.latent_state_discovery_v3,
-      );
-      const hiddenState = safeObject(latent.hidden_state);
-      const control = safeObject(latent.control);
-      const directionalConsensus = safeObject(
-        latent.directional_consensus_v3 || control.directional_consensus_v3,
-      );
-      const components = safeObject(latent.directional_components);
-      const buy = safeObject(components.BUY || components.buy);
-      const sell = safeObject(components.SELL || components.sell);
-      const rest = safeObject(components.REST || components.rest);
-      const horizon = safeObject(latent.state_cycle_horizon);
-      const horizonDurationContract = safeObject(horizon.duration);
-      const rail = document.getElementById("latent-control-rail");
-      const buyCard = document.getElementById("latent-buy-component");
-      const sellCard = document.getElementById("latent-sell-component");
-      const write = (id, value) => {
-        const node = document.getElementById(id);
-        if (node) setText(node, value);
-      };
-      const metricNumber = (value) => (
-        value === null || value === undefined || value === ""
-          ? Number.NaN
-          : Number(value)
-      );
-      const probabilityCopy = (component) => {
-        const probability = metricNumber(component.next_state_probability);
-        return Number.isFinite(probability)
-          ? (probability * 100).toFixed(1) + "% empirical next-state mass"
-          : "Next-state mass needs more history";
-      };
-      const supportCopy = (component) => {
-        const support = metricNumber(component.outgoing_transition_support);
-        const count = metricNumber(component.next_state_count);
-        if (!Number.isFinite(support) || support <= 0) {
-          return "Waiting for Pair DNA transition support";
-        }
-        const destinationCount = Number.isFinite(count) ? count : 0;
-        return destinationCount + " matching exits across " + support
-          + " observed state transitions";
-      };
-
-      setText(els.beginnerStoryTitle, "Hidden-state control");
-      setText(
-        els.beginnerStorySummary,
-        "A local swing is not control. Control needs multi-candle state maturity, Pair DNA support, and a confirmed third-touch wick line aligned with primary structure.",
-      );
-
-      if (!Object.keys(latent).length) {
-        if (rail) rail.dataset.side = "unresolved";
-        if (buyCard) buyCard.classList.remove("is-control");
-        if (sellCard) sellCard.classList.remove("is-control");
-        write("latent-control-side", "ANALYZING");
-        write("latent-state-label", "Latent state unresolved");
-        write(
-          "latent-control-context",
-          "Waiting for the closed-candle state model. No strategy rule will substitute.",
-        );
-        write("latent-cycle-horizon", "Full state-cycle horizon pending");
-        return;
-      }
-
-      const side = safeText(control.side, "UNRESOLVED").toUpperCase();
-      const status = safeText(control.status, "").toUpperCase();
-      const candidateSide = safeText(
-        control.candidate_side || control.local_leg_side || hiddenState.direction,
-        "UNRESOLVED",
-      ).toUpperCase();
-      const directionalSide = safeText(
-        control.directional_side || directionalConsensus.stable_side,
-        "UNRESOLVED",
-      ).toUpperCase();
-      const directionStable = (
-        (directionalSide === "BUY" || directionalSide === "SELL")
-        && (status.startsWith("STABLE_DIRECTION") || status === "STRUCTURALLY_CONFIRMED_CONTROL")
-      );
-      const reactionSide = safeText(control.reaction_side, "UNRESOLVED").toUpperCase();
-      const reactionStatus = safeText(control.reaction_status, "").toUpperCase();
-      const confirmedControl = (
-        (side === "BUY" || side === "SELL")
-        && status === "STRUCTURALLY_CONFIRMED_CONTROL"
-      );
-      const reactionConfirmed = reactionStatus === "CLOSED_CANDLE_REACTION_CONFIRMED";
-      const reactionDeveloping = reactionStatus === "LIVE_TOUCH_DEVELOPING";
-      const currentState = safeText(hiddenState.state, "UNRESOLVED").toUpperCase();
-      const controlLabel = confirmedControl
-        ? side + " STRUCTURAL CONTROL"
-        : (reactionSide === "BUY" || reactionSide === "SELL") && reactionConfirmed
-          ? reactionSide + " REACTION CONFIRMED"
-          : (reactionSide === "BUY" || reactionSide === "SELL") && reactionDeveloping
-            ? reactionSide + " TOUCH DEVELOPING"
-            : directionStable
-              ? directionalSide + " DOMINANT STRUCTURE"
-            : candidateSide === "BUY" || candidateSide === "SELL"
-              ? candidateSide + " LOCAL LEG ONLY"
-              : "NEITHER CONFIRMED";
-      if (rail) rail.dataset.side = confirmedControl
-        ? side.toLowerCase()
-        : directionStable
-          ? directionalSide.toLowerCase()
-          : "unresolved";
-      if (buyCard) buyCard.classList.toggle("is-control", confirmedControl && side === "BUY");
-      if (sellCard) sellCard.classList.toggle("is-control", confirmedControl && side === "SELL");
-      write("latent-control-side", controlLabel);
-      const stateAge = metricNumber(hiddenState.age_candles);
-      write(
-        "latent-state-label",
-        "Current local state: " + currentState.replaceAll("_", " ")
-          + (Number.isFinite(stateAge) ? " · " + stateAge + " completed candles" : ""),
-      );
-      const restProbability = metricNumber(rest.next_state_probability);
-      write(
-        "latent-control-context",
-        safeText(control.explanation || control.basis, "empirical state evidence unresolved")
-          .replaceAll("_", " ")
-          + (Number.isFinite(restProbability)
-            ? " · REST mass " + (restProbability * 100).toFixed(1) + "%"
-            : ""),
-      );
-
-      const path = Array.isArray(horizon.path)
-        ? horizon.path
-          .map((item) => safeText(safeObject(item).state, "").replaceAll("_", " "))
-          .filter(Boolean)
-        : [];
-      const expectedCandles = metricNumber(horizon.expected_candles);
-      const durationDisplay = safeText(horizonDurationContract.display, "");
-      const horizonDuration = Number.isFinite(expectedCandles)
-        ? "about " + expectedCandles.toFixed(1) + " candles"
-          + (durationDisplay && durationDisplay !== "duration unsupported"
-            ? " / " + durationDisplay
-            : "")
-        : "duration still unsupported";
-      write(
-        "latent-cycle-horizon",
-        path.length
-          ? "Whole state cycle: " + path.join(" -> ") + " · " + horizonDuration
-          : "Whole state-cycle path needs more Pair DNA history",
-      );
-
-      write(
-        "latent-buy-status",
-        confirmedControl && side === "BUY"
-          ? "STRUCTURAL CONTROL"
-          : directionStable && directionalSide === "BUY"
-            ? "DOMINANT STRUCTURE"
-          : reactionSide === "BUY" && reactionConfirmed
-            ? "REACTION CONFIRMED"
-            : candidateSide === "BUY"
-              ? "LOCAL LEG ONLY"
-              : "NOT CONFIRMED",
-      );
-      write(
-        "latent-buy-state",
-        buy.currently_active || control.local_leg_side === "BUY"
-          ? directionStable && directionalSide === "SELL"
-            ? "LOCAL UP PULLBACK ACTIVE"
-            : "UP SWING ACTIVE NOW"
-          : "UP SWING IS NOT THE ACTIVE STATE",
-      );
-      write("latent-buy-mass", probabilityCopy(buy));
-      write("latent-buy-support", supportCopy(buy));
-      write(
-        "latent-sell-status",
-        confirmedControl && side === "SELL"
-          ? "STRUCTURAL CONTROL"
-          : directionStable && directionalSide === "SELL"
-            ? "DOMINANT STRUCTURE"
-          : reactionSide === "SELL" && reactionConfirmed
-            ? "REACTION CONFIRMED"
-            : candidateSide === "SELL"
-              ? "LOCAL LEG ONLY"
-              : "NOT CONFIRMED",
-      );
-      write(
-        "latent-sell-state",
-        sell.currently_active || control.local_leg_side === "SELL"
-          ? directionStable && directionalSide === "BUY"
-            ? "LOCAL DOWN PULLBACK ACTIVE"
-            : "DOWN SWING ACTIVE NOW"
-          : directionStable && directionalSide === "SELL" && control.local_leg_side === "BUY"
-            ? "SELL STRUCTURE · LOCAL BUY PULLBACK"
-          : "DOWN SWING IS NOT THE ACTIVE STATE",
-      );
-      write("latent-sell-mass", probabilityCopy(sell));
-      write("latent-sell-support", supportCopy(sell));
+function renderLatentStateControl(payload) {
+      // Retired: the hidden-state control rail and BUY/SELL state components
+      // were removed from the dashboard to keep the workspace easy to read.
+      // The live decision is presented by renderDecision and the execution
+      // readiness panel (renderPassiveDecisionAudit).
     }
 
     function renderDecision(payload) {
@@ -7429,7 +6921,6 @@
           + (observedAt > 0 ? " · " + formatAge(observedAt) : ""),
       );
       renderLatentStateControl(payload);
-      renderPassiveDecisionAudit(payload);
       scheduleEntryExpiry(permission, freshness, action);
       enforceCaptureSourceDecision(payload);
     }
@@ -7636,6 +7127,127 @@
       setText(els.streamObservationDetail, detail.join(" · "));
     }
 
+    function frontlineUrl() {
+      return "/v1/mobile/frontline/latest/" + encodeURIComponent(SESSION_ID);
+    }
+
+    async function refreshFrontlineQwen(payload, options) {
+      const config = options || {};
+      if (config.silent && state.frontlineRefreshQueued) {
+        return;
+      }
+      state.frontlineRefreshQueued = true;
+      try {
+        const frontline = await requestJsonAny(frontlineUrl());
+        if (state.frontlineRefreshQueued) {
+          renderFrontlineQwen(payload, frontline);
+        }
+      } catch (error) {
+        renderFrontlineQwen(payload, null);
+      } finally {
+        state.frontlineRefreshQueued = false;
+      }
+    }
+
+    function renderFrontlineQwen(payload, frontline) {
+      const qwen = safeObject(frontline);
+      const panel = els.frontlineQwenPanel;
+      if (!panel) {
+        return;
+      }
+      if (!qwen || !qwen.schema_version) {
+        panel.dataset.state = "pending";
+        panel.dataset.verdict = "pending";
+        setText(els.frontlineQwenStatus, "Preparing analysis");
+        setText(els.frontlineQwenVerdict, "PENDING");
+        setText(els.frontlineQwenConfidence, "Analysis is being prepared for the current chart.");
+        setText(els.frontlineQwenMessage, "Preparing to review the current chart for entry quality.");
+        return;
+      }
+      const state = safeText(qwen.state, "unknown").toLowerCase();
+      panel.dataset.state = state;
+      if (state === "mock") {
+        panel.dataset.verdict = "ALLOW";
+        setText(els.frontlineQwenStatus, "Offline verification mode");
+        setText(els.frontlineQwenVerdict, safeText(qwen.verdict, "ALLOW"));
+        setText(els.frontlineQwenConfidence, "offline verification");
+        setText(els.frontlineQwenMessage, safeText(qwen.reason, "Offline verification assessment."));
+        renderFrontlineQwenMeta(qwen, payload);
+        return;
+      }
+      if (state !== "ok") {
+        panel.dataset.verdict = "pending";
+        setText(els.frontlineQwenStatus, "Clearance " + safeText(qwen.state, "unavailable").toUpperCase());
+        setText(els.frontlineQwenVerdict, "UNAVAILABLE");
+        setText(els.frontlineQwenConfidence, safeText(qwen.reason, "No usable analysis."));
+        setText(els.frontlineQwenMessage, safeText(qwen.reason, "The analyst could not produce a usable assessment."));
+        return;
+      }
+      const verdict = safeText(qwen.verdict, "").toUpperCase();
+      panel.dataset.verdict = verdict === "VETO" ? "VETO" : "ALLOW";
+      setText(els.frontlineQwenStatus, "Analysis reviewed the current chart");
+      setText(els.frontlineQwenVerdict, verdict || "ALLOW");
+      const confidence = Number(qwen.confidence);
+      const confidenceText = Number.isFinite(confidence)
+        ? "confidence " + (Math.round(confidence * 100) / 100).toFixed(2)
+        : "confidence n/a";
+      const side = safeText(qwen.side, "").toUpperCase();
+      setText(
+        els.frontlineQwenConfidence,
+        side + (side ? " · " : "") + confidenceText
+        + " · " + safeText(qwen.position_quality, "aligned"),
+      );
+      renderFrontlineQwenDominantComponents(qwen, payload);
+      const reason = safeText(qwen.reason, "No reason provided by the analyst.");
+      setText(els.frontlineQwenMessage, reason);
+      const warnings = safeList(qwen.warnings);
+      if (warnings.length) {
+        setText(els.frontlineQwenMessage, reason + "  Notes: " + warnings.join(" | "));
+      }
+      renderFrontlineQwenMeta(qwen, payload);
+    }
+
+    function renderFrontlineQwenDominantComponents(qwen, payload) {
+      const bias = safeObject(payload && payload.direct_visual_bias_v3);
+      const biasSide = safeText(bias.side, "").toUpperCase();
+      const biasConfidence = Number(bias.confidence);
+      const dominantSide = biasSide || safeText(bias.dominant_side, "").toUpperCase();
+      const biasText = (dominantSide ? dominantSide + " " : "")
+        + (Number.isFinite(biasConfidence) ? (Math.round(biasConfidence * 100) / 100).toFixed(2) : "n/a");
+      const buyState = dominantSide === "BUY" ? "PREFERRED" : "SECONDARY";
+      const sellState = dominantSide === "SELL" ? "PREFERRED" : "SECONDARY";
+      if (els.frontlineQwenBuy) {
+        els.frontlineQwenBuy.dataset.control = String(dominantSide === "BUY");
+        setText(els.frontlineQwenBuyState, buyState);
+        setText(els.frontlineQwenBuySupport, biasText || "No read available");
+      }
+      if (els.frontlineQwenSell) {
+        els.frontlineQwenSell.dataset.control = String(dominantSide === "SELL");
+        setText(els.frontlineQwenSellState, sellState);
+        setText(els.frontlineQwenSellSupport, biasText || "No read available");
+      }
+    }
+
+    function renderFrontlineQwenMeta(qwen, payload) {
+      setText(els.frontlineQwenModel, "analyst: " + safeText(qwen.model, "pending"));
+      const candle = safeText(qwen.candle_key, "");
+      if (candle) {
+        setText(els.frontlineQwenCandle, "frame: " + candle);
+      } else {
+        const seq = qwen.candle_sequence;
+        setText(els.frontlineQwenCandle, "frame: " + (seq === undefined || seq === null ? "pending" : String(seq)));
+      }
+      const published = Number(qwen.published_epoch);
+      const latency = Number(qwen.latency_seconds);
+      if (Number.isFinite(published) && published > 0) {
+        setText(els.frontlineQwenAge, "age: " + (formatAge(published) || formatTime(published)));
+      } else if (Number.isFinite(latency)) {
+        setText(els.frontlineQwenAge, "reviewed in " + latency.toFixed(1) + "s");
+      } else {
+        setText(els.frontlineQwenAge, "age: pending");
+      }
+    }
+
     function renderTrackingStatus(payload) {
       const tracking = safeObject(payload.tracking);
       const freshness = safeObject(payload.freshness);
@@ -7840,12 +7452,13 @@
       // Entry geometry is still committed only by commitOperatorState after
       // the matching bitmap loads, so this cannot mix frames or authorize a
       // trade from forming pixels.
-      const operatorState = safeObject(payload);
+const operatorState = safeObject(payload);
       state.payload = operatorState;
       rememberCompletedStudyHistory(operatorState);
       renderTrackingStatus(operatorState);
       renderDecision(operatorState);
       renderHistory(operatorState);
+      refreshFrontlineQwen(operatorState, {silent: true});
     }
 
     function loadSurface(payload, options) {

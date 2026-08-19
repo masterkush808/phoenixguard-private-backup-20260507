@@ -23,7 +23,6 @@
     "dashboard_route": "/v3/mobile/window-tracker/dashboard"
   },
   "required_files": [
-    "Backend/launch/shooter.py",
     "Backend/launch/launch_phoenixguard_live_ready.ps1",
     "Backend/launch/start_phoenixguard_full_local.ps1",
     "Backend/launch/start_phoenixguard_24_7_tracker.py",
@@ -65,7 +64,6 @@
     "Backend/tests/test_model_council_v3.py",
     "Backend/tests/test_market_reality_engine.py",
     "Backend/tests/test_execution_packet_schema_v3.py",
-    "Backend/tests/test_shooter_package_reporter.py",
     "Backend/tests/test_floating_state_reducer.py",
     "Backend/tests/test_instrument_context_lock.py",
     "Backend/tests/test_cache_observability_v3.py",

@@ -8,7 +8,7 @@ import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = PROJECT_ROOT / "Developer" / "developer_tools" / "phoenixguard_kill_switch.py"
+MODULE_PATH = PROJECT_ROOT / "Backend" / "tools" / "phoenixguard_kill_switch.py"
 
 
 def _load_module():
