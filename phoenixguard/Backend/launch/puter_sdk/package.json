@@ -1,0 +1,10 @@
+{
+  "name": "phoenixguard-puter-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Node bridge to Puter.js for the PhoenixGuard frontline Qwen daemon.",
+  "dependencies": {
+    "@heyputer/puter.js": "^2.6.1",
+    "ws": "^8.18.0"
+  }
+}

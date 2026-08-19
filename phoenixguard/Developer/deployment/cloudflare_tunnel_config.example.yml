@@ -1,9 +1,0 @@
-tunnel: PHOENIXGUARD_TUNNEL_ID
-credentials-file: C:\Users\Administrator\.cloudflared\PHOENIXGUARD_TUNNEL_ID.json
-
-# Protect this hostname with Cloudflare Access, VPN, or an equivalent auth gate
-# before routing real PhoenixGuard traffic through it.
-ingress:
-  - hostname: phoenixguard.example.com
-    service: http://127.0.0.1:8793
-  - service: http_status:404

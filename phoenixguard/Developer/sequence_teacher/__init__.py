@@ -1,1 +1,0 @@
-"""Sequence teacher manifest tooling."""
