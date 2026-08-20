@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhoenixGuard Universal Chart Region</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">PHOENIXGUARD V3 · UNIVERSAL EDGE CHART SOURCE</p>
+        <h1>Select the chart once.<br>Keep working anywhere.</h1>
+        <p class="lede">Show any HTTP(S) chart in Edge. Press <strong>Ctrl+Shift+7</strong> to lock its full viewport immediately, or <strong>Ctrl+Shift+8</strong> to select an exact region. Press <strong>Ctrl+Shift+9</strong> at any time to kill capture.</p>
+      </header>
+
+      <section class="status" aria-labelledby="statusHeading">
+        <div>
+          <p class="eyebrow" id="statusHeading">CAPTURE STATUS</p>
+          <div class="phase-row">
+            <span class="phase" id="phase">IDLE</span>
+            <span class="pulse" id="pulse" aria-hidden="true"></span>
+          </div>
+          <h2 id="message">Press Ctrl+Shift+7 for the full viewport or Ctrl+Shift+8 for an exact region.</h2>
+        </div>
+        <dl>
+          <div><dt>Locked chart</dt><dd id="lockedTab">None</dd></div>
+          <div><dt>Selected region</dt><dd id="selectedRegion">None</dd></div>
+          <div><dt>Source lease</dt><dd id="sourceLease">Not claimed</dd></div>
+          <div><dt>Render freshness</dt><dd id="renderFreshness">Not streaming</dd></div>
+          <div><dt>Transport frame</dt><dd id="transportFrame">Never</dd></div>
+          <div><dt>Visual change</dt><dd id="visualChange">Never</dd></div>
+          <div><dt>Sampling</dt><dd id="sampling">0.25 FPS</dd></div>
+          <div><dt>Upload interval</dt><dd id="uploadInterval">Server controlled</dd></div>
+          <div><dt>Accepted</dt><dd id="acceptedFrames">0 frames</dd></div>
+          <div><dt>Latest-frame replacements</dt><dd id="replacedFrames">0</dd></div>
+          <div><dt>Last accepted</dt><dd id="lastAccepted">Never</dd></div>
+          <div><dt>Lock full viewport</dt><dd id="fullViewportShortcut">Ctrl+Shift+7</dd></div>
+          <div><dt>Select / switch</dt><dd id="selectShortcut">Ctrl+Shift+8</dd></div>
+          <div><dt>Kill capture</dt><dd id="killShortcut">Ctrl+Shift+9</dd></div>
+        </dl>
+        <p class="error" id="shortcutError" hidden></p>
+        <p class="error" id="lastError" hidden></p>
+        <p class="focus-proof">The selected tab may be inactive, covered, or minimized after <code>LIVE</code>. No tab activation, window restore, or focus API is used. Unchanged pixels remain valid only while decoded media continues advancing; a 90-second decoder stall fails closed.</p>
+      </section>
+
+      <section aria-labelledby="connectionHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOCAL CONNECTION</p>
+            <h2 id="connectionHeading">PhoenixGuard frame ingest</h2>
+          </div>
+          <button class="quiet" id="testConnection" type="button">Test server</button>
+        </div>
+        <form id="configForm">
+          <label class="wide">Server URL
+            <input id="baseUrl" type="url" required autocomplete="url" placeholder="http://127.0.0.1:8793">
+          </label>
+          <label>Session ID
+            <input id="sessionId" required spellcheck="false">
+          </label>
+          <label>Source ID
+            <input id="sourceId" required spellcheck="false">
+          </label>
+          <label class="wide">Frame-ingest token
+            <input id="token" type="password" required autocomplete="off">
+          </label>
+          <label class="wide">HMAC signing secret <span>optional unless PhoenixGuard requires it</span>
+            <input id="signingSecret" type="password" autocomplete="off">
+          </label>
+          <p class="wide">Pair and timeframe are read from each newly selected chart. PhoenixGuard never carries a saved identity hint into another tab or region.</p>
+          <details class="wide">
+            <summary>Capture tuning</summary>
+            <div class="tuning-grid">
+              <label>Maximum output width
+                <input id="maxWidth" type="number" min="640" max="2560" step="1">
+              </label>
+              <label>JPEG quality
+                <input id="jpegQuality" type="number" min="0.55" max="0.95" step="0.01">
+              </label>
+              <label>Material delta
+                <input id="materialDeltaThreshold" type="number" min="0.001" max="0.08" step="0.001">
+              </label>
+              <label>Rest heartbeat seconds
+                <input id="heartbeatSec" type="number" min="15" max="120" step="1">
+              </label>
+            </div>
+          </details>
+          <div class="actions wide">
+            <button class="primary" type="submit">Save configuration</button>
+            <button class="danger" id="stopCapture" type="button">Kill capture</button>
+          </div>
+        </form>
+        <p class="feedback" id="feedback" aria-live="polite"></p>
+        <p class="focus-proof">If a shortcut is unassigned, open <code>edge://extensions/shortcuts</code> and assign it. Edge reserves Ctrl+Shift+B for its Favorites bar.</p>
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

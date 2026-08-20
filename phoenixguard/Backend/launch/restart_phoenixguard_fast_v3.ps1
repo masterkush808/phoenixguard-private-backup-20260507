@@ -166,9 +166,10 @@ for ($attempt = 1; $attempt -le 4 -and -not $session; $attempt++) {
 }
 
 # Frontline Qwen daemon: watches the live stream, feeds the FULL untruncated
-# payload + studied chart image to the best Qwen model (free Puter API), and
-# publishes a frontline_reasoning_v3 verdict the direct trade bridge respects
-# as a veto gate.  Fails open (no token / no API) without blocking the bridge.
+# payload + studied chart image to the Qwen vision model served by Cloudflare
+# Workers AI (@cf/qwen/qwen3.8-27b), and publishes a frontline_reasoning_v3
+# verdict the direct trade bridge respects as a veto gate.  Fails open (no
+# token / no API) without blocking the bridge.
 $frontlineScript = Join-Path $projectRoot 'Backend\launch\phoenixguard_frontline_qwen.py'
 $frontline = Start-Process `
     -FilePath $pythonPath `

@@ -3,11 +3,17 @@
 
 Listens to PhoenixGuard's live session stream and, whenever the studied
 candle changes, assembles the FULL untruncated V3 live-state payload plus the
-latest chart image and asks the highest available Qwen vision model (through
-the free Puter AI API) to reason about the market.  The resulting verdict is
-published as ``frontline_reasoning_v3.json`` next to PhoenixGuard's other
-sidecars, where the direct trade bridge reads it and applies it as a final
-veto gate before clicking BUY or SELL.
+latest chart image and asks the Qwen vision model served by Cloudflare Workers
+AI (``@cf/qwen/qwen3.8-27b``) to reason about the market.  The resulting
+verdict is published as ``frontline_reasoning_v3.json`` next to PhoenixGuard's
+other sidecars, where the direct trade bridge reads it and applies it as a
+final veto gate before clicking BUY or SELL.
+
+Provider: Cloudflare Workers AI (no Alibaba / ModelScope account required).
+The API token comes from ``PHOENIXGUARD_QWEN_TOKEN`` (or, as a fallback,
+``CLOUDFLARE_API_TOKEN`` or the ``qwen_token.txt`` file), and the account id
+comes from ``PHOENIXGUARD_CLOUDFLARE_ACCOUNT_ID``.  ``PHOENIXGUARD_QWEN_URL``
+overrides the base URL for a custom/self-hosted endpoint.
 
 Role contract (fail-safe):
   * Qwen has VETO power only.  It can block a trade the bridge wanted, it can
@@ -24,7 +30,6 @@ import base64
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -39,26 +44,27 @@ from _pg_bootstrap import ensure_project_paths
 
 PROJECT_ROOT = ensure_project_paths()
 
-PUTER_BASE_URL = str(
-    os.getenv("PUTER_BASE_URL") or "https://api.puter.com/puterai/openai/v1"
-).strip()
-PUTER_CHAT_ENDPOINT = PUTER_BASE_URL.rstrip("/") + "/chat/completions"
+_CLOUDFLARE_ACCOUNT_ID = str(os.getenv("PHOENIXGUARD_CLOUDFLARE_ACCOUNT_ID") or "").strip()
+_configured_qwen_url = str(os.getenv("PHOENIXGUARD_QWEN_URL") or "").strip().rstrip("/")
+QWEN_BASE_URL = _configured_qwen_url or (
+    f"https://api.cloudflare.com/client/v4/accounts/{_CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+    if _CLOUDFLARE_ACCOUNT_ID
+    else ""
+)
+QWEN_CHAT_ENDPOINT = (QWEN_BASE_URL + "/chat/completions") if QWEN_BASE_URL else ""
 DEFAULT_MODEL = str(
-    os.getenv("PUTER_MODEL") or "qwen/qwen3-vl-235b-a22b-thinking"
+    os.getenv("PHOENIXGUARD_QWEN_MODEL") or "@cf/qwen/qwen3.8-27b"
 ).strip()
-DEFAULT_MODEL_FALLBACKS = [
+DEFAULT_MODEL_FALLBACKS: list[str] = [
     _text.strip()
-    for _text in str(
-        os.getenv("PUTER_MODEL_FALLBACKS")
-        or "qwen/qwen3-vl-8b-thinking,qwen-vl-plus,qwen3-vl-plus"
-    ).split(",")
+    for _text in str(os.getenv("PHOENIXGUARD_QWEN_MODEL_FALLBACKS") or "").split(",")
     if _text.strip()
 ]
 DEFAULT_MIN_INTERVAL_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_MIN_INTERVAL_SEC") or "900.0")
 DEFAULT_VERDICT_FRESHNESS_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_FRESHNESS_SEC") or "180.0")
-DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_CONTEXT_CHARS") or "150000")
+DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_CONTEXT_CHARS") or "30000")
 DEFAULT_MAX_LIST_ITEMS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_LIST_ITEMS") or "50")
-DEFAULT_TIMEOUT_SECONDS = 90.0
+DEFAULT_TIMEOUT_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_TIMEOUT_SEC") or "180.0")
 DEFAULT_LISTENER_RECONNECT_SECONDS = 2.0
 DEFAULT_POLL_SECONDS = 1.0
 SCHEMA_VERSION = "PG_FRONTLINE_REASONING_V3"
@@ -261,6 +267,32 @@ def _latest_chart_image_bytes(*, base_url: str, session_id: str, timeout_sec: fl
     return data, "image/png", time.time()
 
 
+def _optimize_chart_image(chart_bytes: bytes) -> tuple[bytes, str]:
+    """Downscale and re-encode the chart so Cloudflare edge inference keeps up.
+
+    The live chart PNG is large (1920x1080, ~700KB); sending it raw to a 27B
+    vision model causes Cloudflare to time the request out (HTTP 408).  Resize
+    to a sensible maximum and re-encode as JPEG.  Falls back to the original
+    bytes if Pillow is unavailable or the image cannot be parsed.
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(chart_bytes)) as loaded:
+            image = loaded.convert("RGB")
+        image.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=70, optimize=True)
+        optimized = buffer.getvalue()
+        if optimized:
+            return optimized, "image/jpeg"
+    except Exception:
+        pass
+    return chart_bytes, "image/png"
+
+
 def _drop_noise(value: object, *, max_list_items: int) -> object:
     if isinstance(value, Mapping):
         out: dict[str, object] = {}
@@ -303,17 +335,20 @@ def _bounded_context(payload: Mapping[str, object], *, max_chars: int, max_list_
     return serialized[:max_chars]
 
 
-def _load_puter_token(token_arg: str | None) -> str:
+def _load_qwen_token(token_arg: str | None) -> str:
     token = (token_arg or "").strip()
     if token:
         return token
-    token = str(os.getenv("PUTER_AUTH_TOKEN") or "").strip()
+    token = str(os.getenv("PHOENIXGUARD_QWEN_TOKEN") or "").strip()
+    if token:
+        return token
+    token = str(os.getenv("CLOUDFLARE_API_TOKEN") or "").strip()
     if token:
         return token
     for candidate in (
-        PROJECT_ROOT / "Backend" / "launch" / "puter_token.txt",
-        PROJECT_ROOT / "puter_token.txt",
-        Path.home() / ".config" / "phoenixguard" / "puter_token.txt",
+        PROJECT_ROOT / "Backend" / "launch" / "qwen_token.txt",
+        PROJECT_ROOT / "qwen_token.txt",
+        Path.home() / ".config" / "phoenixguard" / "qwen_token.txt",
     ):
         try:
             if candidate.is_file():
@@ -325,79 +360,77 @@ def _load_puter_token(token_arg: str | None) -> str:
     return ""
 
 
-_PUTER_BRIDGE_SCRIPT = Path(__file__).resolve().parent / "puter_sdk" / "puter_qwen_bridge.cjs"
-_NODE_EXECUTABLE = str(os.getenv("PHOENIXGUARD_NODE_BIN") or "").strip() or "node"
-
-
-def _call_puter_qwen(
+def _call_qwen(
     *,
     token: str,
     model: str,
     messages: list[dict[str, object]],
     timeout_sec: float,
 ) -> tuple[str, dict[str, object] | None]:
-    """Call Qwen through the local Puter.js Node bridge.
+    """Call Qwen through Cloudflare Workers AI's OpenAI-compatible inference API.
 
-    Puter's free tier (user-pays model) is only served through the Puter.js SDK
-    (WebSocket); the raw OpenAI-compatible HTTP endpoint returns 402
-    subscription_required on free accounts.  The Node bridge receives an OpenAI
-    shaped ``content`` array (text + base64 image_url) and returns the model
-    reply over stdout as JSON.
+    Cloudflare serves ``@cf/qwen/qwen3.8-27b`` (Qwen vision) on its global edge
+    with a daily-resetting free neuron allowance and no credit card on the
+    Workers Free plan.  The chart image travels in the OpenAI-shaped
+    ``content`` array as a base64 ``image_url`` part.
     """
-    if not _PUTER_BRIDGE_SCRIPT.is_file():
-        return "", {"state": "error", "error": f"Puter bridge not found: {_PUTER_BRIDGE_SCRIPT}"}
-    user_content = None
-    for message in messages:
-        if str(message.get("role")) != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
-            user_content = list(cast(Sequence[object], content))
-            break
-    if user_content is None:
-        return "", {"state": "error", "error": "no user message content to send"}
-    request_body = json.dumps(
+    if not QWEN_CHAT_ENDPOINT:
+        return "", {
+            "state": "error",
+            "error": (
+                "no Cloudflare endpoint configured (set PHOENIXGUARD_CLOUDFLARE_ACCOUNT_ID "
+                "or PHOENIXGUARD_QWEN_URL)"
+            ),
+        }
+    if not token:
+        return "", {"state": "error", "error": "no Cloudflare Workers AI API token configured"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(
         {
-            "token": token,
             "model": model,
-            "max_tokens": 3000,
+            "messages": messages,
+            "max_tokens": 5000,
             "temperature": 0.2,
-            "content": user_content,
+            "reasoning_effort": "medium",
+            "stream": False,
         },
         ensure_ascii=True,
     ).encode("utf-8")
+    req = request.Request(QWEN_CHAT_ENDPOINT, data=body, headers=headers, method="POST")
     try:
-        proc = subprocess.run(
-            [str(_NODE_EXECUTABLE), str(_PUTER_BRIDGE_SCRIPT)],
-            input=request_body,
-            capture_output=True,
-            timeout=timeout_sec,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return "", {"state": "error", "error": f"puter bridge transport error: {exc}"}
-    stdout_text = proc.stdout.decode("utf-8", errors="replace").strip()
-    stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
+        with request.urlopen(req, timeout=timeout_sec) as resp:
+            payload_bytes = resp.read()
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        return "", {"state": "error", "error": f"qwen http {exc.code}: {detail[:800]}"}
+    except (error.URLError, OSError) as exc:
+        return "", {"state": "error", "error": f"qwen connection error: {exc}"}
     try:
-        parsed = json.loads(stdout_text)
-    except json.JSONDecodeError:
-        detail = (stderr_text or stdout_text)[:800]
-        return "", {"state": "error", "error": f"puter bridge returned non-json: {detail}"}
+        parsed = json.loads(payload_bytes)
+    except json.JSONDecodeError as exc:
+        return "", {"state": "error", "error": f"qwen returned non-json: {exc}"}
     if not isinstance(parsed, Mapping):
-        return "", {"state": "error", "error": "puter bridge returned a non-object response"}
+        return "", {"state": "error", "error": "qwen returned a non-object response"}
     parsed_map = cast(Mapping[str, object], parsed)
-    if not parsed_map.get("ok"):
-        detail = str(parsed_map.get("error") or "unknown bridge error")[:800]
-        return "", {"state": "error", "error": f"puter api error: {detail}"}
-    content = str(parsed_map.get("content") or "").strip()
+    choice = parsed_map.get("choices")
+    if not isinstance(choice, Sequence) or not choice:
+        error_detail = str(parsed_map.get("error") or "no choices in response")[:800]
+        return "", {"state": "error", "error": f"qwen api error: {error_detail}"}
+    first = cast(Mapping[str, object], choice[0])
+    message = cast(Mapping[str, object], first.get("message") or {})
+    content = str(message.get("content") or "").strip()
     if not content:
-        return "", {"state": "error", "error": "puter api returned no message content"}
-    usage = parsed_map.get("usage")
+        return "", {"state": "error", "error": "qwen returned no message content"}
     meta: dict[str, object] = {"state": "ok"}
-    if isinstance(usage, Mapping):
-        meta["usage"] = dict(cast(Mapping[str, object], usage))
-    reasoning = str(parsed_map.get("reasoning") or "").strip()
+    reasoning = str(message.get("reasoning_content") or message.get("reasoning") or "").strip()
     if reasoning:
         meta["reasoning"] = reasoning
+    usage = parsed_map.get("usage")
+    if isinstance(usage, Mapping):
+        meta["usage"] = dict(cast(Mapping[str, object], usage))
     return content, meta
 
 
@@ -556,6 +589,8 @@ def _run_verdict_once(
         except Exception:
             image_result = None
     chart_bytes, mime, chart_epoch = image_result if image_result else (None, "", 0.0)
+    if chart_bytes:
+        chart_bytes, mime = _optimize_chart_image(chart_bytes)
 
     started = time.time()
     if mock:
@@ -580,7 +615,7 @@ def _run_verdict_once(
                 "side": "NEUTRAL",
                 "confidence": 0.0,
                 "position_quality": "",
-                "reason": "No Puter API token configured (set PUTER_AUTH_TOKEN or puter_token.txt). Bridge runs without frontline veto.",
+                "reason": "No Cloudflare Workers AI token configured (set PHOENIXGUARD_QWEN_TOKEN / CLOUDFLARE_API_TOKEN / qwen_token.txt). Bridge runs without frontline veto.",
                 "warnings": [],
             }
         else:
@@ -613,7 +648,7 @@ def _run_verdict_once(
                 if fallback and fallback != model
             ]
             for candidate in candidate_models:
-                content, api_meta = _call_puter_qwen(
+                content, api_meta = _call_qwen(
                     token=token, model=candidate, messages=messages, timeout_sec=timeout_sec
                 )
                 if content:
@@ -830,14 +865,15 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "PhoenixGuard Frontline Qwen daemon. Watches the live session stream, "
             "assembles the full untruncated V3 payload plus the studied chart image, "
-            "asks the best available Qwen vision model (free Puter AI API), and "
-            "publishes a frontline_reasoning_v3 verdict the direct trade bridge "
-            "respects as a veto gate."
+            "asks the Qwen vision model served by Cloudflare Workers AI "
+            "(@cf/qwen/qwen3.8-27b), and publishes a "
+            "frontline_reasoning_v3 verdict the direct trade bridge respects "
+            "as a veto gate."
         ),
     )
     parser.add_argument("--base-url", default="")
     parser.add_argument("--session-id", default="")
-    parser.add_argument("--puter-token", default="", help="Puter personal access token (or set PUTER_AUTH_TOKEN / puter_token.txt).")
+    parser.add_argument("--qwen-token", default="", help="Cloudflare Workers AI API token (or set PHOENIXGUARD_QWEN_TOKEN / CLOUDFLARE_API_TOKEN / qwen_token.txt).")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--min-interval-seconds", type=float, default=DEFAULT_MIN_INTERVAL_SECONDS)
@@ -857,7 +893,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_url=args.base_url or None,
         session_id=args.session_id or None,
     )
-    token = _load_puter_token(args.puter_token)
+    token = _load_qwen_token(args.qwen_token)
 
     if args.once:
         verdict = _run_verdict_once(

@@ -78,6 +78,7 @@ data/**
 
 # Local secrets and profiles
 puter_token.txt
+qwen_token.txt
 *.token.txt
 *_auth_token*
 deploy/windows/phoenixguard.vm-share.env.ps1

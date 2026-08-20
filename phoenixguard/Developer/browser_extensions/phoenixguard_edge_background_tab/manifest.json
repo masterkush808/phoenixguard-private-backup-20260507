@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "PhoenixGuard Universal Chart Region",
+  "version": "0.3.12",
+  "description": "Streams one explicitly selected region of any HTTP(S) chart tab to local PhoenixGuard without activating or raising Edge.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "offscreen",
+    "scripting",
+    "storage",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "PhoenixGuard: select or switch the active chart region"
+  },
+  "commands": {
+    "lock-full-viewport": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+7",
+        "linux": "Ctrl+Shift+7",
+        "mac": "Command+Shift+7"
+      },
+      "description": "Lock the active chart tab's full viewport without opening the region selector"
+    },
+    "select-chart-region": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+8",
+        "linux": "Ctrl+Shift+8",
+        "mac": "Command+Shift+8"
+      },
+      "description": "Select or switch the PhoenixGuard chart region in the active Edge tab"
+    },
+    "stop-chart-capture": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+9",
+        "linux": "Ctrl+Shift+9",
+        "mac": "Command+Shift+9"
+      },
+      "description": "Immediately stop PhoenixGuard chart capture",
+      "global": true
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

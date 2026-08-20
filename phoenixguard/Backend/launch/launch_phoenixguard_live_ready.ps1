@@ -782,10 +782,10 @@ if ($NoBrowser) {
 & (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_full_local.ps1') @launchArgs
 
 # Frontline Qwen daemon: watches the live session stream, feeds the FULL
-# untruncated V3 payload plus the studied chart image to the best Qwen vision
-# model (free Puter API), and publishes a frontline_reasoning_v3 verdict the
-# direct trade bridge respects as a veto gate.  Fails open (no token / no API)
-# without blocking the bridge.
+# untruncated V3 payload plus the studied chart image to the Qwen vision model
+# served by Cloudflare Workers AI (@cf/qwen/qwen3.8-27b), and publishes a
+# frontline_reasoning_v3 verdict the direct trade bridge respects as a veto gate.
+# Fails open (no token / no API) without blocking the bridge.
 $frontlineScript = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\phoenixguard_frontline_qwen.py'
 $frontlineDaemon = $null
 if (Test-Path -LiteralPath $frontlineScript -PathType Leaf) {
