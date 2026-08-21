@@ -35,8 +35,11 @@ def _default_calibration_dir(project_root: Path | None = None) -> Path:
 
 
 DEFAULT_OUTPUT = _default_calibration_dir() / "trigger_calibration_manifest.json"
-DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 0.0
+# Human-paced trigger cadence: every action pause is five seconds so the
+# broker cannot mistake the sequence for automated clicking.
+DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 5.0
 DEFAULT_PRE_CLICK_DELAY_SECONDS = 5.0
+DEFAULT_INTER_CLICK_DELAY_SECONDS = 5.0
 DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 
 
@@ -71,6 +74,7 @@ def _build_manifest(
     score_threshold: float,
     chart_focus_settle_seconds: float,
     pre_click_delay_seconds: float,
+    inter_click_delay_seconds: float,
     pointer_move_duration_seconds: float,
 ) -> dict[str, Any]:
     return {
@@ -101,9 +105,10 @@ def _build_manifest(
         "timing_policy": {
             "chart_focus_settle_seconds": float(chart_focus_settle_seconds),
             "pre_click_delay_seconds": float(pre_click_delay_seconds),
+            "inter_click_delay_seconds": float(inter_click_delay_seconds),
             "pointer_move_duration_seconds": float(pointer_move_duration_seconds),
         },
-        "notes": "Durable operator calibration. The bridge will focus the chart, use one saved pacing wait, then click the BUY or SELL target only after PhoenixGuard permits the live direction and entry position. Time and amount remain fixed to the values below.",
+        "notes": "Durable operator calibration. The bridge will focus the chart, wait five seconds, press the BUY or SELL target, wait five seconds, then confirm the second press - human-paced so the sequence is never mistaken for a bot. Time and amount remain fixed to the values below.",
     }
 
 
@@ -129,6 +134,7 @@ def main() -> int:
     parser.add_argument("--score-threshold", type=float, default=0.62)
     parser.add_argument("--chart-focus-settle-seconds", type=float, default=DEFAULT_CHART_FOCUS_SETTLE_SECONDS)
     parser.add_argument("--pre-click-delay-seconds", type=float, default=DEFAULT_PRE_CLICK_DELAY_SECONDS)
+    parser.add_argument("--inter-click-delay-seconds", type=float, default=DEFAULT_INTER_CLICK_DELAY_SECONDS)
     parser.add_argument("--pointer-move-duration-seconds", type=float, default=DEFAULT_POINTER_MOVE_DURATION_SECONDS)
     args = parser.parse_args()
 
@@ -161,6 +167,7 @@ def main() -> int:
         score_threshold=args.score_threshold,
         chart_focus_settle_seconds=max(0.0, float(args.chart_focus_settle_seconds)),
         pre_click_delay_seconds=max(0.0, float(args.pre_click_delay_seconds)),
+        inter_click_delay_seconds=max(0.0, float(args.inter_click_delay_seconds)),
         pointer_move_duration_seconds=max(0.0, float(args.pointer_move_duration_seconds)),
     )
     output_path = Path(args.output).expanduser()

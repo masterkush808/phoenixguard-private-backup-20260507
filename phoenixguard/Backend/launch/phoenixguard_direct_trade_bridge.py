@@ -94,9 +94,9 @@ def _default_calibration_dir(project_root: Path | None = None) -> Path:
 
 
 DEFAULT_TRIGGER_MANIFEST = _default_calibration_dir() / "trigger_calibration_manifest.json"
-DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 0.0
+DEFAULT_CHART_FOCUS_SETTLE_SECONDS = 5.0
 DEFAULT_PRE_CLICK_DELAY_SECONDS = 5.0
-DEFAULT_INTER_CLICK_DELAY_SECONDS = 0.35
+DEFAULT_INTER_CLICK_DELAY_SECONDS = 5.0
 DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 # Listener delivery is the liveness contract.  A stable trend/bias may remain
 # correct for hours, so an unchanged observation timestamp is not a stale
