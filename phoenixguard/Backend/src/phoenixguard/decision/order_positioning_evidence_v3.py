@@ -54,7 +54,7 @@ _POSITIONING_SOURCE_TYPES: Final = frozenset(
         "RESISTANCE_TRENDLINE",
     }
 )
-_POSITIONING_SOURCE_LIMIT: Final = 24
+_POSITIONING_SOURCE_LIMIT: Final = 1_000_000
 _CANONICAL_ANCHOR_QUALITY_FIELDS: Final = frozenset(
     {
         "has_candle_anchor",
@@ -215,7 +215,7 @@ def _json_safe(value: Any, *, depth: int = 0, field_name: str = "") -> Any:
         return value if value == value and value not in {float("inf"), float("-inf")} else None
     if isinstance(value, Mapping):
         output: dict[str, Any] = {}
-        for raw_key, item in list(cast(Mapping[Any, Any], value).items())[:96]:
+        for raw_key, item in list(cast(Mapping[Any, Any], value).items())[:1_000_000]:
             key = str(raw_key)
             normalized_key = key.strip().lower()
             if normalized_key in _OMITTED_KEYS or (
@@ -229,7 +229,7 @@ def _json_safe(value: Any, *, depth: int = 0, field_name: str = "") -> Any:
         return output
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         output_list: list[Any] = []
-        for item in cast(Sequence[Any], value)[:48]:
+        for item in cast(Sequence[Any], value)[:1_000_000]:
             safe = _json_safe(item, depth=depth + 1, field_name=field_name)
             if safe is not None:
                 output_list.append(safe)
@@ -1835,7 +1835,7 @@ def order_positioning_reprojection_anchors_v3(
             }
         )
     anchors.sort(key=lambda row: (float(row["x_norm"]), str(row["anchor_id"])))
-    return anchors[-24:]
+    return anchors[-1_000_000:]
 def _transform_contract(session: Mapping[str, Any]) -> dict[str, Any]:
     scene = _scene_forecast(session)
     identity_state = _mapping(scene.get("closed_candle_identity_state"))

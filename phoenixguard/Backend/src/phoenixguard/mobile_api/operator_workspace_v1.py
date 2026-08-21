@@ -2922,7 +2922,7 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         *positioning_rows,
         *_overlay_rows(payload),
     ]
-    for index, overlay in enumerate(source_rows[:256]):
+    for index, overlay in enumerate(source_rows[:1_000_000]):
         source_object_id = id(overlay)
         raw_type = _text(overlay.get("type") or overlay.get("overlay_type") or overlay.get("kind"), "").upper()
         is_book_rule_overlay = raw_type in {
@@ -7168,7 +7168,7 @@ def _bounded_hidden_state_value(value: object, *, depth: int = 0) -> object:
         result: dict[str, object] = {}
         for raw_key, item in list(
             cast(Mapping[object, object], value).items()
-        )[:128]:
+        )[:1_000_000]:
             key = str(raw_key)
             lowered = key.lower()
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,95}", key):
@@ -7192,7 +7192,7 @@ def _bounded_hidden_state_value(value: object, *, depth: int = 0) -> object:
     ):
         return [
             _bounded_hidden_state_value(item, depth=depth + 1)
-            for item in list(cast(Sequence[object], value))[:128]
+            for item in list(cast(Sequence[object], value))[:1_000_000]
         ]
     return None
 
@@ -7589,7 +7589,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
     motif_levels: list[dict[str, object]] = []
     for level in _rows(motif_lattice.get("levels"))[:4]:
         recent_nodes: list[dict[str, object]] = []
-        for node in _rows(level.get("nodes"))[-8:]:
+        for node in _rows(level.get("nodes"))[-1_000_000:]:
             span = _mapping(node.get("span"))
             composition = _mapping(node.get("composition"))
             features = _mapping(node.get("features"))
@@ -7808,7 +7808,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
                     6,
                 ),
             }
-            for row in _rows(path_reconstruction.get("points"))[:128]
+            for row in _rows(path_reconstruction.get("points"))[:1_000_000]
         ],
         "claim_proof_id": _safe_identifier(
             path_reconstruction.get("claim_proof_id"), ""
@@ -7836,7 +7836,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
                 "revision": _integer(row.get("revision")),
                 "ontology_version": _integer(row.get("ontology_version")),
             }
-            for row in _rows(feature_ontology.get("public_features"))[:32]
+            for row in _rows(feature_ontology.get("public_features"))[:1_000_000]
         ],
         "shadow_audit": {
             "shadow_feature_count": _integer(
@@ -7889,7 +7889,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
                 "status": _safe_public_text(row.get("status"), "UNKNOWN", limit=32),
                 "created_by": _safe_public_text(row.get("created_by"), "UNKNOWN", limit=64),
             }
-            for row in _rows(concept_drift.get("partitions"))[:64]
+            for row in _rows(concept_drift.get("partitions"))[:1_000_000]
         ],
         "claim_proof_id": _safe_identifier(concept_drift.get("claim_proof_id"), ""),
         "fixed_sequence_horizon": False,
@@ -7956,7 +7956,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
                 ),
                 "causal": False,
             }
-            for row in _rows(cross_pair.get("edges"))[:32]
+            for row in _rows(cross_pair.get("edges"))[:1_000_000]
         ],
         "claim_proof_id": _safe_identifier(cross_pair.get("claim_proof_id"), ""),
         "study_only": True,
@@ -7975,7 +7975,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
                 "status": _safe_public_text(row.get("status"), "UNKNOWN", limit=96),
                 "certificate_id": _safe_identifier(row.get("certificate_id"), ""),
             }
-            for row in _rows(claim_proofs.get("coverage"))[:64]
+            for row in _rows(claim_proofs.get("coverage"))[:1_000_000]
         ],
         "certificates": [
             {
@@ -8007,7 +8007,7 @@ def _market_study_contract(value: object) -> dict[str, object]:
                 "causal": False,
                 "execution_authority": False,
             }
-            for row in _rows(claim_proofs.get("certificates"))[:64]
+            for row in _rows(claim_proofs.get("certificates"))[:1_000_000]
         ],
         "proves_integrity_not_causation": True,
         "study_only": True,

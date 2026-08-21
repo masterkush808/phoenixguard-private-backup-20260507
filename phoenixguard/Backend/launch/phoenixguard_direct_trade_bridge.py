@@ -239,11 +239,64 @@ class _InstanceLock:
         lock_name = f"phoenixguard_direct_bridge_{_text(session_id) or 'default'}.lock"
         self.path = Path(tempfile.gettempdir()) / lock_name
 
+    def _pid_from_lock(self) -> int:
+        try:
+            return int(self.path.read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            return 0
+
+    def _owner_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            # Windows: no simple kill(pid, 0); probe via OpenProcess.
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
     def acquire(self) -> None:
         try:
             fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise RuntimeError(f"Bridge instance already running for this session ({self.path}).") from exc
+        except FileExistsError:
+            # A previous bridge that exited without cleanup must never block
+            # the next launch. Steal the lock only when its PID is provably
+            # dead; a live owner still refuses a second instance.
+            owner_pid = self._pid_from_lock()
+            if self._owner_alive(owner_pid):
+                raise RuntimeError(
+                    f"Bridge instance already running for this session ({self.path})."
+                ) from FileExistsError()
+            try:
+                self.path.unlink()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Bridge instance lock is stale but could not be removed ({self.path}): {exc}"
+                ) from exc
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError as exc:
+                raise RuntimeError(
+                    f"Bridge instance already running for this session ({self.path})."
+                ) from exc
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(str(os.getpid()))
 

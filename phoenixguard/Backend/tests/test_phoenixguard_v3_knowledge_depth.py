@@ -84,8 +84,8 @@ def test_execution_controls_normalize_knowledge_depth_knobs() -> None:
         }
     )
 
-    assert controls["live_max_tracked_candles"] == 256
-    assert controls["support_resistance_max_zones_per_role"] == 12
-    assert controls["support_resistance_max_total_zones"] == 24
-    assert controls["support_resistance_max_significant_zones"] == 24
-    assert controls["smart_money_max_liquidity_pools"] == 24
+    assert controls["live_max_tracked_candles"] == 512
+    assert controls["support_resistance_max_zones_per_role"] == 20
+    assert controls["support_resistance_max_total_zones"] == 40
+    assert controls["support_resistance_max_significant_zones"] == 40
+    assert controls["smart_money_max_liquidity_pools"] == 40

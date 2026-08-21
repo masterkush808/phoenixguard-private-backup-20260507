@@ -931,7 +931,7 @@ def closed_candle_identity_v3(
                 or row.get("side")
                 or row.get("color")
             )
-            for _row_index, row in closed_rows[-12:]
+            for _row_index, row in closed_rows[-1_000_000:]
         )
         identity_fields = [
             "VISUAL_SEQUENCE_BAR_V3",
@@ -1057,7 +1057,7 @@ def _closed_candle_observation_state_v3(
         if right - left > 0.5
     ]
     ranges: list[float] = []
-    for row in rows[-24:]:
+    for row in rows[-1_000_000:]:
         top = _axis_value(row, "wick_top_px", "wick_top", "high_y_px", "high_y")
         bottom = _axis_value(
             row,
@@ -1072,14 +1072,14 @@ def _closed_candle_observation_state_v3(
         "latest_closed": _visual_candle_observation_v3(closed, index=closed_index),
         "closed_tail": [
             _visual_candle_observation_v3(row, index=index)
-            for index, row in closed_rows[-24:]
+            for index, row in closed_rows[-1_000_000:]
         ],
         "forming": (
             _visual_candle_observation_v3(forming[1], index=forming[0])
             if forming is not None
             else {}
         ),
-        "median_x_step": statistics.median(x_steps[-24:]) if x_steps else 8.0,
+        "median_x_step": statistics.median(x_steps[-1_000_000:]) if x_steps else 8.0,
         "median_range": statistics.median(ranges) if ranges else 12.0,
         "detected_candle_count": len(rows),
         "detected_closed_count": closed_count,
@@ -1547,7 +1547,7 @@ def _prior_close_reobservation_v3(
     return evidence
 
 
-_STABLE_VISIBLE_CANDLE_BINDING_LIMIT_V3 = 32
+_STABLE_VISIBLE_CANDLE_BINDING_LIMIT_V3 = 1_000_000
 
 
 def _stable_visual_match_score_v3(
@@ -2372,13 +2372,13 @@ def build_scene_forecast_anchor_v3(
         for left, right in zip(x_values, x_values[1:])
         if right - left > 0.5
     ]
-    natural_step = statistics.median(x_steps[-24:]) if x_steps else max(4.0, width * 0.018)
+    natural_step = statistics.median(x_steps[-1_000_000:]) if x_steps else max(4.0, width * 0.018)
     x_norm = max(0.0, min(1.0, latest_x / width))
     available_step = max(1.0 / width, (0.985 - x_norm) / FORECAST_HORIZON_STEPS_V3)
     event_step_x_norm = min(natural_step / width, available_step)
 
     range_values: list[float] = []
-    for row in closed_rows[-32:]:
+    for row in closed_rows[-1_000_000:]:
         top = _axis_value(row, "wick_top_px", "wick_top", "high_y_px", "high_y")
         bottom = _axis_value(
             row,

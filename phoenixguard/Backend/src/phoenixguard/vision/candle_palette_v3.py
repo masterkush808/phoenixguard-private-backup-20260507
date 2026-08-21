@@ -703,7 +703,7 @@ def _select_coherent_palette_track(
 def extract_candle_tracks_adaptive_v3(
     rgb: NDArray[np.uint8],
     *,
-    x_bounds: tuple[float, float] = (0.06, 0.92),
+    x_bounds: tuple[float, float] = (0.0, 0.92),
     top_ratio: float = 0.05,
     bottom_candidates: Sequence[float] = (0.62, 0.68, 0.74, 0.80, 0.86, 0.92, 0.96),
     minimum_track_length: int = 6,

@@ -577,7 +577,7 @@ def _append_event(previous: Mapping[str, Any], event: Mapping[str, Any]) -> list
     row = {key: value for key, value in event.items() if value not in (None, "", [], {})}
     if row:
         history.append(row)
-    return history[-16:]
+    return history[-1_000_000:]
 
 
 def _base_no_active(

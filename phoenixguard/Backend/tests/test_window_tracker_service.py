@@ -8983,7 +8983,10 @@ def test_lstm_composite_forecast_survives_bounded_cold_persistence(tmp_path: Pat
     assert lstm["trajectory_interval_status"] == "READY"
     assert lstm["trajectory_interval"] == interval_metadata
     retained_features = cast(list[dict[str, Any]], lstm["features"])
-    assert len(retained_features) == 8
+    # Persistence no longer truncates the feature tail: every produced feature
+    # row survives the cold round-trip.
+    assert len(retained_features) == 20
+    assert [row["index"] for row in retained_features] == list(range(20))
     assert retained_features[-1]["relative_price_location"] == anchor_location
     assert retained_path[0]["expected_open_norm"] == anchor_location
     assert "artifact_path" not in lstm

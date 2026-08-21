@@ -44,6 +44,31 @@ from _pg_bootstrap import ensure_project_paths
 
 PROJECT_ROOT = ensure_project_paths()
 
+# Cloudflare Workers AI credentials: real environment variables win, then a
+# gitignored config file (Backend/launch/qwen_cloudflare.env) so the daemon
+# works even when spawned from a terminal that predates the user-level env vars.
+_QWEN_ENV_FILE = Path(__file__).resolve().parent / "qwen_cloudflare.env"
+
+
+def _apply_qwen_env_file() -> None:
+    try:
+        if not _QWEN_ENV_FILE.is_file():
+            return
+        for raw_line in _QWEN_ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+_apply_qwen_env_file()
+
 _CLOUDFLARE_ACCOUNT_ID = str(os.getenv("PHOENIXGUARD_CLOUDFLARE_ACCOUNT_ID") or "").strip()
 _configured_qwen_url = str(os.getenv("PHOENIXGUARD_QWEN_URL") or "").strip().rstrip("/")
 QWEN_BASE_URL = _configured_qwen_url or (
@@ -60,10 +85,10 @@ DEFAULT_MODEL_FALLBACKS: list[str] = [
     for _text in str(os.getenv("PHOENIXGUARD_QWEN_MODEL_FALLBACKS") or "").split(",")
     if _text.strip()
 ]
-DEFAULT_MIN_INTERVAL_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_MIN_INTERVAL_SEC") or "900.0")
+DEFAULT_MIN_INTERVAL_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_MIN_INTERVAL_SEC") or "2700.0")
 DEFAULT_VERDICT_FRESHNESS_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_FRESHNESS_SEC") or "180.0")
 DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_CONTEXT_CHARS") or "30000")
-DEFAULT_MAX_LIST_ITEMS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_LIST_ITEMS") or "50")
+DEFAULT_MAX_LIST_ITEMS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_LIST_ITEMS") or "1000000")
 DEFAULT_TIMEOUT_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_TIMEOUT_SEC") or "180.0")
 DEFAULT_LISTENER_RECONNECT_SECONDS = 2.0
 DEFAULT_POLL_SECONDS = 1.0

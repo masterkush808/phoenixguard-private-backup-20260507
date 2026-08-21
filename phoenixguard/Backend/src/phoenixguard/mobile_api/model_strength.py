@@ -61,11 +61,11 @@ MODEL_STRENGTH_NUMBER_GROUPS: dict[str, dict[str, tuple[float, float, float]]] =
         "max_opposing_force_reaction_distance": (0.10, 0.0, 1.0),
     },
     "structureControls": {
-        "live_max_tracked_candles": (64.0, 8.0, 256.0),
-        "support_resistance_max_zones_per_role": (4.0, 2.0, 12.0),
-        "support_resistance_max_total_zones": (8.0, 4.0, 24.0),
-        "support_resistance_max_significant_zones": (8.0, 4.0, 24.0),
-        "smart_money_max_liquidity_pools": (8.0, 4.0, 24.0),
+        "live_max_tracked_candles": (1_000_000.0, 8.0, 1_000_000.0),
+        "support_resistance_max_zones_per_role": (1_000_000.0, 2.0, 1_000_000.0),
+        "support_resistance_max_total_zones": (1_000_000.0, 4.0, 1_000_000.0),
+        "support_resistance_max_significant_zones": (1_000_000.0, 4.0, 1_000_000.0),
+        "smart_money_max_liquidity_pools": (1_000_000.0, 4.0, 1_000_000.0),
     },
     "councilControls": {
         "min_dominance_margin": (0.18, 0.0, 1.0),

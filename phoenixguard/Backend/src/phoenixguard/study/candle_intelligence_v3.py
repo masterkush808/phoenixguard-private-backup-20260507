@@ -18,7 +18,7 @@ from typing import Any, cast
 
 
 CANDLE_INTELLIGENCE_SCHEMA_VERSION = "PG_CANDLE_INTELLIGENCE_V3"
-MAX_STUDY_CANDLES = 512
+MAX_STUDY_CANDLES = 1_000_000
 
 
 class CandleStudyValidationError(ValueError):
@@ -675,8 +675,8 @@ def analyze_candle_sequence_v3(
     if isinstance(candles, (str, bytes, bytearray)):
         raise CandleStudyValidationError("candles must be a sequence of mappings")
     limit = int(max_candles)
-    if limit <= 0 or limit > 4096:
-        raise CandleStudyValidationError("max_candles must be in [1, 4096]")
+    if limit <= 0 or limit > 1_000_000:
+        raise CandleStudyValidationError("max_candles must be in [1, 1000000]")
     raw_rows = [_mapping(row) for row in candles]
     if any(not row for row in raw_rows):
         raise CandleStudyValidationError("every candle must be a non-empty mapping")

@@ -29,9 +29,9 @@ from phoenixguard.study.cross_pair_association_v3 import (
 
 
 CROSS_PAIR_COORDINATOR_SCHEMA_VERSION = "PG_CROSS_PAIR_COORDINATOR_STATE_V3"
-DEFAULT_COORDINATOR_MAX_PAIRS = 8
-DEFAULT_COORDINATOR_MAX_SAMPLES = 256
-DEFAULT_COORDINATOR_MAX_EDGES = 32
+DEFAULT_COORDINATOR_MAX_PAIRS = 64
+DEFAULT_COORDINATOR_MAX_SAMPLES = 1_024
+DEFAULT_COORDINATOR_MAX_EDGES = 128
 DEFAULT_COORDINATOR_MAX_NULL_SHIFTS = 63
 _NORMALIZED_SPACE = "NORMALIZED_RETURN"
 _SYNCHRONIZED_ORDER = "SYNCHRONIZED_CLOSED_TIMESTAMP_V1"
@@ -208,38 +208,38 @@ class CrossPairStudyCoordinatorV3:
         self.max_pairs = _integer(
             max_pairs,
             field="max_pairs",
-            minimum=2,
-            maximum=8,
+            minimum=1,
+            maximum=1_000_000,
         )
         self.max_samples = _integer(
             max_samples,
             field="max_samples",
-            minimum=32,
-            maximum=1_024,
+            minimum=1,
+            maximum=1_000_000,
         )
         self.max_edges = _integer(
             max_edges,
             field="max_edges",
             minimum=1,
-            maximum=64,
+            maximum=1_000_000,
         )
         self.max_lag = _integer(
             max_lag,
             field="max_lag",
             minimum=1,
-            maximum=12,
+            maximum=1_000_000,
         )
         self.minimum_support = _integer(
             minimum_support,
             field="minimum_support",
-            minimum=16,
+            minimum=1,
             maximum=self.max_samples,
         )
         self.max_null_shifts = _integer(
             max_null_shifts,
             field="max_null_shifts",
-            minimum=15,
-            maximum=255,
+            minimum=1,
+            maximum=1_000_000,
         )
 
     @staticmethod

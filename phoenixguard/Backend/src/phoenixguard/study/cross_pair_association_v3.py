@@ -19,11 +19,19 @@ from typing import Any, cast
 
 
 CROSS_PAIR_ASSOCIATION_SCHEMA_VERSION = "PG_CROSS_PAIR_ASSOCIATION_V3"
-MAX_CROSS_PAIR_SAMPLES = 1_024
+# Validation ceilings stay generous, but the per-call defaults below are what
+# the live study loop actually uses: lead-lag work is O(shifts x samples x
+# pairs), so million-level defaults turned each frame into a multi-minute
+# computation (the "222s over-budget live study" regression).
+MAX_CROSS_PAIR_SAMPLES = 1_000_000
 MAX_CROSS_PAIR_LAG = 12
-MAX_NULL_CIRCULAR_SHIFTS = 255
-MAX_CROSS_PAIR_GRAPH_PAIRS = 8
-MAX_CROSS_PAIR_GRAPH_EDGES = 64
+MAX_NULL_CIRCULAR_SHIFTS = 1_000_000
+MAX_CROSS_PAIR_GRAPH_PAIRS = 1_000_000
+MAX_CROSS_PAIR_GRAPH_EDGES = 1_000_000
+_DEFAULT_MAX_SAMPLES = 1_024
+_DEFAULT_NULL_SHIFTS = 255
+_DEFAULT_GRAPH_PAIRS = 64
+_DEFAULT_GRAPH_EDGES = 128
 CROSS_PAIR_COMPATIBLE_COORDINATE_SPACES = frozenset(
     {
         "NORMALIZED_RETURN",
@@ -409,8 +417,8 @@ def analyze_cross_pair_lead_lag_v3(
     minimum_support: int = 32,
     significance_alpha: float = 0.05,
     mutual_information_bins: int = 8,
-    max_samples: int = MAX_CROSS_PAIR_SAMPLES,
-    max_null_shifts: int = 127,
+    max_samples: int = _DEFAULT_MAX_SAMPLES,
+    max_null_shifts: int = _DEFAULT_NULL_SHIFTS,
 ) -> dict[str, Any]:
     """Return only significant non-causal lead-lag associations.
 
@@ -447,7 +455,7 @@ def analyze_cross_pair_lead_lag_v3(
     null_shifts = _integer(
         max_null_shifts,
         field="max_null_shifts",
-        minimum=15,
+        minimum=1,
         maximum=MAX_NULL_CIRCULAR_SHIFTS,
     )
     alpha = _finite(significance_alpha, field="significance_alpha")
@@ -606,10 +614,10 @@ def build_cross_pair_association_graph_v3(
     minimum_support: int = 32,
     significance_alpha: float = 0.05,
     mutual_information_bins: int = 8,
-    max_samples: int = MAX_CROSS_PAIR_SAMPLES,
-    max_null_shifts: int = 127,
-    max_pairs: int = MAX_CROSS_PAIR_GRAPH_PAIRS,
-    max_edges: int = MAX_CROSS_PAIR_GRAPH_EDGES,
+    max_samples: int = _DEFAULT_MAX_SAMPLES,
+    max_null_shifts: int = _DEFAULT_NULL_SHIFTS,
+    max_pairs: int = _DEFAULT_GRAPH_PAIRS,
+    max_edges: int = _DEFAULT_GRAPH_EDGES,
 ) -> dict[str, Any]:
     """Build a bounded graph from all deterministic pairwise studies.
 

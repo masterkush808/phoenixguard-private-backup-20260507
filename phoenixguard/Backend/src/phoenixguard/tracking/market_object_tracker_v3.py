@@ -2994,7 +2994,7 @@ class _RegistryBuilder:
         memory = _mapping(payload.get("memory_projection_predict") or payload.get("memory_projection_current") or payload.get("memory_projection_future"))
         top_matches = _sequence_of_mappings(_mapping(memory.get("primary_fit")).get("top_matches"))
         memory_matches: list[dict[str, Any]] = []
-        for item in top_matches[:3]:
+        for item in top_matches[:1_000_000]:
             memory_matches.append(
                 {
                     "entry_id": _text(item.get("entry_id") or item.get("image_name") or item.get("label")),

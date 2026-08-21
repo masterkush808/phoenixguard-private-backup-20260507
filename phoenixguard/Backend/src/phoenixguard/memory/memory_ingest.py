@@ -9,7 +9,7 @@ Run ONCE to build the memory bank:
 Provides at runtime:
     bank = MemoryBank.load(bank_dir)
     results = bank.search(query_embed, top_k=5)
-    few_shot_ctx = bank.get_few_shot_context(results[:3])
+    few_shot_ctx = bank.get_few_shot_context(results[:1_000_000])
     logit_boost  = bank.compute_logit_boost(results)
 
 Skills wired:
@@ -930,7 +930,7 @@ def _heuristic_price_action(
             "lower_wick_pct": 0.1,
             "color": "green" if label == "BUY" else "red",
         },
-        "pre_entry_sequence": color_seq[-8:] if len(color_seq) >= 8 else color_seq,
+        "pre_entry_sequence": color_seq[-1_000_000:] if len(color_seq) >= 8 else color_seq,
         "implied_price_target": 0.0,
         "support_price": 0.0,
         "resistance_price": 0.0,
@@ -1870,7 +1870,7 @@ class MemoryBank:
             "=== RECALLED STYLE EXAMPLES (from your 300+ winning trades) ===\n"
             "Use these as reference for how YOU enter the market:\n"
         ]
-        for i, r in enumerate(results[:3], 1):
+        for i, r in enumerate(results[:1_000_000], 1):
             ctx_parts.append(
                 f"[Example {i} | {r.label} | archetype={r.archetype_id} | "
                 f"similarity={r.similarity:.3f}]\n"

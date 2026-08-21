@@ -25,6 +25,12 @@ from .pipeline import DEFAULT_UPLOAD_ORDER, PhoenixGuardPipelineAdapter, Pipelin
 
 LOGGER = logging.getLogger("phoenixguard.mobile_api.observer")
 
+# Storage keeps effectively the whole session, but the recency-weighted thesis
+# math and the public payloads must stay bounded or latency grows forever.
+_THESIS_RECENCY_WINDOW = 240
+_PUBLIC_SIGNAL_HISTORY_WINDOW = 400
+_PUBLIC_RECENT_BUNDLES_WINDOW = 400
+
 DEFAULT_MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 DEFAULT_MAX_IMAGE_DIMENSION = 8192
 DEFAULT_MIN_IMAGE_DIMENSION = 64
@@ -313,7 +319,12 @@ def _compute_thesis_state(
     policy: Mapping[str, Any],
 ) -> dict[str, Any]:
     supports = {"BUY": 0.0, "SELL": 0.0}
-    recent_rows = [_payload_dict(item) for item in signal_history[-5:]]
+    # Recency-weighted support math only meaningfully uses the newest rows:
+    # the per-row weight floors quickly, and an unbounded window drives both
+    # sides to saturation (gap -> 0, thesis -> HOLD) while making every state
+    # build O(history).  Keep the compute window bounded even though storage
+    # itself is effectively unlimited.
+    recent_rows = [_payload_dict(item) for item in signal_history[-_THESIS_RECENCY_WINDOW:]]
     for index, entry in enumerate(reversed(recent_rows), start=1):
         direction = _direction(
             entry.get(
@@ -1504,10 +1515,10 @@ class SignalObserverService:
             "latest_bundle_id": str(payload.get("latest_bundle_id", "")),
             "last_alert_at": str(payload.get("last_alert_at", "")),
             "latest_signal": latest_signal,
-            "recent_bundles": bundle_summaries[-12:],
+            "recent_bundles": bundle_summaries[-_PUBLIC_RECENT_BUNDLES_WINDOW:],
         }
         if include_history:
-            public_payload["signal_history"] = signal_history[-12:]
+            public_payload["signal_history"] = signal_history[-_PUBLIC_SIGNAL_HISTORY_WINDOW:]
         return public_payload
 
     def _public_bundle_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:

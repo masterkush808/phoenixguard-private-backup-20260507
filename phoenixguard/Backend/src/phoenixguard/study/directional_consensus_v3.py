@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 DIRECTIONAL_CONSENSUS_SCHEMA_VERSION = "PG_ADAPTIVE_DIRECTIONAL_CONSENSUS_V3"
 _SWITCH_CONFIRMATIONS = 3
-_MAX_TRACKED_MARKETS = 64
+_MAX_TRACKED_MARKETS = 1_000_000
 _LOCK = RLock()
 _STATE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 

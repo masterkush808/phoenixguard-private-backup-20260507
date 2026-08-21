@@ -6942,7 +6942,7 @@ def create_app(
                         )
                         public_tracking["book_rule_overlay_rows_v3"] = [
                             dict(cast(Mapping[str, object], row))
-                            for row in cast(Sequence[object], direct_book_rule_overlays)[:32]
+                            for row in cast(Sequence[object], direct_book_rule_overlays)[:1_000_000]
                             if isinstance(row, Mapping)
                         ]
                         public_payload["tracking_summary"] = public_tracking

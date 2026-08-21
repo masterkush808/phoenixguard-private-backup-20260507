@@ -30,8 +30,8 @@ from phoenixguard.study.candle_intelligence_v3 import CANDLE_INTELLIGENCE_SCHEMA
 SEQUENCE_FINGERPRINT_SCHEMA_VERSION = "PG_SEQUENCE_FINGERPRINT_V3"
 HISTORICAL_SEQUENCE_STORE_SCHEMA_VERSION = "PG_HISTORICAL_SEQUENCE_STORE_V3"
 FINGERPRINT_VECTOR_SIZE = 60
-DEFAULT_MAX_HISTORICAL_ENTRIES = 2048
-DEFAULT_MAX_ENTRIES_PER_PAIR = 512
+DEFAULT_MAX_HISTORICAL_ENTRIES = 1_000_000
+DEFAULT_MAX_ENTRIES_PER_PAIR = 1_000_000
 
 
 class HistoricalSimilarityValidationError(ValueError):
@@ -529,7 +529,7 @@ def sequence_similarity_v3(
     if trend_score == 1.0:
         explanations.append("major and inner trends match")
     if shared_objects:
-        explanations.append(f"shared objects: {', '.join(shared_objects[:5])}")
+        explanations.append(f"shared objects: {', '.join(shared_objects[:1_000_000])}")
     return {
         "schema_version": SEQUENCE_FINGERPRINT_SCHEMA_VERSION,
         "status": "COMPARED",
@@ -565,7 +565,7 @@ def build_similarity_graph_v3(
     edge_limit = int(max_edges_per_node)
     if not math.isfinite(floor) or not 0.0 <= floor <= 1.0:
         raise HistoricalSimilarityValidationError("minimum_similarity must be in [0, 1]")
-    if not 1 <= edge_limit <= 32:
+    if not 1 <= edge_limit <= 1_000_000:
         raise HistoricalSimilarityValidationError("max_edges_per_node must be in [1, 32]")
     if len(fingerprints) > 256:
         raise HistoricalSimilarityValidationError("similarity graph is bounded to 256 nodes")
@@ -650,7 +650,10 @@ def _feature_tokens(fingerprint: Mapping[str, Any]) -> set[str]:
         f"REGIME:{str(fingerprint.get('regime') or 'UNKNOWN').upper()}",
         f"CURRENT_STATE:{str(latest.get('current_state') or 'UNKNOWN').upper()}",
     }
-    objects = sorted(cast(list[str], fingerprint.get("object_types", [])))[:32]
+    # The object-pair token loop is quadratic in len(objects); unbounded
+    # object_types lists made every fingerprint comparison explode. Keep the
+    # generous-but-bounded windows.
+    objects = sorted(cast(list[str], fingerprint.get("object_types", [])))[:64]
     tokens.update(f"OBJECT:{value}" for value in objects)
     for object_type in objects:
         tokens.add(f"PAIR:CANDLE_TYPE={candle_type}&OBJECT={object_type}")
@@ -658,7 +661,7 @@ def _feature_tokens(fingerprint: Mapping[str, Any]) -> set[str]:
     for index, first in enumerate(objects):
         for second in objects[index + 1 :]:
             tokens.add(f"PAIR:OBJECT={first}&OBJECT={second}")
-    return set(sorted(tokens)[:768])
+    return set(sorted(tokens)[:4_096])
 
 
 def _wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
@@ -683,7 +686,7 @@ def summarize_outcome_correlations_v3(
     result_limit = int(max_results)
     if not 2 <= support_floor <= 10_000:
         raise HistoricalSimilarityValidationError("min_support must be in [2, 10000]")
-    if not 1 <= result_limit <= 1024:
+    if not 1 <= result_limit <= 1_000_000:
         raise HistoricalSimilarityValidationError("max_results must be in [1, 1024]")
     if len(fingerprints) > 10_000:
         raise HistoricalSimilarityValidationError("outcome correlation input is bounded to 10000 fingerprints")
@@ -835,8 +838,8 @@ class HistoricalSequenceStoreV3:
         self.max_entries = int(max_entries)
         self.max_entries_per_pair = int(max_entries_per_pair)
         self.lock_timeout_seconds = float(lock_timeout_seconds)
-        if not 1 <= self.max_entries <= 10_000:
-            raise HistoricalSimilarityValidationError("max_entries must be in [1, 10000]")
+        if not 1 <= self.max_entries <= 1_000_000:
+            raise HistoricalSimilarityValidationError("max_entries must be in [1, 1000000]")
         if not 1 <= self.max_entries_per_pair <= self.max_entries:
             raise HistoricalSimilarityValidationError("max_entries_per_pair must be in [1, max_entries]")
         if not 0.0 < self.lock_timeout_seconds <= 60.0:
@@ -1004,6 +1007,8 @@ class HistoricalSequenceStoreV3:
             state = self._load()
         entries = _rows(state.get("entries"))
         if len(entries) > 256:
+            # The graph builder is hard-bounded to 256 nodes; keep the newest
+            # window so accumulated history cannot raise past the validator.
             entries = sorted(
                 entries,
                 key=lambda row: (int(row.get("stored_ordinal", 0)), str(row.get("fingerprint_id"))),

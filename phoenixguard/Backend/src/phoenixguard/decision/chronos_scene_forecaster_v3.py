@@ -36,7 +36,7 @@ _TARGET_NAMES = ("open_offset", "high_offset", "low_offset", "close_offset")
 _QUANTILE_LEVELS = (0.10, 0.50, 0.90)
 _QUANTILE_KEYS = ("p10", "p50", "p90")
 _DEFAULT_SAMPLE_COUNT = 31
-_MAX_CACHE_ENTRIES = 32
+_MAX_CACHE_ENTRIES = 1_000_000
 _NORMAL_90_Z = 1.2815515655446004
 
 

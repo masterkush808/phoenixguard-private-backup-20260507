@@ -20,10 +20,10 @@ from typing import Any, cast
 
 ADAPTIVE_FEATURE_ONTOLOGY_SCHEMA_VERSION = "PG_ADAPTIVE_FEATURE_ONTOLOGY_V3"
 FEATURE_PROMOTION_GATE_SCHEMA_VERSION = "PG_FEATURE_PROMOTION_GATE_V3"
-DEFAULT_MAX_FEATURES = 2_048
-DEFAULT_MAX_REVISIONS_PER_FEATURE = 32
+DEFAULT_MAX_FEATURES = 1_000_000
+DEFAULT_MAX_REVISIONS_PER_FEATURE = 1_000_000
 MAX_FEATURE_DOCUMENT_BYTES = 32 * 1024
-MAX_FEATURE_EVIDENCE_CANDLES = 512
+MAX_FEATURE_EVIDENCE_CANDLES = 1_000_000
 
 
 class AdaptiveFeatureOntologyValidationError(ValueError):
@@ -166,9 +166,9 @@ class AdaptiveFeatureOntologyV3:
             raise AdaptiveFeatureOntologyValidationError(
                 f"max_features cannot exceed {DEFAULT_MAX_FEATURES}"
             )
-        if self.max_revisions_per_feature > 256:
+        if self.max_revisions_per_feature > 1_000_000:
             raise AdaptiveFeatureOntologyValidationError(
-                "max_revisions_per_feature cannot exceed 256"
+                "max_revisions_per_feature cannot exceed 1000000"
             )
         self.minimum_support = _integer(
             minimum_support, field="minimum_support", minimum=1

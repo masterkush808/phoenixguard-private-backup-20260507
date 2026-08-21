@@ -78,13 +78,21 @@ from phoenixguard.study._persistence_v3 import (
 
 
 MARKET_STUDY_SCHEMA_VERSION = "PG_MARKET_STUDY_V3"
-_MAX_LIVE_CANDLES = 128
+# Stores may retain up to a million records, but every study used to re-run
+# over the full history each frame, which made tracker_study latency grow
+# without bound after the caps were raised.  Per-frame analysis therefore runs
+# on this recent compute window (512 closed candles ~= 42h of M5) while the
+# persisted stores keep their million-record ceilings.
+_MAX_LIVE_CANDLES = 1_000_000
+_LIVE_STUDY_COMPUTE_WINDOW = 512
+_PENDING_COMPUTE_WINDOW = 1024
+_PUBLIC_RECENT_WINDOW = 256
 _PENDING_OUTCOME_SCHEMA_VERSION = "PG_PENDING_MARKET_OUTCOMES_V3"
-_MAX_PENDING_PAIRS = 64
-_MAX_PENDING_CANDLES = 16
-_MAX_PENDING_OBJECTS = 16
-_MAX_CONTINUOUS_MOTIF_NODES_PER_LEVEL = 512
-_MAX_PUBLIC_RECENT_CANDLES = 32
+_MAX_PENDING_PAIRS = 4_096
+_MAX_PENDING_CANDLES = _PENDING_COMPUTE_WINDOW
+_MAX_PENDING_OBJECTS = _PENDING_COMPUTE_WINDOW
+_MAX_CONTINUOUS_MOTIF_NODES_PER_LEVEL = 2_048
+_MAX_PUBLIC_RECENT_CANDLES = _PUBLIC_RECENT_WINDOW
 
 _CLOSED_CANDLE_TIME_PROOF_CACHE_FIELDS = (
     "schema_version",
@@ -104,7 +112,7 @@ _CLOSED_CANDLE_TIME_PROOF_CACHE_FIELDS = (
     "contiguous_from_previous",
 )
 _ONTOLOGY_STORE_SCHEMA_VERSION = "PG_PAIR_SCOPED_ADAPTIVE_ONTOLOGY_STORE_V3"
-_MAX_ONTOLOGY_PAIRS = 64
+_MAX_ONTOLOGY_PAIRS = 4_096
 _CONCEPT_DRIFT_FIXED_WINDOW = 24
 
 
@@ -413,7 +421,7 @@ def _jpclf_liquidity_state(
                 entropy -= value * math.log(value)
         entropy /= math.log(3.0)
 
-    recent = list(candles[-8:])
+    recent = list(candles[-_LIVE_STUDY_COMPUTE_WINDOW:])
     sweep_count = 0
     for candle in recent:
         rejection = _mapping(_mapping(candle.get("interaction")).get("rejection"))
@@ -683,7 +691,7 @@ def _object_conditioned_time_to_event(
                 for value in cast(Sequence[object], row.get("object_types", []))
                 if str(value).strip()
             }
-        )[:32]
+        )[:1_000_000]
         normalized.append({"state": state, "object_types": object_types})
         for object_type in object_types:
             frequencies[object_type] = frequencies.get(object_type, 0) + 1
@@ -1699,7 +1707,7 @@ def _normalized_cross_pair_series(
                 "value": round((current_close - previous_close) / scale, 10),
             }
         )
-    return rows[-256:]
+    return rows[-_PUBLIC_RECENT_WINDOW:]
 
 
 def _claim_proof_rows(
@@ -2257,7 +2265,7 @@ def _pending_retracement_study(study: Mapping[str, Any]) -> dict[str, Any]:
 
     if not study:
         return {}
-    observations = _rows(study.get("observations"))[:128]
+    observations = _rows(study.get("observations"))[:_PUBLIC_RECENT_WINDOW]
     return {
         "schema_version": study.get("schema_version"),
         "status": study.get("status"),
@@ -2412,7 +2420,7 @@ def _compact_similarity(value: Mapping[str, Any]) -> dict[str, Any]:
             "outcome": deepcopy(_mapping(row.get("outcome"))),
             "latest": deepcopy(_mapping(row.get("latest"))),
             "shared_object_types": deepcopy(row.get("shared_object_types", [])),
-            "explanations": list(cast(Sequence[Any], row.get("explanations", [])))[:4]
+            "explanations": list(cast(Sequence[Any], row.get("explanations", [])))[:_PUBLIC_RECENT_WINDOW]
             if isinstance(row.get("explanations"), Sequence)
             and not isinstance(row.get("explanations"), (str, bytes, bytearray))
             else [],
@@ -2465,7 +2473,7 @@ def _compact_similarity_graph(
         for row in _rows(value.get("nodes"))
         if str(row.get("symbol") or "").upper() == symbol
         and str(row.get("timeframe") or "").upper() == timeframe
-    ][-64:]
+    ][-_LIVE_STUDY_COMPUTE_WINDOW:]
     identifiers = {str(row.get("fingerprint_id") or "") for row in nodes}
     edges = [
         row
@@ -2487,7 +2495,7 @@ def _compact_similarity_graph(
         "study_only": True,
         "execution_authority": False,
         "node_count": len(nodes),
-        "edge_count": len(edges[:128]),
+        "edge_count": len(edges[:_PUBLIC_RECENT_WINDOW]),
         "nodes": [
             {
                 "fingerprint_id": row.get("fingerprint_id"),
@@ -2516,7 +2524,7 @@ def _compact_similarity_graph(
                 )
                 else [],
             }
-            for row in edges[:128]
+            for row in edges[:_PUBLIC_RECENT_WINDOW]
         ],
     }
 
@@ -2798,7 +2806,7 @@ class MarketStudyServiceV3:
         ledger = self.candle_ledger.recent_candles(
             symbol,
             timeframe,
-            limit=MAX_CLOSED_HISTORY_CANDLES,
+            limit=min(MAX_CLOSED_HISTORY_CANDLES, _LIVE_STUDY_COMPUTE_WINDOW),
         )
         merged_rows = _continuous_price_rows(
             candle_study,
@@ -2815,14 +2823,14 @@ class MarketStudyServiceV3:
             merged_rows,
             regime=str(regime or "UNKNOWN"),
             require_closed=True,
-            max_candles=MAX_CLOSED_HISTORY_CANDLES,
+            max_candles=_LIVE_STUDY_COMPUTE_WINDOW,
         )
         count = int(extended_candles.get("studied_count", 0) or 0)
         adaptive_inner_window = min(128, max(2, int(round(math.sqrt(count)))))
         extended_behavior = measure_market_behavior_v3(
             extended_candles,
             timeframe_seconds=timeframe_seconds,
-            max_candles=MAX_CLOSED_HISTORY_CANDLES,
+            max_candles=_LIVE_STUDY_COMPUTE_WINDOW,
             inner_window=adaptive_inner_window,
         )
         return (
@@ -3162,7 +3170,7 @@ class MarketStudyServiceV3:
                 return deepcopy(cached)
 
             candle_study = analyze_candle_sequence_v3(
-                list(candles)[-_MAX_LIVE_CANDLES:],
+                list(candles)[-_LIVE_STUDY_COMPUTE_WINDOW:],
                 regime=str(regime or "UNKNOWN"),
                 require_closed=True,
                 max_candles=_MAX_LIVE_CANDLES,
@@ -3228,11 +3236,11 @@ class MarketStudyServiceV3:
             behavior_study = measure_market_behavior_v3(
                 candle_study,
                 timeframe_seconds=timeframe_seconds,
-                max_candles=_MAX_LIVE_CANDLES,
+                max_candles=_LIVE_STUDY_COMPUTE_WINDOW,
                 inner_window=min(8, int(candle_study.get("studied_count", 0) or 0)),
             )
             sequence_id = f"{canonical_symbol}|{canonical_timeframe}|{close_key}"
-            object_rows = [_mapping(row) for row in objects if _mapping(row)][:64]
+            object_rows = [_mapping(row) for row in objects if _mapping(row)][:_PENDING_COMPUTE_WINDOW]
             fingerprint = build_sequence_fingerprint_v3(
                 candle_study,
                 behavior_study,

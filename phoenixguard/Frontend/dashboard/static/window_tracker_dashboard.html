@@ -3677,6 +3677,7 @@ acceptedView: "",
       completedStudyHistory: [],
       streamRefreshQueued: false,
       streamRefreshTimer: 0,
+      lastStreamRefreshFrameId: "",
       busy: false,
       imageUrl: "",
       imageFallbackUrl: "",
@@ -5051,6 +5052,22 @@ async function requestJson(url) {
           return;
         }
         state.streamRefreshQueued = false;
+        // A full operator-workspace rebuild can take multiple seconds.  Only
+        // pay for it when the display frame actually advanced; the compact SSE
+        // snapshot already updates the book-rules and live panels instantly.
+        const liveSession = safeObject(state.liveSession);
+        const streamFrame = safeText(
+          liveSession.display_frame_id
+            || liveSession.chart_frame_id
+            || liveSession.frame_index,
+          "",
+        );
+        if (streamFrame && streamFrame === state.lastStreamRefreshFrameId) {
+          return;
+        }
+        if (streamFrame) {
+          state.lastStreamRefreshFrameId = streamFrame;
+        }
         await refreshOperatorState();
         if (state.streamRefreshQueued) {
           scheduleStreamRefresh(80);
@@ -5074,6 +5091,10 @@ async function requestJson(url) {
       }
       state.liveSession = Object.assign({}, safeObject(state.liveSession), snapshot);
       rememberCompletedStudyHistory(state.liveSession);
+      // The SSE compact snapshot already carries the current book-rule signal.
+      // Render it immediately so the panel never waits on the full operator
+      // workspace rebuild (which can take seconds per complete frame).
+      renderBookRuleArchitecture(state.liveSession);
       if (state.payload) {
         // Stream observations can advance while the next broker bitmap is
         // decoding. Update live/forming copy now, while entry authority and
@@ -5460,6 +5481,7 @@ async function requestJson(url) {
           || latestSignal.tracking_summary
       );
       const sessionTracking = safeObject(session.tracking_summary);
+      const streamIdentity = safeObject(source.current_chart_identity_v3);
       const candidates = [
         tracking.book_rule_action_signal_v3,
         source.book_rule_action_signal_v3,
@@ -5467,10 +5489,25 @@ async function requestJson(url) {
         sessionTracking.book_rule_action_signal_v3,
         safeObject(session.latest_signal).book_rule_action_signal_v3,
       ];
-      const expectedFrame = safeText(surface.frame_id, "");
-      const expectedPair = canonicalMarketToken(market.symbol);
-      const expectedTimeframe = canonicalMarketToken(market.timeframe);
-      const expectedSelector = safeText(surface.market_selector_visual_fingerprint, "");
+      const expectedFrame = safeText(
+        surface.frame_id
+          || source.display_frame_id
+          || source.chart_frame_id
+          || streamIdentity.frame_id,
+        "",
+      );
+      const expectedPair = canonicalMarketToken(
+        market.symbol || streamIdentity.symbol,
+      );
+      const expectedTimeframe = canonicalMarketToken(
+        market.timeframe || streamIdentity.timeframe,
+      );
+      const expectedSelector = safeText(
+        surface.market_selector_visual_fingerprint
+          || source.market_selector_visual_fingerprint
+          || streamIdentity.market_selector_visual_fingerprint,
+        "",
+      );
       const selected = candidates.map(safeObject).find(function (candidate) {
         if (safeText(candidate.schema_version, "") !== "PG_BOOK_RULE_ACTION_SIGNAL_V3") {
           return false;
@@ -5495,11 +5532,18 @@ async function requestJson(url) {
           && candidate.current_scenario_only === true
           && candidate.execution_authority === false
         );
+        const streamOwnedCurrentSignal = Boolean(
+          safeText(source.schema_version, "") !== "PG_OPERATOR_WORKSPACE_V1"
+          && safeText(candidate.provider_role, "") === "PRIMARY_BOOK_RULE_SIGNAL_PROVIDER"
+          && safeText(candidate.overlay_contract, "") === "EXACT_CURRENT_CHART_PIXELS_NO_FLOATING_GEOMETRY"
+          && candidate.current_scenario_only === true
+          && candidate.execution_authority === false
+        );
         return Boolean(expectedFrame && frame === expectedFrame)
           && Boolean(expectedPair && pair === expectedPair)
           && Boolean(expectedTimeframe && timeframe === expectedTimeframe)
           && Boolean(expectedSelector && selector === expectedSelector)
-          && (identityStatus === "LOCKED" || operatorOwnedCurrentSignal);
+          && (identityStatus === "LOCKED" || operatorOwnedCurrentSignal || streamOwnedCurrentSignal);
       });
       if (!selected) {
         return {};
@@ -7211,9 +7255,16 @@ function renderLatentStateControl(payload) {
       const bias = safeObject(payload && payload.direct_visual_bias_v3);
       const biasSide = safeText(bias.side, "").toUpperCase();
       const biasConfidence = Number(bias.confidence);
-      const dominantSide = biasSide || safeText(bias.dominant_side, "").toUpperCase();
+      const dominantSide = biasSide
+        || safeText(bias.dominant_side, "").toUpperCase()
+        || safeText(qwen && qwen.side, "").toUpperCase();
+      const fallbackConfidence = Number(qwen && qwen.confidence);
       const biasText = (dominantSide ? dominantSide + " " : "")
-        + (Number.isFinite(biasConfidence) ? (Math.round(biasConfidence * 100) / 100).toFixed(2) : "n/a");
+        + (Number.isFinite(biasConfidence)
+          ? (Math.round(biasConfidence * 100) / 100).toFixed(2)
+          : Number.isFinite(fallbackConfidence)
+            ? (Math.round(fallbackConfidence * 100) / 100).toFixed(2)
+            : "n/a");
       const buyState = dominantSide === "BUY" ? "PREFERRED" : "SECONDARY";
       const sellState = dominantSide === "SELL" ? "PREFERRED" : "SECONDARY";
       if (els.frontlineQwenBuy) {

@@ -10,8 +10,11 @@ from typing import Any, Iterator, Mapping, Sequence, cast
 
 
 SCHEMA_VERSION = "PG_SCENE_FORECAST_FEATURES_V3"
-MAX_CANDLES = 256
-MAX_AUDIT_LEAVES = 4096
+MAX_CANDLES = 1_000_000
+MAX_AUDIT_LEAVES = 1_000_000
+# Published audit lists are bounded samples; the *_count fields stay exact.
+_AUDIT_FIELD_SAMPLE = 256
+_AUDIT_ROW_SAMPLE = 512
 MISSING_CATEGORY = "__MISSING__"
 OTHER_CATEGORY = "__OTHER__"
 
@@ -337,7 +340,7 @@ def _normalized_category(value: Any, *, default: str = MISSING_CATEGORY) -> str:
     normalized = re.sub(r"[^A-Z0-9]+", "_", text).strip("_")
     if not normalized:
         return OTHER_CATEGORY
-    return normalized[:64]
+    return normalized[:1_000_000]
 
 
 def _side(value: Any) -> str:
@@ -399,10 +402,19 @@ class _Audit:
 
     @staticmethod
     def _covered(path: str, prefixes: set[str]) -> bool:
-        return any(
-            path == prefix or path.startswith(f"{prefix}.") or path.startswith(f"{prefix}[")
-            for prefix in prefixes
-        )
+        if path in prefixes:
+            return True
+        # A prefix covers this leaf only when it is the leaf itself or one of
+        # its exact ancestor boundaries ("prefix." / "prefix[...").  Testing
+        # each dot/bracket boundary against the hash set is O(depth) instead
+        # of scanning every recorded prefix (which ran ~100M string compares
+        # per frame after the audit-leaf ceiling was raised).
+        for index in range(1, len(path)):
+            char = path[index]
+            if char == "." or char == "[":
+                if path[:index] in prefixes:
+                    return True
+        return False
 
     def finalize(self, roots: Mapping[str, Any]) -> dict[str, Any]:
         inspected = 0
@@ -418,19 +430,19 @@ class _Audit:
                 self.reject(path, _rejection_reason(path, leaf))
         consumed_fields = sorted(self.consumed)
         missing_fields = sorted(self.missing)
-        rejected_fields = [
-                {"path": path, "reason": reason}
-                for path, reason in sorted(self.rejected)
-            ]
+        rejected_rows = [
+            {"path": path, "reason": reason}
+            for path, reason in sorted(self.rejected)
+        ]
+        # The counts above stay authoritative; the retained lists are a bounded
+        # sample so the published payload cannot grow with session history.
         return {
-            # These totals remain authoritative when persistence boundaries
-            # retain only a bounded sample of the detailed audit lists.
             "consumed_field_count": len(consumed_fields),
             "missing_field_count": len(missing_fields),
-            "rejected_field_count": len(rejected_fields),
-            "consumed_fields": consumed_fields,
-            "missing_fields": missing_fields,
-            "rejected_fields": rejected_fields,
+            "rejected_field_count": len(rejected_rows),
+            "consumed_fields": consumed_fields[-_AUDIT_FIELD_SAMPLE:],
+            "missing_fields": missing_fields[-_AUDIT_FIELD_SAMPLE:],
+            "rejected_fields": rejected_rows[-_AUDIT_ROW_SAMPLE:],
             "inspected_leaf_count": inspected,
         }
 

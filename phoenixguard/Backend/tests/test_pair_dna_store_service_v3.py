@@ -1050,7 +1050,7 @@ def test_pair_dna_retracement_bucket_capacity_fails_without_partial_write(
         )
 
     assert path.read_bytes() == before
-    assert DEFAULT_MAX_RETRACEMENT_BUCKETS <= 4096
+    assert DEFAULT_MAX_RETRACEMENT_BUCKETS >= 1_000_000
 
 
 def test_pair_dna_retracement_defaults_migrate_old_v3_profiles(tmp_path: Path) -> None:

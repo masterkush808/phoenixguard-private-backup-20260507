@@ -891,16 +891,7 @@ def _apply_display_metadata(rows: Sequence[Mapping[str, Any]], mode: str, curren
 
 
 def _label_limit_for_mode(mode: str) -> int:
-    normalized_mode = normalize_view_mode(mode)
-    if normalized_mode in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"}:
-        return 60
-    if normalized_mode in {"FULL_HISTORY_READ", "REPLAY"}:
-        return 34
-    if normalized_mode == "ACTIVE_CONTEXT":
-        return 28
-    if normalized_mode in {"SUPPLY_DEMAND", "TRENDLINES", "PATH"}:
-        return 24
-    return 18
+    return 1_000_000
 
 
 def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -> list[dict[str, Any]]:

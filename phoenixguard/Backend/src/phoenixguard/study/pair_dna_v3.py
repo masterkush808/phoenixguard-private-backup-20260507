@@ -41,35 +41,35 @@ from phoenixguard.study.concept_drift_v3 import (
 
 
 PAIR_DNA_SCHEMA_VERSION = "PG_PAIR_DNA_STORE_V3"
-DEFAULT_MAX_PAIR_PROFILES = 128
-DEFAULT_RECENT_SEQUENCE_LIMIT = 512
+DEFAULT_MAX_PAIR_PROFILES = 1_000_000
+DEFAULT_RECENT_SEQUENCE_LIMIT = 1_000_000
 # Whole-sequence idempotency uses a bounded, append-only segmented Bloom.  A
 # segment is sealed at its design load instead of becoming progressively more
-# saturated.  Twenty segments admit 10,240 sequence identities per pair with a
-# union-bound false-positive ceiling below 1e-9.  Once full, the store refuses
-# new sequences rather than silently forgetting old identities.
+# saturated.  With 1M segments of 512 capacity each, the union-bound false-positive
+# ceiling is approximately 1e-4.  Once full, the store refuses new sequences
+# rather than silently forgetting old identities.
 PAIR_DNA_DEDUPE_SEGMENT_BITS = 32_768
 PAIR_DNA_DEDUPE_SEGMENT_HASHES = 16
 PAIR_DNA_DEDUPE_SEGMENT_CAPACITY = 512
-PAIR_DNA_DEDUPE_MAX_SEGMENTS = 20
+PAIR_DNA_DEDUPE_MAX_SEGMENTS = 1_000_000
 PAIR_DNA_DEDUPE_CAPACITY = (
     PAIR_DNA_DEDUPE_SEGMENT_CAPACITY * PAIR_DNA_DEDUPE_MAX_SEGMENTS
 )
-PAIR_DNA_DEDUPE_FALSE_POSITIVE_CEILING = 1e-9
+PAIR_DNA_DEDUPE_FALSE_POSITIVE_CEILING = 1e-4
 _TIME_ORDER_DOMAIN = "CLOSED_TIMESTAMP_V1"
 _TRACKER_EVENT_ORDER_DOMAIN = "TRACKER_EVENT_SEQUENCE_V3"
 _ORDER_DOMAINS = {_TIME_ORDER_DOMAIN, _TRACKER_EVENT_ORDER_DOMAIN}
 _LEGACY_BLOOM_BITS = 16_384
 _LEGACY_BLOOM_HASHES = 5
 _LEGACY_FALSE_POSITIVE_CEILING = 1e-6
-MAX_PAIR_DNA_ASSOCIATIONS = 2_048
-MAX_PAIR_DNA_OBJECT_TYPES = 256
-MAX_PAIR_DNA_REGIMES = 128
-DEFAULT_MAX_RETRACEMENT_BUCKETS = 2_048
-MAX_RETRACEMENT_STUDY_ROWS = 2_048
-DEFAULT_MAX_CONCEPT_DRIFT_PARTITIONS = 64
-MAX_PAIR_DNA_CONCEPT_DRIFT_PARTITIONS = 1_024
-MAX_RECENT_SEQUENCE_OBJECT_TYPES = 32
+MAX_PAIR_DNA_ASSOCIATIONS = 1_000_000
+MAX_PAIR_DNA_OBJECT_TYPES = 1_000_000
+MAX_PAIR_DNA_REGIMES = 1_000_000
+DEFAULT_MAX_RETRACEMENT_BUCKETS = 1_000_000
+MAX_RETRACEMENT_STUDY_ROWS = 1_000_000
+DEFAULT_MAX_CONCEPT_DRIFT_PARTITIONS = 1_000_000
+MAX_PAIR_DNA_CONCEPT_DRIFT_PARTITIONS = 1_000_000
+MAX_RECENT_SEQUENCE_OBJECT_TYPES = 1_000_000
 RETRACEMENT_CONFLUENCE_STUDY_SCHEMA_VERSION = (
     "PG_RETRACEMENT_CONFLUENCE_STUDY_V3"
 )
@@ -1155,7 +1155,7 @@ def _validate_retracement_aggregate(
     ):
         raise PairDNAValidationError(f"{field} must remain observation-only")
     raw_buckets = _required_mapping(source.get("buckets"), field=f"{field}.buckets")
-    if len(raw_buckets) > 4096:
+    if len(raw_buckets) > MAX_RETRACEMENT_STUDY_ROWS:
         raise PairDNAValidationError(f"{field}.buckets exceeds the absolute capacity")
     buckets: dict[str, Any] = {}
     for key, raw in raw_buckets.items():
@@ -1667,14 +1667,14 @@ def _correlation_features(
         if object_type:
             features.add(f"OBJECT:{object_type}")
             object_types.add(object_type)
-    ordered_objects = sorted(object_types)[:32]
+    ordered_objects = sorted(object_types)[:1_000_000]
     for object_type in ordered_objects:
         features.add(f"PAIR:CANDLE_TYPE={candle_type}&OBJECT={object_type}")
         features.add(f"PAIR:PERSONALITY={personality}&OBJECT={object_type}")
     for index, first in enumerate(ordered_objects):
         for second in ordered_objects[index + 1 :]:
             features.add(f"PAIR:OBJECT={first}&OBJECT={second}")
-    return sorted(features)[:768]
+    return sorted(features)[:1_000_000]
 
 
 def _apply_outcome_correlation(
@@ -2492,13 +2492,13 @@ class PairDNAStoreV3:
         self.max_retracement_buckets = int(max_retracement_buckets)
         self.max_concept_drift_partitions = int(max_concept_drift_partitions)
         self.lock_timeout_seconds = float(lock_timeout_seconds)
-        if not 1 <= self.max_pairs <= 4096:
-            raise PairDNAValidationError("max_pairs must be in [1, 4096]")
-        if not 1 <= self.recent_sequence_limit <= 4096:
-            raise PairDNAValidationError("recent_sequence_limit must be in [1, 4096]")
-        if not 1 <= self.max_retracement_buckets <= 4096:
+        if not 1 <= self.max_pairs <= 1_000_000:
+            raise PairDNAValidationError("max_pairs must be in [1, 1000000]")
+        if not 1 <= self.recent_sequence_limit <= 1_000_000:
+            raise PairDNAValidationError("recent_sequence_limit must be in [1, 1000000]")
+        if not 1 <= self.max_retracement_buckets <= 1_000_000:
             raise PairDNAValidationError(
-                "max_retracement_buckets must be in [1, 4096]"
+                "max_retracement_buckets must be in [1, 1000000]"
             )
         if not (
             1

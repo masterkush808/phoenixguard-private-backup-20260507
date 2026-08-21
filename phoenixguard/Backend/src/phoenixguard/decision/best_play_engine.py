@@ -337,7 +337,7 @@ def _collect_sequence_motifs(
             if _profile_direction(frame, "projection_direction") == direction:
                 add(direction, f"{direction} projected follow-through", 0.12 + 0.18 * _profile_value(frame, "projection_confidence"), 1.0, frame_source)
         for pattern_dir in ("BUY", "SELL"):
-            for item in _pattern_rows(frame, pattern_dir)[:2]:
+            for item in _pattern_rows(frame, pattern_dir)[:1_000_000]:
                 add(
                     pattern_dir,
                     f"{pattern_dir} {str(item.get('pattern', '')).replace('_', ' ').strip()}",
@@ -346,7 +346,7 @@ def _collect_sequence_motifs(
                     frame_source,
                 )
 
-    for item in _sequence_history(combined)[-5:]:
+    for item in _sequence_history(combined)[-240:]:
         direction = _direction(item.get("direction", "HOLD"))
         if direction not in {"BUY", "SELL"}:
             continue
@@ -369,7 +369,7 @@ def _collect_sequence_motifs(
         add(direction, label, 0.16 + 0.18 * _clip01(box.get("confidence", 0.0)), 1.0, combined_source)
 
     for pattern_dir in ("BUY", "SELL"):
-        for item in _pattern_rows(combined, pattern_dir)[:3]:
+        for item in _pattern_rows(combined, pattern_dir)[:1_000_000]:
             add(
                 pattern_dir,
                 f"{pattern_dir} {str(item.get('pattern', '')).replace('_', ' ').strip()}",

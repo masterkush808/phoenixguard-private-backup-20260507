@@ -564,7 +564,7 @@ def _masked_reconstruction(candles: Sequence[Any]) -> dict[str, Any]:
         "maximum_normalized_error": _rounded(max(values)),
         "anomalous_candle_indexes": [
             index for index, error in errors if error >= cutoff
-        ][-8:],
+        ][-1_000_000:],
     }
 
 
@@ -1021,7 +1021,7 @@ def _causal_hypotheses(
                 "candidate_for_out_of_sample_or_intervention_testing_not_a_causal_claim"
             ),
         }
-        for destination, probability in ranked[:3]
+        for destination, probability in ranked[:1_000_000]
     ]
 
 

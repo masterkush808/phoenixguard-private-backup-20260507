@@ -36,6 +36,12 @@ from phoenixguard.vlm.context_skeleton_v3 import build_vlm_context_skeleton_v3
 
 LIVE_STATE_SCHEMA_VERSION = "PG_LIVE_STATE_V3"
 
+# Public/compact views are re-serialized on every publish and consumed by the
+# browser plus every stream client.  Keep their tails bounded even though
+# internal storage is effectively unlimited (1_000_000 ceilings elsewhere).
+_COMPACT_TRACKED_CANDLES_WINDOW = 512
+_PUBLIC_IDENTITY_REJECTIONS_WINDOW = 400
+
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
@@ -2598,9 +2604,11 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
     tracked_candles = _sequence_of_mappings(tracking.get("tracked_candles"))
     if tracked_candles:
         # The operator needs only the latest causal window to corroborate the
-        # public current-candle close. Keep this internal compact path bounded.
+        # public current-candle close. Keep this internal compact path bounded:
+        # this file is re-read and re-serialized by every SSE client on each
+        # publish, so an unbounded tail here multiplies frontend latency.
         compact["tracking_summary"]["tracked_candles"] = [
-            dict(row) for row in tracked_candles[-8:]
+            dict(row) for row in tracked_candles[-_COMPACT_TRACKED_CANDLES_WINDOW:]
         ]
     model_result = _mapping(session.get("model_council_result"))
     if model_result:
@@ -2809,7 +2817,7 @@ def build_live_state_v3(
                 "timeframe": _text(row.get("timeframe")),
                 "reason": _text(row.get("identity_rejection_reason")),
             }
-            for row in instrument_identity_rejections[:32]
+            for row in instrument_identity_rejections[:_PUBLIC_IDENTITY_REJECTIONS_WINDOW]
         ]
     layer_manager = OverlayLayerManagerV3(active_overlay_mode, now_ms=visibility_now_ms)
     clean_overlays_only = str(os.getenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "0") or "0").strip().lower() not in {

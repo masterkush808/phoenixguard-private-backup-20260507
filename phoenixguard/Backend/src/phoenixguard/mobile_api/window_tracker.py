@@ -531,13 +531,22 @@ _EXECUTION_CURRENT_FLOW_MIN_ALIGNMENT = 4
 _EXECUTION_CURRENT_FLOW_STRETCHED_MIN_CLEAR_PATH = 0.72
 _EXECUTION_CURRENT_FLOW_STRETCHED_MIN_TARGET = 0.78
 _EXECUTION_LIVE_MOMENTUM_MIN_VISIBLE_CANDLES = 8
-_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES = 96
-_PHOENIXGUARD_DEFAULT_LIVE_CANDLE_MAX_WIDTH = 960
+# Effectively unlimited (the detector is bounded by chart pixels, so a
+# one-million ceiling never actually binds while still guarding against
+# pathological input).  Nothing that feeds candle extraction, overlay
+# geometry, or the compact live state is capped at a real visible limit.
+_PHOENIXGUARD_UNLIMITED = 1_000_000
+# Detection/overlay ceilings stay unlimited; these windows bound per-frame
+# compute and serialized tails so latency cannot grow with session age.
+_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW = 240
+_PHOENIXGUARD_COMPACT_TAIL_WINDOW = 512
+_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES = _PHOENIXGUARD_UNLIMITED
+_PHOENIXGUARD_DEFAULT_LIVE_CANDLE_MAX_WIDTH = 2560
 _PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS = 8
-_PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE = 4
-_PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES = 8
-_PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES = 8
-_PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS = 8
+_PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE = _PHOENIXGUARD_UNLIMITED
+_PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES = _PHOENIXGUARD_UNLIMITED
+_PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES = _PHOENIXGUARD_UNLIMITED
+_PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS = _PHOENIXGUARD_UNLIMITED
 _EXECUTION_LIVE_MOMENTUM_MIN_SCORE = 0.54
 _EXECUTION_LIVE_MOMENTUM_MIN_ALIGNMENT = 3
 _EXECUTION_OPPOSING_FORCE_REACTION_MIN_RISK = 0.72
@@ -2537,7 +2546,7 @@ def _compact_live_state_playbook_ai_summary(value: Any) -> dict[str, Any]:
     return {}
 
 
-_COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS = 8
+_COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS = _PHOENIXGUARD_UNLIMITED
 _COMPACT_LIVE_STATE_MAX_STRING_CHARS = 4096
 _COMPACT_LIVE_STATE_MAX_OBSERVABILITY_DEPTH = 8
 _COMPACT_LIVE_STATE_HEAVY_DIAGNOSTIC_KEYS = frozenset(
@@ -2597,7 +2606,7 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
                     mapping_items.sort(key=lambda row: int(_float_or(row.get("step"), 0.0)))
                     items = mapping_items[:12]
                 else:
-                    items = items[:64]
+                    items = items[:_PHOENIXGUARD_COMPACT_TAIL_WINDOW]
                 result[text_key] = [
                     _compact_live_state_observability_value(row, depth=depth + 1)
                     for row in items
@@ -2616,7 +2625,58 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
 
 
 _BOOK_RULE_ACTION_MAX_STRATEGY_ROWS = 32
-_BOOK_RULE_ACTION_MAX_OVERLAY_ROWS = 32
+_BOOK_RULE_ACTION_MAX_OVERLAY_ROWS = _PHOENIXGUARD_COMPACT_TAIL_WINDOW
+# Study-only relationship graphs are internal evidence; nothing downstream
+# renders their row detail.  Retain counts and the newest rows in the published
+# payload while the full graphs remain in the study stores.
+_COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE = 64
+
+
+def _compact_live_state_market_study_v3(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _compact_live_state_observability_value(value)
+    mapping = cast(Mapping[str, Any], value)
+    payload: dict[str, Any] = {
+        str(key): item for key, item in cast(Mapping[Any, Any], value).items()
+    }
+    candle_intelligence = _mapping_to_dict(payload.get("candle_intelligence"))
+    if candle_intelligence:
+        # recent_candles is intentionally NOT sampled here: the direct bridge
+        # and operator panels read the entire visible-candle scene from it.
+        payload["candle_intelligence"] = _compact_live_state_observability_value(
+            candle_intelligence
+        )
+    historical_similarity = _mapping_to_dict(payload.get("historical_similarity"))
+    if historical_similarity:
+        graph = _mapping_to_dict(historical_similarity.get("similarity_graph"))
+        if graph:
+            historical_similarity["similarity_graph"] = (
+                _compact_live_state_bounded_graph(graph)
+            )
+        payload["historical_similarity"] = (
+            _compact_live_state_observability_value(historical_similarity)
+        )
+    object_graph = _mapping_to_dict(payload.get("object_relationship_graph"))
+    if object_graph:
+        payload["object_relationship_graph"] = (
+            _compact_live_state_bounded_graph(object_graph)
+        )
+    return _compact_live_state_observability_value(payload)
+
+
+def _compact_live_state_bounded_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
+    bounded = dict(cast(Mapping[str, Any], graph))
+    for key in ("edges", "nodes"):
+        rows = bounded.get(key)
+        if (
+            isinstance(rows, Sequence)
+            and not isinstance(rows, (str, bytes, bytearray))
+            and len(rows) > _COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE
+        ):
+            bounded[key] = list(cast(Sequence[Any], rows))[
+                -_COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE:
+            ]
+    return bounded
 
 
 def _compact_book_rule_action_signal_v3(value: Any) -> dict[str, Any]:
@@ -2842,6 +2902,8 @@ def _compact_live_state_latest_signal_payload(value: Any) -> Any:
                 compact_book_rules = _compact_book_rule_action_signal_v3(item)
                 if compact_book_rules:
                     payload[key] = compact_book_rules
+            elif key == "market_study_v3":
+                payload[key] = _compact_live_state_market_study_v3(item)
             else:
                 payload[key] = _compact_live_state_observability_value(item)
     return payload
@@ -4231,6 +4293,8 @@ def _compact_live_state_market_payload(value: Any) -> Any:
                         _compact_live_state_observability_value(row)
                         for row in compact_book_overlays
                     ]
+            elif key == "market_study_v3":
+                payload[key] = _compact_live_state_market_study_v3(item)
             else:
                 payload[key] = _compact_live_state_observability_value(item)
     return payload
@@ -4391,14 +4455,14 @@ def _compact_live_state_sequence_context(value: Any) -> dict[str, Any]:
         if isinstance(history, Sequence) and not isinstance(history, (str, bytes, bytearray)):
             rows = [
                 _strip_packet_self_references(item)
-                for item in cast(Sequence[Any], history)[-3:]
+                for item in cast(Sequence[Any], history)[-_PHOENIXGUARD_COMPACT_TAIL_WINDOW:]
                 if isinstance(item, Mapping)
             ]
             if rows:
                 compact[history_key] = rows
     motifs = mapping.get("motifs")
     if isinstance(motifs, Sequence) and not isinstance(motifs, (str, bytes, bytearray)):
-        compact["motifs"] = list(cast(Sequence[Any], motifs)[-5:])
+        compact["motifs"] = list(cast(Sequence[Any], motifs)[-_PHOENIXGUARD_COMPACT_TAIL_WINDOW:])
     return _strip_packet_self_references(compact)
 
 
@@ -10823,7 +10887,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["live_max_tracked_candles"] = max(
         8,
         min(
-            256,
+            _PHOENIXGUARD_UNLIMITED,
             int(
                 controls.get(
                     "live_max_tracked_candles",
@@ -10836,7 +10900,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["support_resistance_max_zones_per_role"] = max(
         2,
         min(
-            12,
+            _PHOENIXGUARD_UNLIMITED,
             int(
                 controls.get(
                     "support_resistance_max_zones_per_role",
@@ -10849,7 +10913,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["support_resistance_max_total_zones"] = max(
         4,
         min(
-            24,
+            _PHOENIXGUARD_UNLIMITED,
             int(
                 controls.get(
                     "support_resistance_max_total_zones",
@@ -10862,7 +10926,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["support_resistance_max_significant_zones"] = max(
         4,
         min(
-            24,
+            _PHOENIXGUARD_UNLIMITED,
             int(
                 controls.get(
                     "support_resistance_max_significant_zones",
@@ -10875,7 +10939,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["smart_money_max_liquidity_pools"] = max(
         4,
         min(
-            24,
+            _PHOENIXGUARD_UNLIMITED,
             int(
                 controls.get(
                     "smart_money_max_liquidity_pools",
@@ -20885,8 +20949,8 @@ class PhoenixGuardWindowTrackingAdapter:
     ) -> list[dict[str, Any]]:
         if len(candles) < 6:
             return []
-        max_zones_per_role = max(1, min(24, int(max_zones_per_role)))
-        max_total_zones = max(2, min(48, int(max_total_zones)))
+        max_zones_per_role = max(1, min(_PHOENIXGUARD_UNLIMITED, int(max_zones_per_role)))
+        max_total_zones = max(2, min(_PHOENIXGUARD_UNLIMITED, int(max_total_zones)))
         width, height = int(image_size[0]), int(image_size[1])
         lows: list[dict[str, float]] = []
         highs: list[dict[str, float]] = []
@@ -21689,7 +21753,7 @@ class PhoenixGuardWindowTrackingAdapter:
         candidate_action: str,
         max_significant_zones: int = _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
     ) -> dict[str, Any]:
-        max_significant_zones = max(1, min(48, int(max_significant_zones)))
+        max_significant_zones = max(1, min(_PHOENIXGUARD_UNLIMITED, int(max_significant_zones)))
         rows = [_mapping_to_dict(zone) for zone in zones]
         reference_states = {"BROKEN", "CONSUMED"}
         significant = [
@@ -21794,8 +21858,8 @@ class PhoenixGuardWindowTrackingAdapter:
         max_significant_zones: int = _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
         max_liquidity_pools: int = _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS,
     ) -> dict[str, Any]:
-        max_significant_zones = max(1, min(48, int(max_significant_zones)))
-        max_liquidity_pools = max(1, min(48, int(max_liquidity_pools)))
+        max_significant_zones = max(1, min(_PHOENIXGUARD_UNLIMITED, int(max_significant_zones)))
+        max_liquidity_pools = max(1, min(_PHOENIXGUARD_UNLIMITED, int(max_liquidity_pools)))
         rows = [dict(item) for item in candles]
         requested_direction = _upper_action(candidate_action)
         if requested_direction not in {"BUY", "SELL"}:
@@ -22679,7 +22743,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 raw_context["revisions"] = []
                 seen = raw_context.get("seen_closed_candle_keys", [])
                 if isinstance(seen, list):
-                    raw_context["seen_closed_candle_keys"] = seen[-8:]
+                    raw_context["seen_closed_candle_keys"] = seen[-_PHOENIXGUARD_COMPACT_TAIL_WINDOW:]
         return state
 
     def _build_scene_forecast_contribution(
@@ -25725,7 +25789,7 @@ class PhoenixGuardWindowTrackingAdapter:
         o, h, low_price, c = _read_ohlc(entry, "o", "h", "l", "c", fallback)
 
         recent_candles: list[dict[str, Any]] = []
-        for row in tracked_candles[-20:]:
+        for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]:
             ro, rh, rl, rc = _read_ohlc(row, "o", "h", "l", "c", c)
             recent_candles.append(
                 {
@@ -25765,15 +25829,15 @@ class PhoenixGuardWindowTrackingAdapter:
         if tracked_candles:
             closes = np.array([
                 _float_or(row.get("c", row.get("close", tracking_summary.get("latest_price_proxy", 1.0))), 1.0)
-                for row in tracked_candles[-24:]
+                for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]
             ], dtype=np.float32)
             highs = np.array([
                 _float_or(row.get("h", row.get("high", closes[-1])), float(closes[-1]))
-                for row in tracked_candles[-24:]
+                for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]
             ], dtype=np.float32)
             lows = np.array([
                 _float_or(row.get("l", row.get("low", closes[-1])), float(closes[-1]))
-                for row in tracked_candles[-24:]
+                for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]
             ], dtype=np.float32)
         else:
             close_value = _float_or(tracking_summary.get("latest_price_proxy", 1.0), 1.0)
@@ -35744,15 +35808,15 @@ class ContinuousWindowTrackerService:
             if min_location_sniper_target_candles is not None:
                 controls["min_location_sniper_target_candles"] = max(1, int(min_location_sniper_target_candles))
             if live_max_tracked_candles is not None:
-                controls["live_max_tracked_candles"] = max(8, min(256, int(live_max_tracked_candles)))
+                controls["live_max_tracked_candles"] = max(8, min(_PHOENIXGUARD_UNLIMITED, int(live_max_tracked_candles)))
             if support_resistance_max_zones_per_role is not None:
-                controls["support_resistance_max_zones_per_role"] = max(2, min(12, int(support_resistance_max_zones_per_role)))
+                controls["support_resistance_max_zones_per_role"] = max(2, min(_PHOENIXGUARD_UNLIMITED, int(support_resistance_max_zones_per_role)))
             if support_resistance_max_total_zones is not None:
-                controls["support_resistance_max_total_zones"] = max(4, min(24, int(support_resistance_max_total_zones)))
+                controls["support_resistance_max_total_zones"] = max(4, min(_PHOENIXGUARD_UNLIMITED, int(support_resistance_max_total_zones)))
             if support_resistance_max_significant_zones is not None:
-                controls["support_resistance_max_significant_zones"] = max(4, min(24, int(support_resistance_max_significant_zones)))
+                controls["support_resistance_max_significant_zones"] = max(4, min(_PHOENIXGUARD_UNLIMITED, int(support_resistance_max_significant_zones)))
             if smart_money_max_liquidity_pools is not None:
-                controls["smart_money_max_liquidity_pools"] = max(4, min(24, int(smart_money_max_liquidity_pools)))
+                controls["smart_money_max_liquidity_pools"] = max(4, min(_PHOENIXGUARD_UNLIMITED, int(smart_money_max_liquidity_pools)))
             if min_live_momentum_visible_candles is not None:
                 controls["min_live_momentum_visible_candles"] = max(1, min(64, int(min_live_momentum_visible_candles)))
             if min_live_momentum_score is not None:
@@ -39240,7 +39304,7 @@ class ContinuousWindowTrackerService:
         o, h, low_price, c = _read_ohlc(entry, "o", "h", "l", "c", fallback)
 
         recent_candles: list[dict[str, Any]] = []
-        for row in tracked_candles[-20:]:
+        for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]:
             ro, rh, rl, rc = _read_ohlc(row, "o", "h", "l", "c", c)
             recent_candles.append(
                 {
@@ -39280,15 +39344,15 @@ class ContinuousWindowTrackerService:
         if tracked_candles:
             closes = np.array([
                 _float_or(row.get("c", row.get("close", tracking_summary.get("latest_price_proxy", 1.0))), 1.0)
-                for row in tracked_candles[-24:]
+                for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]
             ], dtype=np.float32)
             highs = np.array([
                 _float_or(row.get("h", row.get("high", closes[-1])), float(closes[-1]))
-                for row in tracked_candles[-24:]
+                for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]
             ], dtype=np.float32)
             lows = np.array([
                 _float_or(row.get("l", row.get("low", closes[-1])), float(closes[-1]))
-                for row in tracked_candles[-24:]
+                for row in tracked_candles[-_PHOENIXGUARD_MOMENTUM_COMPUTE_WINDOW:]
             ], dtype=np.float32)
         else:
             close_value = _float_or(tracking_summary.get("latest_price_proxy", 1.0), 1.0)

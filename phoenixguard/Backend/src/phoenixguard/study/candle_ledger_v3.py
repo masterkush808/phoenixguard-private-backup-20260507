@@ -30,7 +30,9 @@ CANDLE_LEDGER_SCHEMA_VERSION = "PG_CANDLE_LEDGER_V3"
 CANDLE_LEDGER_SQL_SCHEMA_VERSION = 1
 DEFAULT_MAX_CANDLE_RECORDS = 1_000_000
 MAX_CANDLE_LEDGER_BATCH = 4_096
-MAX_RECENT_CANDLE_READ = 512
+# Storage keeps a million records; "recent" reads stay a bounded window so
+# per-frame queries do not materialize the whole ledger.
+MAX_RECENT_CANDLE_READ = 4_096
 
 
 class CandleLedgerValidationError(ValueError):
