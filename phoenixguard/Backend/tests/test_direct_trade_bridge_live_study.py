@@ -126,6 +126,70 @@ def test_hybrid_lane_never_authorizes_even_when_fast_lanes_look_ready():
         bridge._resolve_trade_payload(payload, score_threshold=0.0, signal_source="hybrid")
 
 
+def test_stale_observation_state_is_refused_regardless_of_verdict() -> None:
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_state_age")
+    stale = time.time() - 2 * 24 * 3600
+    payload = {
+        "session_id": "pocket-live-8788",
+        "last_capture_epoch": stale,
+        "latest_signal": {
+            "published_epoch": stale,
+            "book_rule_action_signal_v3": {
+                "schema_version": "PG_BOOK_RULE_ACTION_SIGNAL_V3",
+                "status": "BOOK_ACTION_CONFIRMED",
+                "action": "SELL",
+                "watch_side": "SELL",
+                "actionable": True,
+                "playbook": "STOP_HUNT_BMS_RTO",
+                "closed_candle_key": "closed-stale",
+                "closed_candle_sequence": 7,
+            },
+        },
+    }
+
+    with pytest.raises(bridge.TradeRejected, match="Observation state is stale"):
+        bridge._resolve_trade_payload(payload)
+
+    # Defense in depth: with the state-age gate disabled the expired valid_until
+    # epoch still refuses a two-day-old verdict.
+    bridge.MAX_STATE_AGE_SECONDS = 0.0
+    try:
+        with pytest.raises(bridge.TradeRejected, match="Live signal expired"):
+            bridge._resolve_trade_payload(payload)
+    finally:
+        bridge.MAX_STATE_AGE_SECONDS = bridge.DEFAULT_MAX_STATE_AGE_SECONDS
+
+
+def test_waiting_verdict_reason_names_what_the_strategist_published() -> None:
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_reason_detail")
+    payload = {
+        "session_id": "pocket-live-8788",
+        "last_capture_epoch": time.time(),
+        "latest_signal": {
+            "published_epoch": time.time(),
+            "book_rule_action_signal_v3": {
+                "schema_version": "PG_BOOK_RULE_ACTION_SIGNAL_V3",
+                "status": "BOOK_EVIDENCE_CONFLICT",
+                "action": "WAIT",
+                "watch_side": "SELL",
+                "actionable": False,
+                "playbook": "AMD_DISTRIBUTION",
+                "closed_candle_key": "closed-gated",
+                "closed_candle_sequence": 9,
+            },
+        },
+    }
+
+    with pytest.raises(bridge.TradeRejected) as rejection:
+        bridge._resolve_trade_payload(payload)
+
+    message = str(rejection.value)
+    assert "No actionable live signal" in message
+    assert "status=BOOK_EVIDENCE_CONFLICT" in message
+    assert "playbook=AMD_DISTRIBUTION" in message
+    assert "state_age=0s" in message
+
+
 def test_bridge_reports_staleness_before_a_waiting_strategist_market():
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_stale_before_timing")
     now = time.time()

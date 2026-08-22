@@ -102,6 +102,8 @@ DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 # correct for hours, so an unchanged observation timestamp is not a stale
 # stream.  Operators can opt into a positive age cap for polling diagnostics.
 DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
+DEFAULT_MAX_STATE_AGE_SECONDS = 180.0
+MAX_STATE_AGE_SECONDS = DEFAULT_MAX_STATE_AGE_SECONDS
 # The strategist (published PG_BOOK_RULE_ACTION_SIGNAL_V3 verdict) is the sole
 # trigger authority.  Candle-color bias, hybrid, and high-frequency lanes were
 # removed as execution paths on purpose: they may inform awareness layers but
@@ -1602,9 +1604,37 @@ def _resolve_trade_payload(
     frontline_required: bool = False,
     frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> dict[str, object]:
+    state_epoch = _payload_live_epoch(payload)
+    state_age_seconds = max(0.0, time.time() - state_epoch) if state_epoch > 0.0 else -1.0
+    if MAX_STATE_AGE_SECONDS > 0.0 and state_age_seconds > MAX_STATE_AGE_SECONDS:
+        raise TradeRejected(
+            (
+                "Observation state is stale "
+                f"(age={state_age_seconds:.0f}s > {MAX_STATE_AGE_SECONDS:.0f}s); "
+                "refusing to act on old strategist output."
+            ),
+            details={"state_age_seconds": round(state_age_seconds, 3), "max_state_age_seconds": float(MAX_STATE_AGE_SECONDS)},
+        )
     signal = _live_signal_from_state(payload, signal_source=signal_source)
     if not signal:
-        raise TradeRejected("No actionable live signal available from PhoenixGuard observation state.")
+        book_state = _mapping_or_empty(
+            _mapping_or_empty(payload.get("latest_signal")).get("book_rule_action_signal_v3")
+        )
+        detail = ""
+        if book_state:
+            detail = (
+                f" | strategist verdict: status={book_state.get('status')} "
+                f"playbook={book_state.get('playbook')} action={book_state.get('action')} "
+                f"actionable={book_state.get('actionable')}"
+            )
+        elif not _mapping_or_empty(payload.get("latest_signal")):
+            detail = " | observation payload has no strategist verdict"
+        else:
+            detail = " (no observation payload received)"
+        age_note = f" | state_age={state_age_seconds:.0f}s" if state_age_seconds >= 0.0 else ""
+        raise TradeRejected(
+            "No actionable live signal available from PhoenixGuard observation state." + detail + age_note
+        )
     now_epoch = time.time()
     freshness = _freshness_context(payload, signal, now_epoch=now_epoch)
     signal_age_seconds = _float(freshness.get("effective_signal_age_seconds"), 0.0)
@@ -1982,6 +2012,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Block every entry until a fresh matching Frontline Qwen verdict is published (strict mode).",
     )
     parser.add_argument(
+        "--max-state-age-seconds",
+        type=float,
+        default=DEFAULT_MAX_STATE_AGE_SECONDS,
+        help="Maximum age of the observation state itself (capture/publish epoch) before the bridge refuses to act. 0 disables.",
+    )
+    parser.add_argument(
         "--frontline-freshness-seconds",
         type=float,
         default=DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
@@ -1991,8 +2027,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    global MAX_STATE_AGE_SECONDS
     parser = _build_parser()
     args = parser.parse_args(argv)
+    MAX_STATE_AGE_SECONDS = max(0.0, float(args.max_state_age_seconds))
 
     args.base_url, args.session_id = _resolve_stack_context(
         base_url=args.base_url or None,
