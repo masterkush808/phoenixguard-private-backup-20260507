@@ -104,6 +104,7 @@ DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
 DEFAULT_MAX_STATE_AGE_SECONDS = 180.0
 MAX_STATE_AGE_SECONDS = DEFAULT_MAX_STATE_AGE_SECONDS
+STATE_EPOCH_WATERMARK = 0.0
 # The strategist (published PG_BOOK_RULE_ACTION_SIGNAL_V3 verdict) is the sole
 # trigger authority.  Candle-color bias, hybrid, and high-frequency lanes were
 # removed as execution paths on purpose: they may inform awareness layers but
@@ -122,9 +123,16 @@ class MissingCalibration(Exception):
 
 
 class TradeRejected(Exception):
-    def __init__(self, message: str, *, details: Mapping[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, object] | None = None,
+        quiet: bool = False,
+    ) -> None:
         super().__init__(message)
         self.details = dict(details or {})
+        self.quiet = bool(quiet)
 
 
 class _BridgeTriggerState:
@@ -1604,8 +1612,20 @@ def _resolve_trade_payload(
     frontline_required: bool = False,
     frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> dict[str, object]:
+    global STATE_EPOCH_WATERMARK
     state_epoch = _payload_live_epoch(payload)
     state_age_seconds = max(0.0, time.time() - state_epoch) if state_epoch > 0.0 else -1.0
+    if state_epoch > 0.0:
+        if state_epoch + 1e-6 < STATE_EPOCH_WATERMARK:
+            raise TradeRejected(
+                (
+                    "Superseded observation state skipped "
+                    f"(state_age={state_age_seconds:.0f}s; freshest seen kept)."
+                ),
+                details={"state_age_seconds": round(state_age_seconds, 3)},
+                quiet=True,
+            )
+        STATE_EPOCH_WATERMARK = max(STATE_EPOCH_WATERMARK, state_epoch)
     if MAX_STATE_AGE_SECONDS > 0.0 and state_age_seconds > MAX_STATE_AGE_SECONDS:
         raise TradeRejected(
             (
@@ -1620,17 +1640,16 @@ def _resolve_trade_payload(
         book_state = _mapping_or_empty(
             _mapping_or_empty(payload.get("latest_signal")).get("book_rule_action_signal_v3")
         )
-        detail = ""
-        if book_state:
-            detail = (
-                f" | strategist verdict: status={book_state.get('status')} "
-                f"playbook={book_state.get('playbook')} action={book_state.get('action')} "
-                f"actionable={book_state.get('actionable')}"
+        if not book_state:
+            raise TradeRejected(
+                "Observation payload has no strategist verdict; partial frame skipped.",
+                quiet=True,
             )
-        elif not _mapping_or_empty(payload.get("latest_signal")):
-            detail = " | observation payload has no strategist verdict"
-        else:
-            detail = " (no observation payload received)"
+        detail = (
+            f" | strategist verdict: status={book_state.get('status')} "
+            f"playbook={book_state.get('playbook')} action={book_state.get('action')} "
+            f"actionable={book_state.get('actionable')}"
+        )
         age_note = f" | state_age={state_age_seconds:.0f}s" if state_age_seconds >= 0.0 else ""
         raise TradeRejected(
             "No actionable live signal available from PhoenixGuard observation state." + detail + age_note
@@ -2076,6 +2095,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         frontline_freshness_seconds=float(args.frontline_freshness_seconds),
                     )
             except TradeRejected as exc:
+                if getattr(exc, "quiet", False):
+                    return 0
                 wait_payload: dict[str, object] = {"triggered": False, "reason": str(exc)}
                 if exc.details:
                     wait_payload["freshness"] = dict(exc.details)
@@ -2189,6 +2210,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     trigger_state.record_trade_execution(result)
                     print(json.dumps({"triggered": True, **result, **exec_meta, "dry_run": False}, sort_keys=True, ensure_ascii=True))
             except TradeRejected as exc:
+                if getattr(exc, "quiet", False):
+                    continue
                 error_payload: dict[str, object] = {"triggered": False, "reason": str(exc)}
                 if getattr(exc, "details", None):
                     error_payload["freshness"] = dict(exc.details)

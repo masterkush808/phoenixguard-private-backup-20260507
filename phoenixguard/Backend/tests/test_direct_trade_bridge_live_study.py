@@ -190,6 +190,43 @@ def test_waiting_verdict_reason_names_what_the_strategist_published() -> None:
     assert "state_age=0s" in message
 
 
+def test_superseded_and_partial_frames_are_skipped_quietly() -> None:
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_watermark")
+    now = time.time()
+
+    def payload(epoch: float, *, with_verdict: bool = True) -> dict[str, object]:
+        book = (
+            {
+                "schema_version": "PG_BOOK_RULE_ACTION_SIGNAL_V3",
+                "status": "BOOK_EVIDENCE_CONFLICT",
+                "action": "WAIT",
+                "actionable": False,
+                "playbook": "AMD_DISTRIBUTION",
+            }
+            if with_verdict
+            else {}
+        )
+        return {
+            "session_id": "s",
+            "last_capture_epoch": epoch,
+            "latest_signal": {"published_epoch": epoch, "book_rule_action_signal_v3": book},
+        }
+
+    fresh = payload(now - 5)
+    with pytest.raises(bridge.TradeRejected) as gated:
+        bridge._resolve_trade_payload(fresh)
+    assert getattr(gated.value, "quiet", False) is False
+
+    with pytest.raises(bridge.TradeRejected) as superseded:
+        bridge._resolve_trade_payload(payload(now - 90))
+    assert getattr(superseded.value, "quiet", False) is True
+    assert "Superseded" in str(superseded.value)
+
+    with pytest.raises(bridge.TradeRejected) as partial:
+        bridge._resolve_trade_payload(payload(now - 4, with_verdict=False))
+    assert getattr(partial.value, "quiet", False) is True
+
+
 def test_bridge_reports_staleness_before_a_waiting_strategist_market():
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_stale_before_timing")
     now = time.time()
