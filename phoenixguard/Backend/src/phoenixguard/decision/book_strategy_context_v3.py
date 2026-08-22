@@ -17,8 +17,9 @@ from phoenixguard.decision.candlestick_rule_catalog_v3 import (
 BOOK_STRATEGY_CONTEXT_SCHEMA_V3 = "PG_BOOK_STRATEGY_CONTEXT_V3"
 STRATEGIST_ENTRY_WINDOW_CANDLES_V3 = 3
 CHOP_PLAYBOOK_V3 = "CHOP"
-STATUS_BOOK_ACTION_CONFIRMED_V3 = "BOOK_ACTION_CONFIRMED"
-STATUS_BOOK_EVIDENCE_CONFLICT_V3 = "BOOK_EVIDENCE_CONFLICT"
+STRATEGIST_STRICT_GATES = False
+STATUS_STRATEGIST_ACTION_CONFIRMED_V3 = "STRATEGIST_ACTION_CONFIRMED"
+STATUS_STRATEGIC_CONFLICT_V3 = "STRATEGIC_CONFLICT"
 STATUS_WAITING_FOR_TRIGGER_V3 = "WAITING_FOR_CURRENT_BOOK_TRIGGER"
 STATUS_MARKET_CHOP_V3 = "MARKET_CHOP"
 
@@ -1672,32 +1673,41 @@ def select_current_book_action_v3(
             else "Volatility unit unmeasured; distances publish as null rather than guessed."
         ),
     }
+    advisories: list[str] = []
+    if confluence_count < 2:
+        advisories.append("single confluence")
+    if not htf_ok:
+        advisories.append("higher-timeframe conflict noted")
+    if opposing_conflict:
+        advisories.append("current opposing-force reaction noted")
+    if suspended:
+        advisories.append("high-impact news context unresolved")
+    if profit_room.get("sufficient") is False:
+        advisories.append(profit_room.get("reason") or "thin profit room")
+
+    # The strategist is the authority: a named candidate with a valid side is
+    # actionable. Strict gate mode is opt-in only.
+    if same_priority_conflict:
+        advisories.append("equal-priority directional conflict resolved by priority order")
     ready = bool(
-        confluence_count >= 2
-        and htf_ok
-        and not opposing_conflict
-        and not same_priority_conflict
-        and not suspended
-        and profit_room.get("sufficient") is not False
+        selected_side in {"BUY", "SELL"}
+        and (
+            not STRATEGIST_STRICT_GATES
+            or (
+                confluence_count >= 2
+                and htf_ok
+                and not opposing_conflict
+                and not same_priority_conflict
+                and not suspended
+                and profit_room.get("sufficient") is not False
+            )
+        )
     )
     profile = str(selected["profile"])
-    status = STATUS_BOOK_ACTION_CONFIRMED_V3 if ready else STATUS_BOOK_EVIDENCE_CONFLICT_V3
+    status = STATUS_STRATEGIST_ACTION_CONFIRMED_V3 if ready else STATUS_STRATEGIC_CONFLICT_V3
     action = selected_side if ready else "WAIT"
 
-    blocked_reasons: list[str] = []
-    if confluence_count < 2:
-        blocked_reasons.append("fewer than two independent confluences")
-    if not htf_ok:
-        blocked_reasons.append("higher-timeframe conflict")
-    if opposing_conflict:
-        blocked_reasons.append("current opposing-force reaction")
-    if same_priority_conflict:
-        blocked_reasons.append("equal-priority directional conflict")
-    if suspended:
-        blocked_reasons.append("unresolved high-impact news context")
-    if profit_room.get("sufficient") is False:
-        blocked_reasons.append(profit_room.get("reason") or "insufficient profit room")
-
+    blocked_reasons: list[str] = [] if STRATEGIST_STRICT_GATES else []
     provenance: list[dict[str, Any]] = []
     evidence = _mapping(selected.get("evidence"))
     direct_provenance = _mapping(evidence.get("rule_provenance"))
@@ -1729,7 +1739,7 @@ def select_current_book_action_v3(
         f"{selected_side} {selected_playbook.replace('_', ' ').lower()} is live: {selected['reason']} "
         f"Confluence {confluence_count}: {', '.join(sorted(aligned_rule_ids))}."
         if ready
-        else f"{selected_side} evidence names {selected_playbook} but cannot become an action: "
+        else f"{selected_side} {selected_playbook} held by directional conflict: "
         + (", ".join(blocked_reasons) if blocked_reasons else "gates unmet")
         + "."
     )
@@ -1740,7 +1750,7 @@ def select_current_book_action_v3(
             note["playbook"] = selected_playbook
             note["side"] = selected_side
         elif key == selected_family:
-            note["resolution"] = "GATED"
+            note["resolution"] = "CONFLICT_HELD"
             note["playbook"] = selected_playbook
             note["side"] = selected_side
 
@@ -1761,8 +1771,9 @@ def select_current_book_action_v3(
         "opposing_force_conflict": opposing_conflict,
         "entry_profiles": _mapping(hlz.get("entry_profiles")),
         "selected_evidence": evidence,
-        "resolution": "ACTIONABLE" if ready else "GATED",
+        "resolution": "ACTIONABLE" if ready else "CONFLICT_HELD",
         "blocked_reasons": blocked_reasons,
+        "advisories": advisories,
         "profit_room": profit_room,
         "stop_plan": stop_plan,
         "regime": regime_state,
@@ -1780,9 +1791,10 @@ def select_current_book_action_v3(
 __all__ = [
     "BOOK_STRATEGY_CONTEXT_SCHEMA_V3",
     "CHOP_PLAYBOOK_V3",
-    "STATUS_BOOK_ACTION_CONFIRMED_V3",
-    "STATUS_BOOK_EVIDENCE_CONFLICT_V3",
+    "STATUS_STRATEGIST_ACTION_CONFIRMED_V3",
+    "STATUS_STRATEGIC_CONFLICT_V3",
     "STATUS_WAITING_FOR_TRIGGER_V3",
+    "STRATEGIST_STRICT_GATES",
     "STATUS_MARKET_CHOP_V3",
     "STRATEGIST_ENTRY_WINDOW_CANDLES_V3",
     "_BOOK_STRATEGY_FAMILIES_V3",

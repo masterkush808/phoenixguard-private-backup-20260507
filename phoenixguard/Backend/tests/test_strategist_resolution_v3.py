@@ -14,9 +14,9 @@ from phoenixguard.decision.book_rule_action_signal_v3 import (
 )
 from phoenixguard.decision.book_strategy_context_v3 import (
     STRATEGIST_ENTRY_WINDOW_CANDLES_V3,
-    STATUS_BOOK_ACTION_CONFIRMED_V3,
-    STATUS_BOOK_EVIDENCE_CONFLICT_V3,
     STATUS_MARKET_CHOP_V3,
+    STATUS_STRATEGIC_CONFLICT_V3,
+    STATUS_STRATEGIST_ACTION_CONFIRMED_V3,
     STATUS_WAITING_FOR_TRIGGER_V3,
     select_current_book_action_v3,
 )
@@ -86,7 +86,7 @@ def test_break_retest_resolves_by_name_with_confluence_reason() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "BREAK_RETEST"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert verdict["action"] == "SELL"
     assert verdict["resolution"] == "ACTIONABLE"
     assert verdict["confluence_count"] >= 2
@@ -115,7 +115,7 @@ def test_zone_role_flip_resolves_by_name() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "ROLE_FLIP_RETEST"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert verdict["action"] == "BUY"
 
 
@@ -132,9 +132,9 @@ def test_trendline_and_zone_rejections_resolve_by_name() -> None:
 
     assert line_verdict["playbook"] == "TRENDLINE_REJECTION"
     assert line_verdict["profile"] == "AGGRESSIVE"
-    assert line_verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert line_verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert zone_verdict["playbook"] == "SUPPORT_RESISTANCE_REJECTION"
-    assert zone_verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert zone_verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
 
 
 def test_hlz_fresh_sequence_names_stop_hunt_bms_rto() -> None:
@@ -150,7 +150,7 @@ def test_hlz_fresh_sequence_names_stop_hunt_bms_rto() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "STOP_HUNT_BMS_RTO"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert verdict["action"] == "SELL"
 
 
@@ -176,7 +176,7 @@ def test_hlz_sequence_survives_entry_window_after_terminal_candle() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "STOP_HUNT_BMS_RTO"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert "entry window" in verdict["scenario"]
     assert _family_note(verdict, "HLZ_EVENT_SEQUENCE")["resolution"] == "ACTIONABLE"
 
@@ -223,7 +223,7 @@ def test_order_block_rto_resolves_by_name() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "ORDER_BLOCK_RTO"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert "ORDER_BLOCK_ALIGNMENT" in verdict["rule_ids"]
 
 
@@ -239,7 +239,7 @@ def test_sweep_reclaim_resolves_liquidity_playbook() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "LIQUIDITY_SWEEP_RECLAIM"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert "LIQUIDITY_SWEEP_SIDE" in verdict["rule_ids"]
 
 
@@ -262,7 +262,7 @@ def test_structure_continuation_resolves_after_recent_bms() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "STRUCTURE_CONTINUATION"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert "BMS_ALIGNMENT" in verdict["rule_ids"]
 
 
@@ -295,10 +295,10 @@ def test_amd_distribution_fresh_event_is_actionable() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "AMD_DISTRIBUTION"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
 
 
-def test_profit_room_blocks_actionable_when_target_too_close() -> None:
+def test_thin_profit_room_is_advisory_not_blocker() -> None:
     control = _base_control(
         trendline_contracts_full_v3={
             "current_role_flip_retests": [
@@ -312,11 +312,11 @@ def test_profit_room_blocks_actionable_when_target_too_close() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_EVIDENCE_CONFLICT_V3
-    assert verdict["action"] == "WAIT"
-    assert verdict["resolution"] == "GATED"
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
+    assert verdict["resolution"] == "ACTIONABLE"
     assert verdict["profit_room"]["sufficient"] is False
-    assert any("room remains" in reason for reason in verdict["blocked_reasons"])
+    assert any("room remains" in note for note in verdict["advisories"])
 
 
 def test_price_inside_opposing_zone_reports_spent_move() -> None:
@@ -338,7 +338,8 @@ def test_price_inside_opposing_zone_reports_spent_move() -> None:
 
     assert verdict["profit_room"]["sufficient"] is False
     assert verdict["profit_room"]["room_px"] == 0.0
-    assert any("inside" in reason for reason in verdict["blocked_reasons"])
+    assert any("inside" in note for note in verdict["advisories"])
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
 
 
 def test_profit_room_passes_when_sufficient() -> None:
@@ -355,7 +356,7 @@ def test_profit_room_passes_when_sufficient() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert verdict["profit_room"]["sufficient"] is True
 
 
@@ -371,7 +372,7 @@ def test_unmeasured_target_does_not_starve_resolution() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert verdict["profit_room"]["measured"] is False
 
 
@@ -387,9 +388,10 @@ def test_equal_priority_directional_conflict_gates_action() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_EVIDENCE_CONFLICT_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
     assert any(
-        "equal-priority" in reason for reason in verdict["blocked_reasons"]
+        "equal-priority" in note for note in verdict["advisories"]
     )
 
 
@@ -405,13 +407,14 @@ def test_htf_conflict_gates_action() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_EVIDENCE_CONFLICT_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
     assert any(
-        "higher-timeframe conflict" in reason for reason in verdict["blocked_reasons"]
+        "higher-timeframe conflict noted" in note for note in verdict["advisories"]
     )
 
 
-def test_ltf_reversal_evidence_never_grants_counter_htf_authority() -> None:
+def test_ltf_reversal_evidence_reported_as_advisory_under_strategist_authority() -> None:
     """HLZ p.105: HTF owns direction; p.152: reversals need HTF liquidity first.
 
     Full LTF reversal evidence (SMS + BMS against HTF) must stay gated.
@@ -441,10 +444,13 @@ def test_ltf_reversal_evidence_never_grants_counter_htf_authority() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_EVIDENCE_CONFLICT_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
     assert any(
-        "higher-timeframe conflict" in reason for reason in verdict["blocked_reasons"]
+        "higher-timeframe conflict noted" in note for note in verdict["advisories"]
     )
+    family_note = _family_note(verdict, "BMS_SMS_STRUCTURE")
+    assert family_note["side"] == "SELL"
 
 
 def test_legacy_reversal_confirmed_key_is_ignored() -> None:
@@ -460,13 +466,14 @@ def test_legacy_reversal_confirmed_key_is_ignored() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_EVIDENCE_CONFLICT_V3
+    assert verdict["playbook"] == "SUPPORT_RESISTANCE_REJECTION"
+    assert verdict["action"] == "SELL"
     assert any(
-        "higher-timeframe conflict" in reason for reason in verdict["blocked_reasons"]
+        "higher-timeframe conflict noted" in note for note in verdict["advisories"]
     )
 
 
-def test_news_suspension_gates_action() -> None:
+def test_news_suspension_is_advisory_under_strategist_authority() -> None:
     control = _base_control(
         support_resistance_full_v3={"current_reactions": [{"current_action_side": "SELL"}]},
         session_news_context_v3={"entry_suspended_until_news_pivot": True},
@@ -474,9 +481,9 @@ def test_news_suspension_gates_action() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_BOOK_EVIDENCE_CONFLICT_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     assert any(
-        "high-impact news" in reason for reason in verdict["blocked_reasons"]
+        "news context unresolved" in note for note in verdict["advisories"]
     )
 
 
@@ -722,7 +729,7 @@ def test_regime_ranging_demotes_breakout_continuation() -> None:
 
     assert verdict["regime"] == "RANGING"
     assert verdict["playbook"] == "SUPPORT_RESISTANCE_REJECTION"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
 
 
 def test_stop_plan_publishes_donnelly_numeric_distances() -> None:
@@ -846,7 +853,7 @@ def test_sunday_gap_fade_resolves_by_name_through_strategist() -> None:
 
     assert verdict["playbook"] == "SUNDAY_GAP_FADE"
     assert verdict["action"] == "BUY"
-    assert verdict["status"] == STATUS_BOOK_ACTION_CONFIRMED_V3
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
     family_note = next(
         row for row in verdict["family_resolutions"] if row["strategy_id"] == "SUNDAY_GAP_FADE"
     )
@@ -909,7 +916,7 @@ def test_builder_publishes_strategist_contract_for_bridge() -> None:
     )
 
 
-def test_builder_surfaces_blocked_reasons_on_gated_setup() -> None:
+def test_builder_surfaces_advisories_on_live_setup() -> None:
     control = _base_control(
         observed_candle_count=24,
         trendline_contracts_full_v3={
@@ -931,7 +938,7 @@ def test_builder_surfaces_blocked_reasons_on_gated_setup() -> None:
         identity_confirmed=True,
     )
 
-    assert verdict["actionable"] is False
+    assert verdict["actionable"] is True
     assert verdict["playbook"] == "BREAK_RETEST"
-    assert verdict["resolution"] == "GATED"
-    assert verdict["blocked_reasons"]
+    assert verdict["resolution"] == "ACTIONABLE"
+    assert isinstance(verdict.get("advisories"), list)

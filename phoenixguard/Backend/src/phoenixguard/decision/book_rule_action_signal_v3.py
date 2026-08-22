@@ -605,7 +605,7 @@ def build_book_rule_action_signal_v3(
     if not source or not identity_confirmed:
         return {
             "schema_version": BOOK_RULE_ACTION_SIGNAL_SCHEMA_V3,
-            "version": 1, "provider_role": "PRIMARY_BOOK_RULE_SIGNAL_PROVIDER",
+            "version": 1, "provider_role": "PRIMARY_STRATEGIST_SIGNAL_PROVIDER",
             "priority": "HIGH",
             "status": "SOURCE_IDENTITY_PENDING" if not identity_confirmed else "WAITING_FOR_CLOSED_CANDLE_RULE_STUDY",
             "action": "WAIT", "watch_side": "NEUTRAL", "actionable": False,
@@ -784,7 +784,7 @@ def build_book_rule_action_signal_v3(
     )
     return {
         "schema_version": BOOK_RULE_ACTION_SIGNAL_SCHEMA_V3,
-        "version": 1, "provider_role": "PRIMARY_BOOK_RULE_SIGNAL_PROVIDER",
+        "version": 1, "provider_role": "PRIMARY_STRATEGIST_SIGNAL_PROVIDER",
         "priority": "HIGH", "status": status, "action": action,
         "watch_side": immediate_side, "actionable": action in {"BUY", "SELL"},
         "confidence": round(confidence, 6),
@@ -794,6 +794,9 @@ def build_book_rule_action_signal_v3(
         "resolution": _safe_text(current_rule.get("resolution"), "WATCHING"),
         "blocked_reasons": [
             _safe_text(row) for row in (current_rule.get("blocked_reasons") or []) if _safe_text(row)
+        ],
+        "advisories": [
+            _safe_text(row) for row in (current_rule.get("advisories") or []) if _safe_text(row)
         ],
         "entry_window_candles": int(_number(current_rule.get("entry_window_candles"), 0)),
         "profit_room": _mapping(current_rule.get("profit_room")),

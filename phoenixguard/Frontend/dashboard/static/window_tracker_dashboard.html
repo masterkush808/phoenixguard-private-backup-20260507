@@ -3026,7 +3026,7 @@
       <section class="book-rule-signal" id="book-rule-architecture-panel" data-action="WAIT" data-priority="HIGH" aria-label="High-priority current book-rule action live V3" aria-live="polite">
         <header class="book-rule-head">
           <h3 class="book-rule-title">Current scenario action and book rules - live V3</h3>
-          <span class="book-rule-priority" id="book-rule-status">High priority - Primary signal provider - waiting for current closed-candle rules</span>
+          <span class="book-rule-priority" id="book-rule-status">High priority - Primary strategist provider - waiting for current closed-candle rules</span>
         </header>
         <div class="book-rule-core">
           <div class="book-rule-action">
@@ -3139,7 +3139,7 @@
             <span class="overlay-family-label">Market context &amp; trade map</span>
             <div class="layer-filter-list" aria-label="Market context and trade map overlays">
               <button class="layer-filter" type="button" data-overlay-family="market_context" aria-pressed="true">Reaction map <span class="layer-count" data-layer-count="market_context">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="book_rules" aria-pressed="true">Book rules <span class="layer-count" data-layer-count="book_rules">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="book_rules" aria-pressed="true">Strategists <span class="layer-count" data-layer-count="book_rules">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="council" aria-pressed="true">Combined analysis <span class="layer-count" data-layer-count="council">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="order_positioning" aria-pressed="true">Order areas <span class="layer-count" data-layer-count="order_positioning">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="triggers" aria-pressed="true">Entry triggers <span class="layer-count" data-layer-count="triggers">0</span></button>
@@ -5575,7 +5575,7 @@ async function requestJson(url) {
       if (!Object.keys(control).length) {
         const panel = document.getElementById("book-rule-architecture-panel");
         if (panel) panel.dataset.action = "WAIT";
-        setText("book-rule-status", "High priority - Primary signal provider - waiting for current frame-locked rules");
+        setText("book-rule-status", "High priority - Primary strategist provider - waiting for current frame-locked rules");
         setText("book-rule-action", "WAIT");
         setText("book-rule-action-detail", "No same-frame, pair-locked book action is published.");
         setText("book-rule-scenario", "Waiting for the current closed-candle rule stack");
@@ -5606,16 +5606,16 @@ async function requestJson(url) {
       const active = strategies.filter((row) => String(safeObject(row).status || "").toUpperCase() === "ACTIVE");
       const watching = strategies.filter((row) => String(safeObject(row).status || "").toUpperCase() === "WATCHING");
       const strategyCopy = active.length
-        ? `ACTIVE: ${active.slice(0, 14).map((row) => boundedBookText(safeObject(row).label, "Book rule", 56)).join("; ")}`
+        ? `ACTIVE: ${active.slice(0, 14).map((row) => boundedBookText(safeObject(row).label, "Strategist", 56)).join("; ")}`
         : watching.length
-          ? `WATCHING: ${watching.slice(0, 14).map((row) => boundedBookText(safeObject(row).label, "Book rule", 56)).join("; ")}`
+          ? `WATCHING: ${watching.slice(0, 14).map((row) => boundedBookText(safeObject(row).label, "Strategist", 56)).join("; ")}`
           : "No complete strategy family is active on the latest closed candle.";
       const detail = action === "WAIT" && ["BUY", "SELL"].includes(watchSide)
         ? `Watch ${watchSide} - ${confidence} book confidence - trigger not complete`
         : `${confidence} book confidence - ${String(control.playbook || "UNRESOLVED").replace(/_/g, " ")}`;
 
       if (panel) panel.dataset.action = ["BUY", "SELL", "AVOID"].includes(action) ? action : "WAIT";
-      setText("book-rule-status", `High priority - Primary signal provider - ${boundedBookText(String(control.status || "ACTIVE").replace(/_/g, " "), "ACTIVE", 32)}`);
+      setText("book-rule-status", `High priority - Primary strategist provider - ${boundedBookText(String(control.status || "ACTIVE").replace(/_/g, " "), "ACTIVE", 32)}`);
       setText("book-rule-action", action);
       setText("book-rule-action-detail", boundedBookText(detail, "Current book action is unresolved.", 120));
       setText("book-rule-scenario", boundedBookText(control.scenario, "No complete directional book setup is aligned.", 180));
@@ -7848,7 +7848,7 @@ const operatorState = safeObject(payload);
 
     function overlayFamilyTitle(family) {
       const labels = {
-        book_rules: "Book rules",
+        book_rules: "Strategists",
         market_context: "Reaction map",
         order_positioning: "Order areas",
         current_candles: "Current price",

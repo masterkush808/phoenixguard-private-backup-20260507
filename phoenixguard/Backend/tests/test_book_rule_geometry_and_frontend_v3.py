@@ -105,6 +105,6 @@ def test_live_dashboard_exposes_complete_book_rule_architecture() -> None:
 
     assert "function renderBookRuleArchitecture(payload)" in source
     assert "book_rule_action_signal_v3" in source
-    assert "Primary signal provider" in source
+    assert "Primary strategist provider" in source
     assert "Pair-conditioned horizon" not in source
     assert '"book_rule_line"' in source
