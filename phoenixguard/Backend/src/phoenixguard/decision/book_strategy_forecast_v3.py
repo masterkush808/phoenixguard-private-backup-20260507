@@ -83,8 +83,8 @@ _BOOK_PROVENANCE: dict[str, dict[str, Any]] = {
     },
     "CONFLUENCE": {
         "source_file": "zlib.pub_the-art-of-currency-trading-a-professionals-guide-to-the-foreign-exchange-market.pdf",
-        "printed_pages": [],
-        "pdf_pages": [],
+        "printed_pages": [71, 72, 176, 177, 338, 342],
+        "pdf_pages": [87, 88, 192, 193, 354, 358],
     },
 }
 
@@ -1017,6 +1017,7 @@ def build_book_strategy_forecast_control_v3(
         "amd_v3": _mapping(context_suite.get("amd_v3")),
         "news_pivot_v3": _mapping(context_suite.get("news_pivot_v3")),
         "sakata_v3": _mapping(context_suite.get("sakata_v3")),
+        "sunday_gap_fade_v3": _mapping(context_suite.get("sunday_gap_fade_v3")),
         "opposing_force_targets_v3": _mapping(context_suite.get("opposing_targets")),
         "technical_indicators_used": False,
         "technical_indicator_scope": "EXCLUDED_BY_USER",

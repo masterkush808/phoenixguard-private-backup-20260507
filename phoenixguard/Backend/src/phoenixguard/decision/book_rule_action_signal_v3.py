@@ -177,6 +177,30 @@ def _pattern_summary(control: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _market_geometry(
+    candles: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Latest close and median candle height in chart pixel space."""
+    rows = [dict(row) for row in candles if isinstance(row, Mapping)]
+    if not rows:
+        return {}
+    latest = rows[-1]
+    close_y = latest.get("close_y", latest.get("close_y_px"))
+    ranges: list[float] = []
+    for row in rows[-12:]:
+        top = row.get("top_y", row.get("wick_top_px", row.get("high_y")))
+        bottom = row.get("bottom_y", row.get("wick_bottom_px", row.get("low_y")))
+        top_value = _number(top, float("nan"))
+        bottom_value = _number(bottom, float("nan"))
+        if math.isfinite(top_value) and math.isfinite(bottom_value):
+            ranges.append(abs(top_value - bottom_value))
+    median_range = sorted(ranges)[len(ranges) // 2] if ranges else 0.0
+    return {
+        "latest_close_y_px": _number(close_y, float("nan")) if math.isfinite(_number(close_y, float("nan"))) else None,
+        "median_candle_range_y_px": median_range,
+    }
+
+
 def _strategy_row(
     strategy_id: str,
     label: str,
@@ -338,8 +362,25 @@ def _strategy_report(control: Mapping[str, Any], candle: Mapping[str, Any]) -> l
         ),
         _strategy_row(
             "PAIR_DNA", "Pair-specific behavior history",
-            active=bool(pair_dna), side=_side(pair_dna.get("side"), pair_dna.get("dominant_side")),
-            evidence=_safe_text(pair_dna.get("status") or pair_dna.get("regime"), "Pair history still collecting"),
+            active=bool(pair_dna.get("profile_applied")),
+            side=_side(pair_dna.get("side"), pair_dna.get("dominant_side")),
+            evidence=(
+                f"Pair history leans {pair_dna.get('side')} at {pair_dna.get('probability')}"
+                if bool(pair_dna.get("profile_applied"))
+                else _safe_text(pair_dna.get("current_regime"), "Pair history still collecting")
+                + "; directionally neutral"
+            ),
+        ),
+        _strategy_row(
+            "SUNDAY_GAP_FADE", "Weekend gap fade (about 85 percent fill within 48 hours)",
+            active=bool(_mapping(control.get("sunday_gap_fade_v3") or full_stack.get("sunday_gap_fade_v3")).get("detected")),
+            side=_side((_mapping(control.get("sunday_gap_fade_v3") or full_stack.get("sunday_gap_fade_v3")).get("side"))),
+            evidence=(
+                f"Weekend {str((_mapping(control.get('sunday_gap_fade_v3') or full_stack.get('sunday_gap_fade_v3'))).get('gap_direction') or '').lower()} gap; "
+                f"size {_number((_mapping(control.get('sunday_gap_fade_v3') or full_stack.get('sunday_gap_fade_v3'))).get('gap_size')):.4f}"
+                if bool((_mapping(control.get('sunday_gap_fade_v3') or full_stack.get('sunday_gap_fade_v3'))).get("detected"))
+                else str((_mapping(control.get('sunday_gap_fade_v3') or full_stack.get('sunday_gap_fade_v3'))).get("reason") or "No weekend gap context.")
+            ),
         ),
     ]
 
@@ -576,15 +617,33 @@ def build_book_rule_action_signal_v3(
             "execution_authority": False, **lineage,
         }
 
-    current_rule = select_current_book_action_v3(source)
+    current_rule = select_current_book_action_v3(
+        source,
+        market_geometry=_market_geometry(candles),
+    )
     immediate_side = _side(current_rule.get("watch_side"))
     confidence = max(0.0, min(1.0, _number(current_rule.get("evidence_strength"))))
-    margin = 0.0
+    alignment_margin = _number(
+        _mapping(current_rule.get("directional_alignment")).get("margin"),
+        0.0,
+    )
+    margin = min(1.0, alignment_margin / 6.0) if alignment_margin > 0.0 else 0.0
     playbook = _safe_text(current_rule.get("playbook"), "UNRESOLVED").upper()
     candle = _pattern_summary(source)
     strategies = _strategy_report(source, candle)
     active_strategies = [row for row in strategies if row["status"] == "ACTIVE"]
     watching_strategies = [row for row in strategies if row["status"] == "WATCHING"]
+    resolution_by_family = {
+        str(row.get("strategy_id")): dict(row)
+        for row in current_rule.get("family_resolutions") or []
+        if isinstance(row, Mapping) and row.get("strategy_id")
+    }
+    for row in strategies:
+        resolved = resolution_by_family.get(str(row.get("strategy_id")))
+        if resolved:
+            row["resolved_playbook"] = _safe_text(resolved.get("playbook"))
+            row["resolution"] = _safe_text(resolved.get("resolution"), "WATCHING")
+            row["resolution_reason"] = _safe_text(resolved.get("reason"))
     action = _safe_text(current_rule.get("action"), "WAIT").upper()
     status = _safe_text(current_rule.get("status"), "WAITING_FOR_CURRENT_BOOK_TRIGGER").upper()
     if action not in {"BUY", "SELL"}:
@@ -599,8 +658,16 @@ def build_book_rule_action_signal_v3(
         "TRENDLINE_REJECTION": "Require a completed wick rejection at the mature three-touch line without a body breach.",
         "BREAK_RETEST": "Require the broken line or zone to hold its new role on the completed retest.",
         "LIQUIDITY_SWEEP_RECLAIM": "Require the sweep to reclaim the level on a completed candle.",
-        "CANDLE_REVERSAL_AT_STRUCTURE": "Require the location-valid candle pattern to close at confirmed structure.",
+        "SUPPORT_RESISTANCE_REJECTION": "Require a completed rejection of the exact support/resistance zone.",
+        "ORDER_BLOCK_RTO": "Require the return into the last opposing candle that caused BMS to hold.",
+        "TURTLE_SOUP_SH_BMS_RTO": "Require the sweep, reclaim, confirming BMS, and return chain to complete in order.",
         "STRUCTURE_CONTINUATION": "Require the completed structure break to hold without an opposing close.",
+        "AMD_DISTRIBUTION": "Require accumulation, opposite-side manipulation, and a distribution close.",
+        "POST_NEWS_PIVOT": "Require the post-news pivot and midpoint confirmation close.",
+        "SAKATA_METHOD": "Require the Sakata cycle formation to complete with a confirming close.",
+        "CANDLE_REVERSAL_AT_STRUCTURE": "Require the location-valid candle pattern to close at confirmed structure.",
+        "CANDLE_CONTINUATION_AT_STRUCTURE": "Require the location-valid continuation pattern to close at confirmed structure.",
+        "SUNDAY_GAP_FADE": "Require weekend-gap context and fade the first-hour retrace toward the pre-weekend close.",
         "RANGE_REACTION": "Require completed rejection from the active range boundary.",
     }
     trigger = _safe_text(
@@ -723,6 +790,22 @@ def build_book_rule_action_signal_v3(
         "confidence": round(confidence, 6),
         "confidence_percent": round(confidence * 100.0, 1),
         "score_margin": round(margin, 6), "playbook": playbook,
+        "playbook_family": _safe_text(current_rule.get("playbook_family")),
+        "resolution": _safe_text(current_rule.get("resolution"), "WATCHING"),
+        "blocked_reasons": [
+            _safe_text(row) for row in (current_rule.get("blocked_reasons") or []) if _safe_text(row)
+        ],
+        "entry_window_candles": int(_number(current_rule.get("entry_window_candles"), 0)),
+        "profit_room": _mapping(current_rule.get("profit_room")),
+        "stop_plan": _mapping(current_rule.get("stop_plan")),
+        "regime": _safe_text(current_rule.get("regime"), "UNCLASSIFIED"),
+        "regime_notes": [
+            _safe_text(row) for row in (current_rule.get("regime_notes") or []) if _safe_text(row)
+        ],
+        "directional_alignment": _mapping(current_rule.get("directional_alignment")),
+        "family_resolutions": [
+            dict(row) for row in current_rule.get("family_resolutions") or [] if isinstance(row, Mapping)
+        ],
         "entry_profile": _safe_text(current_rule.get("profile"), "NONE").upper(),
         "entry_profiles": _mapping(current_rule.get("entry_profiles")),
         "confluence_count": int(_number(current_rule.get("confluence_count"))),

@@ -22,6 +22,8 @@ CANDLESTICK_SOURCE_FILE_V3 = (
     "for trading stocks, futures and Forex ( PDFDrive ).pdf"
 )
 
+TRENDLINE_SECRETS_SOURCE_FILE_V3 = "secrets revealed $10 000 cost price-1-1.pdf"
+
 
 def _spec(
     rule_id: str,
@@ -34,6 +36,8 @@ def _spec(
     *,
     confirmation: str = "SELF_CONFIRMED",
     location_required: bool = True,
+    source_file: str | None = None,
+    pdf_offset: int = 24,
 ) -> dict[str, Any]:
     return {
         "rule_id": rule_id,
@@ -44,8 +48,8 @@ def _spec(
         "required_location_side": side if location_required else "ANY",
         "confirmation": confirmation,
         "printed_pages": [printed_start, printed_end],
-        "pdf_pages": [printed_start + 24, printed_end + 24],
-        "source_file": CANDLESTICK_SOURCE_FILE_V3,
+        "pdf_pages": [printed_start + pdf_offset, printed_end + pdf_offset],
+        "source_file": source_file or CANDLESTICK_SOURCE_FILE_V3,
         "source_section": family,
         "technical_indicator": False,
         "price_location_mode": (
@@ -71,8 +75,8 @@ CANDLESTICK_RULE_CATALOG_V3: tuple[dict[str, Any], ...] = (
     _spec("BEARISH_BELT_HOLD", "SELL", "REVERSAL_SINGLE", 1, "BUY", 84, 87, confirmation="NEXT_CLOSE"),
     _spec("BULLISH_ENGULFING", "BUY", "REVERSAL_DOUBLE", 2, "SELL", 90, 91),
     _spec("BEARISH_ENGULFING", "SELL", "REVERSAL_DOUBLE", 2, "BUY", 90, 91),
-    _spec("WHITE_INSIDE_OUT_UP", "BUY", "REVERSAL_TRIPLE", 3, "SELL", 95, 96),
-    _spec("BLACK_INSIDE_OUT_DOWN", "SELL", "REVERSAL_TRIPLE", 3, "BUY", 95, 96),
+    _spec("WHITE_INSIDE_OUT_UP", "BUY", "REVERSAL_DOUBLE", 2, "SELL", 95, 96),
+    _spec("BLACK_INSIDE_OUT_DOWN", "SELL", "REVERSAL_DOUBLE", 2, "BUY", 95, 96),
     _spec("PIERCING_LINE", "BUY", "REVERSAL_DOUBLE", 2, "SELL", 99, 100),
     _spec("DARK_CLOUD_COVER", "SELL", "REVERSAL_DOUBLE", 2, "BUY", 99, 100),
     _spec("BULLISH_THRUSTING_LINE", "BUY", "REVERSAL_DOUBLE", 2, "SELL", 100, 104, confirmation="NEXT_CLOSE"),
@@ -97,8 +101,8 @@ CANDLESTICK_RULE_CATALOG_V3: tuple[dict[str, Any], ...] = (
     _spec("TRI_STAR_TOP", "SELL", "REVERSAL_TRIPLE", 3, "BUY", 134, 137),
     _spec("BREAKAWAY_THREE_NEW_PRICE_BOTTOM", "BUY", "REVERSAL_MULTIPLE", 5, "SELL", 137, 140),
     _spec("BREAKAWAY_THREE_NEW_PRICE_TOP", "SELL", "REVERSAL_MULTIPLE", 5, "BUY", 137, 140),
-    _spec("BULLISH_BLACK_THREE_GAPS", "BUY", "REVERSAL_MULTIPLE", 4, "SELL", 143, 144),
-    _spec("BEARISH_WHITE_THREE_GAPS", "SELL", "REVERSAL_MULTIPLE", 4, "BUY", 143, 144),
+    _spec("BULLISH_BLACK_THREE_GAPS", "BUY", "REVERSAL_MULTIPLE", 5, "SELL", 143, 144),
+    _spec("BEARISH_WHITE_THREE_GAPS", "SELL", "REVERSAL_MULTIPLE", 5, "BUY", 143, 144),
     _spec("THREE_WHITE_SOLDIERS", "BUY", "REVERSAL_TRIPLE", 3, "SELL", 147, 148),
     _spec("THREE_BLACK_CROWS", "SELL", "REVERSAL_TRIPLE", 3, "BUY", 147, 148),
     _spec("ADVANCE_BLOCK", "SELL", "REVERSAL_TRIPLE", 3, "BUY", 151, 153, confirmation="NEXT_CLOSE"),
@@ -129,6 +133,30 @@ CANDLESTICK_RULE_CATALOG_V3: tuple[dict[str, Any], ...] = (
     _spec("DOWN_GAP_SIDE_BY_SIDE_WHITE_LINES", "SELL", "CONTINUATION_TRIPLE", 3, "SELL", 199, 200, location_required=False),
     _spec("HIGH_PRICE_GAPPING_PLAY", "BUY", "CONTINUATION_MULTIPLE", 5, "BUY", 203, 203, location_required=False),
     _spec("LOW_PRICE_GAPPING_PLAY", "SELL", "CONTINUATION_MULTIPLE", 5, "SELL", 203, 204, location_required=False),
+    _spec(
+        "RAILWAY_TRACK_BULL",
+        "BUY",
+        "REVERSAL_DOUBLE",
+        2,
+        "SELL",
+        88,
+        95,
+        confirmation="NEXT_CLOSE",
+        source_file=TRENDLINE_SECRETS_SOURCE_FILE_V3,
+        pdf_offset=0,
+    ),
+    _spec(
+        "RAILWAY_TRACK_BEAR",
+        "SELL",
+        "REVERSAL_DOUBLE",
+        2,
+        "BUY",
+        88,
+        95,
+        confirmation="NEXT_CLOSE",
+        source_file=TRENDLINE_SECRETS_SOURCE_FILE_V3,
+        pdf_offset=0,
+    ),
 )
 
 
@@ -252,7 +280,7 @@ def _inside(inner: Mapping[str, Any], outer: Mapping[str, Any]) -> bool:
 
 
 def _spinning(row: Mapping[str, Any]) -> bool:
-    return _small(row) and _upper_wick(row) >= _body(row) * 0.6 and _lower_wick(row) >= _body(row) * 0.6
+    return _small(row) and _upper_wick(row) >= _body(row) and _lower_wick(row) >= _body(row)
 
 
 def _umbrella(row: Mapping[str, Any]) -> bool:
@@ -272,6 +300,33 @@ def _three_progressive(rows: Sequence[Mapping[str, Any]], side: str) -> bool:
     return all(_down(row) and _long(row) for row in (a, b, c)) and _value(a, "close") > _value(b, "close") > _value(c, "close")
 
 
+def _railway_track(candles: Sequence[Mapping[str, Any]], side: str) -> bool:
+    """Two opposite-colour candles with near-equal, unusually long bodies.
+
+    Source: "secrets revealed $10 000 cost price-1-1" pp.88-95. Bull variant:
+    long bearish candle then long bullish candle in a downtrend; bear mirror.
+    """
+    if len(candles) < 2:
+        return False
+    first, second = candles[-2], candles[-1]
+    if side == "BUY":
+        if not (_down(first) and _up(second)):
+            return False
+    elif not (_up(first) and _down(second)):
+        return False
+    body_first = abs(_value(first, "close") - _value(first, "open"))
+    body_second = abs(_value(second, "close") - _value(second, "open"))
+    longest = max(body_first, body_second)
+    if longest <= 1e-9 or abs(body_first - body_second) > 0.35 * longest:
+        return False
+    history = [
+        abs(_value(row, "close") - _value(row, "open"))
+        for row in candles[:-2][-10:]
+    ]
+    typical = sorted(history)[len(history) // 2] if history else 0.0
+    return min(body_first, body_second) >= typical
+
+
 def _matches(rule_id: str, candles: Sequence[Mapping[str, Any]]) -> bool:
     if not candles:
         return False
@@ -282,14 +337,28 @@ def _matches(rule_id: str, candles: Sequence[Mapping[str, Any]]) -> bool:
         return _spinning(c)
     if rule_id in {"HAMMER", "HANGING_MAN"}:
         return _umbrella(c)
+    if rule_id == "RAILWAY_TRACK_BULL":
+        return _railway_track(candles, "BUY")
+    if rule_id == "RAILWAY_TRACK_BEAR":
+        return _railway_track(candles, "SELL")
     if rule_id in {"INVERTED_HAMMER", "SHOOTING_STAR"}:
         return _inverted_umbrella(c)
-    if rule_id.startswith("DOJI_") and "STAR" not in rule_id:
-        return _doji(c)
-    if rule_id == "BULLISH_MEETING_LINE":
-        return _down(p) and _up(c) and _near(_value(c, "close"), _value(p, "close"), max(_spread(c), _spread(p)))
-    if rule_id == "BEARISH_MEETING_LINE":
-        return _up(p) and _down(c) and _near(_value(c, "close"), _value(p, "close"), max(_spread(c), _spread(p)))
+    if rule_id == "DOJI_BOTTOM":
+        return _down(p) and _long(p) and _doji(c)
+    if rule_id == "DOJI_TOP":
+        return _up(p) and _long(p) and _doji(c)
+    if rule_id in {"BULLISH_MEETING_LINE"}:
+        return (
+            _down(p) and _long(p) and _up(c) and _long(c)
+            and _value(c, "open") < _value(p, "low")
+            and _near(_value(c, "close"), _value(p, "close"), max(_spread(c), _spread(p)))
+        )
+    if rule_id in {"BEARISH_MEETING_LINE"}:
+        return (
+            _up(p) and _long(p) and _down(c) and _long(c)
+            and _value(c, "open") > _value(p, "high")
+            and _near(_value(c, "close"), _value(p, "close"), max(_spread(c), _spread(p)))
+        )
     if rule_id == "BULLISH_BELT_HOLD":
         return _up(c) and _long(c) and _lower_wick(c) <= 0.06 * _spread(c)
     if rule_id == "BEARISH_BELT_HOLD":
@@ -299,95 +368,229 @@ def _matches(rule_id: str, candles: Sequence[Mapping[str, Any]]) -> bool:
     if rule_id == "BEARISH_ENGULFING":
         return _up(p) and _down(c) and _body_low(c) <= _body_low(p) and _body_high(c) >= _body_high(p)
     if rule_id == "WHITE_INSIDE_OUT_UP":
-        return len(candles) >= 3 and _inside(p, a) and _up(c) and _value(c, "close") > _value(a, "high")
+        return (
+            len(candles) >= 2
+            and _down(p) and _long(p)
+            and _up(c)
+            and _body_low(p) < _value(c, "open") < _body_high(p)
+            and _value(c, "close") > _value(p, "open")
+        )
     if rule_id == "BLACK_INSIDE_OUT_DOWN":
-        return len(candles) >= 3 and _inside(p, a) and _down(c) and _value(c, "close") < _value(a, "low")
+        return (
+            len(candles) >= 2
+            and _up(p) and _long(p)
+            and _down(c)
+            and _body_low(p) < _value(c, "open") < _body_high(p)
+            and _value(c, "close") < _value(p, "open")
+        )
     if rule_id == "PIERCING_LINE":
         midpoint = (_value(p, "open") + _value(p, "close")) / 2.0
-        return _down(p) and _up(c) and _value(c, "open") <= _value(p, "close") and midpoint < _value(c, "close") < _value(p, "open")
+        return _down(p) and _up(c) and _value(c, "open") <= _value(p, "close") and midpoint <= _value(c, "close") < _value(p, "open")
     if rule_id == "DARK_CLOUD_COVER":
         midpoint = (_value(p, "open") + _value(p, "close")) / 2.0
-        return _up(p) and _down(c) and _value(c, "open") >= _value(p, "close") and _value(p, "open") < _value(c, "close") < midpoint
+        return _up(p) and _down(c) and _value(c, "open") >= _value(p, "close") and _value(p, "open") < _value(c, "close") <= midpoint
     if rule_id == "BULLISH_THRUSTING_LINE":
         midpoint = (_value(p, "open") + _value(p, "close")) / 2.0
         return _down(p) and _up(c) and _value(p, "close") < _value(c, "close") <= midpoint
     if rule_id == "INCOMPLETE_DARK_CLOUD_COVER":
         midpoint = (_value(p, "open") + _value(p, "close")) / 2.0
-        return _up(p) and _down(c) and midpoint <= _value(c, "close") < _value(p, "close")
+        return _up(p) and _down(c) and midpoint < _value(c, "close") < _value(p, "close")
     if rule_id in {"BULLISH_HARAMI", "BEARISH_HARAMI"}:
         desired = _up(c) if rule_id.startswith("BULLISH") else _down(c)
         return _long(p) and desired and _inside(c, p)
     if rule_id in {"BULLISH_HARAMI_CROSS", "BEARISH_HARAMI_CROSS"}:
         return _long(p) and _doji(c) and _inside(c, p)
     if rule_id == "HOMING_PIGEON":
-        return _down(p) and _down(c) and _inside(c, p)
+        return _down(p) and _long(p) and _down(c) and _inside(c, p)
     if rule_id == "BEARISH_HOMING_PIGEON":
-        return _up(p) and _up(c) and _inside(c, p)
+        return _up(p) and _long(p) and _up(c) and _inside(c, p)
     if rule_id == "TWEEZERS_BOTTOM":
         return _near(_value(c, "low"), _value(p, "low"), max(_spread(c), _spread(p)))
     if rule_id == "TWEEZERS_TOP":
         return _near(_value(c, "high"), _value(p, "high"), max(_spread(c), _spread(p)))
     if rule_id in {"DOJI_STAR_BOTTOM", "DOJI_STAR_TOP"}:
-        return _long(p) and _doji(c) and (_gap_down(p, c) if rule_id.endswith("BOTTOM") else _gap_up(p, c))
+        if rule_id.endswith("BOTTOM"):
+            return _down(p) and _long(p) and _doji(c) and _value(c, "high") < _body_low(p)
+        return _up(p) and _long(p) and _doji(c) and _value(c, "low") > _body_high(p)
     if rule_id in {"THREE_RIVER_MORNING_DOJI_STAR", "THREE_RIVER_EVENING_DOJI_STAR"}:
         bullish = rule_id.startswith("THREE_RIVER_MORNING")
-        return len(candles) >= 3 and (_down(a) if bullish else _up(a)) and _doji(p) and (_up(c) if bullish else _down(c)) and (_value(c, "close") > (_value(a, "open") + _value(a, "close")) / 2.0 if bullish else _value(c, "close") < (_value(a, "open") + _value(a, "close")) / 2.0)
+        body_gap = (
+            _value(p, "high") < _body_low(a) if bullish else _value(p, "low") > _body_high(a)
+        )
+        trigger = (
+            _value(c, "close") > (_value(a, "open") + _value(a, "close")) / 2.0
+            if bullish
+            else _value(c, "close") < (_value(a, "open") + _value(a, "close")) / 2.0
+        )
+        return len(candles) >= 3 and (_down(a) if bullish else _up(a)) and _long(a) and _doji(p) and body_gap and (_up(c) if bullish else _down(c)) and trigger
     if rule_id in {"ABANDONED_BABY_BOTTOM", "ABANDONED_BABY_TOP"}:
         bullish = rule_id.endswith("BOTTOM")
-        return len(candles) >= 3 and _doji(p) and ((_gap_down(a, p) and _gap_up(p, c) and _up(c)) if bullish else (_gap_up(a, p) and _gap_down(p, c) and _down(c)))
+        mother_colour = _down(a) if bullish else _up(a)
+        return len(candles) >= 3 and mother_colour and _doji(p) and ((_gap_down(a, p) and _gap_up(p, c) and _up(c)) if bullish else (_gap_up(a, p) and _gap_down(p, c) and _down(c)))
     if rule_id in {"THREE_RIVER_MORNING_STAR", "THREE_RIVER_EVENING_STAR"}:
         bullish = "MORNING" in rule_id
-        midpoint = (_value(a, "open") + _value(a, "close")) / 2.0
-        return len(candles) >= 3 and (_down(a) if bullish else _up(a)) and _small(p) and (_up(c) if bullish else _down(c)) and (_value(c, "close") > midpoint if bullish else _value(c, "close") < midpoint)
+        if len(candles) < 3:
+            return False
+        if bullish:
+            return (
+                _down(a) and _long(a) and _small(p)
+                and _value(p, "high") < _body_low(a)
+                and _up(c) and _long(c)
+                and _value(c, "close") > max(_value(a, "high"), _value(p, "high"))
+            )
+        return (
+            _up(a) and _long(a) and _small(p)
+            and _value(p, "low") > _body_high(a)
+            and _down(c) and _long(c)
+            and _value(c, "close") < min(_value(a, "low"), _value(p, "low"))
+        )
     if rule_id in {"TRI_STAR_BOTTOM", "TRI_STAR_TOP"}:
-        return len(candles) >= 3 and all(_doji(row) for row in (a, p, c)) and ((_value(p, "low") < _value(a, "low") and _value(p, "low") < _value(c, "low")) if rule_id.endswith("BOTTOM") else (_value(p, "high") > _value(a, "high") and _value(p, "high") > _value(c, "high")))
+        if not (len(candles) >= 3 and all(_doji(row) for row in (a, p, c))):
+            return False
+        return (_gap_down(a, p) and _gap_up(p, c)) if rule_id.endswith("BOTTOM") else (_gap_up(a, p) and _gap_down(p, c))
     if rule_id.startswith("BREAKAWAY_THREE_NEW_PRICE") and len(candles) >= 5:
         rows = candles[-5:]
-        bullish = rule_id.endswith("BOTTOM")
-        return ((_down(rows[0]) and all(_down(row) for row in rows[1:4]) and _up(rows[4]) and _value(rows[4], "close") > _value(rows[1], "open")) if bullish else (_up(rows[0]) and all(_up(row) for row in rows[1:4]) and _down(rows[4]) and _value(rows[4], "close") < _value(rows[1], "open")))
-    if rule_id == "BULLISH_BLACK_THREE_GAPS" and len(candles) >= 4:
-        rows = candles[-4:]
-        return all(_down(row) for row in rows) and all(_gap_down(rows[i], rows[i + 1]) for i in range(3))
-    if rule_id == "BEARISH_WHITE_THREE_GAPS" and len(candles) >= 4:
-        rows = candles[-4:]
-        return all(_up(row) for row in rows) and all(_gap_up(rows[i], rows[i + 1]) for i in range(3))
+        if rule_id.endswith("BOTTOM"):
+            return (
+                _down(rows[0]) and _long(rows[0]) and _gap_down(rows[0], rows[1])
+                and all(_small(row) for row in rows[1:4])
+                and _value(rows[1], "low") > _value(rows[2], "low") > _value(rows[3], "low")
+                and _up(rows[4]) and _long(rows[4])
+                and _value(rows[4], "close") > max(_value(rows[1], "high"), _value(rows[2], "high"), _value(rows[3], "high"))
+            )
+        return (
+            _up(rows[0]) and _long(rows[0]) and _gap_up(rows[0], rows[1])
+            and all(_small(row) for row in rows[1:4])
+            and _value(rows[1], "high") < _value(rows[2], "high") < _value(rows[3], "high")
+            and _down(rows[4]) and _long(rows[4])
+            and _value(rows[4], "close") < min(_value(rows[1], "low"), _value(rows[2], "low"), _value(rows[3], "low"))
+        )
+    if rule_id == "BULLISH_BLACK_THREE_GAPS" and len(candles) >= 5:
+        rows = candles[-5:]
+        return (
+            all(_down(row) for row in rows[:4])
+            and all(_gap_down(rows[i], rows[i + 1]) for i in range(3))
+            and _up(rows[4])
+            and _value(rows[4], "close") > _value(rows[3], "high")
+        )
+    if rule_id == "BEARISH_WHITE_THREE_GAPS" and len(candles) >= 5:
+        rows = candles[-5:]
+        return (
+            all(_up(row) for row in rows[:4])
+            and all(_gap_up(rows[i], rows[i + 1]) for i in range(3))
+            and _down(rows[4])
+            and _value(rows[4], "close") < _value(rows[3], "low")
+        )
     if rule_id == "THREE_WHITE_SOLDIERS":
-        return _three_progressive(candles, "BUY")
+        return (
+            _three_progressive(candles, "BUY")
+            and all(_upper_wick(row) <= 0.15 * max(1e-9, _spread(row)) for row in candles[-3:])
+        )
     if rule_id == "THREE_BLACK_CROWS":
-        return _three_progressive(candles, "SELL")
+        return (
+            _three_progressive(candles, "SELL")
+            and all(_lower_wick(row) <= 0.15 * max(1e-9, _spread(row)) for row in candles[-3:])
+        )
     if rule_id == "ADVANCE_BLOCK" and len(candles) >= 3:
         rows = candles[-3:]
-        bodies = [_body(row) for row in rows]
-        return all(_up(row) for row in rows) and bodies[0] > bodies[1] > bodies[2] and _upper_wick(rows[2]) > _upper_wick(rows[0])
+        return (
+            all(_up(row) for row in rows)
+            and _upper_wick(rows[1]) > _body(rows[1])
+            and _upper_wick(rows[2]) > _body(rows[2])
+            and _small(rows[1])
+            and _small(rows[2])
+        )
     if rule_id == "DELIBERATION" and len(candles) >= 3:
         rows = candles[-3:]
-        return _up(rows[0]) and _up(rows[1]) and _up(rows[2]) and _long(rows[0]) and _long(rows[1]) and _small(rows[2]) and _value(rows[2], "open") >= _value(rows[1], "close")
+        return (
+            _up(rows[0]) and _up(rows[1]) and _up(rows[2])
+            and _long(rows[0]) and _long(rows[1]) and _small(rows[2])
+            and _value(rows[0], "close") < _value(rows[1], "close") < _value(rows[2], "close")
+            and _value(rows[2], "open") >= _value(rows[1], "close") - 0.1 * _body(rows[1])
+        )
     if rule_id == "UPSIDE_GAP_TWO_CROWS" and len(candles) >= 3:
-        return _up(a) and _down(p) and _down(c) and _gap_up(a, p) and _body_low(c) <= _body_low(p) and _body_high(c) >= _body_high(p) and _value(c, "close") > _value(a, "close")
+        return (
+            _up(a)
+            and _down(p) and _down(c)
+            and _value(p, "open") > _value(a, "high")
+            and _body_low(c) <= _body_low(p) and _body_high(c) >= _body_high(p)
+        )
     if rule_id == "CONCEALING_BABY_SWALLOW" and len(candles) >= 4:
         w, x, y, z = candles[-4:]
-        return _down(w) and _marubozu(w) and _down(x) and _marubozu(x) and _down(y) and _upper_wick(y) > _body(y) and _down(z) and _value(z, "high") > _value(y, "high") and _value(z, "low") < _value(y, "low")
+        return (
+            _down(w) and _marubozu(w)
+            and _down(x) and _marubozu(x)
+            and _down(y) and _gap_down(x, y) and _upper_wick(y) > _body(y)
+            and _value(y, "low") < _value(x, "close")
+            and _down(z)
+            and _value(z, "high") > _value(y, "high") and _value(z, "low") < _value(y, "low")
+        )
     if rule_id == "LADDER_BOTTOM" and len(candles) >= 5:
         rows = candles[-5:]
-        return all(_down(row) for row in rows[:3]) and _down(rows[3]) and _upper_wick(rows[3]) > _body(rows[3]) and _up(rows[4]) and _value(rows[4], "close") > _value(rows[3], "high")
-    if rule_id in {"TOWER_BOTTOM", "TOWER_TOP"} and len(candles) >= 5:
-        rows = candles[-5:]
+        return (
+            all(_down(row) and _long(row) for row in rows[:3])
+            and _value(rows[0], "close") > _value(rows[1], "close") > _value(rows[2], "close")
+            and _down(rows[3])
+            and _upper_wick(rows[3]) > _body(rows[3])
+            and _up(rows[4]) and _long(rows[4])
+            and _value(rows[4], "close") > max(_value(rows[2], "high"), _value(rows[3], "high"))
+        )
+    if rule_id in {"TOWER_BOTTOM", "TOWER_TOP"}:
         bullish = rule_id.endswith("BOTTOM")
-        return ((_down(rows[0]) and _long(rows[0]) and all(_small(row) for row in rows[1:4]) and _up(rows[4]) and _long(rows[4])) if bullish else (_up(rows[0]) and _long(rows[0]) and all(_small(row) for row in rows[1:4]) and _down(rows[4]) and _long(rows[4])))
-    if rule_id == "EIGHT_TO_TEN_NEW_RECORD_LOWS" and len(candles) >= 8:
-        lows = [_value(row, "low") for row in candles[-8:]]
-        return all(right < left for left, right in zip(lows, lows[1:]))
-    if rule_id == "EIGHT_TO_TEN_NEW_RECORD_HIGHS" and len(candles) >= 8:
-        highs = [_value(row, "high") for row in candles[-8:]]
-        return all(right > left for left, right in zip(highs, highs[1:]))
+        if len(candles) < 3:
+            return False
+        for middle_count in range(1, min(4, len(candles) - 2) + 1):
+            rows = candles[-(middle_count + 2):]
+            head, tail = rows[0], rows[-1]
+            middles = rows[1:-1]
+            if bullish:
+                if _down(head) and _long(head) and all(_small(row) for row in middles) and _up(tail) and _long(tail):
+                    return True
+            elif _up(head) and _long(head) and all(_small(row) for row in middles) and _down(tail) and _long(tail):
+                return True
+        return False
+    if rule_id == "EIGHT_TO_TEN_NEW_RECORD_LOWS" and len(candles) >= 9:
+        window = candles[-12:]
+        running_low = _value(window[0], "low")
+        record_lows = 0
+        for row in window:
+            low = _value(row, "low")
+            if low < running_low:
+                record_lows += 1
+                running_low = low
+        return record_lows >= 8 and _down(c)
+    if rule_id == "EIGHT_TO_TEN_NEW_RECORD_HIGHS" and len(candles) >= 9:
+        window = candles[-12:]
+        running_high = _value(window[0], "high")
+        record_highs = 0
+        for row in window:
+            high = _value(row, "high")
+            if high > running_high:
+                record_highs += 1
+                running_high = high
+        return record_highs >= 8 and _up(c)
     if rule_id == "BULLISH_SEPARATING_LINES":
-        return _down(p) and _up(c) and _near(_value(c, "open"), _value(p, "open"), max(_spread(c), _spread(p)))
+        return (
+            _down(p) and _up(c) and _lower_wick(c) <= 0.06 * max(1e-9, _spread(c))
+            and _near(_value(c, "open"), _value(p, "open"), max(_spread(c), _spread(p)))
+        )
     if rule_id == "BEARISH_SEPARATING_LINES":
-        return _up(p) and _down(c) and _near(_value(c, "open"), _value(p, "open"), max(_spread(c), _spread(p)))
+        return (
+            _up(p) and _down(c) and _upper_wick(c) <= 0.06 * max(1e-9, _spread(c))
+            and _near(_value(c, "open"), _value(p, "open"), max(_spread(c), _spread(p)))
+        )
     if rule_id == "BULLISH_KICKING":
-        return _down(p) and _marubozu(p) and _up(c) and _marubozu(c) and _gap_up(p, c)
+        return (
+            _down(p) and _long(p) and _upper_wick(p) <= 0.15 * max(1e-9, _spread(p)) and _lower_wick(p) <= 0.15 * max(1e-9, _spread(p))
+            and _up(c) and _long(c) and _upper_wick(c) <= 0.15 * max(1e-9, _spread(c)) and _lower_wick(c) <= 0.15 * max(1e-9, _spread(c))
+            and _gap_up(p, c)
+        )
     if rule_id == "BEARISH_KICKING":
-        return _up(p) and _marubozu(p) and _down(c) and _marubozu(c) and _gap_down(p, c)
+        return (
+            _up(p) and _long(p) and _upper_wick(p) <= 0.15 * max(1e-9, _spread(p)) and _lower_wick(p) <= 0.15 * max(1e-9, _spread(p))
+            and _down(c) and _long(c) and _upper_wick(c) <= 0.15 * max(1e-9, _spread(c)) and _lower_wick(c) <= 0.15 * max(1e-9, _spread(c))
+            and _gap_down(p, c)
+        )
     if rule_id in {"ON_NECK", "IN_NECK", "BEARISH_THRUSTING_LINE"}:
         if not (_down(p) and _long(p) and _up(c)):
             return False
@@ -395,7 +598,8 @@ def _matches(rule_id: str, candles: Sequence[Mapping[str, Any]]) -> bool:
         if rule_id == "ON_NECK":
             return _near(close, _value(p, "low"), _spread(p), 0.08)
         if rule_id == "IN_NECK":
-            return _value(p, "low") < close <= _value(p, "close") + 0.2 * _body(p)
+            body_p = max(1e-9, _body(p))
+            return (_value(p, "close") - 0.05 * body_p) <= close <= (_value(p, "close") + 0.25 * body_p)
         return _value(p, "close") < close < (_value(p, "open") + _value(p, "close")) / 2.0
     if rule_id in {"RISING_THREE_METHODS", "FALLING_THREE_METHODS"} and len(candles) >= 5:
         rows = candles[-5:]
@@ -406,30 +610,48 @@ def _matches(rule_id: str, candles: Sequence[Mapping[str, Any]]) -> bool:
                 _up(rows[0])
                 and _long(rows[0])
                 and all(
-                    _down(row)
+                    _small(row)
                     and _value(row, "high") <= _value(rows[0], "high")
                     and _value(row, "low") >= _value(rows[0], "low")
                     for row in inside_rows
                 )
                 and _up(rows[4])
+                and _long(rows[4])
                 and _value(rows[4], "close") > _value(rows[0], "high")
             )
         return (
             _down(rows[0])
             and _long(rows[0])
             and all(
-                _up(row)
+                _small(row)
                 and _value(row, "high") <= _value(rows[0], "high")
                 and _value(row, "low") >= _value(rows[0], "low")
                 for row in inside_rows
             )
             and _down(rows[4])
+            and _long(rows[4])
             and _value(rows[4], "close") < _value(rows[0], "low")
         )
     if rule_id in {"BULLISH_MAT_HOLD", "BEARISH_MAT_HOLD"} and len(candles) >= 5:
         rows = candles[-5:]
-        bullish = rule_id.startswith("BULLISH")
-        return ((_up(rows[0]) and _long(rows[0]) and _gap_up(rows[0], rows[1]) and all(_small(row) for row in rows[1:4]) and _up(rows[4]) and _value(rows[4], "close") > _value(rows[0], "high")) if bullish else (_down(rows[0]) and _long(rows[0]) and _gap_down(rows[0], rows[1]) and all(_small(row) for row in rows[1:4]) and _down(rows[4]) and _value(rows[4], "close") < _value(rows[0], "low")))
+        first_midpoint = (_value(rows[0], "open") + _value(rows[0], "close")) / 2.0
+        if rule_id.startswith("BULLISH"):
+            return (
+                _up(rows[0]) and _long(rows[0]) and _gap_up(rows[0], rows[1])
+                and _down(rows[1])
+                and all(_small(row) for row in rows[1:4])
+                and min(_value(row, "low") for row in rows[1:4]) > first_midpoint
+                and _up(rows[4])
+                and _value(rows[4], "close") > _value(rows[1], "high")
+            )
+        return (
+            _down(rows[0]) and _long(rows[0]) and _gap_down(rows[0], rows[1])
+            and _up(rows[1])
+            and all(_small(row) for row in rows[1:4])
+            and max(_value(row, "high") for row in rows[1:4]) < first_midpoint
+            and _down(rows[4])
+            and _value(rows[4], "close") < _value(rows[1], "low")
+        )
     if rule_id == "RISING_WINDOW":
         return _gap_up(p, c)
     if rule_id == "FALLING_WINDOW":

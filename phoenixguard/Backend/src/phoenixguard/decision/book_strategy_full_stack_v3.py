@@ -666,6 +666,12 @@ def _amd_state(
         state = "MANIPULATION_RECLAIMED"
     if distribution_confirmed:
         state = "AMD_DISTRIBUTION_CONFIRMED"
+    window_base = max(0, len(candles) - len(rows))
+    distribution_index = (
+        window_base + len(rows) - 1
+        if distribution_confirmed
+        else None
+    )
     return {
         "state": state,
         "complete": distribution_confirmed,
@@ -676,6 +682,7 @@ def _amd_state(
         "distribution_confirmed": distribution_confirmed,
         "session_sequence_observed": session_sequence_observed,
         "accumulation_range": [range_low, range_high],
+        "event_index": distribution_index,
     }
 
 
@@ -710,6 +717,28 @@ def _news_pivot(
     side = _direction(pivot)
     midpoint = (_number(displacement.get("high")) + _number(displacement.get("low"))) / 2.0
     confirmed = (_number(pivot.get("close")) < midpoint) if side == "SELL" else (_number(pivot.get("close")) > midpoint)
+
+    pre_release_index = displacement_offset - 1
+    pre_release_price = (
+        _number(recent[pre_release_index].get("close")) if pre_release_index >= 0 else math.nan
+    )
+    post_pivot_rows = after[pivot_index + 1 :]
+    if math.isfinite(pre_release_price):
+        closes_back = [
+            _number(row.get("close"))
+            for row in post_pivot_rows
+            if (
+                _number(row.get("close")) < pre_release_price
+                if displacement_side == "BUY"
+                else _number(row.get("close")) > pre_release_price
+            )
+        ]
+    else:
+        closes_back = []
+    hard_exit_triggered = bool(closes_back)
+    bad_news_good_price = bool(displacement_side == "SELL" and closes_back)
+    good_news_bad_price = bool(displacement_side == "BUY" and closes_back)
+
     return {
         "active": True,
         "state": "NEWS_PIVOT_CONFIRMED" if confirmed else "PIVOT_FORMING_WAITING_FOR_CLOSE",
@@ -718,6 +747,13 @@ def _news_pivot(
         "displacement_side": displacement_side,
         "event_phase": str(news.get("event_phase") or news.get("phase") or "ACTIVE").upper(),
         "direction_inferred_before_pivot": False,
+        "pivot_persists_for_session": True,
+        "pre_release_price": round(pre_release_price, 8) if math.isfinite(pre_release_price) else None,
+        "closes_back_through_pivot": len(closes_back),
+        "hard_exit_triggered": hard_exit_triggered,
+        "bad_news_good_price_confirmed": bad_news_good_price,
+        "good_news_bad_price_confirmed": good_news_bad_price,
+        "source_provenance": {"source_file": "zlib.pub_the-art-of-currency-trading-a-professionals-guide-to-the-foreign-exchange-market.pdf", "printed_pages": [268, 270]},
     }
 
 
@@ -726,23 +762,108 @@ def _sakata_state(
     structure: Mapping[str, Any],
 ) -> dict[str, Any]:
     highs = _rows(structure.get("intermediate_pivots"))
-    pivot_highs = [row for row in highs if row.get("kind") == "HIGH"][-3:]
-    pivot_lows = [row for row in highs if row.get("kind") == "LOW"][-3:]
+    all_pivot_highs = [row for row in highs if row.get("kind") == "HIGH"]
+    all_pivot_lows = [row for row in highs if row.get("kind") == "LOW"]
+    pivot_highs = all_pivot_highs[-3:]
+    pivot_lows = all_pivot_lows[-3:]
     median_range = statistics.median([_spread(row) for row in candles]) if candles else 0.0
     tolerance = median_range * 0.35
+
+    def body_of(row: Mapping[str, Any]) -> float:
+        return abs(_number(row.get("close")) - _number(row.get("open")))
+
+    def range_of(row: Mapping[str, Any]) -> float:
+        return max(1e-9, _spread(row))
+
+    def is_small(row: Mapping[str, Any]) -> bool:
+        return body_of(row) <= 0.35 * range_of(row)
+
+    def is_long(row: Mapping[str, Any]) -> bool:
+        return body_of(row) >= 0.6 * range_of(row)
+
+    def is_marubozu_like(row: Mapping[str, Any]) -> bool:
+        upper = max(0.0, _number(row.get("high")) - max(_number(row.get("open")), _number(row.get("close"))))
+        lower = max(0.0, min(_number(row.get("open")), _number(row.get("close"))) - _number(row.get("low")))
+        return is_long(row) and upper <= 0.08 * range_of(row) and lower <= 0.08 * range_of(row)
+
     methods: list[dict[str, Any]] = []
     if len(pivot_highs) == 3 and max(float(row["price"]) for row in pivot_highs) - min(float(row["price"]) for row in pivot_highs) <= tolerance:
         methods.append({"method": "THREE_MOUNTAINS", "side": "SELL", "confirmed": True})
     if len(pivot_lows) == 3 and max(float(row["price"]) for row in pivot_lows) - min(float(row["price"]) for row in pivot_lows) <= tolerance:
-        methods.append({"method": "THREE_RIVERS", "side": "BUY", "confirmed": True})
-    if len(candles) >= 4:
-        up_gaps = sum(_number(right.get("low")) > _number(left.get("high")) for left, right in zip(candles[-4:], candles[-3:]))
-        down_gaps = sum(_number(right.get("high")) < _number(left.get("low")) for left, right in zip(candles[-4:], candles[-3:]))
+        methods.append({"method": "TRIPLE_BOTTOM_SANZAN_BOTTOM", "side": "BUY", "confirmed": True})
+    if (
+        len(pivot_highs) == 3
+        and float(pivot_highs[1]["price"]) - max(float(pivot_highs[0]["price"]), float(pivot_highs[2]["price"])) >= tolerance * 0.5
+        and abs(float(pivot_highs[0]["price"]) - float(pivot_highs[2]["price"])) <= tolerance
+    ):
+        methods.append({"method": "THREE_BUDDHA_TOP", "side": "SELL", "confirmed": True})
+    if (
+        len(pivot_lows) == 3
+        and min(float(pivot_lows[0]["price"]), float(pivot_lows[2]["price"])) - float(pivot_lows[1]["price"]) >= tolerance * 0.5
+        and abs(float(pivot_lows[0]["price"]) - float(pivot_lows[2]["price"])) <= tolerance
+    ):
+        methods.append({"method": "INVERTED_THREE_BUDDHA_TOP", "side": "BUY", "confirmed": True})
+    if len(candles) >= 6:
+        for k in range(10, 4, -1):
+            if len(candles) < k + 1:
+                continue
+            arc = candles[-(k + 1):-1]
+            trigger = candles[-1]
+            lows = [_number(row.get("low")) for row in arc]
+            trough = min(range(k), key=lambda i: lows[i])
+            decreasing_then_rising = (
+                all(lows[i] >= lows[i + 1] for i in range(trough))
+                and all(lows[i] <= lows[i + 1] for i in range(trough, k - 1))
+            )
+            sag = (lows[0] + lows[-1]) / 2.0 - min(lows)
+            arc_start_high = _number(arc[0].get("high"))
+            if (
+                all(is_small(row) for row in arc)
+                and decreasing_then_rising
+                and sag <= 1.5 * median_range
+                and _direction(trigger) == "BUY"
+                and is_long(trigger)
+                and _number(trigger.get("close")) > arc_start_high
+            ):
+                methods.append({"method": "FRY_PAN_BOTTOM", "side": "BUY", "confirmed": True})
+                break
+    if len(all_pivot_highs) >= 2 and len(candles) >= 3:
+        first, second = all_pivot_highs[-2], all_pivot_highs[-1]
+        first_index = int(_number(first.get("index"), -1))
+        second_index = int(_number(second.get("index"), -1))
+        if (
+            first_index >= 0
+            and second_index > first_index + 2
+            and abs(float(first["price"]) - float(second["price"])) <= tolerance
+        ):
+            valley = min(
+                (_number(row.get("low")) for row in candles[first_index:second_index + 1]),
+                default=math.nan,
+            )
+            if math.isfinite(valley) and _number(candles[-1].get("close")) < valley:
+                methods.append({"method": "DOUBLE_TOP_FILTER", "side": "SELL", "confirmed": True})
+    if len(candles) >= 6:
+        up_gaps = sum(
+            _number(right.get("low")) > _number(left.get("high"))
+            for left, right in zip(candles[-6:], candles[-5:])
+        )
+        down_gaps = sum(
+            _number(right.get("high")) < _number(left.get("low"))
+            for left, right in zip(candles[-6:], candles[-5:])
+        )
         if up_gaps >= 3:
             methods.append({"method": "THREE_GAPS_EXHAUSTION", "side": "SELL", "confirmed": True})
         if down_gaps >= 3:
             methods.append({"method": "THREE_GAPS_EXHAUSTION", "side": "BUY", "confirmed": True})
     if len(candles) >= 3:
+        a, b, c = candles[-3], candles[-2], candles[-1]
+        if (
+            all(_direction(row) == "SELL" for row in (a, b, c))
+            and is_marubozu_like(a) and is_marubozu_like(b) and is_marubozu_like(c)
+            and abs(_number(b.get("open")) - _number(a.get("close"))) <= 0.05 * range_of(b)
+            and abs(_number(c.get("open")) - _number(b.get("close"))) <= 0.05 * range_of(c)
+        ):
+            methods.append({"method": "SIMULTANEOUS_THREE_WINGS", "side": "SELL", "confirmed": True})
         directions = [_direction(row) for row in candles[-3:]]
         if directions == ["BUY", "BUY", "BUY"]:
             methods.append({"method": "THREE_SOLDIERS", "side": "BUY", "confirmed": True})
@@ -754,6 +875,73 @@ def _sakata_state(
         "source_file": _CANDLE_FILE,
         "printed_pages": [253, 267],
         "pdf_pages": [277, 291],
+    }
+
+
+def _sunday_gap_fade(
+    candles: Sequence[Mapping[str, Any]],
+    session_context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Donnelly pp.174-176: weekend gaps fade; about 85 percent fill within 48 hours.
+
+    Requires positive weekend evidence (candle timestamps spanning the close or an
+    explicit session flag). A gap alone is never treated as a weekend gap.
+    """
+    rows = _rows(candles)
+    if len(rows) < 3:
+        return {"detected": False, "reason": "INSUFFICIENT_CANDLES"}
+
+    def epoch_of(row: Mapping[str, Any]) -> float | None:
+        raw = row.get("timestamp") or row.get("closed_at") or row.get("time")
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    previous, latest = rows[-2], rows[-1]
+    prev_epoch = epoch_of(previous)
+    latest_epoch = epoch_of(latest)
+    gap_hours = abs(latest_epoch - prev_epoch) / 3600.0 if prev_epoch and latest_epoch else None
+    if gap_hours is not None:
+        weekend = gap_hours >= 20.0
+    else:
+        text = " ".join(f"{key}={value}" for key, value in _mapping(session_context).items()).upper()
+        weekend = any(token in text for token in ("SUNDAY", "WEEKEND_GAP", "MONDAY_OPEN"))
+    if not weekend:
+        return {
+            "detected": False,
+            "reason": "NO_WEEKEND_CONTEXT",
+            "gap_hours": round(gap_hours, 3) if gap_hours is not None else None,
+        }
+
+    range_unit = statistics.median([_spread(row) for row in rows[-12:]]) if rows else 0.0
+    gap_up = _number(latest.get("low")) > _number(previous.get("high"))
+    gap_down = _number(latest.get("high")) < _number(previous.get("low"))
+    if not (gap_up or gap_down):
+        return {"detected": False, "reason": "NO_TRUE_WEEKEND_GAP", "weekend": True}
+
+    gap_size = (
+        _number(latest.get("low")) - _number(previous.get("high"))
+        if gap_up
+        else _number(previous.get("low")) - _number(latest.get("high"))
+    )
+    origin_close = _number(previous.get("close"))
+    latest_close = _number(latest.get("close"))
+    fill_target = origin_close + (latest_close - origin_close) * 0.10
+    side = "SELL" if gap_up else "BUY"
+    return {
+        "detected": True,
+        "side": side,
+        "gap_direction": "UP" if gap_up else "DOWN",
+        "gap_size": round(abs(gap_size), 8),
+        "range_unit": round(range_unit, 8),
+        "origin_close": round(origin_close, 8),
+        "fill_target_price": round(fill_target, 8),
+        "base_rate": "ABOUT_85_PERCENT_FILL_WITHIN_48H",
+        "entry_window": "FIRST_HOUR_OF_MONDAY_SESSION",
+        "stop_distance_units": 1.0,
+        "source_provenance": {"source_file": "zlib.pub_the-art-of-currency-trading-a-professionals-guide-to-the-foreign-exchange-market.pdf", "printed_pages": [174, 176]},
     }
 
 
@@ -1032,6 +1220,12 @@ def _strict_trendline_contracts_v3(
     heights = [row["bottom"] - row["top"] for row in pixels if row]
     tolerance = max(1.5, (statistics.median(heights) if heights else 12.0) * 0.1)
     current_seconds = _TIMEFRAME_SECONDS.get(str(timeframe or "M5").upper(), 300)
+    recent_bodies = [
+        float(row["body_bottom"]) - float(row["body_top"])
+        for row in pixels[-10:]
+        if row
+    ]
+    median_body = statistics.median([value for value in recent_bodies if value > 0]) if any(value > 0 for value in recent_bodies) else 0.0
     contracts: list[dict[str, Any]] = []
     location_history: dict[str, str] = {}
     for line_index, raw in enumerate(_rows(trendlines)):
@@ -1045,6 +1239,11 @@ def _strict_trendline_contracts_v3(
         accepted = line.get("geometry_contract_accepted") is True or line.get("accepted") is True
         if len(points) < 2 or role not in {"BUY", "SELL"}:
             continue
+        line_timeframe = str(line.get("timeframe") or line.get("source_timeframe") or timeframe).upper()
+        line_seconds = _TIMEFRAME_SECONDS.get(line_timeframe, current_seconds)
+        outer = "OUTER" in str(line.get("role") or line.get("kind") or "").upper() or line_seconds > current_seconds
+        authority_multiplier = 1.6 if outer else 1.0 if line_seconds == current_seconds else 0.65
+        break_requires_htf_close = bool(line_seconds > current_seconds)
         anchor_indices = [
             min(range(len(pixels)), key=lambda index: abs((pixels[index] or {"x": float(index)})["x"] - point[0]))
             for point in points
@@ -1085,6 +1284,8 @@ def _strict_trendline_contracts_v3(
         contact_points: list[list[float]] = []
         rejection_indices: list[int] = []
         close_through_indices: list[int] = []
+        noise_close_through_indices: list[int] = []
+        break_details: dict[int, dict[str, float]] = {}
         second_anchor = max(anchor_indices) if anchor_indices else -1
         for index, pixel in enumerate(pixels):
             if not pixel or pixel["x"] < points[0][0] - spacing:
@@ -1104,7 +1305,18 @@ def _strict_trendline_contracts_v3(
                 else pixel["close_y"] < projected - tolerance
             )
             if closes_through and index > second_anchor:
-                close_through_indices.append(index)
+                body_length = max(0.0, float(pixel["body_bottom"]) - float(pixel["body_top"]))
+                candle_range = max(1e-9, abs(float(pixel["bottom"]) - float(pixel["top"])))
+                penetration_ratio = abs(float(pixel["close_y"]) - projected) / candle_range
+                body_long_enough = body_length >= median_body if median_body > 1e-9 else True
+                if body_long_enough and penetration_ratio >= 0.5:
+                    close_through_indices.append(index)
+                    break_details[index] = {
+                        "body_length_px": round(body_length, 6),
+                        "penetration_ratio": round(penetration_ratio, 6),
+                    }
+                else:
+                    noise_close_through_indices.append(index)
             if contact and body_defends:
                 contact_indices.append(index)
                 contact_points.append([round(pixel["x"], 6), round(projected, 6)])
@@ -1124,6 +1336,11 @@ def _strict_trendline_contracts_v3(
             and third_touch_indices
         )
         break_index = close_through_indices[0] if close_through_indices else None
+        unconfirmed_htf_break_index: int | None = None
+        if break_index is not None and break_requires_htf_close:
+            unconfirmed_htf_break_index = break_index
+            break_details.pop(break_index, None)
+            break_index = None
         flipped_side = "SELL" if role == "BUY" else "BUY"
         retest_indices: list[int] = []
         if break_index is not None:
@@ -1147,15 +1364,13 @@ def _strict_trendline_contracts_v3(
         current_rejection = bool(mature and rejection_indices and rejection_indices[-1] == latest_index and (break_index is None or latest_index < break_index))
         current_role_flip = bool(mature and retest_indices and retest_indices[-1] == latest_index)
         role_flip_confirmed = bool(mature and break_index is not None and retest_indices and break_index < retest_indices[-1])
-        line_timeframe = str(line.get("timeframe") or line.get("source_timeframe") or timeframe).upper()
-        line_seconds = _TIMEFRAME_SECONDS.get(line_timeframe, current_seconds)
-        outer = "OUTER" in str(line.get("role") or line.get("kind") or "").upper() or line_seconds > current_seconds
-        authority_multiplier = 1.6 if outer else 1.0 if line_seconds == current_seconds else 0.65
         lifecycle = "CANDIDATE_REJECTED"
         if line_defined:
             lifecycle = "TWO_ANCHORS_WAITING_FOR_THIRD_TOUCH"
         if mature:
             lifecycle = "ACTIVE_THREE_TOUCH"
+        if unconfirmed_htf_break_index is not None:
+            lifecycle = "UNCONFIRMED_BREAK_WAITING_FOR_HTF_CLOSE"
         if break_index is not None:
             lifecycle = "BROKEN_WAITING_FOR_ROLE_FLIP_RETEST"
         if role_flip_confirmed:
@@ -1165,6 +1380,11 @@ def _strict_trendline_contracts_v3(
             **line,
             "trendline_id": line_id,
             "role_side": role,
+            "break_requires_htf_close": break_requires_htf_close,
+            "unconfirmed_htf_break_index": unconfirmed_htf_break_index,
+            "noise_close_through_indices": noise_close_through_indices,
+            "break_significance_details": break_details,
+            "break_significance_test": "BODY_AT_LEAST_RECENT_MEDIAN_AND_CLOSE_PAST_HALF_RANGE",
             "line_points": [[x, y] for x, y in points],
             "line_points_v3": [[x, y] for x, y in points],
             "anchor_wick_points": [[x, y] for x, y in points],
@@ -1303,6 +1523,7 @@ def evaluate_full_non_indicator_book_stack_v3(
     amd = _amd_state(rows, session_context)
     news_pivot = _news_pivot(rows, news_context)
     sakata = _sakata_state(rows, structure)
+    sunday_gap = _sunday_gap_fade(rows, session_context)
     calibration = _rule_calibration(pair_dna_context)
     scores = {"BUY": 0.0, "SELL": 0.0}
     traces: list[dict[str, Any]] = []
@@ -1339,6 +1560,37 @@ def evaluate_full_non_indicator_book_stack_v3(
         side = str(news_pivot["side"])
         scores[side] += 1.35
         traces.append(_trace("POST_NEWS_PIVOT_CONFIRMED", side, 1.35, "High-impact displacement was followed by an opposing pivot and midpoint confirmation close.", source_file=_HLZ_FILE, pdf_pages=[46, 49], section="High-impact news liquidity behavior"))
+    persistent_news = news_pivot.get("good_news_bad_price_confirmed") or news_pivot.get("bad_news_good_price_confirmed")
+    if persistent_news:
+        side = "SELL" if news_pivot.get("good_news_bad_price_confirmed") else "BUY"
+        if side in scores:
+            scores[side] += 0.9
+            traces.append(_trace(
+                "NEWS_PIVOT_PERSISTENCE_TEST",
+                side,
+                0.9,
+                (
+                    "Good-news/bad-price: the rally folded back through the pre-release pivot for the session."
+                    if side == "SELL"
+                    else "Bad-news/good-price: the sell-off reclaimed the pre-release pivot for the session."
+                ),
+                source_file="zlib.pub_the-art-of-currency-trading-a-professionals-guide-to-the-foreign-exchange-market.pdf",
+                pdf_pages=[190, 192],
+                section="News trading: bad news/good price and good news/bad price tests",
+            ))
+    if sunday_gap.get("detected"):
+        gap_side = str(sunday_gap.get("side"))
+        if gap_side in scores:
+            scores[gap_side] += 1.2
+            traces.append(_trace(
+                "SUNDAY_GAP_FADE_DETECTED",
+                gap_side,
+                1.2,
+                f"Weekend {str(sunday_gap.get('gap_direction')).lower()} gap detected; about 85 percent of weekend gaps fill within 48 hours.",
+                source_file="zlib.pub_the-art-of-currency-trading-a-professionals-guide-to-the-foreign-exchange-market.pdf",
+                pdf_pages=[190, 192],
+                section="Weekend gap fade setup",
+            ))
     for method in _rows(sakata.get("active_methods")):
         side = str(method.get("side") or "NEUTRAL")
         if side in scores:
@@ -1362,6 +1614,7 @@ def evaluate_full_non_indicator_book_stack_v3(
         "amd": amd,
         "news_pivot": news_pivot,
         "sakata": sakata,
+        "sunday_gap_fade_v3": sunday_gap,
         "rule_calibration": calibration,
         "candle_location_history": trendline["candle_location_history"],
         "candle_zone_location_history": trendline["candle_zone_location_history"],
