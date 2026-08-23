@@ -590,9 +590,18 @@ def _read_live_state(*, base_url: str, session_id: str, timeout_sec: float) -> d
 
     # The runtime file is published before the HTTP view is serialized. On the
     # local bridge path, returning it first removes an avoidable API round trip.
-    if local_payload is not None and _payload_live_epoch(local_payload) > 0.0:
+    # A persisted file can outlive the runtime, though: only prefer it while it
+    # is still inside the freshness window, otherwise fall through to the live
+    # API so a stopped tracker never masquerades as current state.
+    local_epoch = _payload_live_epoch(local_payload) if local_payload else 0.0
+    local_fresh = (
+        _max_state_age_seconds <= 0.0
+        or local_epoch <= 0.0
+        or (time.time() - local_epoch) <= _max_state_age_seconds
+    )
+    if local_payload is not None and local_epoch > 0.0 and local_fresh:
         local_payload["_bridge_state_source"] = "local_runtime_file"
-        local_payload["_bridge_state_epoch"] = _payload_live_epoch(local_payload)
+        local_payload["_bridge_state_epoch"] = local_epoch
         return _attach_live_sidecars(local_payload, session_id)
 
     url = base_url.rstrip("/") + f"/v1/mobile/live/state/v3/{session_id}?mode=CLEAN_LIVE&compact=1"
