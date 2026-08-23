@@ -17,7 +17,7 @@ from phoenixguard.decision.candlestick_rule_catalog_v3 import (
 BOOK_STRATEGY_CONTEXT_SCHEMA_V3 = "PG_BOOK_STRATEGY_CONTEXT_V3"
 STRATEGIST_ENTRY_WINDOW_CANDLES_V3 = 3
 CHOP_PLAYBOOK_V3 = "CHOP"
-STRATEGIST_STRICT_GATES = False
+STRATEGIST_STRICT_GATES = True
 STATUS_STRATEGIST_ACTION_CONFIRMED_V3 = "STRATEGIST_ACTION_CONFIRMED"
 STATUS_STRATEGIC_CONFLICT_V3 = "STRATEGIC_CONFLICT"
 STATUS_WAITING_FOR_TRIGGER_V3 = "WAITING_FOR_CURRENT_BOOK_TRIGGER"
@@ -1707,7 +1707,19 @@ def select_current_book_action_v3(
     status = STATUS_STRATEGIST_ACTION_CONFIRMED_V3 if ready else STATUS_STRATEGIC_CONFLICT_V3
     action = selected_side if ready else "WAIT"
 
-    blocked_reasons: list[str] = [] if STRATEGIST_STRICT_GATES else []
+    blocked_reasons: list[str] = []
+    if confluence_count < 2:
+        blocked_reasons.append("fewer than two independent confluences")
+    if not htf_ok:
+        blocked_reasons.append("higher-timeframe conflict")
+    if opposing_conflict:
+        blocked_reasons.append("current opposing-force reaction")
+    if same_priority_conflict:
+        blocked_reasons.append("equal-priority directional conflict")
+    if suspended:
+        blocked_reasons.append("unresolved high-impact news context")
+    if profit_room.get("sufficient") is False:
+        blocked_reasons.append(profit_room.get("reason") or "insufficient profit room")
     provenance: list[dict[str, Any]] = []
     evidence = _mapping(selected.get("evidence"))
     direct_provenance = _mapping(evidence.get("rule_provenance"))
