@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -18,6 +19,7 @@ BOOK_STRATEGY_CONTEXT_SCHEMA_V3 = "PG_BOOK_STRATEGY_CONTEXT_V3"
 STRATEGIST_ENTRY_WINDOW_CANDLES_V3 = 3
 CHOP_PLAYBOOK_V3 = "CHOP"
 STRATEGIST_STRICT_GATES = True
+STRATEGIST_MIN_CONFLUENCE_V3 = max(1, int(os.environ.get("PHOENIXGUARD_MIN_CONFLUENCE", "2")))
 STATUS_STRATEGIST_ACTION_CONFIRMED_V3 = "STRATEGIST_ACTION_CONFIRMED"
 STATUS_STRATEGIC_CONFLICT_V3 = "STRATEGIC_CONFLICT"
 STATUS_WAITING_FOR_TRIGGER_V3 = "WAITING_FOR_CURRENT_BOOK_TRIGGER"
@@ -1694,7 +1696,7 @@ def select_current_book_action_v3(
         and (
             not STRATEGIST_STRICT_GATES
             or (
-                confluence_count >= 2
+                confluence_count >= STRATEGIST_MIN_CONFLUENCE_V3
                 and htf_ok
                 and not opposing_conflict
                 and not same_priority_conflict
@@ -1708,8 +1710,12 @@ def select_current_book_action_v3(
     action = selected_side if ready else "WAIT"
 
     blocked_reasons: list[str] = []
-    if confluence_count < 2:
-        blocked_reasons.append("fewer than two independent confluences")
+    if confluence_count < STRATEGIST_MIN_CONFLUENCE_V3:
+        blocked_reasons.append(
+            f"fewer than {STRATEGIST_MIN_CONFLUENCE_V3} independent confluences"
+            if STRATEGIST_MIN_CONFLUENCE_V3 > 1
+            else "no independent confluence"
+        )
     if not htf_ok:
         blocked_reasons.append("higher-timeframe conflict")
     if opposing_conflict:

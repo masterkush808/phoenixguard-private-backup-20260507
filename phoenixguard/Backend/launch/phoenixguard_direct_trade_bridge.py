@@ -1661,6 +1661,20 @@ def _resolve_trade_payload(
             f"playbook={book_state.get('playbook')} action={book_state.get('action')} "
             f"actionable={book_state.get('actionable')}"
         )
+        held_by = [
+            _text(row)
+            for row in (book_state.get("blocked_reasons") or [])
+            if _text(row)
+        ]
+        if held_by:
+            detail += " | held by: " + "; ".join(held_by)
+        advisory_rows = [
+            _text(row)
+            for row in (book_state.get("advisories") or [])
+            if _text(row)
+        ]
+        if advisory_rows:
+            detail += " | advisories: " + "; ".join(advisory_rows[:3])
         age_note = f" | state_age={state_age_seconds:.0f}s" if state_age_seconds >= 0.0 else ""
         raise TradeRejected(
             "No actionable live signal available from PhoenixGuard observation state." + detail + age_note
