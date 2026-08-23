@@ -103,8 +103,8 @@ DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 # stream.  Operators can opt into a positive age cap for polling diagnostics.
 DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
 DEFAULT_MAX_STATE_AGE_SECONDS = 180.0
-MAX_STATE_AGE_SECONDS = DEFAULT_MAX_STATE_AGE_SECONDS
-STATE_EPOCH_WATERMARK = 0.0
+_max_state_age_seconds = DEFAULT_MAX_STATE_AGE_SECONDS
+_state_epoch_watermark = 0.0
 # The strategist (published PG_BOOK_RULE_ACTION_SIGNAL_V3 verdict) is the sole
 # trigger authority.  Candle-color bias, hybrid, and high-frequency lanes were
 # removed as execution paths on purpose: they may inform awareness layers but
@@ -1209,6 +1209,17 @@ def _book_rule_signal_from_state(payload: Mapping[str, object]) -> dict[str, obj
     if not bool(book_signal.get("actionable")):
         return {}
 
+    execution_timing = _mapping_or_empty(latest_signal.get("execution_timing"))
+    if execution_timing.get("entry_allowed") is False:
+        raise TradeRejected(
+            "Strategist execution-timing veto: "
+            + (
+                _text(execution_timing.get("block_reason"))
+                or "runtime timing engine refused this entry."
+            ),
+            details={"execution_entry_allowed": False},
+        )
+
     def first_value(*values: object) -> object:
         for value in values:
             if value not in (None, ""):
@@ -1612,11 +1623,11 @@ def _resolve_trade_payload(
     frontline_required: bool = False,
     frontline_freshness_seconds: float = DEFAULT_FRONTLINE_FRESHNESS_SECONDS,
 ) -> dict[str, object]:
-    global STATE_EPOCH_WATERMARK
+    global _state_epoch_watermark
     state_epoch = _payload_live_epoch(payload)
     state_age_seconds = max(0.0, time.time() - state_epoch) if state_epoch > 0.0 else -1.0
     if state_epoch > 0.0:
-        if state_epoch + 1e-6 < STATE_EPOCH_WATERMARK:
+        if state_epoch + 1e-6 < _state_epoch_watermark:
             raise TradeRejected(
                 (
                     "Superseded observation state skipped "
@@ -1625,15 +1636,15 @@ def _resolve_trade_payload(
                 details={"state_age_seconds": round(state_age_seconds, 3)},
                 quiet=True,
             )
-        STATE_EPOCH_WATERMARK = max(STATE_EPOCH_WATERMARK, state_epoch)
-    if MAX_STATE_AGE_SECONDS > 0.0 and state_age_seconds > MAX_STATE_AGE_SECONDS:
+        _state_epoch_watermark = max(_state_epoch_watermark, state_epoch)
+    if _max_state_age_seconds > 0.0 and state_age_seconds > _max_state_age_seconds:
         raise TradeRejected(
             (
                 "Observation state is stale "
-                f"(age={state_age_seconds:.0f}s > {MAX_STATE_AGE_SECONDS:.0f}s); "
+                f"(age={state_age_seconds:.0f}s > {_max_state_age_seconds:.0f}s); "
                 "refusing to act on old strategist output."
             ),
-            details={"state_age_seconds": round(state_age_seconds, 3), "max_state_age_seconds": float(MAX_STATE_AGE_SECONDS)},
+            details={"state_age_seconds": round(state_age_seconds, 3), "max_state_age_seconds": float(_max_state_age_seconds)},
         )
     signal = _live_signal_from_state(payload, signal_source=signal_source)
     if not signal:
@@ -1770,6 +1781,33 @@ def _timing_policy_from_manifest(manifest: Mapping[str, object]) -> dict[str, fl
     }
 
 
+def _confirm_pre_click_match(
+    original_side: str,
+    original_candle_key: str,
+    refreshed_trade: Mapping[str, object],
+) -> None:
+    """Zero-tolerance second confirmation immediately before the click.
+
+    The refreshed state must still name the SAME side on the SAME closed candle
+    the strategist decided on. Any drift aborts the trade loudly.
+    """
+    refreshed_side = _upper(refreshed_trade.get("side"))
+    if refreshed_side != _upper(original_side):
+        raise TradeRejected(
+            (
+                "Pre-click confirmation mismatch: the decision was "
+                f"{_upper(original_side) or 'NONE'} but fresh state is {refreshed_side or 'NONE'}; refusing to click."
+            ),
+            details={"decision_side": _upper(original_side), "fresh_side": refreshed_side},
+        )
+    fresh_candle_key = _text(refreshed_trade.get("candle_key"))
+    if original_candle_key and fresh_candle_key and fresh_candle_key != original_candle_key:
+        raise TradeRejected(
+            "Pre-click confirmation mismatch: the strategist moved to a newer candle before the click; refusing.",
+            details={"decision_candle": original_candle_key, "fresh_candle": fresh_candle_key},
+        )
+
+
 def _send_direct_clicks(
     boxes: Mapping[str, tuple[int, int]],
     *,
@@ -1779,6 +1817,7 @@ def _send_direct_clicks(
     fixed_amount: float | None = None,
     timing_policy: Mapping[str, float] | None = None,
     refresh_trade_before_click: Callable[[], Mapping[str, object]] | None = None,
+    expected_candle_key: str = "",
 ) -> dict[str, object]:
     try:
         import pyautogui
@@ -1805,6 +1844,7 @@ def _send_direct_clicks(
     refreshed = False
     if refresh_trade_before_click is not None:
         refreshed_trade = refresh_trade_before_click()
+        _confirm_pre_click_match(effective_side, expected_candle_key, refreshed_trade)
         refreshed_side = _upper(refreshed_trade.get("side"))
         if refreshed_side not in {"BUY", "SELL"}:
             raise TradeRejected("PhoenixGuard did not publish a fresh BUY or SELL at click time.")
@@ -1873,6 +1913,7 @@ def _execute_trade(
     calibration_path: str | None,
     fixed_expiry_seconds_override: int | None = None,
     refresh_trade_before_click: Callable[[], Mapping[str, object]] | None = None,
+    expected_candle_key: str = "",
 ) -> dict[str, object]:
     manifest = _load_calibration_manifest(calibration_path)
     boxes, chart_anchor, fixed_amount, fixed_expiry, timing_policy = _trigger_manifest_to_boxes(manifest)
@@ -1889,6 +1930,7 @@ def _execute_trade(
         fixed_amount=fixed_amount,
         timing_policy=timing_policy,
         refresh_trade_before_click=refresh_trade_before_click,
+        expected_candle_key=expected_candle_key or _text(trade.get("candle_key")),
     )
     return {
         "fixed_expiry_seconds": effective_fixed_expiry,
@@ -1960,6 +2002,7 @@ def _trade_once(
         calibration_path=calibration_path,
         fixed_expiry_seconds_override=fixed_expiry_seconds_override,
         refresh_trade_before_click=refresh_before_click,
+        expected_candle_key=_text(trade.get("candle_key")),
     )
     initial_side = _upper(trade.get("side"))
     if refreshed_trade:
@@ -2046,10 +2089,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    global MAX_STATE_AGE_SECONDS
+    global _max_state_age_seconds
     parser = _build_parser()
     args = parser.parse_args(argv)
-    MAX_STATE_AGE_SECONDS = max(0.0, float(args.max_state_age_seconds))
+    _max_state_age_seconds = max(0.0, float(args.max_state_age_seconds))
 
     args.base_url, args.session_id = _resolve_stack_context(
         base_url=args.base_url or None,
@@ -2203,6 +2246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         calibration_path=selected_manifest_path,
                         fixed_expiry_seconds_override=int(args.fixed_expiry_seconds),
                         refresh_trade_before_click=refresh_before_click,
+                        expected_candle_key=_text(result.get("candle_key")),
                     )
                     if refreshed_trade:
                         result = dict(refreshed_trade)

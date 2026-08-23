@@ -126,6 +126,58 @@ def test_hybrid_lane_never_authorizes_even_when_fast_lanes_look_ready():
         bridge._resolve_trade_payload(payload, score_threshold=0.0, signal_source="hybrid")
 
 
+def test_execution_timing_veto_blocks_actionable_verdict() -> None:
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_timing_veto")
+    payload = {
+        "session_id": "pocket-live-8788",
+        "last_capture_epoch": time.time(),
+        "latest_signal": {
+            "published_epoch": time.time(),
+            "execution_timing": {
+                "entry_allowed": False,
+                "block_reason": "BUY is already in the upper studied history area; wait for a lower support pullback.",
+            },
+            "book_rule_action_signal_v3": {
+                "schema_version": "PG_BOOK_RULE_ACTION_SIGNAL_V3",
+                "status": "STRATEGIST_ACTION_CONFIRMED",
+                "action": "BUY",
+                "watch_side": "BUY",
+                "actionable": True,
+                "playbook": "CANDLE_REVERSAL_AT_STRUCTURE",
+                "closed_candle_key": "closed-veto",
+                "closed_candle_sequence": 11,
+            },
+        },
+    }
+
+    with pytest.raises(bridge.TradeRejected, match="execution-timing veto") as rejection:
+        bridge._resolve_trade_payload(payload)
+
+    assert "upper studied history area" in str(rejection.value)
+
+
+def test_pre_click_confirmation_rejects_side_and_candle_drift() -> None:
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_preclick")
+
+    with pytest.raises(bridge.TradeRejected, match="decision was SELL"):
+        bridge._confirm_pre_click_match(
+            "SELL",
+            "candle-a",
+            {"side": "BUY", "candle_key": "candle-a"},
+        )
+
+    with pytest.raises(bridge.TradeRejected, match="newer candle") as drifted:
+        bridge._confirm_pre_click_match(
+            "SELL",
+            "candle-a",
+            {"side": "SELL", "candle_key": "candle-b"},
+        )
+    assert getattr(drifted.value, "quiet", False) is False
+
+    # Matching side and candle passes silently.
+    bridge._confirm_pre_click_match("SELL", "candle-a", {"side": "SELL", "candle_key": "candle-a"})
+
+
 def test_stale_observation_state_is_refused_regardless_of_verdict() -> None:
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_state_age")
     stale = time.time() - 2 * 24 * 3600
@@ -152,12 +204,12 @@ def test_stale_observation_state_is_refused_regardless_of_verdict() -> None:
 
     # Defense in depth: with the state-age gate disabled the expired valid_until
     # epoch still refuses a two-day-old verdict.
-    bridge.MAX_STATE_AGE_SECONDS = 0.0
+    bridge._max_state_age_seconds = 0.0
     try:
         with pytest.raises(bridge.TradeRejected, match="Live signal expired"):
             bridge._resolve_trade_payload(payload)
     finally:
-        bridge.MAX_STATE_AGE_SECONDS = bridge.DEFAULT_MAX_STATE_AGE_SECONDS
+        bridge._max_state_age_seconds = bridge.DEFAULT_MAX_STATE_AGE_SECONDS
 
 
 def test_waiting_verdict_reason_names_what_the_strategist_published() -> None:
@@ -806,8 +858,8 @@ def test_send_direct_clicks_honors_saved_delays(monkeypatch):
     assert recorded_sleeps == [7.0, 0.5]
 
 
-def test_send_direct_clicks_refreshes_verdict_after_wait_before_final_click(monkeypatch):
-    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_click_refresh")
+def test_send_direct_clicks_aborts_when_refreshed_side_drifts(monkeypatch):
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_click_drift_abort")
     events: list[tuple[object, ...]] = []
 
     fake_pyautogui = SimpleNamespace(
@@ -821,11 +873,46 @@ def test_send_direct_clicks_refreshes_verdict_after_wait_before_final_click(monk
         events.append(("refresh",))
         return {"side": "SELL"}
 
+    with pytest.raises(bridge.TradeRejected, match="decision was BUY"):
+        bridge._send_direct_clicks(
+            {"buy_click": (30, 40), "sell_click": (50, 60)},
+            chart_anchor=(10, 20),
+            side="BUY",
+            expiry_seconds=180,
+            timing_policy={
+                "chart_focus_settle_seconds": 0.0,
+                "pre_click_delay_seconds": 5.0,
+                "inter_click_delay_seconds": 0.4,
+                "pointer_move_duration_seconds": 0.4,
+            },
+            refresh_trade_before_click=refresh_trade,
+        )
+
+    # No clicks may land after a failed confirmation.
+    assert ("click", 50, 60) not in events
+
+
+def test_send_direct_clicks_fires_when_refresh_confirms_decision(monkeypatch):
+    bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_click_confirm")
+    events: list[tuple[object, ...]] = []
+
+    fake_pyautogui = SimpleNamespace(
+        moveTo=lambda x, y, duration=0.0: events.append(("moveTo", x, y, duration)),
+        click=lambda x, y: events.append(("click", x, y)),
+    )
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+    monkeypatch.setattr(bridge.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+
+    def refresh_trade():
+        events.append(("refresh",))
+        return {"side": "BUY"}
+
     result = bridge._send_direct_clicks(
         {"buy_click": (30, 40), "sell_click": (50, 60)},
         chart_anchor=(10, 20),
         side="BUY",
         expiry_seconds=180,
+        expected_candle_key="candle-live",
         timing_policy={
             "chart_focus_settle_seconds": 0.0,
             "pre_click_delay_seconds": 5.0,
@@ -840,12 +927,12 @@ def test_send_direct_clicks_refreshes_verdict_after_wait_before_final_click(monk
         ("click", 10, 20),
         ("sleep", 5.0),
         ("refresh",),
-        ("moveTo", 50, 60, 0.4),
-        ("click", 50, 60),
+        ("moveTo", 30, 40, 0.4),
+        ("click", 30, 40),
         ("sleep", 0.4),
-        ("click", 50, 60),
+        ("click", 30, 40),
     ]
-    assert result == {"executed_side": "SELL", "refreshed_before_click": True, "press_count": 2}
+    assert result == {"executed_side": "BUY", "refreshed_before_click": True, "press_count": 2}
 
 
 def test_bridge_trigger_state_starts_cooldown_after_ten_executed_trades(monkeypatch):
