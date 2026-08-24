@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.decision.blocker_taxonomy_v3 import (
     BlockerClass,
@@ -100,7 +100,9 @@ def resolve_blocker_ablation_profile_v3(
     raw: Any = value
     if isinstance(value, Mapping):
         controls = value.get("execution_controls")
-        control_mapping = controls if isinstance(controls, Mapping) else {}
+        control_mapping: Mapping[str, Any] = (
+            cast("Mapping[str, Any]", controls) if isinstance(controls, Mapping) else {}
+        )
         raw = (
             value.get("blocker_ablation_profile")
             or value.get("ablation_profile")

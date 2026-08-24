@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.mobile_api.operator_workspace_v1 import (
     path_clock_liquidity_contract_v3,
@@ -42,7 +42,7 @@ def _audit() -> dict[str, Any]:
         sweep=0.5,
         calibration=0.5,
     )
-    state = {
+    state: dict[str, Any] = {
         "symbol": "USD/CAD OTC",
         "timeframe": "M5",
         "active_anchors": [
@@ -130,20 +130,23 @@ def test_operator_contract_exposes_four_axes_without_private_replay_rows() -> No
         sweep=0.5,
         calibration=0.8,
     )
-    contract = path_clock_liquidity_contract_v3(
-        {
-            "schema_version": "PG_PATH_CLOCK_LIQUIDITY_PUBLIC_STUDY_V3",
-            "status": "STUDIED",
-            "study_only": True,
-            "execution_authority": False,
-            "grants_entry_permission": False,
-            "symbol": "USD/CAD OTC",
-            "timeframe": "M5",
-            "closed_candle_key": "close-12",
-            "candidate_replay_score": candidate_score,
-            "baseline_replay_score": baseline_score,
-            "passive_prediction_audit_v3": audit,
-        }
+    contract = cast(
+        dict[str, Any],
+        path_clock_liquidity_contract_v3(
+            {
+                "schema_version": "PG_PATH_CLOCK_LIQUIDITY_PUBLIC_STUDY_V3",
+                "status": "STUDIED",
+                "study_only": True,
+                "execution_authority": False,
+                "grants_entry_permission": False,
+                "symbol": "USD/CAD OTC",
+                "timeframe": "M5",
+                "closed_candle_key": "close-12",
+                "candidate_replay_score": candidate_score,
+                "baseline_replay_score": baseline_score,
+                "passive_prediction_audit_v3": audit,
+            }
+        ),
     )
 
     public_audit = contract["passive_prediction_audit_v3"]

@@ -33,7 +33,7 @@ DISPOSABLE_ROOT_PATHS = {
     "debug.log",
     "logs",
 }
-DISPOSABLE_FILE_PATHS = set()
+DISPOSABLE_FILE_PATHS: set[str] = set()
 SKIP_SCAN_DIR_NAMES = {
     ".git",
     "_archive",

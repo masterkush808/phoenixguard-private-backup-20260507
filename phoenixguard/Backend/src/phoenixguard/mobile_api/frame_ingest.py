@@ -1590,6 +1590,18 @@ async def _read_image_upload(frame: UploadFile) -> tuple[Image.Image, str, int]:
     return image, hashlib.sha256(data).hexdigest(), len(data)
 
 
+
+class _IngestSessionFrameState:
+    def __init__(self, *, audit_base: dict[str, object] | None = None) -> None:
+        self.auth_context: FeedAuthContext | None = None
+        self.feed_reservation: FeedRuntimeReservation | None = None
+        self.feed_reservation_committed: bool = False
+        self.decoded_image: Image.Image | None = None
+        self.analysis_job_enqueued: bool = False
+        self.audit_base: dict[str, object] = {} if audit_base is None else audit_base
+
+
+
 def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> APIRouter:
     router = APIRouter(prefix="/v1/mobile/frame-ingest", tags=["frame-ingest"])
 
@@ -2058,6 +2070,202 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             "source_control": _public_source_control(session.get("capture_source_v3", {})),
         }
 
+    async def _ingest_session_frame_core(
+        *,
+        request: Request,
+        session_id: str,
+        frame: UploadFile,
+        source_id: str,
+        symbol: str,
+        timeframe: str,
+        source_url: str,
+        sequence_id: str,
+        capture_epoch_ms: int,
+        frame_id: int,
+        source_generation: int,
+        source_lease_id: str,
+        metadata_json: str,
+        authorization: str | None,
+        x_phoenixguard_token: str | None,
+        get_tracker: Callable[[], FrameIngestTracker],
+        state: _IngestSessionFrameState,
+    ) -> dict[str, object]:
+        audit_base = state.audit_base
+        _require_origin_allowed(request.headers.get("origin"))
+        auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
+        state.auth_context = auth_context
+        metadata = _metadata_from_json(metadata_json)
+        effective_symbol, effective_timeframe, identity_hints_ignored = (
+            _effective_frame_identity_hints(symbol, timeframe, metadata)
+        )
+        audit_base["identity_hint_policy"] = (
+            "visual_reproof_required"
+            if (
+                str(metadata.get("source_type", "") or "").strip(),
+                str(metadata.get("coordinate_space", "") or "").strip(),
+            )
+            in VISUAL_IDENTITY_SOURCE_CONTRACTS
+            else "declared_hint_allowed"
+        )
+        audit_base["identity_hints_ignored"] = identity_hints_ignored
+        _require_scope_allowed(
+            auth_context,
+            session_id,
+            source_id,
+            effective_symbol,
+            effective_timeframe,
+        )
+        _require_current_frame_source_contract(
+            session_id,
+            source_id=source_id,
+            sequence_id=sequence_id,
+            source_generation=int(source_generation or 0),
+            source_lease_id=str(source_lease_id or ""),
+            metadata=metadata,
+        )
+        image, frame_sha256, frame_bytes = await _read_image_upload(frame)
+        state.decoded_image = image
+        audit_base["frame_sha256"] = frame_sha256
+        audit_base["frame_bytes"] = frame_bytes
+        _require_frame_signature(
+            auth_context,
+            request,
+            session_id=session_id,
+            source_id=source_id,
+            sequence_id=sequence_id,
+            capture_epoch_ms=int(capture_epoch_ms or 0),
+            frame_id=int(frame_id or 0),
+            frame_sha256=frame_sha256,
+        )
+        feed_reservation = _reserve_feed_runtime(
+            auth_context,
+            session_id=session_id,
+            source_id=source_id,
+            sequence_id=sequence_id,
+            source_generation=int(source_generation or 0),
+            capture_epoch_ms=int(capture_epoch_ms or 0),
+            frame_id=int(frame_id or 0),
+        )
+        state.feed_reservation = feed_reservation
+        metadata["client_host"] = request.client.host if request.client else ""
+        metadata["filename"] = frame.filename or ""
+        metadata["feed_token_name"] = auth_context.token_name
+        metadata["feed_user_id"] = auth_context.user_id
+        metadata["frame_sha256"] = frame_sha256
+        metadata["frame_bytes"] = frame_bytes
+        metadata["source_generation"] = int(source_generation or 0)
+        metadata["source_lease_id"] = str(source_lease_id or "")
+        if (
+            str(metadata.get("source_type", "") or "").strip(),
+            str(metadata.get("coordinate_space", "") or "").strip(),
+        ) in VISUAL_IDENTITY_SOURCE_CONTRACTS:
+            metadata["identity_hint_policy"] = "visual_reproof_required"
+            metadata["identity_hints_ignored"] = identity_hints_ignored
+        identity_key = _analysis_identity_key(
+            source_id=source_id,
+            symbol=effective_symbol,
+            timeframe=effective_timeframe,
+            sequence_id=sequence_id,
+            source_generation=int(source_generation or 0),
+            metadata=metadata,
+        )
+        tracker = get_tracker()
+        direct_bias_publisher = getattr(
+            tracker,
+            "publish_direct_visual_bias_from_external_frame_v3",
+            None,
+        )
+        if callable(direct_bias_publisher):
+            direct_bias_publisher(
+                str(session_id or "").strip(),
+                image,
+                source_id=str(source_id or "").strip(),
+                sequence_id=str(sequence_id or "").strip(),
+                source_generation=int(source_generation or 0),
+                source_lease_id=str(source_lease_id or "").strip(),
+                capture_epoch_ms=int(capture_epoch_ms or 0),
+                frame_id=int(frame_id or 0),
+                metadata=metadata,
+            )
+        job = FrameAnalysisJob(
+            session_id=str(session_id or "").strip(),
+            image=image,
+            source_id=str(source_id or "").strip(),
+            symbol=str(effective_symbol or "").strip(),
+            timeframe=str(effective_timeframe or "").strip(),
+            source_url=str(source_url or "").strip(),
+            sequence_id=str(sequence_id or "").strip(),
+            capture_epoch_ms=int(capture_epoch_ms or 0),
+            frame_id=int(frame_id or 0),
+            source_generation=int(source_generation or 0),
+            source_lease_id=str(source_lease_id or "").strip(),
+            metadata=metadata,
+            tracker=tracker,
+            audit_context=_analysis_audit_context(auth_context),
+            audit_fields=dict(audit_base),
+            identity_key=identity_key,
+        )
+        mailbox, analysis_disposition, last_result = _enqueue_analysis_job(
+            job,
+            retry_after_ms=int(auth_context.min_interval_sec) * 1000,
+        )
+        state.analysis_job_enqueued = True
+        state.feed_reservation_committed = True
+        _security_audit(
+            "frame_ingest_accepted",
+            auth_context,
+            {
+                **audit_base,
+                "analysis_disposition": analysis_disposition,
+                "analysis_busy": mailbox["analysis_busy"],
+                "pending_frame_id": mailbox["pending_frame_id"],
+            },
+        )
+        previous_external_feed = last_result.get("external_frame_feed", {})
+        external_feed = (
+            dict(cast(Mapping[str, Any], previous_external_feed))
+            if isinstance(previous_external_feed, Mapping)
+            else {}
+        )
+        external_feed.update(
+            {
+                "source_id": str(source_id or "").strip(),
+                "symbol": str(effective_symbol or "").strip(),
+                "timeframe": str(effective_timeframe or "").strip(),
+                "sequence_id": str(sequence_id or "").strip(),
+                "frame_id": int(frame_id or 0),
+                "capture_epoch_ms": int(capture_epoch_ms or 0),
+                "source_generation": int(source_generation or 0),
+                "analysis_queued": True,
+                "analysis_disposition": analysis_disposition,
+            }
+        )
+        return {
+            "schema_version": "PG_FRAME_INGEST_ACCEPTED_V1",
+            "accepted": True,
+            "session_id": str(last_result.get("session_id", session_id) or session_id),
+            "status": str(last_result.get("status", "analysis_queued") or "analysis_queued"),
+            "capture_count": int(last_result.get("capture_count", 0) or 0),
+            "frame_index": int(last_result.get("frame_index", 0) or 0),
+            "state_version": int(last_result.get("state_version", 0) or 0),
+            "decision_version": int(last_result.get("decision_version", 0) or 0),
+            "external_frame_feed": external_feed,
+            "analysis_disposition": analysis_disposition,
+            "analysis_mailbox": mailbox,
+            "analysis_busy": mailbox["analysis_busy"],
+            "active_frame_id": mailbox["active_frame_id"],
+            "active_superseded": mailbox["active_superseded"],
+            "pending_frame_id": mailbox["pending_frame_id"],
+            "replaced_frame_count": mailbox["replaced_frame_count"],
+            "retry_after_ms": mailbox["retry_after_ms"],
+            "last_completed_frame_id": mailbox["last_completed_frame_id"],
+            "last_completed_epoch_ms": mailbox["last_completed_epoch_ms"],
+            "last_failed_frame_id": mailbox["last_failed_frame_id"],
+            "last_failed_epoch_ms": mailbox["last_failed_epoch_ms"],
+            "last_failure_reason_code": mailbox["last_failure_reason_code"],
+            "last_failure_error_type": mailbox["last_failure_error_type"],
+        }
+
     async def ingest_session_frame(
         request: Request,
         session_id: str,
@@ -2075,207 +2283,51 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
         authorization: str | None = Header(default=None),
         x_phoenixguard_token: str | None = Header(default=None),
     ) -> dict[str, object]:
-        auth_context: FeedAuthContext | None = None
-        feed_reservation: FeedRuntimeReservation | None = None
-        feed_reservation_committed = False
-        decoded_image: Image.Image | None = None
-        analysis_job_enqueued = False
-        audit_base: dict[str, object] = {
-            "session_id": session_id,
-            "source_id": source_id,
-            "sequence_id": sequence_id,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "frame_id": int(frame_id or 0),
-            "capture_epoch_ms": int(capture_epoch_ms or 0),
-            "source_generation": int(source_generation or 0),
-            "client_host": request.client.host if request.client else "",
-        }
-        try:
-            _require_origin_allowed(request.headers.get("origin"))
-            auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
-            metadata = _metadata_from_json(metadata_json)
-            effective_symbol, effective_timeframe, identity_hints_ignored = (
-                _effective_frame_identity_hints(symbol, timeframe, metadata)
-            )
-            audit_base["identity_hint_policy"] = (
-                "visual_reproof_required"
-                if (
-                    str(metadata.get("source_type", "") or "").strip(),
-                    str(metadata.get("coordinate_space", "") or "").strip(),
-                )
-                in VISUAL_IDENTITY_SOURCE_CONTRACTS
-                else "declared_hint_allowed"
-            )
-            audit_base["identity_hints_ignored"] = identity_hints_ignored
-            _require_scope_allowed(
-                auth_context,
-                session_id,
-                source_id,
-                effective_symbol,
-                effective_timeframe,
-            )
-            _require_current_frame_source_contract(
-                session_id,
-                source_id=source_id,
-                sequence_id=sequence_id,
-                source_generation=int(source_generation or 0),
-                source_lease_id=str(source_lease_id or ""),
-                metadata=metadata,
-            )
-            image, frame_sha256, frame_bytes = await _read_image_upload(frame)
-            decoded_image = image
-            audit_base["frame_sha256"] = frame_sha256
-            audit_base["frame_bytes"] = frame_bytes
-            _require_frame_signature(
-                auth_context,
-                request,
-                session_id=session_id,
-                source_id=source_id,
-                sequence_id=sequence_id,
-                capture_epoch_ms=int(capture_epoch_ms or 0),
-                frame_id=int(frame_id or 0),
-                frame_sha256=frame_sha256,
-            )
-            feed_reservation = _reserve_feed_runtime(
-                auth_context,
-                session_id=session_id,
-                source_id=source_id,
-                sequence_id=sequence_id,
-                source_generation=int(source_generation or 0),
-                capture_epoch_ms=int(capture_epoch_ms or 0),
-                frame_id=int(frame_id or 0),
-            )
-            metadata["client_host"] = request.client.host if request.client else ""
-            metadata["filename"] = frame.filename or ""
-            metadata["feed_token_name"] = auth_context.token_name
-            metadata["feed_user_id"] = auth_context.user_id
-            metadata["frame_sha256"] = frame_sha256
-            metadata["frame_bytes"] = frame_bytes
-            metadata["source_generation"] = int(source_generation or 0)
-            metadata["source_lease_id"] = str(source_lease_id or "")
-            if (
-                str(metadata.get("source_type", "") or "").strip(),
-                str(metadata.get("coordinate_space", "") or "").strip(),
-            ) in VISUAL_IDENTITY_SOURCE_CONTRACTS:
-                metadata["identity_hint_policy"] = "visual_reproof_required"
-                metadata["identity_hints_ignored"] = identity_hints_ignored
-            identity_key = _analysis_identity_key(
-                source_id=source_id,
-                symbol=effective_symbol,
-                timeframe=effective_timeframe,
-                sequence_id=sequence_id,
-                source_generation=int(source_generation or 0),
-                metadata=metadata,
-            )
-            tracker = get_tracker()
-            direct_bias_publisher = getattr(
-                tracker,
-                "publish_direct_visual_bias_from_external_frame_v3",
-                None,
-            )
-            if callable(direct_bias_publisher):
-                direct_bias_publisher(
-                    str(session_id or "").strip(),
-                    image,
-                    source_id=str(source_id or "").strip(),
-                    sequence_id=str(sequence_id or "").strip(),
-                    source_generation=int(source_generation or 0),
-                    source_lease_id=str(source_lease_id or "").strip(),
-                    capture_epoch_ms=int(capture_epoch_ms or 0),
-                    frame_id=int(frame_id or 0),
-                    metadata=metadata,
-                )
-            job = FrameAnalysisJob(
-                session_id=str(session_id or "").strip(),
-                image=image,
-                source_id=str(source_id or "").strip(),
-                symbol=str(effective_symbol or "").strip(),
-                timeframe=str(effective_timeframe or "").strip(),
-                source_url=str(source_url or "").strip(),
-                sequence_id=str(sequence_id or "").strip(),
-                capture_epoch_ms=int(capture_epoch_ms or 0),
-                frame_id=int(frame_id or 0),
-                source_generation=int(source_generation or 0),
-                source_lease_id=str(source_lease_id or "").strip(),
-                metadata=metadata,
-                tracker=tracker,
-                audit_context=_analysis_audit_context(auth_context),
-                audit_fields=dict(audit_base),
-                identity_key=identity_key,
-            )
-            mailbox, analysis_disposition, last_result = _enqueue_analysis_job(
-                job,
-                retry_after_ms=int(auth_context.min_interval_sec) * 1000,
-            )
-            analysis_job_enqueued = True
-            feed_reservation_committed = True
-            _security_audit(
-                "frame_ingest_accepted",
-                auth_context,
-                {
-                    **audit_base,
-                    "analysis_disposition": analysis_disposition,
-                    "analysis_busy": mailbox["analysis_busy"],
-                    "pending_frame_id": mailbox["pending_frame_id"],
-                },
-            )
-            previous_external_feed = last_result.get("external_frame_feed", {})
-            external_feed = (
-                dict(cast(Mapping[str, Any], previous_external_feed))
-                if isinstance(previous_external_feed, Mapping)
-                else {}
-            )
-            external_feed.update(
-                {
-                    "source_id": str(source_id or "").strip(),
-                    "symbol": str(effective_symbol or "").strip(),
-                    "timeframe": str(effective_timeframe or "").strip(),
-                    "sequence_id": str(sequence_id or "").strip(),
-                    "frame_id": int(frame_id or 0),
-                    "capture_epoch_ms": int(capture_epoch_ms or 0),
-                    "source_generation": int(source_generation or 0),
-                    "analysis_queued": True,
-                    "analysis_disposition": analysis_disposition,
-                }
-            )
-            return {
-                "schema_version": "PG_FRAME_INGEST_ACCEPTED_V1",
-                "accepted": True,
-                "session_id": str(last_result.get("session_id", session_id) or session_id),
-                "status": str(last_result.get("status", "analysis_queued") or "analysis_queued"),
-                "capture_count": int(last_result.get("capture_count", 0) or 0),
-                "frame_index": int(last_result.get("frame_index", 0) or 0),
-                "state_version": int(last_result.get("state_version", 0) or 0),
-                "decision_version": int(last_result.get("decision_version", 0) or 0),
-                "external_frame_feed": external_feed,
-                "analysis_disposition": analysis_disposition,
-                "analysis_mailbox": mailbox,
-                "analysis_busy": mailbox["analysis_busy"],
-                "active_frame_id": mailbox["active_frame_id"],
-                "active_superseded": mailbox["active_superseded"],
-                "pending_frame_id": mailbox["pending_frame_id"],
-                "replaced_frame_count": mailbox["replaced_frame_count"],
-                "retry_after_ms": mailbox["retry_after_ms"],
-                "last_completed_frame_id": mailbox["last_completed_frame_id"],
-                "last_completed_epoch_ms": mailbox["last_completed_epoch_ms"],
-                "last_failed_frame_id": mailbox["last_failed_frame_id"],
-                "last_failed_epoch_ms": mailbox["last_failed_epoch_ms"],
-                "last_failure_reason_code": mailbox["last_failure_reason_code"],
-                "last_failure_error_type": mailbox["last_failure_error_type"],
+        state = _IngestSessionFrameState(
+            audit_base={
+                "session_id": session_id,
+                "source_id": source_id,
+                "sequence_id": sequence_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "frame_id": int(frame_id or 0),
+                "capture_epoch_ms": int(capture_epoch_ms or 0),
+                "source_generation": int(source_generation or 0),
+                "client_host": request.client.host if request.client else "",
             }
+        )
+        try:
+            return await _ingest_session_frame_core(
+                request=request,
+                session_id=session_id,
+                frame=frame,
+                source_id=source_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                source_url=source_url,
+                sequence_id=sequence_id,
+                capture_epoch_ms=capture_epoch_ms,
+                frame_id=frame_id,
+                source_generation=source_generation,
+                source_lease_id=source_lease_id,
+                metadata_json=metadata_json,
+                authorization=authorization,
+                x_phoenixguard_token=x_phoenixguard_token,
+                get_tracker=get_tracker,
+                state=state,
+            )
         except HTTPException as exc:
             _security_audit(
                 "frame_ingest_rejected",
-                auth_context,
-                {**audit_base, "status_code": exc.status_code, "detail": str(exc.detail)},
+                state.auth_context,
+                {**state.audit_base, "status_code": exc.status_code, "detail": str(exc.detail)},
             )
             raise
         except KeyError as exc:
             _security_audit(
                 "frame_ingest_rejected",
-                auth_context,
-                {**audit_base, "status_code": status.HTTP_404_NOT_FOUND, "detail": "Window tracker session not found."},
+                state.auth_context,
+                {**state.audit_base, "status_code": status.HTTP_404_NOT_FOUND, "detail": "Window tracker session not found."},
             )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
@@ -2292,14 +2344,14 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 detail = {"reason_code": lease_reason, "message": message}
                 _security_audit(
                     "frame_ingest_rejected",
-                    auth_context,
-                    {**audit_base, "status_code": lease_status, "detail": message},
+                    state.auth_context,
+                    {**state.audit_base, "status_code": lease_status, "detail": message},
                 )
                 raise HTTPException(status_code=lease_status, detail=detail) from exc
             _security_audit(
                 "frame_ingest_rejected",
-                auth_context,
-                {**audit_base, "status_code": status.HTTP_400_BAD_REQUEST, "detail": message},
+                state.auth_context,
+                {**state.audit_base, "status_code": status.HTTP_400_BAD_REQUEST, "detail": message},
             )
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message) from exc
         except Exception as exc:
@@ -2314,16 +2366,16 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 }
                 _security_audit(
                     "frame_ingest_rejected",
-                    auth_context,
-                    {**audit_base, "status_code": lease_status, "detail": message},
+                    state.auth_context,
+                    {**state.audit_base, "status_code": lease_status, "detail": message},
                 )
                 raise HTTPException(status_code=lease_status, detail=detail) from exc
             raise
         finally:
-            if not feed_reservation_committed:
-                _rollback_feed_runtime_reservation(feed_reservation)
-            if decoded_image is not None and not analysis_job_enqueued:
-                decoded_image.close()
+            if not state.feed_reservation_committed:
+                _rollback_feed_runtime_reservation(state.feed_reservation)
+            if state.decoded_image is not None and not state.analysis_job_enqueued:
+                state.decoded_image.close()
 
     def frame_ingest_status(
         session_id: str,

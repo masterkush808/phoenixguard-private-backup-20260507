@@ -15,7 +15,7 @@ def test_frontend_heartbeat_records_current_degraded_overlay_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(realtime_sync_v3, "DEFAULT_HEARTBEAT_STORE_DIR", tmp_path)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     session_id = "pocket-live-8788"
     alive_payload: dict[str, Any] = {
         "session_id": session_id,
@@ -70,7 +70,7 @@ def test_frontend_heartbeat_api_records_replay_on_canonical_dashboard_pulse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(realtime_sync_v3, "DEFAULT_HEARTBEAT_STORE_DIR", tmp_path)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     session_id = "pocket-live-8788"
     replay_payload: dict[str, Any] = {
         "session_id": session_id,
@@ -114,7 +114,7 @@ def test_frontend_heartbeat_api_ignores_transient_empty_live_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(realtime_sync_v3, "DEFAULT_HEARTBEAT_STORE_DIR", tmp_path)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     session_id = "pocket-live-8788"
     live_payload: dict[str, Any] = {
         "session_id": session_id,

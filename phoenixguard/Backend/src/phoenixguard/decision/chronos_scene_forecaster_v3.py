@@ -644,10 +644,13 @@ def _strategy_phase_value(
     strategy_control: Mapping[str, Any] | None,
     step: int,
 ) -> float:
-    control = strategy_control if isinstance(strategy_control, Mapping) else {}
+    control: Mapping[str, Any] = (
+        strategy_control if isinstance(strategy_control, Mapping) else {}
+    )
     values = control.get("phase_multipliers")
     if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)) and values:
-        value = _control_number(values[min(step, len(values) - 1)])
+        sequence = cast(Sequence[Any], values)
+        value = _control_number(sequence[min(step, len(sequence) - 1)])
         return max(-1.5, min(1.5, value))
     side = str(control.get("forecast_side") or "").upper()
     return 1.0 if side == "BUY" else -1.0 if side == "SELL" else 0.0
@@ -683,7 +686,9 @@ def _causal_analog_delta_path(
     state_drift = 0.55 * momentum + 0.25 * center + 0.20 * suite_drift
     context_width = min(6, max(1, len(history) // 4))
     generated: list[float] = []
-    control = strategy_control if isinstance(strategy_control, Mapping) else {}
+    control: Mapping[str, Any] = (
+        strategy_control if isinstance(strategy_control, Mapping) else {}
+    )
     control_side = str(control.get("forecast_side") or "").upper()
     control_confidence = max(
         0.0,
@@ -867,7 +872,9 @@ def build_chronos_scene_forecast_contribution_v3(
         schema_fingerprint=prepared.schema_fingerprint,
     )
     seed = int(deterministic_seed)
-    control = strategy_control if isinstance(strategy_control, Mapping) else {}
+    control: Mapping[str, Any] = (
+        strategy_control if isinstance(strategy_control, Mapping) else {}
+    )
     control_side = str(control.get("forecast_side") or "").upper()
     control_confidence = max(
         0.0,

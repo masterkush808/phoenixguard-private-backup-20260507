@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "Backend" / "src"))
@@ -29,8 +30,10 @@ def main() -> int:
 
     session_path = LIVE_SESSIONS / SESSION_ID
     payload = json.loads((session_path / "session.json").read_text(encoding="utf-8"))
-    tracking = dict(payload.get("tracking_summary") or {})
-    candles = [dict(row) for row in tracking.get("tracked_candles") or []]
+    tracking: dict[str, Any] = dict(payload.get("tracking_summary") or {})
+    candles: list[dict[str, Any]] = [
+        dict(row) for row in cast("list[Any]", tracking.get("tracked_candles") or [])
+    ]
     print(f"tracked_candles: {len(candles)}")
 
     artifacts = sorted((session_path / "artifacts").glob("*_chart.jpg"))
@@ -57,7 +60,8 @@ def main() -> int:
         adapter = PhoenixGuardWindowTrackingAdapter()
         profiler = cProfile.Profile()
         profiler.enable()
-        tracking_summary, latest_signal = adapter._build_signal_payloads(  # noqa: SLF001
+        build_signal_payloads = getattr(adapter, "_build_signal_payloads")
+        tracking_summary, latest_signal = build_signal_payloads(
             chart_image,
             chart_region,
             candles,

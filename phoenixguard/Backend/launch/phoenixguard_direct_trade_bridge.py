@@ -334,6 +334,17 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _text_rows(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    rows: list[str] = []
+    for raw_row in cast(Sequence[object], value):
+        row_text = _text(raw_row)
+        if row_text:
+            rows.append(row_text)
+    return rows
+
+
 def _mapping_value(mapping: Mapping[str, object], key: str) -> object:
     return mapping.get(key)
 
@@ -1670,18 +1681,10 @@ def _resolve_trade_payload(
             f"playbook={book_state.get('playbook')} action={book_state.get('action')} "
             f"actionable={book_state.get('actionable')}"
         )
-        held_by = [
-            _text(row)
-            for row in (book_state.get("blocked_reasons") or [])
-            if _text(row)
-        ]
+        held_by = _text_rows(book_state.get("blocked_reasons"))
         if held_by:
             detail += " | held by: " + "; ".join(held_by)
-        advisory_rows = [
-            _text(row)
-            for row in (book_state.get("advisories") or [])
-            if _text(row)
-        ]
+        advisory_rows = _text_rows(book_state.get("advisories"))
         if advisory_rows:
             detail += " | advisories: " + "; ".join(advisory_rows[:3])
         age_note = f" | state_age={state_age_seconds:.0f}s" if state_age_seconds >= 0.0 else ""

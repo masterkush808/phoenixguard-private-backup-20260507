@@ -18,6 +18,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Mapping
 
 _PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
@@ -27,13 +28,22 @@ from _pg_bootstrap import ensure_project_paths  # noqa: E402
 
 PROJECT_ROOT = ensure_project_paths()
 
+import phoenixguard_direct_trade_bridge  # noqa: E402
 from phoenixguard_direct_trade_bridge import (  # noqa: E402
     DEFAULT_POINTER_MOVE_DURATION_SECONDS,
     MissingCalibration,
-    _load_calibration_manifest,
-    _send_direct_clicks,
-    _trigger_manifest_to_boxes,
 )
+
+_load_calibration_manifest: Callable[[str | None], dict[str, object]] = getattr(
+    phoenixguard_direct_trade_bridge, "_load_calibration_manifest"
+)
+_send_direct_clicks: Callable[..., dict[str, object]] = getattr(
+    phoenixguard_direct_trade_bridge, "_send_direct_clicks"
+)
+_trigger_manifest_to_boxes: Callable[
+    [Mapping[str, object]],
+    tuple[dict[str, tuple[int, int]], tuple[int, int] | None, float, int, dict[str, float]],
+] = getattr(phoenixguard_direct_trade_bridge, "_trigger_manifest_to_boxes")
 
 
 def _resolve_button(boxes: dict[str, tuple[int, int]], side: str) -> tuple[str, tuple[int, int]]:

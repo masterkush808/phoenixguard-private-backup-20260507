@@ -14,7 +14,7 @@ import json
 from collections import Counter
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, cast
 
 _TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_TOOLS_DIR))
@@ -34,7 +34,11 @@ from phoenixguard.decision.book_strategy_forecast_v3 import (  # noqa: E402
 def _rows(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    return [row for row in value if isinstance(row, dict)]
+    return [
+        cast("dict[str, Any]", row)
+        for row in cast("list[object]", value)
+        if isinstance(row, dict)
+    ]
 
 
 def _artifact_frame(path: Path) -> int:
@@ -56,15 +60,15 @@ def load_artifacts(session_dir: Path) -> list[Path]:
 def build_replay_context(path: Path) -> dict[str, Any] | None:
     """Rebuild the forecast control and verdict for one decision artifact."""
     payload = json.loads(path.read_text(encoding="utf-8"))
-    summary = payload.get("tracking_summary") or {}
-    latest_signal = payload.get("latest_signal") or {}
-    book_signal = summary.get("book_rule_action_signal_v3") or latest_signal.get(
+    summary: dict[str, Any] = payload.get("tracking_summary") or {}
+    latest_signal: dict[str, Any] = payload.get("latest_signal") or {}
+    book_signal: dict[str, Any] = summary.get("book_rule_action_signal_v3") or latest_signal.get(
         "book_rule_action_signal_v3"
     ) or {}
     candles = _rows(summary.get("tracked_candles"))
     trendlines = _rows(summary.get("trendlines_v3"))
     zones = _rows(summary.get("support_resistance_zones"))
-    market_study = summary.get("market_study_v3") or {}
+    market_study: dict[str, Any] = summary.get("market_study_v3") or {}
     if not candles:
         return None
     pair = str(latest_signal.get("market") or payload.get("market") or "UNKNOWN")
@@ -74,7 +78,7 @@ def build_replay_context(path: Path) -> dict[str, Any] | None:
         or "M5"
     )
     frame_id = int(latest_signal.get("published_epoch") or _artifact_frame(path))
-    chart_image = summary.get("chart_region") or {}
+    chart_image: dict[str, Any] = summary.get("chart_region") or {}
     bounds = [
         float(chart_image.get("x") or 0.0),
         float(chart_image.get("y") or 0.0),
@@ -142,13 +146,13 @@ def replay_artifact(path: Path) -> dict[str, Any]:
             "starvation": {"reason": "MISSING_REPLAY_INPUTS", "detail": ""},
         }
     verdict = context["verdict"]
-    starvation = {
+    starvation: dict[str, Any] = {
         "reason": "RESOLVED" if verdict.get("actionable") else str(verdict.get("status")),
         "detail": str(verdict.get("scenario")),
         "active_strategy_ids": [
             row.get("strategy_id")
-            for row in verdict.get("strategy_report") or []
-            if isinstance(row, dict) and row.get("status") == "ACTIVE"
+            for row in _rows(verdict.get("strategy_report"))
+            if row.get("status") == "ACTIVE"
         ],
         "confluence_count": verdict.get("confluence_count"),
     }
@@ -181,7 +185,10 @@ def summarize(reports: list[dict[str, Any]]) -> dict[str, Any]:
     replayed_status = Counter(str(row["replayed"].get("status")) for row in reports)
     replayed_playbook = Counter(str(row["replayed"].get("playbook")) for row in reports)
     actionable_frames = sum(bool(row["replayed"].get("actionable")) for row in reports)
-    published_actionable = sum(bool((row["published"] or {}).get("actionable")) for row in reports)
+    published_actionable = sum(
+        bool(cast("dict[str, Any]", row["published"] or {}).get("actionable"))
+        for row in reports
+    )
     return {
         "frames": len(reports),
         "published_actionable_frames": published_actionable,
@@ -210,8 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"frame {row['frame']:>6} | {row['pair']:<14} {row['timeframe']:<4} | "
             f"candles={row['candle_count']:>3} | "
-            f"published={str((row['published'] or {}).get('playbook')):<28} "
-            f"{str((row['published'] or {}).get('actionable')):<5} | "
+            f"published={str(cast('dict[str, Any]', row['published'] or {}).get('playbook')):<28} "
+            f"{str(cast('dict[str, Any]', row['published'] or {}).get('actionable')):<5} | "
             f"replayed={str(replayed.get('playbook')):<28} "
             f"{str(replayed.get('status')):<34} conf={replayed.get('confidence')} | "
             f"{starve.get('reason')}"

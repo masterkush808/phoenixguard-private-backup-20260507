@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from threading import RLock
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 DIRECTIONAL_CONSENSUS_SCHEMA_VERSION = "PG_ADAPTIVE_DIRECTIONAL_CONSENSUS_V3"
@@ -13,7 +13,7 @@ _STATE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _side(value: Any) -> str:
@@ -33,7 +33,7 @@ def _number(value: Any, fallback: float = 0.0) -> float:
 
 
 def _latest_indices(candles: Sequence[Mapping[str, Any]]) -> set[int]:
-    result = {max(0, len(candles) - 1)} if candles else set()
+    result: set[int] = {max(0, len(candles) - 1)} if candles else set()
     if candles:
         latest = candles[-1]
         for key in ("source_index", "index", "candle_index", "sequence_index"):
@@ -51,7 +51,7 @@ def _line_evidence(
     for raw in trendlines:
         if not isinstance(raw, Mapping):
             continue
-        row = dict(raw)
+        row = dict(cast(Mapping[str, Any], raw))
         direction = _side(row.get("direction"))
         if direction == "UNRESOLVED":
             role = str(row.get("trendline_role") or "").lower()
@@ -68,12 +68,17 @@ def _line_evidence(
             and not bool(row.get("significant_close", False))
             and str(row.get("breach_state") or "ACTIVE").upper() == "ACTIVE"
         )
-        raw_indices = row.get("touch_candle_indices", [])
-        touch_indices = {
-            int(_number(item, -1.0))
-            for item in raw_indices
-            if _number(item, -1.0) >= 0
-        } if isinstance(raw_indices, Sequence) and not isinstance(raw_indices, (str, bytes, bytearray)) else set()
+        raw_indices: Any = row.get("touch_candle_indices", [])
+        touch_indices: set[int] = (
+            {
+                int(_number(item, -1.0))
+                for item in cast(Sequence[Any], raw_indices)
+                if _number(item, -1.0) >= 0
+            }
+            if isinstance(raw_indices, Sequence)
+            and not isinstance(raw_indices, (str, bytes, bytearray))
+            else set()
+        )
         forming_touch = bool(row.get("forming_touch", False))
         current_touch = bool(forming_touch or latest.intersection(touch_indices))
         distance = max(0.0, _number(row.get("close_distance_norm"), 9.999))
@@ -287,7 +292,7 @@ def resolve_directional_consensus_v3(
     if stable == "UNRESOLVED":
         status = "DIRECTION_CONFLICT"
         explanation = "BUY and SELL evidence is too close; no dominant direction is published."
-    elif confirmed_reaction:
+    elif confirmed_reaction and matching_line is not None:
         status = "STRUCTURALLY_CONFIRMED_CONTROL"
         explanation = (
             f"{stable} direction is stable and a completed candle confirmed reaction at the side-matched {matching_line['role']} line."
@@ -297,7 +302,7 @@ def resolve_directional_consensus_v3(
         explanation = (
             f"{stable} remains dominant, but the side-matched line reaction is still forming."
         )
-    elif opposing_force_near:
+    elif opposing_force_near and opposing_line is not None:
         status = "STABLE_DIRECTION_AT_OPPOSING_FORCE"
         explanation = (
             f"{stable} remains the dominant structure, while confirmed {opposing_line['direction']} {opposing_line['role']} is nearby; this is opposing force, not a direction flip."

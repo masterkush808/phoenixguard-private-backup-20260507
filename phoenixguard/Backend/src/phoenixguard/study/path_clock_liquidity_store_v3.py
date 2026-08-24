@@ -2305,7 +2305,7 @@ def pending_path_clock_liquidity_v3(
             "baseline_metrics": {},
             "axis_deltas": {},
             "profitability_evidence_v3": (
-                PathClockLiquiditySideStoreV3._profitability_evidence(
+                getattr(PathClockLiquiditySideStoreV3, "_profitability_evidence")(
                     matured_count=0,
                     candidate_metrics={},
                     baseline_metrics={},

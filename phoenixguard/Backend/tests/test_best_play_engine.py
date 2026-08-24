@@ -1,9 +1,7 @@
 from __future__ import annotations
-import pytest
 
 import sys
 from pathlib import Path
-from typing import Any
 
 
 _REPO = Path(__file__).resolve().parents[2]

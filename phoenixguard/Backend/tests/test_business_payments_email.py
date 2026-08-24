@@ -206,7 +206,7 @@ def test_resend_email_confirmation_send_path_with_mocked_http() -> None:
 def test_access_is_not_activated_until_verified_payment_state_is_valid() -> None:
     secret = "whsec_activation_guard"
     repo = MockBusinessRepository.seeded()
-    client = TestClient(create_business_app(repository=repo, stripe_webhook_secret=secret))
+    client: Any = TestClient(create_business_app(repository=repo, stripe_webhook_secret=secret))
 
     checkout_event: dict[str, Any] = {
         "id": "evt_checkout_unpaid",

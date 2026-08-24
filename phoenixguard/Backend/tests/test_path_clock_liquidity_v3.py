@@ -18,7 +18,7 @@ from phoenixguard.study.path_clock_liquidity_v3 import (
 )
 
 
-SCOPE = {
+SCOPE: dict[str, Any] = {
     "symbol": "USD/CAD OTC",
     "timeframe": "M5",
     "coordinate_space": "NORMALIZED_MEDIAN_RANGE",
@@ -162,7 +162,7 @@ def test_trajectory_excludes_under_15_minutes_and_above_policy_horizon() -> None
 
 def test_forming_asymmetry_requires_pre_outcome_causal_freeze() -> None:
     field = _field()
-    accepted = field.add_trajectory(
+    accepted: dict[str, Any] = field.add_trajectory(
         _trajectory("FORMING-OK", _winning_path(), liquidity=_liquidity(forming=True))
     )
     assert accepted["liquidity_state"]["wick_body_asymmetry_source"] == (
@@ -186,7 +186,7 @@ def test_forming_asymmetry_requires_pre_outcome_causal_freeze() -> None:
 
 def test_common_clock_grid_preserves_excursions_and_joint_distribution() -> None:
     field = _field()
-    stored = field.add_trajectory(_trajectory("WIN", _winning_path()))
+    stored: dict[str, Any] = field.add_trajectory(_trajectory("WIN", _winning_path()))
     assert [point["elapsed_seconds"] for point in stored["points"]] == [
         0,
         300,
@@ -199,7 +199,7 @@ def test_common_clock_grid_preserves_excursions_and_joint_distribution() -> None
     assert stored["maximum_favorable_excursion_mru"] == pytest.approx(1.1)
     assert stored["final_direction"] == "UP"
 
-    distribution = field.joint_clock_distribution()
+    distribution: dict[str, Any] = field.joint_clock_distribution()
     assert distribution["clock_step_seconds"] == 300
     assert distribution["row_count"] == 5
     assert distribution["rows"][2]["support_count"] == 1
@@ -238,7 +238,7 @@ def test_joint_distribution_keeps_duration_remaining_clock_and_liquidity_axes() 
         )
     )
 
-    distribution = field.joint_clock_distribution()
+    distribution: dict[str, Any] = field.joint_clock_distribution()
     same_remaining = [
         row for row in distribution["rows"] if row["remaining_seconds"] == 1_200
     ]
@@ -264,7 +264,7 @@ def test_stop_survival_joint_query_observes_event_order_and_never_authorizes() -
     field = _field()
     field.add_trajectory(_trajectory("WIN", _winning_path()))
     field.add_trajectory(_trajectory("SWEPT", _swept_path()))
-    result = field.estimate_stop_survival(
+    result: dict[str, Any] = field.estimate_stop_survival(
         studied_direction="UP",
         contract_duration_seconds=1_200,
         elapsed_seconds=0,
@@ -292,7 +292,7 @@ def test_stop_survival_joint_query_observes_event_order_and_never_authorizes() -
 def test_late_clock_keeps_history_visible_without_public_studied_eligibility() -> None:
     field = _field()
     field.add_trajectory(_trajectory("WIN", _winning_path()))
-    result = field.estimate_stop_survival(
+    result: dict[str, Any] = field.estimate_stop_survival(
         studied_direction="UP",
         contract_duration_seconds=1_200,
         elapsed_seconds=301,
@@ -326,7 +326,7 @@ def test_worst_drawdown_probability_tracks_global_event_after_live_clock() -> No
             ],
         )
     )
-    result = field.estimate_stop_survival(
+    result: dict[str, Any] = field.estimate_stop_survival(
         studied_direction="UP",
         contract_duration_seconds=1_200,
         elapsed_seconds=600,
@@ -344,7 +344,7 @@ def test_worst_drawdown_probability_tracks_global_event_after_live_clock() -> No
 
 
 def test_forward_forecast_normalizes_live_pair_dna_coordinate_prefixes() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="SELL",
         duration_contract={
             "status": "ELIGIBLE",
@@ -429,7 +429,7 @@ def test_forward_forecast_normalizes_live_pair_dna_coordinate_prefixes() -> None
 
 
 def test_forward_forecast_uses_live_m5_sequence_before_neutral_prior() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "status": "ELIGIBLE",
@@ -478,7 +478,7 @@ def test_live_timing_requires_declared_history_and_segment_floors(
     rest_segments: int,
     available: bool,
 ) -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 3_000,
@@ -513,7 +513,7 @@ def test_live_timing_requires_declared_history_and_segment_floors(
 
 
 def test_eur_nzd_style_62_candle_buy_read_yields_3_to_7_live_closes() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 3_000,
@@ -556,7 +556,7 @@ def test_eur_nzd_style_62_candle_buy_read_yields_3_to_7_live_closes() -> None:
 
 
 def test_forward_forecast_derives_pair_averages_from_raw_pair_dna_sums() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="SELL",
         duration_contract={
             "status": "ELIGIBLE",
@@ -618,7 +618,7 @@ def test_forward_forecast_derives_pair_averages_from_raw_pair_dna_sums() -> None
 def test_pair_timing_and_transition_estimates_require_minimum_support(
     support: int,
 ) -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 3_000,
@@ -693,7 +693,7 @@ def test_pair_rest_wait_is_counted_once_and_target_duration_is_excluded() -> Non
 
 
 def test_active_target_forecasts_next_same_direction_swing_after_rest() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 3_000,
@@ -767,7 +767,7 @@ def test_active_target_next_swing_live_timing_requires_all_evidence_floors(
     score: float,
     available: bool,
 ) -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 3_000,
@@ -816,7 +816,7 @@ def test_active_target_next_swing_live_timing_requires_all_evidence_floors(
 
 
 def test_opposite_swing_wait_is_remaining_opposite_plus_expected_rest() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 3_000,
@@ -851,7 +851,7 @@ def test_opposite_swing_wait_is_remaining_opposite_plus_expected_rest() -> None:
 
 
 def test_forward_forecast_does_not_turn_policy_horizon_into_move_window() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "status": "ELIGIBLE",
@@ -878,7 +878,7 @@ def test_forward_forecast_does_not_turn_policy_horizon_into_move_window() -> Non
 
 
 def test_buy_only_pair_dna_cannot_publish_sell_timing_window() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="SELL",
         duration_contract={
             "status": "ELIGIBLE",
@@ -922,7 +922,7 @@ def test_buy_only_pair_dna_cannot_publish_sell_timing_window() -> None:
 
 
 def test_up_only_current_sequence_cannot_publish_sell_timing_window() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="SELL",
         duration_contract={
             "status": "ELIGIBLE",
@@ -980,7 +980,7 @@ def test_survival_forecast_rejects_conditioned_and_unsupported_curves() -> None:
             ],
         }
 
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "status": "ELIGIBLE",
@@ -1039,7 +1039,7 @@ def test_survival_forecast_rejects_conditioned_and_unsupported_curves() -> None:
 
 
 def test_survival_only_window_does_not_invent_rest_behavior() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 1_800,
@@ -1080,7 +1080,7 @@ def test_survival_only_window_does_not_invent_rest_behavior() -> None:
 
 
 def test_single_motif_case_cannot_override_live_or_publish_outcomes() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "status": "ELIGIBLE",
@@ -1168,7 +1168,7 @@ def test_motif_timing_requires_minimum_independent_outcome_support(
         }
         for _ in range(support)
     ]
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 1_800,
@@ -1219,7 +1219,7 @@ def test_motif_timing_requires_minimum_independent_outcome_support(
 
 
 def test_motif_outcomes_own_occurrence_likelihood_and_sweep_estimate() -> None:
-    entries = []
+    entries: list[dict[str, Any]] = []
     for index in range(4):
         entries.append(
             {
@@ -1239,7 +1239,7 @@ def test_motif_outcomes_own_occurrence_likelihood_and_sweep_estimate() -> None:
                 ],
             }
         )
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "status": "ELIGIBLE",
@@ -1287,7 +1287,7 @@ def test_motif_outcomes_own_occurrence_likelihood_and_sweep_estimate() -> None:
 
 
 def test_exact_stop_survival_is_not_blended_into_directional_likelihood() -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="SELL",
         duration_contract={
             "status": "ELIGIBLE",
@@ -1353,7 +1353,7 @@ def test_exact_stop_survival_is_not_blended_into_directional_likelihood() -> Non
 def test_exact_timing_and_probabilities_require_minimum_support(
     support: int,
 ) -> None:
-    forecast = build_hierarchical_forward_timing_forecast_v3(
+    forecast: dict[str, Any] = build_hierarchical_forward_timing_forecast_v3(
         candidate_direction="BUY",
         duration_contract={
             "requested_duration_seconds": 1_800,
@@ -1403,7 +1403,7 @@ def test_exact_timing_and_probabilities_require_minimum_support(
 def test_freezes_are_closed_candle_ordered_bounded_and_restart_safe() -> None:
     field = _field(max_freezes=1)
     field.add_trajectory(_trajectory("WIN", _winning_path()))
-    freeze = field.freeze_closed_candle_state(
+    freeze: dict[str, Any] = field.freeze_closed_candle_state(
         closed_candle_key="C-LIVE-11",
         order_index=11,
         closed_at_seconds=10_300.0,
@@ -1431,7 +1431,7 @@ def test_freezes_are_closed_candle_ordered_bounded_and_restart_safe() -> None:
         scenarios=[{"stop_distance_mru": 0.3, "move_size_mru": 0.5}],
     )
     assert replayed == freeze
-    conflicting = dict(
+    conflicting: dict[str, Any] = dict(
         closed_candle_key="C-LIVE-11",
         order_index=11,
         closed_at_seconds=10_300.0,
@@ -1455,7 +1455,7 @@ def test_freezes_are_closed_candle_ordered_bounded_and_restart_safe() -> None:
             liquidity_state=_liquidity(order_index=12, as_of_seconds=10_600.0),
         )
 
-    snapshot = field.snapshot()
+    snapshot: dict[str, Any] = field.snapshot()
     restored = JointPathClockLiquidityFieldV3.from_snapshot(snapshot)
     assert restored.snapshot() == snapshot
     tampered = deepcopy(snapshot)
@@ -1488,7 +1488,7 @@ def test_trajectory_and_freeze_capacity_reject_instead_of_unbounded_growth() -> 
         field.add_trajectory(conflicting)
     with pytest.raises(PathClockLiquidityValidationError, match="capacity"):
         field.add_trajectory(_trajectory("TWO", _swept_path()))
-    snapshot = field.snapshot()
+    snapshot: dict[str, Any] = field.snapshot()
     assert len(snapshot["trajectories"]) == 1
     assert snapshot["config"]["max_trajectories"] == 1
     assert snapshot["persistence_contract"]["pair_dna_embeddable"] is False
@@ -1549,7 +1549,7 @@ def test_replay_scores_four_independent_axes_and_probability_calibration() -> No
         _replay(4, predicted="UP", observed="UP", move_time=1_200, probability=0.3, survived=False),
         _replay(5, predicted="DOWN", observed="UP", move_time=300, probability=1.0, survived=False),
     ]
-    score = score_path_clock_replays_v3(records, **SCOPE)
+    score: dict[str, Any] = score_path_clock_replays_v3(records, **SCOPE)
     metrics = score["metrics"]
     assert metrics["directional_accuracy"] == 0.75
     assert metrics["timing_accuracy"] == 0.5
@@ -1585,7 +1585,7 @@ def test_completed_no_target_replay_is_scored_as_censored_failure() -> None:
     )
     no_target["observed_move_occurred"] = False
 
-    score = score_path_clock_replays_v3([no_target], **SCOPE)
+    score: dict[str, Any] = score_path_clock_replays_v3([no_target], **SCOPE)
 
     assert score["eligible_replay_count"] == 1
     assert score["excluded_early_move_count"] == 0
@@ -1636,7 +1636,7 @@ def test_promotion_requires_every_axis_to_improve_together() -> None:
         "sweep_survival_rate": 0.64,
         "calibration_score": 0.75,
     }
-    passed = evaluate_path_clock_promotion_gate_v3(
+    passed: dict[str, Any] = evaluate_path_clock_promotion_gate_v3(
         baseline_score=_score(baseline_metrics),
         candidate_score=_score(candidate_metrics),
         minimum_replays=32,
@@ -1648,7 +1648,7 @@ def test_promotion_requires_every_axis_to_improve_together() -> None:
 
     one_regression = deepcopy(candidate_metrics)
     one_regression["timing_accuracy"] = baseline_metrics["timing_accuracy"]
-    failed = evaluate_path_clock_promotion_gate_v3(
+    failed: dict[str, Any] = evaluate_path_clock_promotion_gate_v3(
         baseline_score=_score(baseline_metrics),
         candidate_score=_score(one_regression),
         minimum_replays=32,
@@ -1659,7 +1659,7 @@ def test_promotion_requires_every_axis_to_improve_together() -> None:
 
     unpaired_candidate = _score(candidate_metrics)
     unpaired_candidate["scenario_grid_digest"] = "D" * 64
-    unpaired = evaluate_path_clock_promotion_gate_v3(
+    unpaired: dict[str, Any] = evaluate_path_clock_promotion_gate_v3(
         baseline_score=_score(baseline_metrics),
         candidate_score=unpaired_candidate,
         minimum_replays=32,

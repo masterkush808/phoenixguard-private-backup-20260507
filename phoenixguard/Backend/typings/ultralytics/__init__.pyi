@@ -1,3 +1,10 @@
-from ultralytics.models import YOLO as YOLO
+from typing import Any
 
-__all__: tuple[str, ...]
+
+class YOLO:
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def __getattr__(self, name: str) -> Any: ...
+
+
+__all__: tuple[str, ...] = ("YOLO",)

@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
-from phoenixguard.mobile_api.window_tracker import (
-    _candles_to_seconds,
-    _canonical_timeframe_label_v3,
-    _identity_text_timeframe_candidates_v3,
-    _reconcile_latent_state_control_v3,
-    _strict_live_trendline_geometry_v3,
-    _timeframe_seconds,
-)
+from phoenixguard.mobile_api import window_tracker
 from phoenixguard.study.latent_state_discovery_v3 import (
     build_latent_state_discovery_v3,
 )
+
+_candles_to_seconds = getattr(window_tracker, "_candles_to_seconds")
+_canonical_timeframe_label_v3 = getattr(
+    window_tracker, "_canonical_timeframe_label_v3"
+)
+_identity_text_timeframe_candidates_v3 = getattr(
+    window_tracker, "_identity_text_timeframe_candidates_v3"
+)
+_reconcile_latent_state_control_v3 = getattr(
+    window_tracker, "_reconcile_latent_state_control_v3"
+)
+_strict_live_trendline_geometry_v3 = getattr(
+    window_tracker, "_strict_live_trendline_geometry_v3"
+)
+_timeframe_seconds = getattr(window_tracker, "_timeframe_seconds")
 
 
 def test_timeframe_identity_and_math_are_not_m5_specific() -> None:
@@ -190,7 +199,7 @@ def test_cycle_duration_falls_back_to_observed_closed_candle_segments() -> None:
 
 
 def test_structural_control_requires_stable_confirmation_before_overriding_local_pullback() -> None:
-    study = {
+    study: dict[str, Any] = {
         "hidden_state_discovery_v3": {
             "hidden_state": {
                 "state": "UP_SWING",

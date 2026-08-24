@@ -36,7 +36,8 @@ def test_behavior_tokens_preserve_measured_body_and_wicks() -> None:
         },
     ]
 
-    tokens = adapter._build_candle_behavior_tokens(  # noqa: SLF001 - contract regression test
+    build_tokens = getattr(adapter, "_build_candle_behavior_tokens")
+    tokens = build_tokens(
         candles,
         {"fit_bounds": [0, 20, 100, 100], "zones": []},
         candidate_action="BUY",

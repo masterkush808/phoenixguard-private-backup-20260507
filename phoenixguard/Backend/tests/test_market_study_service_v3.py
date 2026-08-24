@@ -15,7 +15,6 @@ from phoenixguard.study.market_study_service_v3 import (
     _object_conditioned_time_to_event,  # pyright: ignore[reportPrivateUsage]
 )
 from phoenixguard.study.motif_lattice_v3 import (
-    MAX_PATH_CANDLES,
     MotifLatticeValidationError,
 )
 from phoenixguard.study.study_claim_proof_v3 import (

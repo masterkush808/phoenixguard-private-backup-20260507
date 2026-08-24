@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.decision.book_strategy_context_v3 import (
     evaluate_book_strategy_context_v3,
@@ -90,12 +90,16 @@ _BOOK_PROVENANCE: dict[str, dict[str, Any]] = {
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[Mapping[str, Any]]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [row for row in value if isinstance(row, Mapping)]
+        return [
+            cast(Mapping[str, Any], row)
+            for row in cast(Sequence[Any], value)
+            if isinstance(row, Mapping)
+        ]
     return []
 
 
@@ -183,13 +187,23 @@ def _normalise_candles(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, A
                 elif direction == "SELL":
                     open_y, close_y = body_top, body_bottom
         if pixel_mode:
-            if None in (open_y, close_y, top_y, bottom_y):
+            if (
+                open_y is None
+                or close_y is None
+                or top_y is None
+                or bottom_y is None
+            ):
                 continue
             open_price = -float(open_y)
             close_price = -float(close_y)
             high_price = -float(top_y)
             low_price = -float(bottom_y)
-        if None in (open_price, high_price, low_price, close_price):
+        if (
+            open_price is None
+            or high_price is None
+            or low_price is None
+            or close_price is None
+        ):
             continue
         open_value = float(open_price)
         close_value = float(close_price)
@@ -304,11 +318,16 @@ def _derived_trends(candles: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
 
 def _point(value: Any) -> tuple[float, float] | None:
     if isinstance(value, Mapping):
-        x_value = _pick(value, "x_px", "x", "x_center_px")
-        y_value = _pick(value, "y_px", "y", "wick_y_px")
+        mapped = cast(Mapping[str, Any], value)
+        x_value = _pick(mapped, "x_px", "x", "x_center_px")
+        y_value = _pick(mapped, "y_px", "y", "wick_y_px")
         if x_value is not None and y_value is not None:
             return x_value, y_value
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) and len(value) >= 2:
+    if (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
+        and len(cast(Sequence[Any], value)) >= 2
+    ):
         x_value = _number(value[0])
         y_value = _number(value[1])
         if x_value is not None and y_value is not None:
@@ -324,7 +343,7 @@ def _line_y_at_x(line: Mapping[str, Any], x_value: float) -> float | None:
     projection_x = _number(line.get("current_projection_x"))
     if raw_projection is not None and projection_x is not None and abs(projection_x - x_value) <= 1.5:
         return raw_projection[1]
-    candidates = (
+    _candidates = (
         _rows(line.get("line_points"))
         or _rows(line.get("anchor_wick_points"))
         or _rows(line.get("points"))
@@ -332,7 +351,11 @@ def _line_y_at_x(line: Mapping[str, Any], x_value: float) -> float | None:
     points: list[tuple[float, float]] = []
     raw_points = line.get("line_points") or line.get("anchor_wick_points") or line.get("points")
     if isinstance(raw_points, Sequence) and not isinstance(raw_points, (str, bytes, bytearray)):
-        points = [parsed for value in raw_points if (parsed := _point(value)) is not None]
+        points = [
+            parsed
+            for value in cast(Sequence[Any], raw_points)
+            if (parsed := _point(value)) is not None
+        ]
     if len(points) < 2:
         first = _point(line.get("anchor_1") or line.get("first_anchor") or line.get("start"))
         second = _point(line.get("anchor_2") or line.get("second_anchor") or line.get("end"))
@@ -379,7 +402,7 @@ def _trendline_rules(
         if role not in scores:
             continue
         touch_points = line.get("touch_points")
-        default_touches = len(touch_points) if isinstance(touch_points, Sequence) else 0
+        default_touches = len(cast(Sequence[Any], touch_points)) if isinstance(touch_points, Sequence) else 0
         touch_count = int(_number(line.get("touch_count"), float(default_touches)) or 0)
         mature = bool(line.get("strategy_touch_confirmed")) or touch_count >= 3
         if not mature:
@@ -517,90 +540,6 @@ def _zone_rules(
     }
 
 
-def _candle_patterns(
-    candles: Sequence[Mapping[str, Any]],
-    prior_trend: str,
-) -> list[tuple[str, str, float]]:
-    if not candles:
-        return []
-    current = candles[-1]
-    body = float(current["body"])
-    spread = float(current["range"])
-    upper_wick = float(current["high"]) - max(float(current["open"]), float(current["close"]))
-    lower_wick = min(float(current["open"]), float(current["close"])) - float(current["low"])
-    patterns: list[tuple[str, str, float]] = []
-    if body <= spread * 0.1:
-        patterns.append(("DOJI_INDECISION", "NEUTRAL", 0.0))
-    if lower_wick >= max(body * 2.0, spread * 0.45) and upper_wick <= spread * 0.2:
-        patterns.append(
-            (
-                "HAMMER" if prior_trend == "SELL" else "HANGING_MAN",
-                "BUY" if prior_trend == "SELL" else "SELL",
-                1.0,
-            )
-        )
-    if upper_wick >= max(body * 2.0, spread * 0.45) and lower_wick <= spread * 0.2:
-        patterns.append(
-            (
-                "SHOOTING_STAR" if prior_trend == "BUY" else "INVERTED_HAMMER",
-                "SELL" if prior_trend == "BUY" else "BUY",
-                1.0,
-            )
-        )
-    if body >= spread * 0.82 and current["direction"] in {"BUY", "SELL"}:
-        patterns.append(
-            (
-                "BULLISH_MARUBOZU" if current["direction"] == "BUY" else "BEARISH_MARUBOZU",
-                str(current["direction"]),
-                0.85,
-            )
-        )
-    if len(candles) >= 2:
-        previous = candles[-2]
-        current_body = sorted((float(current["open"]), float(current["close"])))
-        previous_body = sorted((float(previous["open"]), float(previous["close"])))
-        if (
-            current["direction"] == "BUY"
-            and previous["direction"] == "SELL"
-            and current_body[0] <= previous_body[0]
-            and current_body[1] >= previous_body[1]
-        ):
-            patterns.append(("BULLISH_ENGULFING", "BUY", 1.35))
-        if (
-            current["direction"] == "SELL"
-            and previous["direction"] == "BUY"
-            and current_body[0] <= previous_body[0]
-            and current_body[1] >= previous_body[1]
-        ):
-            patterns.append(("BEARISH_ENGULFING", "SELL", 1.35))
-        if current_body[0] >= previous_body[0] and current_body[1] <= previous_body[1]:
-            patterns.append(
-                (
-                    "BULLISH_HARAMI" if current["direction"] == "BUY" else "BEARISH_HARAMI",
-                    str(current["direction"]),
-                    0.65,
-                )
-            )
-        tolerance = statistics.median((float(current["range"]), float(previous["range"]))) * 0.12
-        if abs(float(current["low"]) - float(previous["low"])) <= tolerance:
-            patterns.append(("TWEEZER_BOTTOM", "BUY", 0.75))
-        if abs(float(current["high"]) - float(previous["high"])) <= tolerance:
-            patterns.append(("TWEEZER_TOP", "SELL", 0.75))
-    if len(candles) >= 3:
-        first, middle, last = candles[-3:]
-        directions = [str(row["direction"]) for row in (first, middle, last)]
-        if directions == ["BUY", "BUY", "BUY"] and middle["close"] > first["close"] and last["close"] > middle["close"]:
-            patterns.append(("THREE_WHITE_SOLDIERS", "BUY", 1.25))
-        if directions == ["SELL", "SELL", "SELL"] and middle["close"] < first["close"] and last["close"] < middle["close"]:
-            patterns.append(("THREE_BLACK_CROWS", "SELL", 1.25))
-        midpoint = (float(first["open"]) + float(first["close"])) / 2.0
-        if first["direction"] == "SELL" and float(middle["body"]) <= float(first["body"]) * 0.45 and last["direction"] == "BUY" and float(last["close"]) > midpoint:
-            patterns.append(("MORNING_STAR", "BUY", 1.55))
-        if first["direction"] == "BUY" and float(middle["body"]) <= float(first["body"]) * 0.45 and last["direction"] == "SELL" and float(last["close"]) < midpoint:
-            patterns.append(("EVENING_STAR", "SELL", 1.55))
-    return patterns
-
-
 def _packet_side(payload: Mapping[str, Any] | None) -> tuple[str, float]:
     data = _mapping(payload)
     side = _side(
@@ -636,38 +575,6 @@ def _smart_money_rule(payload: Mapping[str, Any] | None) -> tuple[str, float, st
         else "STRUCTURE_SHIFT"
     )
     return side, confidence or 0.55, event
-
-
-def _phase_path(
-    primary_side: str,
-    major_side: str,
-    playbook: str,
-    confidence: float,
-) -> tuple[list[float], list[str]]:
-    sign = 1.0 if primary_side == "BUY" else -1.0
-    major_sign = 1.0 if major_side == "BUY" else -1.0 if major_side == "SELL" else sign
-    if playbook in {
-        "TRENDLINE_REJECTION",
-        "CANDLE_REVERSAL_AT_STRUCTURE",
-        "LIQUIDITY_SWEEP_RECLAIM",
-    }:
-        phases = [(10, sign, 1.0), (4, sign, 0.18), (7, -sign, 0.48), (14, sign, 0.78)]
-    elif playbook in {"BREAK_RETEST", "ROLE_FLIP_RETEST"}:
-        phases = [(8, sign, 0.9), (6, -sign, 0.55), (18, sign, 0.95), (5, sign, 0.2)]
-    else:
-        phases = [(14, sign, 0.82), (5, sign, 0.15), (8, -sign, 0.42), (18, sign, 0.86)]
-    used = sum(length for length, _, _ in phases)
-    phases.append((FORECAST_HORIZON_CANDLES_V3 - used, major_sign, 0.68 if major_sign == sign else 0.58))
-    amplitude = 0.72 + 0.28 * confidence
-    multipliers: list[float] = []
-    directions: list[str] = []
-    for length, phase_sign, strength in phases:
-        for step in range(max(0, length)):
-            wave = (0.86, 1.08, 0.72, 1.16, 0.91)[step % 5]
-            value = float(phase_sign) * float(strength) * amplitude * wave
-            multipliers.append(round(value, 6))
-            directions.append("BUY" if value > 0.08 else "SELL" if value < -0.08 else "REST")
-    return multipliers[:FORECAST_HORIZON_CANDLES_V3], directions[:FORECAST_HORIZON_CANDLES_V3]
 
 
 def build_book_strategy_forecast_control_v3(
@@ -719,7 +626,7 @@ def build_book_strategy_forecast_control_v3(
             _mapping(context_suite.get("score_adjustments")).get(direction),
             0.0,
         ) or 0.0
-    traces.extend(_rows(context_suite.get("rule_trace")))
+    traces.extend(cast(list[dict[str, Any]], _rows(context_suite.get("rule_trace"))))
     if major_side in scores:
         scores[major_side] += 1.35
         _record(

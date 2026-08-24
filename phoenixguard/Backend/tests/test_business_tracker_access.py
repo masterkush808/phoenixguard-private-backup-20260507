@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 from fastapi import FastAPI
@@ -28,12 +28,12 @@ def _mobile_client(
     store: BusinessStore | None = None,
     *,
     tracker: object | None = None,
-) -> TestClient:
+) -> Any:
     set_business_store_for_test(store or BusinessStore())
     return TestClient(create_app(window_tracker_service=tracker))  # type: ignore[arg-type]
 
 
-def _bare_business_client(store: BusinessStore | None = None) -> TestClient:
+def _bare_business_client(store: BusinessStore | None = None) -> Any:
     app = FastAPI()
     register_business_routes(app, store=store or BusinessStore())
     return TestClient(app)

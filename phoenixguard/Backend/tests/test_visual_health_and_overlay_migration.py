@@ -104,7 +104,7 @@ def test_visual_health_passes_when_chart_overlay_frontend_aligned(tmp_path: Path
         }
     )
     app = create_app(window_tracker_service=svc)
-    client = TestClient(app)
+    client: Any = TestClient(app)
     response = client.get(f"/v1/mobile/visual/health/v3?session_id={session_id}")
     assert response.status_code == 200
     payload = response.json()

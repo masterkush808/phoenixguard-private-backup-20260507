@@ -17,12 +17,12 @@ EXPIRED_AUTH = {"Authorization": "Bearer pg_mock_expired_customer"}
 UNBOUND_AUTH = {"Authorization": "Bearer pg_mock_unbound_customer"}
 
 
-def _client() -> TestClient:
+def _client() -> Any:
     return TestClient(create_business_app())
 
 
 def _register(
-    client: TestClient,
+    client: Any,
     *,
     license_key: str,
     fingerprint: str,
@@ -59,7 +59,7 @@ def _stripe_signature(payload: bytes, *, secret: str = MOCK_STRIPE_WEBHOOK_SECRE
     return f"t={timestamp},v1={digest}"
 
 
-def _post_stripe(client: TestClient, event: dict[str, Any]) -> Any:
+def _post_stripe(client: Any, event: dict[str, Any]) -> Any:
     payload = _stripe_payload(event)
     return client.post(
         "/v1/webhooks/stripe",

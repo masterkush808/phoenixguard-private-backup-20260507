@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,16 +15,16 @@ EXPIRED_AUTH = {"Authorization": "Bearer pg_mock_expired_customer"}
 UNBOUND_AUTH = {"Authorization": "Bearer pg_mock_unbound_customer"}
 
 
-def _client() -> TestClient:
+def _client() -> Any:
     return TestClient(create_business_app(email_provider=CapturingEmailVerificationProvider()))
 
 
-def _latest_verification_token(client: TestClient) -> str:
-    provider = cast(Any, client.app).state.business_email_provider
+def _latest_verification_token(client: Any) -> str:
+    provider = client.app.state.business_email_provider
     return str(provider.sent_messages[-1]["verification_token"])
 
 
-def _register_device(client: TestClient, *, license_key: str, fingerprint: str) -> dict[str, Any]:
+def _register_device(client: Any, *, license_key: str, fingerprint: str) -> dict[str, Any]:
     response = client.post(
         "/v1/device/register",
         json={

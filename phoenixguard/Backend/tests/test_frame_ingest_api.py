@@ -19,7 +19,7 @@ from phoenixguard.mobile_api.app import create_app
 from phoenixguard.mobile_api.frame_ingest import reset_frame_ingest_runtime_state_for_tests
 
 
-def _client(tracker: _FakeFrameTracker | None = None) -> TestClient:
+def _client(tracker: _FakeFrameTracker | None = None) -> Any:
     reset_frame_ingest_runtime_state_for_tests()
     return TestClient(create_app(window_tracker_service=tracker or _FakeFrameTracker()))
 
@@ -1971,8 +1971,8 @@ def test_worker_start_failure_clears_racing_pending_job(
     reset_frame_ingest_runtime_state_for_tests()
     tracker = _FakeFrameTracker()
     app = create_app(window_tracker_service=tracker)
-    first_client = TestClient(app)
-    second_client = TestClient(app)
+    first_client: Any = TestClient(app)
+    second_client: Any = TestClient(app)
     start_entered = threading.Event()
     release_start = threading.Event()
     first_result: dict[str, Any] = {}
@@ -1986,7 +1986,7 @@ def test_worker_start_failure_clears_racing_pending_job(
 
     monkeypatch.setattr(frame_ingest_module, "_start_analysis_worker", fail_worker_start)
 
-    def send_frame(client: TestClient, frame_id: int) -> Any:
+    def send_frame(client: Any, frame_id: int) -> Any:
         return client.post(
             "/v1/mobile/frame-ingest/sessions/start-failure-live/frames",
             headers={"Authorization": "Bearer secret-token"},

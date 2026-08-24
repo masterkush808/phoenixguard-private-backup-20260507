@@ -23,7 +23,7 @@ import json
 import logging
 import platform
 import time
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.mobile_api.windows_region_capture_v3 import (
     GlobalRegionHotkeyLoopV3,
@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             parsed_restore = json.loads(Path(args.restore_binding).read_text(encoding="utf-8"))
             if not isinstance(parsed_restore, dict):
                 raise ValueError("The restore binding must be a JSON object.")
-            restore_payload = dict(parsed_restore)
+            restore_payload = dict(cast("dict[str, Any]", parsed_restore))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             LOGGER.warning("The saved Windows region binding could not be loaded: %s", exc)
     try:

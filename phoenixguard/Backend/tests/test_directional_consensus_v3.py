@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from typing import Any
+
 from phoenixguard.study.directional_consensus_v3 import (
     reset_directional_consensus_v3,
     resolve_directional_consensus_v3,
 )
 
 
-def _study(closed_key: str, *, local_state: str, buy: float, sell: float) -> dict:
+def _study(closed_key: str, *, local_state: str, buy: float, sell: float) -> dict[str, Any]:
     return {
         "symbol": "NZD/USD OTC",
         "timeframe": "M5",
@@ -27,7 +29,7 @@ def _study(closed_key: str, *, local_state: str, buy: float, sell: float) -> dic
     }
 
 
-def _line(direction: str, *, touches: int, distance: float, current: bool = False) -> dict:
+def _line(direction: str, *, touches: int, distance: float, current: bool = False) -> dict[str, Any]:
     return {
         "type": "SUPPORT_TRENDLINE" if direction == "BUY" else "RESISTANCE_TRENDLINE",
         "trendline_role": "support" if direction == "BUY" else "resistance",

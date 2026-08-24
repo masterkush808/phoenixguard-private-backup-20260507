@@ -349,12 +349,12 @@ def test_retired_show_future_and_projection_artifact_routes_are_absent(
     }
     svc.save_session(payload)
     app = create_app(window_tracker_service=svc)
-    client = TestClient(app)
-    resp = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/show-future")
+    client: Any = TestClient(app)
+    resp: Any = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/show-future")
     assert resp.status_code == 404
-    art = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-projection")
+    art: Any = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-projection")
     assert art.status_code == 404
-    reference = client.get(
+    reference: Any = client.get(
         f"/v1/mobile/window-tracker/sessions/{session_id}"
         "/artifacts/latest-memory-reference"
     )
@@ -390,12 +390,12 @@ def test_retired_predict_and_forecast_action_routes_are_absent(tmp_path: Path) -
             "last_chart_path": str(chart_path),
         }
     )
-    client = TestClient(create_app(window_tracker_service=svc))
+    client: Any = TestClient(create_app(window_tracker_service=svc))
     try:
-        predict_response = client.post(
+        predict_response: Any = client.post(
             f"/v1/mobile/window-tracker/sessions/{session_id}/predict"
         )
-        poll_response = client.get(
+        poll_response: Any = client.get(
             f"/v1/mobile/window-tracker/sessions/{session_id}"
             "/forecast-actions/retired-request"
         )

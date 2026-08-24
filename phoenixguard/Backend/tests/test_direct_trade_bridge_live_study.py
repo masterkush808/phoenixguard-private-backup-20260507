@@ -4,6 +4,7 @@ import sys
 import time
 from types import SimpleNamespace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -30,7 +31,7 @@ def _load_calibration_module(module_name: str = "phoenixguard_trigger_calibratio
     return _load_module(module_name, CALIBRATION_MODULE_PATH)
 
 
-def _strategist_verdict_payload(**overrides):
+def _strategist_verdict_payload(**overrides: Any):
     latest_signal = {
         "published_epoch": time.time(),
         "signal_age_sec": 0.5,
@@ -84,7 +85,7 @@ def test_bridge_accepts_strategist_verdict_by_default():
     "removed_source",
     ["bias", "hybrid", "high_frequency", "two-candle"],
 )
-def test_removed_sources_never_authorize_trades(removed_source):
+def test_removed_sources_never_authorize_trades(removed_source: str):
     bridge = _load_bridge_module(f"phoenixguard_direct_trade_bridge_removed_{removed_source.replace('-', '_')}")
     payload = _strategist_verdict_payload()
 
@@ -204,6 +205,7 @@ def test_stale_observation_state_is_refused_regardless_of_verdict() -> None:
 
     # Defense in depth: with the state-age gate disabled the expired valid_until
     # epoch still refuses a two-day-old verdict.
+    bridge = cast(Any, bridge)
     bridge._max_state_age_seconds = 0.0
     try:
         with pytest.raises(bridge.TradeRejected, match="Live signal expired"):
@@ -578,7 +580,7 @@ def test_resolve_trade_payload_rejects_waiting_book_rule_signal():
 
 
 
-def test_bridge_defaults_trigger_manifest_to_durable_user_store(monkeypatch, tmp_path):
+def test_bridge_defaults_trigger_manifest_to_durable_user_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     local_app_data = tmp_path / "localappdata"
     manifest_path = local_app_data / "PhoenixGuard" / "calibration" / "trigger_calibration_manifest.json"
     manifest_path.parent.mkdir(parents=True)
@@ -594,7 +596,7 @@ def test_bridge_defaults_trigger_manifest_to_durable_user_store(monkeypatch, tmp
     assert bridge._calibration_manifest_paths(bridge.PROJECT_ROOT) == [manifest_path.resolve()]
 
 
-def test_read_live_state_prefers_fresher_local_runtime_snapshot(monkeypatch, tmp_path):
+def test_read_live_state_prefers_fresher_local_runtime_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_prefer_local_runtime")
     runtime_dir = tmp_path / "runtime" / "live"
     session_dir = runtime_dir / "data_live" / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
@@ -610,19 +612,21 @@ def test_read_live_state_prefers_fresher_local_runtime_snapshot(monkeypatch, tmp
     }
     local_state_path.write_text(json.dumps(local_payload), encoding="utf-8")
 
-    monkeypatch.setattr(bridge, "_default_live_runtime_dir", lambda project_root=None: runtime_dir)
-    monkeypatch.setattr(
-        bridge,
-        "_read_json_url",
-        lambda url, timeout_sec: {
+    def _fake_runtime_dir(project_root: Path | None = None) -> Path:
+        return runtime_dir
+
+    def _fake_read_json_url(url: str, timeout_sec: float) -> dict[str, object]:
+        return {
             "session_id": "pocket-live-8788",
             "last_capture_epoch": 100.0,
             "latest_signal": {
                 "published_epoch": 100.0,
                 "action": "BUY",
             },
-        },
-    )
+        }
+
+    monkeypatch.setattr(bridge, "_default_live_runtime_dir", _fake_runtime_dir)
+    monkeypatch.setattr(bridge, "_read_json_url", _fake_read_json_url)
 
     payload = bridge._read_live_state(
         base_url="http://127.0.0.1:8793",
@@ -634,7 +638,7 @@ def test_read_live_state_prefers_fresher_local_runtime_snapshot(monkeypatch, tmp
     assert payload["latest_signal"]["action"] == "SELL"
 
 
-def test_read_fresh_trade_does_not_spin_until_timeout_on_a_stale_snapshot(monkeypatch):
+def test_read_fresh_trade_does_not_spin_until_timeout_on_a_stale_snapshot(monkeypatch: pytest.MonkeyPatch):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_stale_single_read")
     calls = 0
     stale_epoch = time.time() - 60
@@ -656,7 +660,7 @@ def test_read_fresh_trade_does_not_spin_until_timeout_on_a_stale_snapshot(monkey
         },
     }
 
-    def read_state(**_kwargs):
+    def read_state(**_kwargs: object):
         nonlocal calls
         calls += 1
         return payload
@@ -743,7 +747,7 @@ def test_strategist_uses_fresh_observation_timestamp_instead_of_stale_signal_age
     assert trade["signal_age_seconds"] < 2.0
 
 
-def test_trigger_calibration_defaults_output_to_durable_user_store(monkeypatch, tmp_path):
+def test_trigger_calibration_defaults_output_to_durable_user_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     local_app_data = tmp_path / "localappdata"
     calibration_dir = local_app_data / "PhoenixGuard" / "calibration"
 
@@ -755,7 +759,7 @@ def test_trigger_calibration_defaults_output_to_durable_user_store(monkeypatch, 
     assert calibration.DEFAULT_OUTPUT == calibration_dir / "trigger_calibration_manifest.json"
 
 
-def test_trigger_calibration_writes_atomic_primary_and_backup(tmp_path):
+def test_trigger_calibration_writes_atomic_primary_and_backup(tmp_path: Path):
     calibration = _load_calibration_module("phoenixguard_trigger_calibration_backup")
     output = tmp_path / "trigger_calibration_manifest.json"
     manifest = {"boxes": {"buy_click": {"x": 1, "y": 2}, "sell_click": {"x": 3, "y": 4}}}
@@ -822,17 +826,23 @@ def test_trigger_manifest_to_boxes_uses_saved_timing_policy():
     }
 
 
-def test_send_direct_clicks_honors_saved_delays(monkeypatch):
+def test_send_direct_clicks_honors_saved_delays(monkeypatch: pytest.MonkeyPatch):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_click_timing")
     recorded_calls: list[tuple[object, ...]] = []
     recorded_sleeps: list[float] = []
 
-    fake_pyautogui = SimpleNamespace(
-        moveTo=lambda x, y, duration=0.0: recorded_calls.append(("moveTo", x, y, duration)),
-        click=lambda x, y: recorded_calls.append(("click", x, y)),
-    )
+    def _move_to(x: float, y: float, duration: float = 0.0) -> None:
+        recorded_calls.append(("moveTo", x, y, duration))
+
+    def _click(x: float, y: float) -> None:
+        recorded_calls.append(("click", x, y))
+
+    def _sleep(seconds: float) -> None:
+        recorded_sleeps.append(seconds)
+
+    fake_pyautogui = SimpleNamespace(moveTo=_move_to, click=_click)
     monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
-    monkeypatch.setattr(bridge.time, "sleep", lambda seconds: recorded_sleeps.append(seconds))
+    monkeypatch.setattr(bridge.time, "sleep", _sleep)
 
     bridge._send_direct_clicks(
         {"buy_click": (30, 40)},
@@ -858,16 +868,22 @@ def test_send_direct_clicks_honors_saved_delays(monkeypatch):
     assert recorded_sleeps == [7.0, 0.5]
 
 
-def test_send_direct_clicks_aborts_when_refreshed_side_drifts(monkeypatch):
+def test_send_direct_clicks_aborts_when_refreshed_side_drifts(monkeypatch: pytest.MonkeyPatch):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_click_drift_abort")
     events: list[tuple[object, ...]] = []
 
-    fake_pyautogui = SimpleNamespace(
-        moveTo=lambda x, y, duration=0.0: events.append(("moveTo", x, y, duration)),
-        click=lambda x, y: events.append(("click", x, y)),
-    )
+    def _move_to(x: float, y: float, duration: float = 0.0) -> None:
+        events.append(("moveTo", x, y, duration))
+
+    def _click(x: float, y: float) -> None:
+        events.append(("click", x, y))
+
+    def _sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+
+    fake_pyautogui = SimpleNamespace(moveTo=_move_to, click=_click)
     monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
-    monkeypatch.setattr(bridge.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+    monkeypatch.setattr(bridge.time, "sleep", _sleep)
 
     def refresh_trade():
         events.append(("refresh",))
@@ -892,16 +908,22 @@ def test_send_direct_clicks_aborts_when_refreshed_side_drifts(monkeypatch):
     assert ("click", 50, 60) not in events
 
 
-def test_send_direct_clicks_fires_when_refresh_confirms_decision(monkeypatch):
+def test_send_direct_clicks_fires_when_refresh_confirms_decision(monkeypatch: pytest.MonkeyPatch):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_click_confirm")
     events: list[tuple[object, ...]] = []
 
-    fake_pyautogui = SimpleNamespace(
-        moveTo=lambda x, y, duration=0.0: events.append(("moveTo", x, y, duration)),
-        click=lambda x, y: events.append(("click", x, y)),
-    )
+    def _move_to(x: float, y: float, duration: float = 0.0) -> None:
+        events.append(("moveTo", x, y, duration))
+
+    def _click(x: float, y: float) -> None:
+        events.append(("click", x, y))
+
+    def _sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+
+    fake_pyautogui = SimpleNamespace(moveTo=_move_to, click=_click)
     monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
-    monkeypatch.setattr(bridge.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+    monkeypatch.setattr(bridge.time, "sleep", _sleep)
 
     def refresh_trade():
         events.append(("refresh",))
@@ -935,7 +957,7 @@ def test_send_direct_clicks_fires_when_refresh_confirms_decision(monkeypatch):
     assert result == {"executed_side": "BUY", "refreshed_before_click": True, "press_count": 2}
 
 
-def test_bridge_trigger_state_starts_cooldown_after_ten_executed_trades(monkeypatch):
+def test_bridge_trigger_state_starts_cooldown_after_ten_executed_trades(monkeypatch: pytest.MonkeyPatch):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_cooldown")
     clock = {"now": 1000.0}
     monkeypatch.setattr(bridge.time, "time", lambda: clock["now"])
@@ -1016,7 +1038,7 @@ def test_bridge_trigger_state_stops_after_eight_executed_trades():
 
 
 
-def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch, tmp_path):
+def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     bridge = _load_bridge_module("phoenixguard_direct_visual_bias_sidecar")
     runtime_dir = tmp_path / "runtime" / "live"
     session_dir = (
@@ -1042,8 +1064,11 @@ def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch, tmp_pa
         ),
         encoding="utf-8",
     )
+    def _fake_runtime_dir(project_root: Path | None = None) -> Path:
+        return runtime_dir
+
     monkeypatch.setattr(
-        bridge, "_default_live_runtime_dir", lambda project_root=None: runtime_dir
+        bridge, "_default_live_runtime_dir", _fake_runtime_dir
     )
 
     payload = bridge._read_live_state(
@@ -1055,12 +1080,15 @@ def test_read_live_state_attaches_direct_visual_bias_sidecar(monkeypatch, tmp_pa
     assert payload["direct_visual_bias_v3"]["side"] == "SELL"
 
 
-def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch, tmp_path):
+def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_listener")
     runtime_dir = tmp_path / "runtime" / "live"
     runtime_dir.mkdir(parents=True)
+    def _fake_runtime_dir(project_root: Path | None = None) -> Path:
+        return runtime_dir
+
     monkeypatch.setattr(
-        bridge, "_default_live_runtime_dir", lambda project_root=None: runtime_dir
+        bridge, "_default_live_runtime_dir", _fake_runtime_dir
     )
     now_epoch = time.time()
     event = {
@@ -1087,7 +1115,7 @@ def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch, tmp_path
         def __enter__(self):
             return self
 
-        def __exit__(self, *_args):
+        def __exit__(self, *_args: object) -> bool:
             return False
 
         def __iter__(self):
@@ -1101,7 +1129,10 @@ def test_bridge_listener_uses_phoenixguard_session_updates(monkeypatch, tmp_path
                 ]
             )
 
-    monkeypatch.setattr(bridge.request, "urlopen", lambda *_args, **_kwargs: _StreamResponse())
+    def _fake_urlopen(*_args: object, **_kwargs: object) -> _StreamResponse:
+        return _StreamResponse()
+
+    monkeypatch.setattr(bridge.request, "urlopen", _fake_urlopen)
 
     update = next(
         bridge._iter_phoenixguard_session_updates(
@@ -1135,13 +1166,13 @@ def test_bridge_uses_listener_transport_by_default():
 
 
 def test_bridge_once_mode_uses_the_phoenixguard_listener(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ):
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_listener_once")
 
     class NoopLock:
-        def __init__(self, **_kwargs):
+        def __init__(self, **_kwargs: object) -> None:
             pass
 
         def acquire(self) -> None:
@@ -1151,25 +1182,23 @@ def test_bridge_once_mode_uses_the_phoenixguard_listener(
             return None
 
     event = {"session_id": "pocket-live-8788", "direct_visual_bias_v3": {"side": "SELL"}}
-    monkeypatch.setattr(bridge, "_InstanceLock", NoopLock)
-    monkeypatch.setattr(
-        bridge,
-        "_iter_phoenixguard_session_updates",
-        lambda **_kwargs: iter([event]),
-    )
-    monkeypatch.setattr(
-        bridge,
-        "_trade_from_listener_payload",
-        lambda payload, **_kwargs: {
+
+    def _fake_session_updates(**_kwargs: object):
+        return iter([event])
+
+    def _fake_trade_from_listener(payload: dict[str, Any], **_kwargs: object):
+        return {
             "side": payload["direct_visual_bias_v3"]["side"],
             "state_source": "phoenixguard_session_stream",
-        },
-    )
-    monkeypatch.setattr(
-        bridge,
-        "_trade_once",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("poll fallback ran")),
-    )
+        }
+
+    def _fail_trade_once(**_kwargs: object):
+        raise AssertionError("poll fallback ran")
+
+    monkeypatch.setattr(bridge, "_InstanceLock", NoopLock)
+    monkeypatch.setattr(bridge, "_iter_phoenixguard_session_updates", _fake_session_updates)
+    monkeypatch.setattr(bridge, "_trade_from_listener_payload", _fake_trade_from_listener)
+    monkeypatch.setattr(bridge, "_trade_once", _fail_trade_once)
 
     assert bridge.main(["--once", "--dry-run", "--transport", "listener"]) == 0
     assert '"state_source": "phoenixguard_session_stream"' in capsys.readouterr().out

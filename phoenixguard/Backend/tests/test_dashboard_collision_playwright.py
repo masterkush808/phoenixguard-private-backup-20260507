@@ -5004,7 +5004,7 @@ def test_surface_selector_proof_missing_or_wrong_rejects_selector_bound_rows(
     chromium_browser: Browser,
 ) -> None:
     initial = _operator_payload()
-    malformed_cases = []
+    malformed_cases: list[tuple[str, dict[str, Any]]] = []
     missing = copy.deepcopy(initial)
     missing["surface"].pop("market_selector_visual_fingerprint")
     malformed_cases.append(("missing surface selector", missing))

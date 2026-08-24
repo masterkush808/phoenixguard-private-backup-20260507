@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 
 CANDLESTICK_CATALOG_SCHEMA_V3 = "PG_CANDLESTICK_RULE_CATALOG_V3"
@@ -331,8 +331,8 @@ def _matches(rule_id: str, candles: Sequence[Mapping[str, Any]]) -> bool:
     if not candles:
         return False
     c = candles[-1]
-    p = candles[-2] if len(candles) >= 2 else {}
-    a = candles[-3] if len(candles) >= 3 else {}
+    p: Mapping[str, Any] = candles[-2] if len(candles) >= 2 else {}
+    a: Mapping[str, Any] = candles[-3] if len(candles) >= 3 else {}
     if rule_id.startswith("SPINNING_TOP"):
         return _spinning(c)
     if rule_id in {"HAMMER", "HANGING_MAN"}:
@@ -720,7 +720,6 @@ def _derived_filter_state(
     rows = list(candles[-20:])
     if not rows:
         return {"observable_filter_count": 0, "filters": {}}
-    ranges = [_spread(row) for row in rows]
     latest = rows[-1]
     close_location = (
         (_value(latest, "close") - min(_value(row, "low") for row in rows))
@@ -771,10 +770,23 @@ def _semantic_side(value: object) -> str:
 
 def _location_sides(value: object) -> set[str]:
     sides: set[str] = set()
-    values = value if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else [value]
+    values = cast(
+        Sequence[object],
+        (
+            value
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+            else [value]
+        ),
+    )
     for item in values:
+        candidates: tuple[object, ...]
         if isinstance(item, Mapping):
-            candidates = (item.get("role_side"), item.get("side"), item.get("role"))
+            binding = cast(Mapping[str, object], item)
+            candidates = (
+                binding.get("role_side"),
+                binding.get("side"),
+                binding.get("role"),
+            )
         else:
             candidates = (item,)
         for candidate in candidates:
@@ -782,6 +794,10 @@ def _location_sides(value: object) -> set[str]:
             if side in {"BUY", "SELL"}:
                 sides.add(side)
     return sides
+
+
+def _is_mapping_row(row: object) -> bool:
+    return isinstance(row, Mapping)
 
 
 def evaluate_candlestick_catalog_v3(
@@ -792,7 +808,7 @@ def evaluate_candlestick_catalog_v3(
     higher_timeframe_side: str = "NEUTRAL",
     location_history: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    rows = [row for row in candles if isinstance(row, Mapping)]
+    rows = [row for row in candles if _is_mapping_row(row)]
     fallback_trend = _semantic_side(prior_trend)
     location = _semantic_side(location_side)
     htf_side = _semantic_side(higher_timeframe_side)
@@ -824,8 +840,9 @@ def evaluate_candlestick_catalog_v3(
         )
         required_prior = str(spec["required_prior_trend"])
         prior_trend_valid = required_prior == "NEUTRAL" or observed_prior == required_prior
-        required_location = str(spec["required_location_side"])
-        location_bindings = location_history if isinstance(location_history, Mapping) else {}
+        location_bindings: Mapping[str, Any] = (
+            location_history if isinstance(location_history, Mapping) else {}
+        )
         location_sides = _location_sides(location_bindings.get(str(pattern_end)))
         if pattern_end == len(rows) - 1 and not isinstance(location_history, Mapping):
             location_sides.update(_location_sides(location))
@@ -846,7 +863,7 @@ def evaluate_candlestick_catalog_v3(
             and confirmation_satisfied
             and htf_valid
         )
-        failures = []
+        failures: list[str] = []
         if not prior_trend_valid:
             failures.append("PRIOR_TREND_MISMATCH")
         if not location_valid:

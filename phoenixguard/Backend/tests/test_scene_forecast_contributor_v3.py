@@ -999,13 +999,16 @@ def test_stateful_identity_retains_twenty_four_visible_closed_events() -> None:
         previous_state=initial["state"],
     )
 
-    # The detector retains the full bounded history even when repeated visual
-    # shapes make the old forming candle ambiguous. Retention and confirmation
-    # are intentionally separate: ambiguity must not manufacture 24 events.
+    # The detector retains the full visible closed-candle history even when
+    # repeated visual shapes make the old forming candle ambiguous. Retention
+    # and confirmation are intentionally separate: ambiguity must not
+    # manufacture 24 events.
     assert recovered["transition_observed"] is False
     assert recovered["transition_count"] == 0
     assert recovered["closed_candle_sequence"] == 0
-    assert len(recovered["state"]["closed_tail"]) == 24
+    assert len(recovered["state"]["closed_tail"]) == sum(
+        1 for row in advanced_rows if row["is_closed"]
+    )
     assert recovered["state"]["confirmed_event_batch"] == []
 
 

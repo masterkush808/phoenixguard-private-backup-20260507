@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Mapping, cast
 
 import phoenixguard.decision.order_positioning_evidence_v3 as evidence
 
@@ -20,8 +20,12 @@ def _streaming_session() -> dict[str, Any]:
 def test_visual_reaction_window_excludes_the_forming_candle() -> None:
     session = _streaming_session()
 
-    strict = evidence._order_reaction_window(session, chart_width=1000.0)
-    visual = evidence._order_reaction_window(
+    reaction_window = cast(
+        Callable[..., dict[str, Any]],
+        getattr(evidence, "_order_reaction_window"),
+    )
+    strict = reaction_window(session, chart_width=1000.0)
+    visual = reaction_window(
         session,
         chart_width=1000.0,
         allow_visual_closed_fallback=True,
@@ -68,12 +72,34 @@ def test_current_reference_map_uses_streaming_closed_candle_geometry(
             "chart_transform_valid": True,
         },
     }
-    monkeypatch.setattr(evidence, "_order_reference_geometry", lambda _session: (1000.0, 500.0, 0.006))
-    monkeypatch.setattr(evidence, "_order_reference_current_y", lambda _session, *, chart_height: (0.4, "FORMING_LIVE_CANDLE"))
-    monkeypatch.setattr(evidence, "_stable_broker_source_lock_id", lambda _session: "lock-current")
-    monkeypatch.setattr(evidence, "_current_positioning_frame_id", lambda _session: 42)
-    monkeypatch.setattr(evidence, "_identity", lambda _session: {"pair": "USD/CAD OTC", "timeframe": "M5"})
-    monkeypatch.setattr(evidence, "order_positioning_evidence_rows_v3", lambda _session: [source])
+    def fake_geometry(_session: Mapping[str, Any]) -> tuple[float, float, float] | None:
+        return (1000.0, 500.0, 0.006)
+
+    def fake_current_y(
+        _session: Mapping[str, Any],
+        *,
+        chart_height: float,
+    ) -> tuple[float | None, str]:
+        return (0.4, "FORMING_LIVE_CANDLE")
+
+    def fake_lock_id(_session: Mapping[str, Any]) -> str:
+        return "lock-current"
+
+    def fake_frame_id(_session: Mapping[str, Any]) -> int:
+        return 42
+
+    def fake_identity(_session: Mapping[str, Any]) -> dict[str, Any]:
+        return {"pair": "USD/CAD OTC", "timeframe": "M5"}
+
+    def fake_rows(_session: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return [source]
+
+    monkeypatch.setattr(evidence, "_order_reference_geometry", fake_geometry)
+    monkeypatch.setattr(evidence, "_order_reference_current_y", fake_current_y)
+    monkeypatch.setattr(evidence, "_stable_broker_source_lock_id", fake_lock_id)
+    monkeypatch.setattr(evidence, "_current_positioning_frame_id", fake_frame_id)
+    monkeypatch.setattr(evidence, "_identity", fake_identity)
+    monkeypatch.setattr(evidence, "order_positioning_evidence_rows_v3", fake_rows)
 
     reference_map = evidence.build_current_order_reference_map_v3(session)
 

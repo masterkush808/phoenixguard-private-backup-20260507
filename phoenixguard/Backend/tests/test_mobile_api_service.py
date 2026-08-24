@@ -186,7 +186,7 @@ def test_mobile_api_service_runs_job_and_exposes_result(tmp_path: Path) -> None:
 
 def test_mobile_api_http_surface_accepts_four_images(tmp_path: Path) -> None:
     service = MobileApiService(root_dir=tmp_path / "mobile_api_http", pipeline_adapter=_FakePipelineAdapter(tmp_path))
-    client = TestClient(create_app(service))
+    client: Any = TestClient(create_app(service))
     response = client.post(
         "/v1/mobile/jobs",
         files=[
@@ -261,7 +261,7 @@ def test_mobile_api_live_profile_exposes_clean_unavailable_capability(
         root_dir=tmp_path / "mobile_api_live",
         pipeline_adapter=PhoenixGuardPipelineAdapter(),
     )
-    client = TestClient(create_app(service))
+    client: Any = TestClient(create_app(service))
 
     config_response = client.get("/v1/mobile/config")
     assert config_response.status_code == 200
@@ -363,6 +363,7 @@ def test_full_live_state_routes_strip_host_paths_without_losing_public_geometry(
         _build_live_state,
     )
 
+    client: Any
     with TestClient(create_app(window_tracker_service=object())) as client:
         responses = (
             client.get(f"/v1/mobile/live/state/v3/{session_id}"),
@@ -439,7 +440,7 @@ def test_mobile_api_health_route_is_lazy(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(mobile_app_module, "_observer_service", _boom)
     monkeypatch.setattr(mobile_app_module, "_window_tracker_service", _boom)
 
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     response = client.get("/v1/mobile/health")
 
     assert response.status_code == 200

@@ -11,7 +11,7 @@ from phoenixguard.business.store import FREE_PREVIEW_PLAN_CODE, BusinessStore, s
 from phoenixguard.mobile_api.app import create_app
 
 
-def _client() -> TestClient:
+def _client() -> Any:
     set_business_store_for_test(BusinessStore())
     return TestClient(create_app())
 

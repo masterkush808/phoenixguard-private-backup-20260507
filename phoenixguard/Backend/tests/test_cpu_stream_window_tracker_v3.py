@@ -1641,7 +1641,8 @@ def test_public_session_compact_read_attaches_cross_process_stream_health(
     )
     monkeypatch.setattr(service, "cpu_stream_health_v3", stream_health)
     try:
-        response = TestClient(create_app(window_tracker_service=service)).get(
+        client: Any = TestClient(create_app(window_tracker_service=service))
+        response: Any = client.get(
             "/v1/mobile/window-tracker/sessions/session-a"
         )
 

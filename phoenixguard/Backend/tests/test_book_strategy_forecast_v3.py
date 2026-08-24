@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from phoenixguard.decision.book_strategy_forecast_v3 import (
     build_book_strategy_forecast_control_v3,
 )
@@ -148,10 +150,10 @@ def test_pattern_shape_without_location_has_no_directional_authority() -> None:
     )
     normalized = [
         {
-            "open": -float(row["open_y_px"]),
-            "close": -float(row["close_y_px"]),
-            "high": -float(row["wick_top_y_px"]),
-            "low": -float(row["wick_bottom_y_px"]),
+            "open": -float(cast(float, row["open_y_px"])),
+            "close": -float(cast(float, row["close_y_px"])),
+            "high": -float(cast(float, row["wick_top_y_px"])),
+            "low": -float(cast(float, row["wick_bottom_y_px"])),
         }
         for row in rows
     ]

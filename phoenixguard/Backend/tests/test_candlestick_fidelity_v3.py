@@ -7,14 +7,17 @@ wrong pattern encodings.
 
 from __future__ import annotations
 
-from phoenixguard.decision.candlestick_rule_catalog_v3 import (
-    CANDLESTICK_RULE_CATALOG_V3,
-    _matches,
-)
-from phoenixguard.decision.book_strategy_full_stack_v3 import _sakata_state
+from typing import Any
+
+import phoenixguard.decision.book_strategy_full_stack_v3 as book_strategy_full_stack_v3
+import phoenixguard.decision.candlestick_rule_catalog_v3 as candlestick_rule_catalog_v3
+from phoenixguard.decision.candlestick_rule_catalog_v3 import CANDLESTICK_RULE_CATALOG_V3
+
+_matches = getattr(candlestick_rule_catalog_v3, "_matches")
+_sakata_state = getattr(book_strategy_full_stack_v3, "_sakata_state")
 
 
-def _bar(open_: float, close: float, high: float, low: float) -> dict:
+def _bar(open_: float, close: float, high: float, low: float) -> dict[str, float]:
     return {"open": open_, "close": close, "high": high, "low": low}
 
 
@@ -205,15 +208,19 @@ def test_separating_lines_require_belt_hold_open() -> None:
     assert _matches("BULLISH_SEPARATING_LINES", [prior, tailed]) is False
 
 
-def _sakata_fixture(pivot_highs: list[float], pivot_lows: list[float], last_rows: list[dict] | None = None):
-    candles = []
+def _sakata_fixture(
+    pivot_highs: list[float],
+    pivot_lows: list[float],
+    last_rows: list[dict[str, float]] | None = None,
+) -> tuple[list[dict[str, float]], dict[str, Any]]:
+    candles: list[dict[str, float]] = []
     price = 100.0
     for index in range(12):
         candles.append(_bar(price + 1.0, price - 1.0, price + 1.4, price - 1.4))
         price += 0.5 if index % 2 else -0.5
     if last_rows:
         candles.extend(last_rows)
-    pivots = {
+    pivots: dict[str, Any] = {
         "internal_pivots": [],
         "intermediate_pivots": (
             [{"kind": "HIGH", "price": value, "index": offset} for offset, value in enumerate(pivot_highs)]
@@ -253,10 +260,7 @@ def test_fry_pan_bottom_detects_shallow_arc_with_breakout() -> None:
     ]
     trigger = _bar(104.3, 107.2, 107.4, 104.2)
 
-    class _Row(dict):
-        pass
-
-    candles = [
+    candles: list[dict[str, float]] = [
         {"open": row["open"], "high": row["high"], "low": row["low"], "close": row["close"]}
         for row in (*arc, trigger)
     ]
@@ -267,8 +271,8 @@ def test_fry_pan_bottom_detects_shallow_arc_with_breakout() -> None:
 
 def test_double_top_filter_needs_valley_break() -> None:
     """p.260: two near-equal pivot highs, latest close beneath the intervening valley."""
-    candles = []
-    base = 100.0
+    candles: list[dict[str, float]] = []
+    _base = 100.0
     shape = [8.0, 10.0, 10.1, 4.0, 1.0, 9.9, 10.05, -2.0]
     for level in shape:
         candles.append({"open": level + 0.4, "close": level, "high": max(level + 0.6, level + 0.4), "low": min(level - 0.6, level)})

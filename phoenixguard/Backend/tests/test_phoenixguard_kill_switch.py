@@ -29,11 +29,11 @@ def test_kill_switch_defaults_to_one_second_capture_interval():
     assert args.capture_interval_sec == 1.0
 
 
-def test_kill_switch_relaunch_passes_one_second_capture_interval(monkeypatch):
+def test_kill_switch_relaunch_passes_one_second_capture_interval(monkeypatch: pytest.MonkeyPatch):
     module = _load_module()
     captured: list[str] = []
 
-    def run(command, **_kwargs):
+    def run(command: list[str], **_kwargs: object):
         captured.extend(command)
         return SimpleNamespace(returncode=0)
 
@@ -55,10 +55,10 @@ def test_kill_switch_relaunch_passes_one_second_capture_interval(monkeypatch):
     assert captured[interval_index] == "1.0"
 
 
-def test_kill_switch_process_scan_timeout_is_bounded(monkeypatch):
+def test_kill_switch_process_scan_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch):
     module = _load_module()
 
-    def timeout(*_args, **_kwargs):
+    def timeout(*_args: object, **_kwargs: object):
         raise module.subprocess.TimeoutExpired(cmd="powershell", timeout=15.0)
 
     monkeypatch.setattr(module.subprocess, "run", timeout)

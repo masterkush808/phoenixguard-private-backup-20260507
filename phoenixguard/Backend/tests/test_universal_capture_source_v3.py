@@ -131,10 +131,13 @@ def test_rejected_study_healthy_heartbeat_releases_lease_for_fresh_recapture(
             source_id="edge-chart",
             sequence_id="seq-study-reclaim",
         )
+        def failing_capture(*args: Any, **kwargs: Any) -> bool:
+            return False
+
         monkeypatch.setattr(
             service,
             "_capture_and_analyze",
-            lambda *args, **kwargs: False,
+            failing_capture,
         )
         now_ms = int(time.time() * 1000)
         metadata = {

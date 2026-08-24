@@ -815,13 +815,15 @@ def _reconcile_latent_state_control_v3(
     if major_side not in {"BUY", "SELL"}:
         major_side = "UNRESOLVED"
 
-    latest_indices = {max(0, len(candles) - 1)} if candles else set()
-    if candles and isinstance(candles[-1], Mapping):
-        latest = cast(Mapping[str, Any], candles[-1])
-        for key in ("source_index", "index", "candle_index", "sequence_index"):
-            candidate = int(_float_or(latest.get(key), -1.0))
-            if candidate >= 0:
-                latest_indices.add(candidate)
+    latest_indices: set[int] = {max(0, len(candles) - 1)} if candles else set()
+    if candles:
+        latest_raw: Any = candles[-1]
+        if isinstance(latest_raw, Mapping):
+            latest = cast(Mapping[str, Any], latest_raw)
+            for key in ("source_index", "index", "candle_index", "sequence_index"):
+                candidate = int(_float_or(latest.get(key), -1.0))
+                if candidate >= 0:
+                    latest_indices.add(candidate)
 
     line_evidence: list[dict[str, Any]] = []
     for raw in trendlines:
@@ -842,9 +844,9 @@ def _reconcile_latent_state_control_v3(
             role = str(row.get("trendline_role") or strict.get("role") or "").lower()
             direction = "BUY" if role == "support" else "SELL" if role == "resistance" else "UNRESOLVED"
         raw_touch_indices = row.get("touch_candle_indices", [])
-        touch_indices = {
+        touch_indices: set[int] = {
             int(_float_or(item, -1.0))
-            for item in raw_touch_indices
+            for item in cast(Sequence[Any], raw_touch_indices)
             if _float_or(item, -1.0) >= 0
         } if isinstance(raw_touch_indices, Sequence) and not isinstance(raw_touch_indices, (str, bytes, bytearray)) else set()
         forming_touch = bool(row.get("forming_touch", False))
@@ -2635,7 +2637,6 @@ _COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE = 64
 def _compact_live_state_market_study_v3(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return _compact_live_state_observability_value(value)
-    mapping = cast(Mapping[str, Any], value)
     payload: dict[str, Any] = {
         str(key): item for key, item in cast(Mapping[Any, Any], value).items()
     }
@@ -2665,13 +2666,13 @@ def _compact_live_state_market_study_v3(value: Any) -> Any:
 
 
 def _compact_live_state_bounded_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
-    bounded = dict(cast(Mapping[str, Any], graph))
+    bounded = dict(graph)
     for key in ("edges", "nodes"):
         rows = bounded.get(key)
         if (
             isinstance(rows, Sequence)
             and not isinstance(rows, (str, bytes, bytearray))
-            and len(rows) > _COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE
+            and len(cast(Sequence[Any], rows)) > _COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE
         ):
             bounded[key] = list(cast(Sequence[Any], rows))[
                 -_COMPACT_LIVE_STATE_GRAPH_ROW_SAMPLE:
@@ -22767,8 +22768,8 @@ class PhoenixGuardWindowTrackingAdapter:
         trendlines: Sequence[Mapping[str, Any]],
         trend_slopes: Mapping[str, Any],
         trend_directions: Mapping[str, Any],
-        session_context: Mapping[str, Any],
-        news_context: Mapping[str, Any],
+        session_context: Mapping[str, Any] | None,
+        news_context: Mapping[str, Any] | None,
         pair_dna_context: Mapping[str, Any],
         higher_timeframe_context: Mapping[str, Any],
     ) -> dict[str, Any]:

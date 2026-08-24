@@ -619,9 +619,9 @@ def test_observer_http_surface_creates_session_and_returns_latest_signal(tmp_pat
         root_dir=tmp_path / "observer_api",
         pipeline_adapter=adapter,
     )
-    client = TestClient(create_app(service=mobile_service, observer_service=observer_service))
+    client: Any = TestClient(create_app(service=mobile_service, observer_service=observer_service))
 
-    create_response = client.post(
+    create_response: Any = client.post(
         "/v1/mobile/observer/sessions",
         json={
             "name": "eurusd-observer",
@@ -635,7 +635,7 @@ def test_observer_http_surface_creates_session_and_returns_latest_signal(tmp_pat
     assert create_response.status_code == 201
     session_id = create_response.json()["session_id"]
 
-    submit_response = client.post(
+    submit_response: Any = client.post(
         f"/v1/mobile/observer/sessions/{session_id}/bundles",
         files=[
             ("screenshots", ("higher_1.png", _png_bytes((10, 20, 30)), "image/png")),
@@ -648,6 +648,6 @@ def test_observer_http_surface_creates_session_and_returns_latest_signal(tmp_pat
     bundle_id = submit_response.json()["bundle_id"]
     observer_service.wait_for_bundle(session_id, bundle_id, timeout=5)
 
-    latest_signal = client.get(f"/v1/mobile/observer/sessions/{session_id}/signals/latest")
+    latest_signal: Any = client.get(f"/v1/mobile/observer/sessions/{session_id}/signals/latest")
     assert latest_signal.status_code == 200
     assert latest_signal.json()["action"] == "BUY"

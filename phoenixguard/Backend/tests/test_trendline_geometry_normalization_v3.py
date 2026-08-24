@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from phoenixguard.tracking.trendline_geometry_v3 import (
     normalize_trendline_overlays_v3,
 )
 
 
-def _candles(*, bottoms: dict[int, float] | None = None) -> list[dict]:
+def _candles(*, bottoms: dict[int, float] | None = None) -> list[dict[str, Any]]:
     selected_bottoms = bottoms or {}
-    rows = []
+    rows: list[dict[str, Any]] = []
     for center in range(10, 111, 10):
         bottom = selected_bottoms.get(center, 90.0)
         top = min(20.0, bottom - 5.0)

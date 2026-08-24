@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from phoenixguard.study import pair_dna_v3
 from phoenixguard.study.behavioral_sequence_v3 import measure_market_behavior_v3
 from phoenixguard.study.candle_intelligence_v3 import analyze_candle_sequence_v3
 from phoenixguard.study.concept_drift_v3 import (
@@ -13,7 +14,6 @@ from phoenixguard.study.concept_drift_v3 import (
     OnlineConceptDriftDetectorV3,
 )
 from phoenixguard.study.pair_dna_v3 import (
-    MAX_RECENT_SEQUENCE_OBJECT_TYPES,
     PairDNAStoreV3,
     PairDNAValidationError,
     pair_profile_key_v3,
@@ -201,7 +201,11 @@ def _studies() -> tuple[dict[str, Any], dict[str, Any]]:
 
 def test_recent_sequence_object_types_are_bounded_and_legacy_safe(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The production ceiling is a deliberate 1M storage bound; pin a small
+    # ceiling here so the truncation behavior itself stays exercised.
+    monkeypatch.setattr(pair_dna_v3, "MAX_RECENT_SEQUENCE_OBJECT_TYPES", 32)
     path = tmp_path / "pair_dna.json"
     store = PairDNAStoreV3(path)
     candle_study, behavior_study = _studies()
@@ -218,7 +222,7 @@ def test_recent_sequence_object_types_are_bounded_and_legacy_safe(
         objects=objects,
     )
     recent = result["profile"]["recent_sequences"][-1]
-    assert len(recent["object_types"]) == MAX_RECENT_SEQUENCE_OBJECT_TYPES
+    assert len(recent["object_types"]) == pair_dna_v3.MAX_RECENT_SEQUENCE_OBJECT_TYPES
     assert recent["object_types"] == sorted(recent["object_types"])
     assert recent["object_types"][0] == "OBJECT_00"
     assert recent["object_types"][-1] == "OBJECT_31"

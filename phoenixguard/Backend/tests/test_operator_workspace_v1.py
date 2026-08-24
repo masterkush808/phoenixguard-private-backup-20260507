@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import NotRequired, TypedDict, cast
+from typing import Any, NotRequired, Protocol, TypedDict, cast
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
 import phoenixguard.mobile_api.app as mobile_app
+from phoenixguard.mobile_api.live_state_v3 import _COMPACT_TRACKED_CANDLES_WINDOW  # pyright: ignore[reportPrivateUsage]
 from phoenixguard.mobile_api.live_state_v3 import build_live_state_v3
 from phoenixguard.mobile_api.operator_workspace_v1 import (
     OPERATOR_WORKSPACE_SCHEMA_VERSION,
@@ -244,6 +244,19 @@ def _mutable_mapping(value: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _public_mapping(value: object) -> dict[str, object]:
+    return cast(dict[str, object], value)
+
+
+class _TestResponse(Protocol):
+    status_code: int
+    content: bytes
+
+    def json(self) -> Any: ...
+
+
+def _test_client_get(client: Any, url: str) -> _TestResponse:
+    return client.get(url)
 
 
 def _fresh_payload(*, side: str = "BUY", now: float = 100.0) -> dict[str, object]:
@@ -398,15 +411,15 @@ def test_wgc_study_source_projects_identity_locked_overlays_without_selector_fin
     )
 
     assert len(workspace["overlays"]) == 1
-    overlay = workspace["overlays"][0]
+    overlay = _public_mapping(workspace["overlays"][0])
     assert overlay["id"] == "wgc-demand-zone-14"
     assert overlay["symbol"] == "CAD/CHF OTC"
     assert overlay["timeframe"] == "M5"
     assert overlay["market_selector_visual_fingerprint"] == ""
     assert overlay["instrument_identity_status"] == "LOCKED"
-    assert overlay["surface_semantic_identity"] == workspace["surface"][
-        "semantic_identity"
-    ]
+    assert overlay["surface_semantic_identity"] == _public_mapping(
+        workspace["surface"]
+    )["semantic_identity"]
 
 
 def test_public_overlay_semantics_are_pair_scoped_even_when_track_id_is_reused() -> None:
@@ -423,12 +436,12 @@ def test_public_overlay_semantics_are_pair_scoped_even_when_track_id_is_reused()
     second = _build_workspace(second_payload, now_epoch=100.0)
 
     assert first["overlays"][0]["id"] == second["overlays"][0]["id"]
-    assert first["overlays"][0]["semantic_id"] != second["overlays"][0][
-        "semantic_id"
-    ]
-    assert first["surface"]["semantic_identity"] != second["surface"][
-        "semantic_identity"
-    ]
+    assert _public_mapping(first["overlays"][0])["semantic_id"] != _public_mapping(
+        second["overlays"][0]
+    )["semantic_id"]
+    assert _public_mapping(first["surface"])["semantic_identity"] != _public_mapping(
+        second["surface"]
+    )["semantic_identity"]
 
 
 def test_unknown_market_frames_never_share_a_visual_surface_namespace() -> None:
@@ -447,9 +460,9 @@ def test_unknown_market_frames_never_share_a_visual_surface_namespace() -> None:
 
     assert first["market"]["symbol"] == "Unknown"
     assert second["market"]["symbol"] == "Unknown"
-    assert first["surface"]["semantic_identity"] != second["surface"][
-        "semantic_identity"
-    ]
+    assert _public_mapping(first["surface"])["semantic_identity"] != _public_mapping(
+        second["surface"]
+    )["semantic_identity"]
 
 
 def test_same_frame_fast_chart_identity_names_surface_before_study_completes() -> None:
@@ -618,7 +631,7 @@ def test_compact_selector_v3_exact_identity_projects_current_overlay() -> None:
     )
 
     assert len(workspace["overlays"]) == 1
-    overlay = workspace["overlays"][0]
+    overlay = _public_mapping(workspace["overlays"][0])
     assert overlay["id"] == "wgc-demand-zone-14"
     assert overlay["symbol"] == "CAD/CHF OTC"
     assert overlay["timeframe"] == "M5"
@@ -626,9 +639,9 @@ def test_compact_selector_v3_exact_identity_projects_current_overlay() -> None:
         "selector_v3_cadchfotc_confirmed"
     )
     assert overlay["instrument_identity_status"] == "LOCKED"
-    assert workspace["surface"]["market_selector_visual_fingerprint"] == (
-        "selector_v3_cadchfotc_confirmed"
-    )
+    assert _public_mapping(workspace["surface"])[
+        "market_selector_visual_fingerprint"
+    ] == ("selector_v3_cadchfotc_confirmed")
 
 
 @pytest.mark.parametrize(
@@ -1241,30 +1254,6 @@ def _bind_countertrend_command(
     command["countertrend_sniper_promotion_v3"] = dict(promotion)
 
 
-def _positioning_anchor_rows(
-    *,
-    scale_x: float = 1.0,
-    offset_x: float = 0.0,
-    scale_y: float = 1.0,
-    offset_y: float = 0.0,
-) -> list[dict[str, object]]:
-    baseline = (
-        ("stable-a", 0.18, 0.34),
-        ("stable-b", 0.38, 0.47),
-        ("stable-c", 0.61, 0.59),
-        ("stable-d", 0.79, 0.41),
-    )
-    return [
-        {
-            "track_id": anchor_id,
-            "is_closed": True,
-            "x_norm": round(scale_x * x_norm + offset_x, 6),
-            "close_y_norm": round(scale_y * y_norm + offset_y, 6),
-        }
-        for anchor_id, x_norm, y_norm in baseline
-    ]
-
-
 def _ready_positioning_preview_candidate(
     *,
     frame_id: int = 14,
@@ -1426,39 +1415,6 @@ def _ready_order_reference_map(
     }
 
 
-def _seal_positioning_plan(plan: dict[str, object]) -> None:
-    zones = cast(list[dict[str, object]], plan["zones"])
-    static = [
-        {
-            key: value
-            for key, value in zone.items()
-            if key not in {"status", "status_reason", "last_updated_step"}
-        }
-        for zone in zones
-    ]
-    geometry_snapshot = json.dumps(
-        static,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-    anchors = cast(list[dict[str, object]], plan["reprojection_anchors"])
-    anchor_snapshot = json.dumps(
-        anchors,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-    plan["geometry_snapshot"] = geometry_snapshot
-    plan["geometry_fingerprint"] = hashlib.sha256(
-        geometry_snapshot.encode("utf-8")
-    ).hexdigest()
-    plan["reprojection_anchor_snapshot"] = anchor_snapshot
-    plan["reprojection_anchor_fingerprint"] = hashlib.sha256(
-        anchor_snapshot.encode("utf-8")
-    ).hexdigest()
-
-
 def _all_keys(value: object) -> set[str]:
     keys: set[str] = set()
     if isinstance(value, Mapping):
@@ -1536,11 +1492,11 @@ def test_operator_surface_exposes_frame_atomic_overlay_versions() -> None:
 
     assert workspace["surface"]["frame_id"] == 14
     assert (
-        workspace["surface"]["overlay_state_version"]
+        _public_mapping(workspace["surface"])["overlay_state_version"]
         == "ovlock_4_a1b2c3d4e5f6"
     )
     assert (
-        workspace["surface"]["overlay_frame_state_version"]
+        _public_mapping(workspace["surface"])["overlay_frame_state_version"]
         == "ov_14_4_a1b2c3d4e5f6"
     )
     assert "frame_timing_trace_v3" not in workspace["surface"]
@@ -1619,7 +1575,7 @@ def test_operator_workspace_sanitizes_cpu_stream_health_without_authority() -> N
     assert stream["fresh"] is True
     assert stream["last_reason"] == "Pixel change accepted"
     assert stream["stream_generation"] == 9
-    market_read = cast(dict[str, object], stream["market_read"])
+    market_read = stream["market_read"]
     assert market_read["state"] == "MOVING"
     assert market_read["fresh"] is True
     assert market_read["freshness_budget_seconds"] == 8.0
@@ -1761,7 +1717,7 @@ def test_fresh_stream_heartbeat_updates_current_read_and_best_action_without_per
     assert "intrabar observation" in studied["answer"]
     studied_read = cast(
         dict[str, object],
-        cast(dict[str, object], studied["evidence"])["streaming_market_read"],
+        studied["evidence"]["streaming_market_read"],
     )
     assert studied_read["state"] == "MOVING"
     assert studied_read["direction"] == "NEUTRAL"
@@ -1773,7 +1729,7 @@ def test_fresh_stream_heartbeat_updates_current_read_and_best_action_without_per
     assert decision["action"] == "DO_NOT_ENTER"
     assert decision["enter_now"] is False
     assert decision["updated_at"] == 99.95
-    decision_evidence = cast(dict[str, object], decision["evidence"])
+    decision_evidence = decision["evidence"]
     assert decision_evidence["entry_permission_authorized"] is False
     assert decision_evidence["execution_authority"] is False
     assert decision_evidence["broker_click_authority"] is False
@@ -1906,7 +1862,9 @@ def test_missed_stream_decision_waits_for_fresh_directional_pullback() -> None:
     assert entry["timing_state"] == "MISSED"
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["enter_now"] is False
-    operator_action = cast(dict[str, object], entry["operator_action"])
+    operator_action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
     assert entry["headline"] == "WAIT FOR PULLBACK"
     assert operator_action["state"] == "WAIT_FOR_PULLBACK"
     assert "fresh SELL pullback" in str(operator_action["instruction"])
@@ -1937,7 +1895,9 @@ def test_missed_prior_thesis_yields_to_aligned_current_regression_and_major() ->
     assert entry["evidence"]["prior_studied_side"] == "SELL"
     assert entry["evidence"]["current_actionable_study_side"] == "BUY"
     assert entry["evidence"]["prior_thesis_superseded"] is True
-    operator_action = cast(dict[str, object], entry["operator_action"])
+    operator_action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
     assert entry["headline"] == "WAIT FOR PULLBACK"
     assert "prior SELL" in str(operator_action["instruction"])
     assert "current closed-candle study now tracks BUY" in str(
@@ -1968,8 +1928,10 @@ def test_current_lineage_buy_forecast_is_not_hidden_by_older_sell_command() -> N
     workspace = _build_workspace(payload, now_epoch=100.0)
     studied = workspace["three_questions"]["studied_direction_current"]
     entry = workspace["three_questions"]["entry_now"]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    evidence = cast(dict[str, object], entry["evidence"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    evidence = entry["evidence"]
 
     assert studied["side"] == "SELL"
     assert studied["evidence"]["current_regression_side"] == "BUY"
@@ -1985,7 +1947,9 @@ def test_current_lineage_buy_forecast_is_not_hidden_by_older_sell_command() -> N
     )
     assert "timing will publish" not in str(entry["headline"]).lower()
     assert entry["decision"] == "WATCH_BUY_PULLBACK"
-    assert entry["operator_action"]["state"] == "WAIT_FOR_PULLBACK"
+    assert _public_mapping(_public_mapping(entry)["operator_action"])[
+        "state"
+    ] == "WAIT_FOR_PULLBACK"
 
 
 def test_resting_stream_watches_current_buy_after_prior_sell_expires() -> None:
@@ -2003,7 +1967,9 @@ def test_resting_stream_watches_current_buy_after_prior_sell_expires() -> None:
     assert entry["side"] == "BUY"
     assert entry["enter_now"] is False
     assert entry["action"] == "DO_NOT_ENTER"
-    operator_action = cast(dict[str, object], entry["operator_action"])
+    operator_action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
     assert operator_action["state"] == "WAIT_FOR_PULLBACK"
     assert "prior SELL thesis remains history" in str(
         operator_action["instruction"]
@@ -2020,15 +1986,21 @@ def test_stream_refresh_updates_cached_questions_without_rebuilding_closed_candl
     base = _build_workspace(payload, now_epoch=100.0)
     original_study_key = base["tracking"]["market_study_v3"]["closed_candle_key"]
 
-    moving = refresh_operator_streaming_read_v3(
-        base,
-        _cpu_stream_runtime_payload(now=101.0, frame_seq=51, state="motion"),
-        now_epoch=101.0,
+    moving = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            base,
+            _cpu_stream_runtime_payload(now=101.0, frame_seq=51, state="motion"),
+            now_epoch=101.0,
+        ),
     )
-    resting = refresh_operator_streaming_read_v3(
-        moving,
-        _cpu_stream_runtime_payload(now=102.0, frame_seq=52, state="rest"),
-        now_epoch=102.0,
+    resting = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            moving,
+            _cpu_stream_runtime_payload(now=102.0, frame_seq=52, state="rest"),
+            now_epoch=102.0,
+        ),
     )
 
     assert moving["revision"] == resting["revision"] == base["revision"]
@@ -2055,10 +2027,13 @@ def test_expired_cached_enter_now_is_cleared_by_public_stream_synthesis() -> Non
         "window_open": False,
     }
 
-    refreshed = refresh_operator_streaming_read_v3(
-        expired,
-        _cpu_stream_runtime_payload(now=101.0, frame_seq=61, state="motion"),
-        now_epoch=101.0,
+    refreshed = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            expired,
+            _cpu_stream_runtime_payload(now=101.0, frame_seq=61, state="motion"),
+            now_epoch=101.0,
+        ),
     )
     decision = refreshed["three_questions"]["entry_now"]
 
@@ -2101,7 +2076,9 @@ def test_three_questions_explain_countertrend_sell_without_turning_study_into_pe
     assert entry["state"] == "FORMING"
     assert entry["side"] == "SELL"
     assert entry["headline"] == "PREPARE"
-    assert cast(dict[str, object], entry["operator_action"])["state"] == "PREPARE"
+    assert _public_mapping(_public_mapping(entry)["operator_action"])[
+        "state"
+    ] == "PREPARE"
     assert not entry["reason"].lower().startswith("wait")
 
 
@@ -2121,7 +2098,9 @@ def test_three_questions_do_not_call_missing_entry_evidence_stale_history() -> N
     assert entry["timing_state"] == "FORMING"
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["headline"] == "STAY OUT"
-    operator_action = cast(dict[str, object], entry["operator_action"])
+    operator_action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
     assert operator_action["state"] == "AVOID"
     assert "No identity-proven completed study" in str(
         operator_action["instruction"]
@@ -2177,14 +2156,20 @@ def test_five_pair_m5_forecasts_are_concrete_bounded_and_stream_stable(
 
     workspace = _build_workspace(payload, now_epoch=100.0)
     entry = workspace["three_questions"]["entry_now"]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    action = cast(dict[str, object], entry["operator_action"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
 
     assert forecast["status"] == "FORECAST_AVAILABLE"
     assert forecast["side"] == side
-    assert forecast["horizon_seconds_low"] >= 900
-    assert forecast["horizon_candles_low"] >= 3
-    assert forecast["horizon_candles_high"] >= forecast["horizon_candles_low"]
+    assert cast(float, forecast["horizon_seconds_low"]) >= 900
+    assert cast(float, forecast["horizon_candles_low"]) >= 3
+    assert cast(float, forecast["horizon_candles_high"]) >= cast(
+        float, forecast["horizon_candles_low"]
+    )
     assert forecast["horizon_label"] == (
         "3–6 completed M5 candles after the anchor close"
     )
@@ -2215,7 +2200,9 @@ def test_five_pair_m5_forecasts_are_concrete_bounded_and_stream_stable(
     assert "NOT YET" not in str(entry["headline"]).upper()
     assert "NOT YET" not in str(entry["answer"]).upper()
     assert action["state"] == "PREPARE"
-    projection = cast(dict[str, object], entry["study_projection"])
+    projection = _public_mapping(
+        _public_mapping(entry)["study_projection"]
+    )
     assert projection["headline"] == (
         f"{forecast['headline']} · uncalibrated live-sequence estimate"
     )
@@ -2321,8 +2308,12 @@ def test_uncalibrated_live_sequence_projection_requires_current_eligible_lineage
     entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
         "entry_now"
     ]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    projection = cast(dict[str, object], entry["study_projection"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    projection = _public_mapping(
+        _public_mapping(entry)["study_projection"]
+    )
 
     assert forecast["status"] == "TIMING_UNRATED"
     assert projection["status"] == "RESEARCH_ONLY_UNCALIBRATED"
@@ -2362,8 +2353,12 @@ def test_empirical_pair_timing_publishes_bounded_uncalibrated_projection() -> No
     entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
         "entry_now"
     ]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    projection = cast(dict[str, object], entry["study_projection"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    projection = _public_mapping(
+        _public_mapping(entry)["study_projection"]
+    )
 
     assert forecast["status"] == "FORECAST_AVAILABLE"
     assert forecast["forecast_lineage_matches"] is True
@@ -2418,9 +2413,11 @@ def test_empirical_pair_projection_fails_closed_outside_timing_contract(
 
     projection = cast(
         dict[str, object],
-        _build_workspace(payload, now_epoch=100.0)["three_questions"][
-            "entry_now"
-        ]["study_projection"],
+        _public_mapping(
+            _build_workspace(payload, now_epoch=100.0)["three_questions"][
+                "entry_now"
+            ]
+        )["study_projection"],
     )
     assert projection["status"] == "RESEARCH_ONLY_UNCALIBRATED"
     assert projection["timing_range_publishable"] is False
@@ -2540,8 +2537,12 @@ def test_forward_forecast_separates_estimated_likelihood_from_evidence_confidenc
     entry = _build_workspace(payload, now_epoch=100.0)["three_questions"][
         "entry_now"
     ]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    action = cast(dict[str, object], entry["operator_action"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
 
     assert forecast["headline"] == (
         "SELL leading 3–6 completed M5 candles after the anchor close"
@@ -2626,9 +2627,9 @@ def test_exact_window_uses_fixed_epochs_counts_down_and_expires_without_reset() 
     )
     at_400_forecast = cast(
         dict[str, object],
-        cast(dict[str, object], at_400["three_questions"])["entry_now"][
-            "timing_forecast"
-        ],
+        _public_mapping(
+            cast(dict[str, object], at_400["three_questions"])["entry_now"]
+        )["timing_forecast"],
     )
     assert at_400_forecast["target_window_end_epoch_seconds"] == 1_900.0
     assert at_400_forecast["seconds_until_window_start"] == 600
@@ -2642,9 +2643,9 @@ def test_exact_window_uses_fixed_epochs_counts_down_and_expires_without_reset() 
     )
     at_700_forecast = cast(
         dict[str, object],
-        cast(dict[str, object], at_700["three_questions"])["entry_now"][
-            "timing_forecast"
-        ],
+        _public_mapping(
+            cast(dict[str, object], at_700["three_questions"])["entry_now"]
+        )["timing_forecast"],
     )
     assert at_700_forecast["target_window_end_epoch_seconds"] == 1_900.0
     assert at_700_forecast["seconds_until_window_start"] == 300
@@ -2658,9 +2659,9 @@ def test_exact_window_uses_fixed_epochs_counts_down_and_expires_without_reset() 
     )
     expired_forecast = cast(
         dict[str, object],
-        cast(dict[str, object], expired["three_questions"])["entry_now"][
-            "timing_forecast"
-        ],
+        _public_mapping(
+            cast(dict[str, object], expired["three_questions"])["entry_now"]
+        )["timing_forecast"],
     )
     assert expired_forecast["exact_wall_clock_proven"] is False
     assert expired_forecast["target_window_start_epoch_seconds"] is None
@@ -2678,8 +2679,8 @@ def test_stream_pair_switch_discards_prior_forecast_and_permission() -> None:
     base_payload = _countertrend_study_payload()
     _attach_forward_timing_forecast(base_payload)
     base = _build_workspace(base_payload, now_epoch=100.0)
-    prior_forecast = cast(
-        dict[str, object], base["three_questions"]["entry_now"]["timing_forecast"]
+    prior_forecast = _public_mapping(
+        _public_mapping(base["three_questions"]["entry_now"])["timing_forecast"]
     )
     assert cast(dict[str, object], prior_forecast["scope"])["symbol"] == "EUR/USD"
 
@@ -2708,7 +2709,7 @@ def test_stream_pair_switch_discards_prior_forecast_and_permission() -> None:
     pending_action = cast(dict[str, object], pending_entry["operator_action"])
 
     assert pending["market"] == {"symbol": "EUR/USD", "timeframe": "M5"}
-    assert pending["permission"]["allowed"] is False
+    assert cast(dict[str, object], pending["permission"])["allowed"] is False
     assert pending_entry["identity_rebind_pending"] is True
     assert cast(dict[str, object], pending_forecast["scope"])["symbol"] == (
         "EUR/USD"
@@ -2748,7 +2749,7 @@ def test_stream_pair_switch_discards_prior_forecast_and_permission() -> None:
     action = cast(dict[str, object], entry["operator_action"])
 
     assert refreshed["market"] == {"symbol": "AUD/CAD OTC", "timeframe": "M5"}
-    assert refreshed["permission"]["allowed"] is False
+    assert cast(dict[str, object], refreshed["permission"])["allowed"] is False
     assert forecast["side"] == "NEUTRAL"
     assert forecast["status"] == "DIRECTION_UNRESOLVED"
     assert "EUR/USD" not in json.dumps(forecast)
@@ -2813,7 +2814,7 @@ def test_heartbeat_pair_switch_revokes_partial_overlay_publish_without_study() -
     }
     assert refreshed["overlays"] == []
     assert refreshed["history"] == []
-    assert refreshed["permission"]["allowed"] is False
+    assert cast(dict[str, object], refreshed["permission"])["allowed"] is False
     questions = cast(dict[str, object], refreshed["three_questions"])
     entry = cast(dict[str, object], questions["entry_now"])
     assert entry["headline"] == "CLASSIFYING CURRENT CHART"
@@ -2852,9 +2853,11 @@ def test_exact_stop_survival_calibration_never_bleeds_into_event_likelihood() ->
 
     forecast = cast(
         dict[str, object],
-        _build_workspace(payload, now_epoch=100.0)["three_questions"][
-            "entry_now"
-        ]["timing_forecast"],
+        _public_mapping(
+            _build_workspace(payload, now_epoch=100.0)["three_questions"][
+                "entry_now"
+            ]
+        )["timing_forecast"],
     )
     technical = cast(dict[str, object], forecast["technical_estimates"])
     public_stop = cast(dict[str, object], technical["stop_survival"])
@@ -2884,9 +2887,15 @@ def test_model_horizon_never_overrides_proven_sub_15_minute_broker_expiry() -> N
 
     workspace = _build_workspace(payload, now_epoch=100.0)
     entry = workspace["three_questions"]["entry_now"]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    action = cast(dict[str, object], entry["operator_action"])
-    proof = cast(dict[str, object], entry["broker_expiry_v3"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
+    proof = _public_mapping(
+        _public_mapping(entry)["broker_expiry_v3"]
+    )
 
     assert workspace["permission"]["allowed"] is True
     assert forecast["forecast_horizon_seconds"] == 3_000
@@ -2917,9 +2926,15 @@ def test_unknown_broker_expiry_keeps_forecast_but_action_requires_verification()
 
     workspace = _build_workspace(payload, now_epoch=100.0)
     entry = workspace["three_questions"]["entry_now"]
-    forecast = cast(dict[str, object], entry["timing_forecast"])
-    action = cast(dict[str, object], entry["operator_action"])
-    proof = cast(dict[str, object], entry["broker_expiry_v3"])
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
+    action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
+    proof = _public_mapping(
+        _public_mapping(entry)["broker_expiry_v3"]
+    )
 
     assert workspace["permission"]["allowed"] is True
     assert forecast["status"] == "FORECAST_AVAILABLE"
@@ -3114,7 +3129,7 @@ def test_path_clock_timing_only_vetoes_known_under_15_minute_duration(
     ]
     timing = cast(
         dict[str, object],
-        cast(dict[str, object], entry["evidence"])["path_clock_liquidity_v3"],
+        entry["evidence"]["path_clock_liquidity_v3"],
     )
 
     assert entry["entry_permission_authorized"] is True
@@ -3175,7 +3190,7 @@ def test_unproven_exact_candle_time_keeps_eligible_duration_separate() -> None:
     ]
     timing = cast(
         dict[str, object],
-        cast(dict[str, object], entry["evidence"])["path_clock_liquidity_v3"],
+        entry["evidence"]["path_clock_liquidity_v3"],
     )
 
     assert timing["minimum_duration_seconds"] == 900
@@ -3512,7 +3527,9 @@ def test_three_questions_call_an_expired_studied_move_missed_instead_of_wait() -
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["timing_state"] == "MISSED"
     assert entry["headline"] == "WAIT FOR PULLBACK"
-    operator_action = cast(dict[str, object], entry["operator_action"])
+    operator_action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
     assert operator_action["state"] == "WAIT_FOR_PULLBACK"
     assert "chasing it now is not authorized" in str(
         operator_action["instruction"]
@@ -3558,7 +3575,9 @@ def test_three_questions_classify_late_chase_trap_as_missed() -> None:
     assert entry["timing_state"] == "MISSED"
     assert entry["action"] == "DO_NOT_ENTER"
     assert entry["headline"] == "WAIT FOR PULLBACK"
-    operator_action = cast(dict[str, object], entry["operator_action"])
+    operator_action = _public_mapping(
+        _public_mapping(entry)["operator_action"]
+    )
     assert operator_action["state"] == "WAIT_FOR_PULLBACK"
     assert "chasing" in str(operator_action["instruction"]).lower()
 
@@ -4202,7 +4221,9 @@ def test_legacy_tracker_session_route_redacts_backend_internals() -> None:
             }
 
     with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}")
+        response = _test_client_get(client,
+            f"/v1/mobile/window-tracker/sessions/{session_id}"
+        )
 
     assert response.status_code == 200
     payload = cast(dict[str, object], response.json())
@@ -4229,16 +4250,20 @@ def test_legacy_tracker_session_route_redacts_backend_internals() -> None:
 
 def test_operator_entry_deadline_distinguishes_absent_window_from_expiry() -> None:
     now_epoch = 1_900_000_000.0
+    deadline_expired = cast(
+        Callable[..., bool],
+        getattr(mobile_app, "_operator_entry_deadline_expired"),
+    )
 
-    assert mobile_app._operator_entry_deadline_expired(
+    assert deadline_expired(
         0.0,
         now_epoch=now_epoch,
     ) is False
-    assert mobile_app._operator_entry_deadline_expired(
+    assert deadline_expired(
         now_epoch + 30.0,
         now_epoch=now_epoch,
     ) is False
-    assert mobile_app._operator_entry_deadline_expired(
+    assert deadline_expired(
         now_epoch - 0.001,
         now_epoch=now_epoch,
     ) is True
@@ -4426,10 +4451,10 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
     with TestClient(
         mobile_app.create_app(window_tracker_service=_NoFullReadTracker())
     ) as client:
-        operator_response = client.get(
+        operator_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
-        same_frame_response = client.get(
+        same_frame_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=structure"
         )
 
@@ -4451,7 +4476,7 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
             encoding="utf-8",
         )
         replacement_path.replace(compact_path)
-        compact_churn_response = client.get(
+        compact_churn_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
 
@@ -4515,22 +4540,22 @@ def test_operator_session_and_health_hot_paths_never_read_full_session(
 
         # The first poll on frame 74 returns frame 73 atomically, including its
         # own artifact URLs and WAIT permission, while one guarded refresh runs.
-        stale_while_refreshing_response = client.get(
+        stale_while_refreshing_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
         changed_pair_response = stale_while_refreshing_response
         for _ in range(100):
-            candidate = client.get(
+            candidate = _test_client_get(client,
                 f"/v1/mobile/operator/state/v1/{session_id}?view=all"
             )
             if candidate.json()["surface"]["frame_id"] == next_frame_id:
                 changed_pair_response = candidate
                 break
             time.sleep(0.01)
-        health_response = client.get(
+        health_response = _test_client_get(client,
             f"/v1/mobile/window-tracker/sessions/{session_id}/health"
         )
-        session_response = client.get(
+        session_response = _test_client_get(client,
             f"/v1/mobile/window-tracker/sessions/{session_id}"
         )
 
@@ -4707,10 +4732,10 @@ def test_operator_same_frame_cache_is_complete_in_both_view_orders(
     tracker = _Tracker()
 
     with TestClient(mobile_app.create_app(window_tracker_service=tracker)) as client:
-        history_first = client.get(
+        history_first = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=history"
         )
-        all_second = client.get(
+        all_second = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
     assert history_first.status_code == 200
@@ -4726,10 +4751,10 @@ def test_operator_same_frame_cache_is_complete_in_both_view_orders(
     assert operator_projection_calls == 1
 
     with TestClient(mobile_app.create_app(window_tracker_service=tracker)) as client:
-        all_first = client.get(
+        all_first = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
-        history_second = client.get(
+        history_second = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=history"
         )
     assert all_first.status_code == 200
@@ -4853,21 +4878,24 @@ def test_operator_cache_miss_advance_seeds_fail_closed_cache_and_reports_updatin
         "build_operator_workspace_v1",
         advancing_builder,
     )
-    monkeypatch.setattr(
-        mobile_app,
-        "_operator_projection_source_revision",
-        lambda requested_session_id: (
+    def projection_revision(requested_session_id: str) -> tuple[str, int, float] | None:
+        return (
             active_revision["value"]
             if requested_session_id == session_id
             else None
-        ),
+        )
+
+    monkeypatch.setattr(
+        mobile_app,
+        "_operator_projection_source_revision",
+        projection_revision,
     )
 
     with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        first_response = client.get(
+        first_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
-        second_response = client.get(
+        second_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
 
@@ -5011,7 +5039,7 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
     monkeypatch.setattr(mobile_app.BackgroundTasks, "add_task", defer_task)
 
     with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        warm_response = client.get(
+        warm_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
         assert warm_response.status_code == 200
@@ -5024,10 +5052,10 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
             15,
             now_epoch + 60.0,
         )
-        stale_response = client.get(
+        stale_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
-        duplicate_poll = client.get(
+        duplicate_poll = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
 
@@ -5043,7 +5071,7 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
         task, args, kwargs = deferred_tasks.pop()
         task(*args, **kwargs)
 
-        progressive_response = client.get(
+        progressive_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
         assert progressive_response.status_code == 200
@@ -5059,7 +5087,7 @@ def test_operator_rollover_defers_one_refresh_until_after_stale_response(
         advance_during_second_projection["value"] = False
         task, args, kwargs = deferred_tasks.pop()
         task(*args, **kwargs)
-        refreshed_response = client.get(
+        refreshed_response = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view=all"
         )
 
@@ -5286,43 +5314,52 @@ def test_cached_operator_projection_refreshes_live_unchanged_external_transport(
         "valid_until": None,
         "age_seconds": 10.0,
     }
-    base["tracking"] = {
-        **cast(dict[str, object], base["tracking"]),
-        "active": False,
-        "state": "PAUSED",
-    }
-    base["overlays"] = [
+    base["tracking"] = cast(
+        _TrackingView,
         {
-            **cast(dict[str, object], row),
-            "lifecycle": (
-                "historical"
-                if cast(dict[str, object], row).get("lifecycle") == "historical"
-                else "stale_diagnostic"
-            ),
-        }
-        for row in cast(list[object], base["overlays"])
-        if isinstance(row, Mapping)
-    ]
-
-    refreshed = refresh_operator_streaming_read_v3(
-        base,
-        {
-            "tracking_enabled": False,
-            "capture_source_v3": {"state": "LIVE", "fresh": True},
-            "visual_observation_v3": {
-                "status": "LIVE_FRAME_UNCHANGED",
-                "message": "Chart stream live; the picture is unchanged.",
-                "transport_state": "LIVE",
-                "transport_fresh": True,
-                "study_update_state": "UNCHANGED",
-                "new_visual_evidence": False,
-                "last_observed_epoch": 90.0,
-                "attempted_epoch": 100.0,
-            },
-            "tracking_summary": {},
-            "latest_signal": {},
+            **cast(dict[str, object], base["tracking"]),
+            "active": False,
+            "state": "PAUSED",
         },
-        now_epoch=100.0,
+    )
+    base["overlays"] = cast(
+        list[_OverlayView],
+        [
+            {
+                **cast(dict[str, object], row),
+                "lifecycle": (
+                    "historical"
+                    if cast(dict[str, object], row).get("lifecycle") == "historical"
+                    else "stale_diagnostic"
+                ),
+            }
+            for row in cast(list[object], base["overlays"])
+            if isinstance(row, Mapping)
+        ],
+    )
+
+    refreshed = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            base,
+            {
+                "tracking_enabled": False,
+                "capture_source_v3": {"state": "LIVE", "fresh": True},
+                "visual_observation_v3": {
+                    "status": "LIVE_FRAME_UNCHANGED",
+                    "message": "Chart stream live; the picture is unchanged.",
+                    "transport_state": "LIVE",
+                    "transport_fresh": True,
+                    "study_update_state": "UNCHANGED",
+                    "new_visual_evidence": False,
+                    "last_observed_epoch": 90.0,
+                    "attempted_epoch": 100.0,
+                },
+                "tracking_summary": {},
+                "latest_signal": {},
+            },
+            now_epoch=100.0,
+        ),
     )
 
     assert refreshed["freshness"]["state"] == "UNCHANGED"
@@ -5488,10 +5525,13 @@ def test_cached_operator_adopts_newer_atomic_same_pair_study_while_next_frame_an
     assert "last_display_surface_signature" not in runtime
     assert "last_study_surface_signature" not in runtime
 
-    refreshed = refresh_operator_streaming_read_v3(
-        base,
-        runtime,
-        now_epoch=101.0,
+    refreshed = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            base,
+            runtime,
+            now_epoch=101.0,
+        ),
     )
 
     assert refreshed["market"] == {"symbol": "EUR/USD", "timeframe": "M5"}
@@ -5500,12 +5540,14 @@ def test_cached_operator_adopts_newer_atomic_same_pair_study_while_next_frame_an
     public_study = refreshed["tracking"]["market_study_v3"]
     assert public_study["closed_candle_sequence"] == 90
     assert public_study["closed_candle_key"] == "5f61d87fce6546ed9dda510a"
-    assert public_study["directional_read"]["side"] == "SELL"
+    assert _public_mapping(public_study["directional_read"])["side"] == "SELL"
 
     questions = refreshed["three_questions"]
     studied = questions["studied_direction_current"]
     entry = questions["entry_now"]
-    forecast = entry["timing_forecast"]
+    forecast = _public_mapping(
+        _public_mapping(entry)["timing_forecast"]
+    )
     assert studied["side"] == "SELL"
     assert studied["evidence"]["current_regression_side"] == "SELL"
     assert "SELL" in str(studied["headline"])
@@ -5560,10 +5602,13 @@ def test_cached_operator_does_not_adopt_non_monotonic_atomic_study() -> None:
         }
     )
 
-    refreshed = refresh_operator_streaming_read_v3(
-        base,
-        runtime,
-        now_epoch=101.0,
+    refreshed = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            base,
+            runtime,
+            now_epoch=101.0,
+        ),
     )
 
     assert refreshed["surface"]["frame_id"] == 14
@@ -5619,12 +5664,15 @@ def test_same_key_atomic_sell_reconciles_stale_buy_q2_without_clearing_overlays(
         "frame_id": 14,
         "lifecycle": "current",
     }
-    workspace["overlays"] = [sentinel_overlay]
+    workspace["overlays"] = cast(list[_OverlayView], [sentinel_overlay])
 
-    refreshed = refresh_operator_streaming_read_v3(
-        workspace,
-        runtime,
-        now_epoch=100.0,
+    refreshed = cast(
+        _OperatorWorkspaceView,
+        refresh_operator_streaming_read_v3(
+            workspace,
+            runtime,
+            now_epoch=100.0,
+        ),
     )
 
     refreshed_questions = _mutable_mapping(refreshed["three_questions"])
@@ -5641,7 +5689,7 @@ def test_same_key_atomic_sell_reconciles_stale_buy_q2_without_clearing_overlays(
     assert refreshed_q2["side"] == "SELL"
     assert "SELL" in str(refreshed_q2["headline"])
     assert refreshed_forecast["side"] == "SELL"
-    assert refreshed_forecast["scope"]["closed_candle_key"] == (
+    assert _public_mapping(refreshed_forecast["scope"])["closed_candle_key"] == (
         "3d40b65dac4324cb7bb8e288"
     )
     assert refreshed["permission"]["allowed"] is False
@@ -5769,7 +5817,7 @@ def test_mixed_frame_operator_snapshot_is_rejected(
         encoding="utf-8",
     )
     load_snapshot = cast(
-        Callable[[str, Mapping[str, object]], dict[str, object] | None],
+        Callable[..., dict[str, object] | None],
         getattr(mobile_app, "_load_operator_overlay_snapshot"),
     )
 
@@ -6075,12 +6123,12 @@ def test_compact_live_chain_preserves_bounded_tracker_close_for_operator(
 
     tracked_candles = [
         {
-            "bbox": [250 + index * 25, 200, 260 + index * 25, 300],
-            "center_x_px": 255.0 + index * 25.0,
-            "close_y_px": 235.0 + index,
+            "bbox": [250 + (index % 9) * 25, 200, 260 + (index % 9) * 25, 300],
+            "center_x_px": 255.0 + (index % 9) * 25.0,
+            "close_y_px": 235.0 + (index % 9),
             "direction": "BUY",
         }
-        for index in range(9)
+        for index in range(_COMPACT_TRACKED_CANDLES_WINDOW)
     ]
     tracked_candles.append(
         {
@@ -6166,7 +6214,7 @@ def test_compact_live_chain_preserves_bounded_tracker_close_for_operator(
                 "coordinate_mode": "CHART_IMAGE_SPACE",
                 "coordinate_units": "pixels",
                 "anchor_type": "CANDLE",
-                "anchor_candles": [9],
+                "anchor_candles": [_COMPACT_TRACKED_CANDLES_WINDOW],
             },
         }
     ]
@@ -6185,7 +6233,13 @@ def test_compact_live_chain_preserves_bounded_tracker_close_for_operator(
         now_epoch=100.0,
     )
     compact_tracking = _mutable_mapping(compact_live_state["tracking_summary"])
-    assert len(cast(Sequence[object], compact_tracking["tracked_candles"])) == 8
+    bounded_rows = cast(
+        Sequence[Mapping[str, object]],
+        compact_tracking["tracked_candles"],
+    )
+    assert len(bounded_rows) == _COMPACT_TRACKED_CANDLES_WINDOW
+    assert bounded_rows[-1]["center_x_px"] == 505.0
+    assert bounded_rows[-1]["close_y_px"] == 276.25
     assert "artifact_integrity" in compact_tracking
     assert "chart_region" in compact_tracking
 
@@ -6376,7 +6430,7 @@ def test_surface_uses_exact_scene_chart_plane_for_window_and_focus_artifact() ->
         "bounds": [0.050565, 0.177489, 0.57504, 0.936147],
         "source_bounds": [0.0, 0.0, 975.0, 701.0],
     }
-    assert surface["overlay_viewports"] == {
+    assert _public_mapping(surface)["overlay_viewports"] == {
         "window": surface["overlay_viewport"],
         "chart": {
             "source_space": "chart",
@@ -6665,10 +6719,27 @@ def test_history_retains_continuous_chronological_regression_studies() -> None:
     assert len(history) == 40
     observed = [row["observed_at"] or 0 for row in history]
     assert observed == sorted(observed)
-    assert all(row["major_trend"]["side"] == "BUY" for row in history)
-    assert all(row["inner_trend"]["side"] in {"BUY", "SELL"} for row in history)
-    assert all(row["behavior"]["current_state"]["state"] in {"REST", "SWING"} for row in history)
-    assert all(row["regression_read"]["side"] in {"BUY", "SELL"} for row in history)
+    assert all(
+        _public_mapping(_public_mapping(row)["major_trend"])["side"] == "BUY"
+        for row in history
+    )
+    assert all(
+        _public_mapping(_public_mapping(row)["inner_trend"])["side"]
+        in {"BUY", "SELL"}
+        for row in history
+    )
+    assert all(
+        _public_mapping(
+            _public_mapping(_public_mapping(row)["behavior"])["current_state"]
+        )["state"]
+        in {"REST", "SWING"}
+        for row in history
+    )
+    assert all(
+        _public_mapping(_public_mapping(row)["regression_read"])["side"]
+        in {"BUY", "SELL"}
+        for row in history
+    )
 
 
 
@@ -6894,7 +6965,9 @@ def test_operator_route_returns_only_the_current_public_projection(
     )
     client = TestClient(mobile_app.create_app(window_tracker_service=_Tracker()))
 
-    response = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
+    response = _test_client_get(client,
+        f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+    )
 
     assert response.status_code == 200
     workspace = cast(_OperatorWorkspaceView, response.json())
@@ -6908,7 +6981,7 @@ def test_operator_route_returns_only_the_current_public_projection(
     )
 
     for retired_view in ("forecast", "lstm", "two-candle", "scene-forecaster", "prediction"):
-        rejected = client.get(
+        rejected = _test_client_get(client,
             f"/v1/mobile/operator/state/v1/{session_id}?view={retired_view}"
         )
         assert rejected.status_code == 400
@@ -7017,7 +7090,9 @@ def test_waiting_operator_reuses_snapshot_rows_but_never_snapshot_transform(
         _poisoned_snapshot,
     )
     with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        response = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=all")
+        response = _test_client_get(client,
+            f"/v1/mobile/operator/state/v1/{session_id}?view=all"
+        )
 
     assert response.status_code == 200
     workspace = cast(_OperatorWorkspaceView, response.json())
@@ -7167,8 +7242,8 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
     )
 
     with TestClient(mobile_app.create_app(window_tracker_service=_Tracker())) as client:
-        first = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=structure")
-        second = client.get(f"/v1/mobile/operator/state/v1/{session_id}?view=structure")
+        first = _test_client_get(client,f"/v1/mobile/operator/state/v1/{session_id}?view=structure")
+        second = _test_client_get(client,f"/v1/mobile/operator/state/v1/{session_id}?view=structure")
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -7176,8 +7251,10 @@ def test_operator_route_persists_projection_frame_when_service_snapshot_advances
         workspace = cast(_OperatorWorkspaceView, response.json())
         assert workspace["surface"]["frame_id"] == 14
         assert [row["family"] for row in workspace["overlays"]] == ["trendlines"]
-        assert workspace["overlays"][0]["geometry_contract_accepted"] is True
-        assert workspace["overlays"][0]["anchor_wick_points"] == [
+        assert _public_mapping(workspace["overlays"][0])[
+            "geometry_contract_accepted"
+        ] is True
+        assert _public_mapping(workspace["overlays"][0])["anchor_wick_points"] == [
             [420.0, 520.0],
             [760.0, 310.0],
         ]

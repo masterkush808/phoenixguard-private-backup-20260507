@@ -20,6 +20,11 @@ from phoenixguard.execution.sequence_context import build_sequence_context_v3, s
 
 NOW = 1_764_000_000.0
 
+_resolve_execution_opportunity_window_v3 = cast(
+    Callable[..., dict[str, Any]],
+    getattr(legacy_engine_module, "_resolve_execution_opportunity_window_v3"),
+)
+
 
 def _strong_snapshot(side: str = "BUY", *, frame_id: int = 101, skill_pass: bool = True) -> dict[str, Any]:
     opposite = "SELL" if side == "BUY" else "BUY"
@@ -1835,7 +1840,7 @@ def test_pair_change_hard_resets_non_executable_persisted_opportunity() -> None:
         "state": "OPEN",
     }
 
-    resolved = legacy_engine_module._resolve_execution_opportunity_window_v3(  # noqa: SLF001
+    resolved = _resolve_execution_opportunity_window_v3(  # noqa: SLF001
         {"execution_opportunity_window_v3": previous},
         None,
         candidate_id="gbp-usd-buy",
@@ -1853,7 +1858,7 @@ def test_pair_change_hard_resets_non_executable_persisted_opportunity() -> None:
 
     assert resolved == {}
 
-    executable = legacy_engine_module._resolve_execution_opportunity_window_v3(  # noqa: SLF001
+    executable = _resolve_execution_opportunity_window_v3(  # noqa: SLF001
         {"execution_opportunity_window_v3": previous},
         None,
         candidate_id="gbp-usd-buy",
@@ -1874,7 +1879,7 @@ def test_pair_change_hard_resets_non_executable_persisted_opportunity() -> None:
 
 
 def test_inactive_old_pair_thesis_cannot_age_a_new_pair_opportunity() -> None:
-    resolved = legacy_engine_module._resolve_execution_opportunity_window_v3(  # noqa: SLF001
+    resolved = _resolve_execution_opportunity_window_v3(  # noqa: SLF001
         {
             "active_signal_thesis": {
                 "schema_version": "PG_SIGNAL_THESIS_V3",
@@ -1961,7 +1966,7 @@ def test_facade_never_restores_working_snapshot_opportunity_from_previous_pair(
         fake_evaluate,
     )
     council = ModelCouncilV3()
-    council._stable_context_key = "CAD/CHF OTC|M5"  # noqa: SLF001
+    setattr(council, "_stable_context_key", "CAD/CHF OTC|M5")  # noqa: SLF001
     snapshot = _strong_snapshot("BUY", frame_id=208)
     snapshot.update(
         {

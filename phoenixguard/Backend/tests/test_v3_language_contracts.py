@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from fastapi.testclient import TestClient
 
 from phoenixguard.execution.packet_v3 import build_execution_packet_v3, validate_execution_packet_v3
@@ -274,7 +275,11 @@ def test_public_language_scorecard_names_v3_authorities() -> None:
     assert scorecard["operator_truth"] == "FloatingStateV2 reducer only"
 
 
-def test_runtime_trace_v3_contains_all_core_nodes() -> None:
+def test_runtime_trace_v3_contains_all_core_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:
             return {
@@ -296,7 +301,7 @@ def test_runtime_trace_v3_contains_all_core_nodes() -> None:
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788")
     assert response.status_code == 200
     payload = response.json()
@@ -322,7 +327,11 @@ def test_runtime_trace_v3_contains_all_core_nodes() -> None:
     assert "sequence_context" in payload["certification_gates"]
 
 
-def test_runtime_trace_uses_nested_broker_surface_source_lock() -> None:
+def test_runtime_trace_uses_nested_broker_surface_source_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:
             return {
@@ -351,7 +360,7 @@ def test_runtime_trace_uses_nested_broker_surface_source_lock() -> None:
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     payload = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788").json()
 
     assert payload["dataflow_contract_trace"]["nodes"]["BrokerSourceLockV3"] == "PASS"
@@ -359,7 +368,13 @@ def test_runtime_trace_uses_nested_broker_surface_source_lock() -> None:
     assert payload["certification_gates"]["source_lock"]["evidence"]["lock_id"] == "broker-surface-lock-001"
 
 
-def test_runtime_trace_does_not_certify_display_only_overlay_authority_as_broker_source_lock() -> None:
+def test_runtime_trace_does_not_certify_display_only_overlay_authority_as_broker_source_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:
             return {
@@ -391,7 +406,7 @@ def test_runtime_trace_does_not_certify_display_only_overlay_authority_as_broker
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     payload = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788").json()
 
     evidence = payload["certification_gates"]["source_lock"]["evidence"]
@@ -402,7 +417,13 @@ def test_runtime_trace_does_not_certify_display_only_overlay_authority_as_broker
     assert evidence["display_only_overlay_authority_status"] == "PASS"
 
 
-def test_runtime_trace_does_not_synthesize_missing_broker_source_lock() -> None:
+def test_runtime_trace_does_not_synthesize_missing_broker_source_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:
             return {
@@ -424,7 +445,7 @@ def test_runtime_trace_does_not_synthesize_missing_broker_source_lock() -> None:
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     payload = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788").json()
 
     assert payload["dataflow_contract_trace"]["nodes"]["BrokerSourceLockV3"] == "MISSING"
@@ -454,7 +475,7 @@ def test_runtime_trace_detects_stale_study_packet() -> None:
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788")
     assert response.status_code == 200
     payload = response.json()
@@ -463,7 +484,13 @@ def test_runtime_trace_detects_stale_study_packet() -> None:
     assert "study_latest_stale" in payload["alignment"]["issues"]
 
 
-def test_runtime_trace_ignores_stale_execution_history_when_study_is_fresh() -> None:
+def test_runtime_trace_ignores_stale_execution_history_when_study_is_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     stale_execution = _execution_packet(valid_until_epoch=1.0, valid_until_epoch_sec=1.0)
 
     class FakeTracker:
@@ -491,7 +518,7 @@ def test_runtime_trace_ignores_stale_execution_history_when_study_is_fresh() -> 
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             return stale_execution
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788")
     assert response.status_code == 200
     payload = response.json()
@@ -531,7 +558,7 @@ def test_runtime_trace_detects_legacy_study_packet_without_valid_until_as_stale(
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788")
     assert response.status_code == 200
     payload = response.json()
@@ -564,13 +591,17 @@ def test_study_latest_endpoint_rejects_stale_packet() -> None:
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/study/latest")
     assert response.status_code == 404
     assert "stale" in response.json()["detail"].lower()
 
 
-def test_runtime_trace_marks_stale_tracker_session() -> None:
+def test_runtime_trace_marks_stale_tracker_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:
             return {
@@ -596,7 +627,7 @@ def test_runtime_trace_marks_stale_tracker_session() -> None:
         def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError("no executable")
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788")
     assert response.status_code == 200
     payload = response.json()

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from typing import Any, Callable, cast
+
 from PIL import Image
 
-from phoenixguard.mobile_api.window_tracker import _external_frame_source_lock_v3
+import phoenixguard.mobile_api.window_tracker as window_tracker_module
+
+_external_frame_source_lock_v3 = cast(
+    Callable[..., dict[str, Any]],
+    getattr(window_tracker_module, "_external_frame_source_lock_v3"),
+)
 
 
 def test_edge_tab_source_lock_is_stable_across_pixel_changes() -> None:

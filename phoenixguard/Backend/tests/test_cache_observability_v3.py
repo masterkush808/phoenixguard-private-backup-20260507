@@ -543,7 +543,12 @@ def test_paper_mode_records_without_clicking(tmp_path: Path) -> None:
     assert json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])["event"] == "paper_mode_decision"
 
 
-def test_model_council_health_endpoint_reads_tracker_session() -> None:
+def test_model_council_health_endpoint_reads_tracker_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct sidecar reads are the live producer boundary, so any leftover
+    # runtime state on this machine would shadow the injected service. The
+    # endpoint contract under test is service reads, not disk reads.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class _FakeTracker:
         def __init__(self) -> None:
             self.session: dict[str, Any] = {
@@ -583,7 +588,7 @@ def test_model_council_health_endpoint_reads_tracker_session() -> None:
             assert session_id == "pocket-live-8788"
             return self.session
 
-    client = TestClient(create_app(window_tracker_service=_FakeTracker()))
+    client: Any = TestClient(create_app(window_tracker_service=_FakeTracker()))
 
     response = client.get("/v1/mobile/model-council/health?session_id=pocket-live-8788")
 
@@ -647,7 +652,7 @@ def test_model_council_health_prefers_compact_sidecar_and_caches_bounded_daemon_
         raise mobile_app.urllib.error.URLError("daemon unavailable")
 
     monkeypatch.setattr(mobile_app.urllib.request, "urlopen", missing_daemon)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     first = client.get("/v1/mobile/model-council/health?session_id=pocket-live-8788")
     second = client.get("/v1/mobile/model-council/health?session_id=pocket-live-8788")
@@ -983,7 +988,11 @@ def test_session_stream_emits_cpu_only_updates_for_heartbeat_and_frame_sequence(
             self.content = content
 
     monkeypatch.setattr(mobile_app, "StreamingResponse", CapturedStreamingResponse)
-    monkeypatch.setattr(mobile_app.time, "sleep", lambda _seconds: None)
+
+    def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(mobile_app.time, "sleep", _no_sleep)
     route = next(
         route
         for route in app.routes
@@ -992,7 +1001,7 @@ def test_session_stream_emits_cpu_only_updates_for_heartbeat_and_frame_sequence(
     )
     endpoint = cast(Callable[[str], object], getattr(route, "endpoint"))
     response = endpoint("pocket-live-8788")
-    events = cast(Any, getattr(response, "content"))
+    events = getattr(response, "content")
 
     def event_payload(event: str) -> dict[str, object]:
         assert event.startswith("event: SESSION_UPDATE\n")
@@ -1126,7 +1135,10 @@ def test_public_cpu_stream_projection_strips_identity_geometry_hashes_and_direct
         assert private_token not in serialized
 
 
-def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> None:
+def test_model_council_latest_execution_packet_endpoints_return_v3_packet(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep direct producer sidecar reads off so leftover runtime state cannot
+    # shadow the injected tracker service under test.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
     packet = _fresh_endpoint_execution_packet(
         packet_id="pgpkt-endpoint",
         frame_id=20,
@@ -1146,7 +1158,7 @@ def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> N
             assert session_id == "pocket-live-8788"
             return packet
 
-    client = TestClient(create_app(window_tracker_service=_FakeTracker()))
+    client: Any = TestClient(create_app(window_tracker_service=_FakeTracker()))
 
     direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
     alias = client.get("/v1/mobile/model-council/execution/latest?session_id=pocket-live-8788")
@@ -1222,7 +1234,7 @@ def test_study_latest_falls_back_to_full_session_when_compact_study_is_stale(
 
     monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", compact_snapshot)
     monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", full_snapshot)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     study_response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/study/latest")
     execution_response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
@@ -1285,7 +1297,7 @@ def test_study_latest_compact_synthesis_uses_canonical_visibility_window(
 
     monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", compact_snapshot)
     monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", unexpected_full_snapshot)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/study/latest")
 
@@ -1337,7 +1349,7 @@ def test_execution_latest_rejects_packet_from_previous_completed_frame(monkeypat
         "_direct_window_tracker_session_snapshot",
         current_full_payload,
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
     alias = client.get("/v1/mobile/model-council/execution/latest?session_id=pocket-live-8788")
@@ -1375,7 +1387,7 @@ def test_execution_latest_honors_current_packet_revocation(monkeypatch: Any) -> 
         "_direct_window_tracker_session_snapshot",
         revoked_full_payload,
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
 
@@ -1407,7 +1419,7 @@ def test_execution_latest_service_fallback_cannot_resurrect_previous_frame() -> 
             assert session_id == "pocket-live-8788"
             return old_packet
 
-    client = TestClient(create_app(window_tracker_service=_FakeTracker()))
+    client: Any = TestClient(create_app(window_tracker_service=_FakeTracker()))
 
     direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
     alias = client.get("/v1/mobile/model-council/execution/latest?session_id=pocket-live-8788")
@@ -1417,7 +1429,7 @@ def test_execution_latest_service_fallback_cannot_resurrect_previous_frame() -> 
 
 
 def test_dashboard_asset_route_rejects_encoded_path_traversal() -> None:
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/window-tracker/assets/js/%2e%2e/%2e%2e/.hintrc")
 
@@ -1425,7 +1437,7 @@ def test_dashboard_asset_route_rejects_encoded_path_traversal() -> None:
 
 
 def test_dashboard_asset_route_serves_floating_window_stylesheet() -> None:
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css")
     traversal = client.get("/v1/mobile/window-tracker/assets/floating-windows/%2e%2e/window_tracker_dashboard.html")
@@ -1442,7 +1454,7 @@ def test_overlay_editor_settings_hard_save_without_public_dashboard_embed(
     settings_path = tmp_path / "floating_windows" / "overlay_editor_settings.json"
     monkeypatch.setattr(mobile_app, "_WINDOW_TRACKER_FLOATING_WINDOWS_DIR", settings_path.parent)
     monkeypatch.setattr(mobile_app, "_WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH", settings_path)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     save = client.post(
         "/v1/mobile/window-tracker/floating-windows/overlay-editor/settings",
@@ -1554,7 +1566,7 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788")
 
@@ -1738,7 +1750,7 @@ def test_compact_live_state_projects_study_only_decision_command_center(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
 
@@ -1987,7 +1999,7 @@ def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(
         raise AssertionError("legacy registry loader should not be used for V3 session overlays")
 
     monkeypatch.setattr(mobile_app, "load_recent_market_objects", fail_registry_load)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
 
@@ -2106,7 +2118,7 @@ def test_live_state_v3_thin_direct_sources_load_locked_registry_context(
         return [registry_entry]
 
     monkeypatch.setattr(mobile_app, "load_recent_market_objects", load_registry_context)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=FULL_HISTORY_READ&compact=1")
 
@@ -2220,7 +2232,7 @@ def test_live_state_v3_compact_preserves_overlay_snap_scene_graph(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
 
@@ -2301,7 +2313,7 @@ def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     first_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788")
 
@@ -2395,7 +2407,7 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     first_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
     assert first_response.status_code == 200
 
@@ -2518,7 +2530,7 @@ def test_compact_live_state_refreshes_transport_without_rebuilding_geometry(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     first = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
     assert first.status_code == 200
@@ -2580,7 +2592,7 @@ def test_hot_compact_cache_overlays_process_local_transport_heartbeat(
         coordinate_space="edge_tab_roi_v1",
     )
     try:
-        client = TestClient(create_app(window_tracker_service=service))
+        client: Any = TestClient(create_app(window_tracker_service=service))
         first = client.get(
             "/v1/mobile/live/state/v3/heartbeat-cache?mode=CLEAN_LIVE&compact=1"
         )
@@ -2723,7 +2735,7 @@ def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(
         getattr(mobile_app, "_COMPACT_LIVE_STATE_RESPONSE_CACHE"),
     )
     compact_cache[cache_key] = (time.time(), cached_payload)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
 
@@ -2910,7 +2922,7 @@ def test_compact_live_state_rebuilds_when_cached_overlay_frame_lags_chart_frame(
         }
 
     monkeypatch.setattr(mobile_app, "build_live_state_v3", fresh_full_build)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
 
@@ -2983,7 +2995,7 @@ def test_compact_live_state_holds_complete_session_while_display_snapshot_is_inc
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
 
@@ -3066,7 +3078,7 @@ def test_compact_live_state_holds_complete_session_when_surface_outruns_overlay_
         encoding="utf-8",
     )
 
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
 
@@ -3143,7 +3155,7 @@ def test_compact_live_state_does_not_reuse_studying_new_pair_cache_after_overlay
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     stale_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
     assert stale_response.status_code == 200
     stale_payload = stale_response.json()
@@ -3240,7 +3252,7 @@ def test_performance_trace_v3_uses_direct_display_state_fast_path(
         "overlay_source_window_signature": "old-surface",
     }
     (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     fresh_display_epoch = time.time()
     display_state["display_capture_epoch"] = fresh_display_epoch
     display_state["display_published_epoch"] = fresh_display_epoch
@@ -3298,7 +3310,7 @@ def test_performance_trace_v3_uses_compact_display_state_without_session_json(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
 
@@ -3347,7 +3359,7 @@ def test_performance_trace_v3_reuses_short_direct_cache_on_read_race(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
     first_response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
     assert first_response.status_code == 200
     assert "direct_trace_cache_reused_v3" not in first_response.json()
@@ -3417,7 +3429,7 @@ def test_performance_trace_v3_treats_locked_display_overlay_as_authority_locked(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
 
@@ -3429,7 +3441,12 @@ def test_performance_trace_v3_treats_locked_display_overlay_as_authority_locked(
     assert payload["timing_trace"]["display_only_authority_locked"] is True
 
 
-def test_model_council_latest_state_endpoint_returns_non_executable_study_packet() -> None:
+def test_model_council_latest_state_endpoint_returns_non_executable_study_packet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Keep direct producer sidecar reads off so leftover runtime state cannot
+    # shadow the injected tracker service under test.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
     study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-study",
@@ -3463,7 +3480,7 @@ def test_model_council_latest_state_endpoint_returns_non_executable_study_packet
                 "promotion_trace": study_packet["promotion_trace"],
             }
 
-    client = TestClient(create_app(window_tracker_service=_FakeTracker()))
+    client: Any = TestClient(create_app(window_tracker_service=_FakeTracker()))
 
     direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/latest")
     alias = client.get("/v1/mobile/model-council/latest?session_id=pocket-live-8788")
@@ -3507,7 +3524,7 @@ def test_model_council_latest_study_packet_endpoints_return_visibility_packet(mo
             assert session_id == "pocket-live-8788"
             return study_packet
 
-    client = TestClient(create_app(window_tracker_service=_FakeTracker()))
+    client: Any = TestClient(create_app(window_tracker_service=_FakeTracker()))
 
     direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/study/latest")
     alias = client.get("/v1/mobile/model-council/study/latest?session_id=pocket-live-8788")
@@ -3535,7 +3552,7 @@ def test_shooter_handshake_endpoint_reads_runtime_file(monkeypatch: Any, tmp_pat
         encoding="utf-8",
     )
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", handshake_path)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     direct = client.get("/v1/mobile/shooter/sessions/pocket-live-8788/handshake")
     alias = client.get("/v1/mobile/shooter/handshake?session_id=pocket-live-8788")
@@ -3563,7 +3580,7 @@ def test_stale_shooter_reporter_heartbeat_is_reported_waiting(monkeypatch: Any, 
         encoding="utf-8",
     )
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", handshake_path)
-    client = TestClient(create_app())
+    client: Any = TestClient(create_app())
 
     response = client.get("/v1/mobile/shooter/sessions/pocket-live-8788/handshake")
 

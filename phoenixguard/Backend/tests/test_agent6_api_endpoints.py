@@ -5,7 +5,7 @@ from phoenixguard.mobile_api.app import create_app
 from phoenixguard.vision.market_registry import merge_market_objects
 
 
-client = TestClient(create_app())
+client: Any = TestClient(create_app())
 
 
 def test_registry_active_endpoint(tmp_path: Path):

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 import hashlib
 import json
 import math
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.decision.book_strategy_context_v3 import (
     BOOK_STRATEGY_CONTEXT_SCHEMA_V3,
@@ -29,20 +29,24 @@ BOOK_RULE_ACTION_SIGNAL_SCHEMA_V3 = "PG_BOOK_RULE_ACTION_SIGNAL_V3"
 
 
 def _mapping(value: object) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast("Mapping[str, Any]", value)) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(row) for row in value if isinstance(row, Mapping)]
+    return [
+        dict(cast("Mapping[str, Any]", row))
+        for row in cast("Sequence[object]", value)
+        if isinstance(row, Mapping)
+    ]
 
 
 def _number(value: object, default: float = 0.0) -> float:
     if isinstance(value, bool) or value is None:
         return default
     try:
-        number = float(value)
+        number = float(cast(Any, value))
     except (TypeError, ValueError, OverflowError):
         return default
     return number if math.isfinite(number) else default
@@ -99,20 +103,26 @@ def _point_pairs(value: object) -> list[list[float]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
     output: list[list[float]] = []
-    for raw in value:
-        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 2:
+    for raw in cast("Sequence[object]", value):
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
             continue
-        x = _number(raw[0], math.nan)
-        y = _number(raw[1], math.nan)
+        points = cast("Sequence[object]", raw)
+        if len(points) < 2:
+            continue
+        x = _number(points[0], math.nan)
+        y = _number(points[1], math.nan)
         if math.isfinite(x) and math.isfinite(y):
             output.append([round(x, 6), round(y, 6)])
     return output
 
 
 def _bounds(value: object) -> list[float]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) < 4:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    values = [_number(item, math.nan) for item in value[:4]]
+    bounded = cast("Sequence[object]", value)
+    if len(bounded) < 4:
+        return []
+    values = [_number(item, math.nan) for item in bounded[:4]]
     if not all(math.isfinite(item) for item in values):
         return []
     x0, y0, x1, y1 = values
@@ -178,10 +188,10 @@ def _pattern_summary(control: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _market_geometry(
-    candles: Sequence[Mapping[str, Any]],
+    candles: Sequence[Any],
 ) -> dict[str, Any]:
     """Latest close and median candle height in chart pixel space."""
-    rows = [dict(row) for row in candles if isinstance(row, Mapping)]
+    rows = [dict(cast("Mapping[str, Any]", row)) for row in candles if isinstance(row, Mapping)]
     if not rows:
         return {}
     latest = rows[-1]
@@ -633,10 +643,15 @@ def build_book_rule_action_signal_v3(
     strategies = _strategy_report(source, candle)
     active_strategies = [row for row in strategies if row["status"] == "ACTIVE"]
     watching_strategies = [row for row in strategies if row["status"] == "WATCHING"]
-    resolution_by_family = {
+    family_rows = [
+        cast("Mapping[str, Any]", row)
+        for row in cast("Sequence[object]", current_rule.get("family_resolutions") or [])
+        if isinstance(row, Mapping)
+    ]
+    resolution_by_family: dict[str, dict[str, Any]] = {
         str(row.get("strategy_id")): dict(row)
-        for row in current_rule.get("family_resolutions") or []
-        if isinstance(row, Mapping) and row.get("strategy_id")
+        for row in family_rows
+        if row.get("strategy_id")
     }
     for row in strategies:
         resolved = resolution_by_family.get(str(row.get("strategy_id")))
@@ -676,13 +691,13 @@ def build_book_rule_action_signal_v3(
     )
     hlz = _mapping(source.get("hlz_sequence_v3") or source.get("hlz_sequence"))
     role_flip = _mapping(source.get("role_flip_sequence_v3") or source.get("role_flip"))
-    location = "active structure"
+    _location = "active structure"
     if _first_truth(hlz, "entry_sequence_ready", "complete"):
-        location = "the completed HLZ sequence"
+        _location = "the completed HLZ sequence"
     elif _first_truth(role_flip, "complete", "confirmed"):
-        location = "the confirmed role-flip retest"
+        _location = "the confirmed role-flip retest"
     elif _number(_mapping(source.get("zone_context")).get("active_zone_count")) > 0:
-        location = "the active supply/demand reaction area"
+        _location = "the active supply/demand reaction area"
     scenario = _safe_text(
         current_rule.get("scenario"),
         "No complete directional book setup is aligned on the latest closed candle.",
@@ -793,21 +808,29 @@ def build_book_rule_action_signal_v3(
         "playbook_family": _safe_text(current_rule.get("playbook_family")),
         "resolution": _safe_text(current_rule.get("resolution"), "WATCHING"),
         "blocked_reasons": [
-            _safe_text(row) for row in (current_rule.get("blocked_reasons") or []) if _safe_text(row)
+            _safe_text(row)
+            for row in cast("Sequence[object]", current_rule.get("blocked_reasons") or [])
+            if _safe_text(row)
         ],
         "advisories": [
-            _safe_text(row) for row in (current_rule.get("advisories") or []) if _safe_text(row)
+            _safe_text(row)
+            for row in cast("Sequence[object]", current_rule.get("advisories") or [])
+            if _safe_text(row)
         ],
         "entry_window_candles": int(_number(current_rule.get("entry_window_candles"), 0)),
         "profit_room": _mapping(current_rule.get("profit_room")),
         "stop_plan": _mapping(current_rule.get("stop_plan")),
         "regime": _safe_text(current_rule.get("regime"), "UNCLASSIFIED"),
         "regime_notes": [
-            _safe_text(row) for row in (current_rule.get("regime_notes") or []) if _safe_text(row)
+            _safe_text(row)
+            for row in cast("Sequence[object]", current_rule.get("regime_notes") or [])
+            if _safe_text(row)
         ],
         "directional_alignment": _mapping(current_rule.get("directional_alignment")),
         "family_resolutions": [
-            dict(row) for row in current_rule.get("family_resolutions") or [] if isinstance(row, Mapping)
+            dict(cast("Mapping[str, Any]", row))
+            for row in cast("Sequence[object]", current_rule.get("family_resolutions") or [])
+            if isinstance(row, Mapping)
         ],
         "entry_profile": _safe_text(current_rule.get("profile"), "NONE").upper(),
         "entry_profiles": _mapping(current_rule.get("entry_profiles")),

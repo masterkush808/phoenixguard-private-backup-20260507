@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import start_phoenixguard_24_7_tracker as tracker_launcher
@@ -15,6 +15,8 @@ from phoenixguard.runtime.tracker_bootstrap import (
     tracker_session_runtime_state,
 )
 
+_launcher = cast(Any, tracker_launcher)
+
 
 def test_direct_edge_dashboard_browser_args_preserve_background_rendering_without_forcing_a_window(
     tmp_path: Path,
@@ -22,7 +24,7 @@ def test_direct_edge_dashboard_browser_args_preserve_background_rendering_withou
     executable = tmp_path / "msedge.exe"
     url = "http://127.0.0.1:8793/v3/mobile/window-tracker/dashboard/test"
 
-    args = tracker_launcher._dashboard_browser_args("edge", executable, url)
+    args = _launcher._dashboard_browser_args("edge", executable, url)
 
     assert args[0] == str(executable)
     assert args[-1] == url
@@ -175,7 +177,7 @@ def test_launcher_does_not_restart_quiet_snapshot_lane_when_cpu_stream_is_curren
 ) -> None:
     monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
 
-    assert tracker_launcher._session_needs_worker_restart(
+    assert _launcher._session_needs_worker_restart(
         {
             "tracking_enabled": True,
             "status": "running",
@@ -199,7 +201,7 @@ def test_launcher_restarts_when_cpu_stream_heartbeat_is_stale(
 ) -> None:
     monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
 
-    assert tracker_launcher._session_needs_worker_restart(
+    assert _launcher._session_needs_worker_restart(
         {
             "tracking_enabled": True,
             "status": "running",
@@ -221,7 +223,7 @@ def test_launcher_restarts_stuck_stream_keyframe_handoff(
 ) -> None:
     monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
 
-    assert tracker_launcher._session_needs_worker_restart(
+    assert _launcher._session_needs_worker_restart(
         {
             "tracking_enabled": True,
             "status": "running",
@@ -255,9 +257,9 @@ def test_launcher_treats_universal_capture_source_as_external_owner(source_state
         },
     }
 
-    assert tracker_launcher._external_capture_source_owns_session(session) is True
-    assert tracker_launcher._capture_source_supervision_is_healthy(session) is True
-    assert tracker_launcher._session_needs_worker_restart(session, 15.0) is False
+    assert _launcher._external_capture_source_owns_session(session) is True
+    assert _launcher._capture_source_supervision_is_healthy(session) is True
+    assert _launcher._session_needs_worker_restart(session, 15.0) is False
 
 
 @pytest.mark.parametrize("source_state", ("NO_SOURCE", "READY", "STOPPED", "KILLED", "WAITING_FOR_SOURCE"))
@@ -271,11 +273,11 @@ def test_launcher_treats_waiting_for_universal_source_as_healthy(source_state: s
         },
     }
 
-    state = tracker_launcher._runtime_state_for_session(session, 15.0)
+    state = _launcher._runtime_state_for_session(session, 15.0)
 
-    assert tracker_launcher._capture_source_waiting_for_selection(session) is True
-    assert tracker_launcher._capture_source_supervision_is_healthy(session) is True
-    assert tracker_launcher._session_needs_worker_restart(session, 15.0) is False
+    assert _launcher._capture_source_waiting_for_selection(session) is True
+    assert _launcher._capture_source_supervision_is_healthy(session) is True
+    assert _launcher._session_needs_worker_restart(session, 15.0) is False
     assert state["healthy"] is True
     assert state["fresh"] is False
 

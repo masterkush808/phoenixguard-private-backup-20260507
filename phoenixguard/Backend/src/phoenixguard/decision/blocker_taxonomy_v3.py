@@ -20,7 +20,7 @@ class ClassifiedBlockerV3:
     blocker_class: BlockerClass
     source: str = "model_council"
     reason: str = ""
-    details: Mapping[str, Any] = field(default_factory=dict)
+    details: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     @property
     def hard(self) -> bool:
@@ -104,7 +104,7 @@ def partition_blockers_v3(
     *,
     default_source: str = "model_council",
 ) -> dict[str, list[dict[str, Any]]]:
-    partition = {member.value: [] for member in BlockerClass}
+    partition: dict[str, list[dict[str, Any]]] = {member.value: [] for member in BlockerClass}
     for blocker in classify_blockers_v3(blockers, default_source=default_source):
         partition[blocker.blocker_class.value].append(blocker.as_dict())
     return partition

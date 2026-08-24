@@ -7,6 +7,7 @@ from PIL import Image
 import pytest
 
 from phoenixguard.mobile_api.live_state_v3 import build_live_state_v3
+from phoenixguard.runtime.realtime_performance_v3 import OVERLAY_RENDER_BUDGETS
 from phoenixguard.tracking.market_object_tracker_v3 import build_v3_overlays_from_session
 from phoenixguard.vision.broker_scene_graph_v3 import build_broker_scene_graph_v3
 from phoenixguard.vision.box_refinement_v3 import resolve_precision_overlays_v3
@@ -436,7 +437,7 @@ def test_live_state_respects_requested_granular_overlay_mode(tmp_path: Path) -> 
     assert "TARGET" in state["overlay_mode"]["available_modes"]
     assert state["renderable_count"] == len(state["overlay_objects"])
     assert state["overlay_layer_manager_v3"]["mode"] == "TARGET"
-    assert state["overlay_layer_manager_v3"]["active_budget"] == 16
+    assert state["overlay_layer_manager_v3"]["active_budget"] == OVERLAY_RENDER_BUDGETS["TARGET"]
     assert all(
         row.get("layer") in {"target_zones", "supply_demand", "prediction_path"}
         for row in state["overlay_objects"]
@@ -451,7 +452,7 @@ def test_candles_mode_renders_every_visible_candle_box(tmp_path: Path) -> None:
     candle_overlays = [row for row in state["overlay_objects"] if row.get("type") == "CURRENT_CANDLE"]
 
     assert state["active_mode"] == "CANDLES"
-    assert state["overlay_layer_manager_v3"]["active_budget"] == 120
+    assert state["overlay_layer_manager_v3"]["active_budget"] == OVERLAY_RENDER_BUDGETS["CANDLES"]
     assert len(candle_overlays) == len(candles)
     assert state["reason_if_empty"] == ""
     assert all(row.get("layer") == "recent_candles" for row in candle_overlays)
@@ -1623,6 +1624,12 @@ def test_precision_resolver_assigns_display_state_and_visual_weight(tmp_path: Pa
 
 
 def test_crowded_valid_overlays_keep_geometry_when_labels_move_to_inspector(tmp_path: Path) -> None:
+    """Crowding restyles labels but must never drop or hide valid overlay geometry.
+
+    Since the V3 label ceiling became a non-dropping 1M cap, crowded-but-valid
+    overlays keep their inline compact labels instead of being pushed to the
+    inspector; only state-based rules (ghosted/rejected) may move them.
+    """
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
     overlays: list[dict[str, Any]] = []
@@ -1662,11 +1669,11 @@ def test_crowded_valid_overlays_keep_geometry_when_labels_move_to_inspector(tmp_
     inspector_only = [row for row in resolved if row.get("display_state") == "INSPECTOR_LABEL"]
 
     assert audit["rendered_count"] == 24
-    assert inspector_only
-    assert all(row["geometry_visible"] is True for row in inspector_only)
-    assert all(row["label_visible"] is False for row in inspector_only)
-    assert all(row["style"]["fill_opacity"] == 0.0 for row in inspector_only)
-    assert audit["precision_report"]["inspector_only_label_count"] >= 1
+    assert all(row.get("precision_rejected") is not True for row in resolved)
+    assert all(row["geometry_visible"] is True for row in resolved)
+    assert not inspector_only
+    assert audit["precision_report"]["compact_count"] == 24
+    assert audit["precision_report"]["visible_label_count"] == 24
 
 
 def test_precision_resolver_rejects_floating_unanchored_live_zone(tmp_path: Path) -> None:

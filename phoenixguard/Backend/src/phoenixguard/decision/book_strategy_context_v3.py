@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.decision.book_strategy_full_stack_v3 import (
     evaluate_full_non_indicator_book_stack_v3,
@@ -48,12 +48,16 @@ _TIMEFRAME_SECONDS = {
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[Mapping[str, Any]]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [row for row in value if isinstance(row, Mapping)]
+        return [
+            cast(Mapping[str, Any], row)
+            for row in cast(Sequence[Any], value)
+            if isinstance(row, Mapping)
+        ]
     return []
 
 
@@ -461,7 +465,7 @@ def evaluate_book_strategy_context_v3(
         scores[direction] += _number(
             _mapping(full_stack.get("score_adjustments")).get(direction)
         )
-    traces.extend(_rows(full_stack.get("rule_trace")))
+    traces.extend(cast(list[dict[str, Any]], _rows(full_stack.get("rule_trace"))))
     htf = _higher_timeframe_authority(timeframe, trend_directions, higher_timeframe_context)
     if htf["strictly_enforced"]:
         side = str(htf["side"])
@@ -847,7 +851,9 @@ def _profit_room_assessment(
         raw_bounds = target.get("bounds")
         bound_values: list[float] = []
         if isinstance(raw_bounds, Sequence) and not isinstance(raw_bounds, (str, bytes, bytearray)):
-            bound_values = [_number(item) for item in list(raw_bounds)[:4]]
+            bound_values = [
+                _number(item) for item in list(cast(Sequence[Any], raw_bounds))[:4]
+            ]
         if len(bound_values) >= 4 and raw_close_y is not None:
             zone_low, zone_high = sorted((bound_values[1], bound_values[3]))
             close_value = _number(raw_close_y)
@@ -939,7 +945,7 @@ def select_current_book_action_v3(
     candidates: list[dict[str, Any]] = []
     family_notes: dict[str, dict[str, Any]] = {}
 
-    def _note(strategy_id: str, *, state: str, playbook: str = "", side: str = "NEUTRAL", reason: str = "") -> None:
+    def _note(strategy_id: str, *, state: str, playbook: str = "", side: object = "NEUTRAL", reason: str = "") -> None:
         family_notes[strategy_id] = {
             "strategy_id": strategy_id,
             "resolution": state,

@@ -11,7 +11,7 @@ import hashlib
 import math
 import statistics
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 
 FULL_BOOK_STACK_SCHEMA_V3 = "PG_FULL_NON_INDICATOR_BOOK_STACK_V3"
@@ -42,12 +42,16 @@ _TIMEFRAME_SECONDS = {
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[Mapping[str, Any]]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [row for row in value if isinstance(row, Mapping)]
+        rows: list[Mapping[str, Any]] = []
+        for candidate in cast(Sequence[Any], value):
+            if isinstance(candidate, Mapping):
+                rows.append(cast(Mapping[str, Any], candidate))
+        return rows
     return []
 
 
@@ -129,10 +133,6 @@ def _trace(
     }
 
 
-def _body(row: Mapping[str, Any]) -> float:
-    return abs(_number(row.get("close")) - _number(row.get("open")))
-
-
 def _spread(row: Mapping[str, Any]) -> float:
     return max(1e-9, _number(row.get("high")) - _number(row.get("low")))
 
@@ -143,21 +143,24 @@ def _direction(row: Mapping[str, Any]) -> str:
 
 def _point(value: Any) -> tuple[float, float] | None:
     if isinstance(value, Mapping):
-        x_value = _number(value.get("x_px", value.get("x", value.get("x_center_px"))), math.nan)
-        y_value = _number(value.get("y_px", value.get("y", value.get("wick_y_px"))), math.nan)
+        mapping = cast(Mapping[str, Any], value)
+        x_value = _number(mapping.get("x_px", mapping.get("x", mapping.get("x_center_px"))), math.nan)
+        y_value = _number(mapping.get("y_px", mapping.get("y", mapping.get("wick_y_px"))), math.nan)
         return (x_value, y_value) if math.isfinite(x_value) and math.isfinite(y_value) else None
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) and len(value) >= 2:
-        x_value = _number(value[0], math.nan)
-        y_value = _number(value[1], math.nan)
-        return (x_value, y_value) if math.isfinite(x_value) and math.isfinite(y_value) else None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        sequence = cast(Sequence[Any], value)
+        if len(sequence) >= 2:
+            x_value = _number(sequence[0], math.nan)
+            y_value = _number(sequence[1], math.nan)
+            return (x_value, y_value) if math.isfinite(x_value) and math.isfinite(y_value) else None
     return None
 
 
 def _line_points(line: Mapping[str, Any]) -> list[tuple[float, float]]:
-    raw = line.get("anchor_wick_points") or line.get("line_points") or line.get("points") or []
+    raw: Any = line.get("anchor_wick_points") or line.get("line_points") or line.get("points") or []
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
         return []
-    return [parsed for value in raw if (parsed := _point(value)) is not None]
+    return [parsed for value in cast(Sequence[Any], raw) if (parsed := _point(value)) is not None]
 
 
 def _line_y(points: Sequence[tuple[float, float]], x_value: float) -> float | None:
@@ -176,7 +179,7 @@ def _pivots(
     pivots: list[dict[str, Any]] = []
     for index in range(radius, len(candles) - radius):
         row = candles[index]
-        neighbors = candles[index - radius : index] + candles[index + 1 : index + radius + 1]
+        neighbors = list(candles[index - radius : index]) + list(candles[index + 1 : index + radius + 1])
         high = _number(row.get("high"))
         low = _number(row.get("low"))
         if all(high > _number(other.get("high")) for other in neighbors):
@@ -361,7 +364,16 @@ def _trendline_contracts(
         anchors_significant = len(points) >= 2 and all(
             _anchor_is_significant(anchor, role, candles, pivots) for anchor in points[:2]
         )
-        touch_indices = {int(_number(value, -1)) for value in line.get("touch_candle_indices", []) if not isinstance(value, bool)} if isinstance(line.get("touch_candle_indices"), Sequence) else set()
+        touch_raw: Any = line.get("touch_candle_indices")
+        touch_indices: set[int] = (
+            {
+                int(_number(value, -1))
+                for value in cast(Sequence[Any], touch_raw)
+                if not isinstance(value, bool)
+            }
+            if isinstance(touch_raw, Sequence)
+            else set()
+        )
         obstruction_indices: list[int] = []
         if len(points) >= 2:
             left_x, right_x = sorted((points[0][0], points[1][0]))
@@ -482,7 +494,7 @@ def _trendline_contracts(
         candle_spacing = x_steps[len(x_steps) // 2] if x_steps else 1.0
         horizon_72_x = latest_x + (72.0 * candle_spacing)
         for forecast_side, opposing_role in (("BUY", "SELL"), ("SELL", "BUY")):
-            candidates = []
+            candidates: list[tuple[float, dict[str, Any], float]] = []
             for line in valid:
                 if line["role_side"] != opposing_role:
                     continue
@@ -491,12 +503,15 @@ def _trendline_contracts(
                     candidates.append((abs(projected_y - _number(candles[-1].get("close_y"))), line, projected_y))
             if candidates:
                 _, selected, projected_y = min(candidates, key=lambda row: row[0])
+                horizon_projected_y = _line_y(
+                    [tuple(point) for point in selected["line_points_v3"]], horizon_72_x
+                )
                 target_by_forecast_side[forecast_side] = {
                     "source": "OPPOSING_TRENDLINE",
                     "line_id": str(selected.get("trendline_id") or selected.get("id") or ""),
                     "target_y_px": round(projected_y, 6),
                     "target_y_px_at_horizon_72": round(
-                        _line_y([tuple(point) for point in selected["line_points_v3"]], horizon_72_x),
+                        projected_y if horizon_projected_y is None else horizon_projected_y,
                         6,
                     ),
                     "horizon_72_x_px": round(horizon_72_x, 6),
@@ -1021,8 +1036,8 @@ def _group_touch_indices(indices: Sequence[int]) -> list[int]:
 
 def _zone_pixel_bounds(zone: Mapping[str, Any]) -> list[float]:
     raw = zone.get("bbox") or zone.get("bounds")
-    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)) and len(raw) >= 4:
-        values = [_number(value, math.nan) for value in raw[:4]]
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)) and len(cast(Sequence[Any], raw)) >= 4:
+        values = [_number(value, math.nan) for value in cast(Sequence[Any], raw)[:4]]
         if all(math.isfinite(value) for value in values):
             x0, y0, x1, y1 = values
             return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
@@ -1723,6 +1738,7 @@ def build_pair_conditioned_horizon_v3(
 
 __all__ = [
     "FULL_BOOK_STACK_SCHEMA_V3",
+    "_trendline_contracts",
     "build_pair_conditioned_horizon_v3",
     "evaluate_full_non_indicator_book_stack_v3",
     "rank_book_scanner_v3",

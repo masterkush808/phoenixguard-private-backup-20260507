@@ -8,6 +8,11 @@ CHOP may only publish when the market carries no directional evidence at all.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
+
+import pytest
+
 from phoenixguard.decision.book_rule_action_signal_v3 import (
     BOOK_RULE_ACTION_SIGNAL_SCHEMA_V3,
     build_book_rule_action_signal_v3,
@@ -21,13 +26,22 @@ from phoenixguard.decision.book_strategy_context_v3 import (
     STATUS_WAITING_FOR_TRIGGER_V3,
     select_current_book_action_v3,
 )
-from phoenixguard.decision.book_strategy_full_stack_v3 import (
-    _news_pivot,
-    _strict_trendline_contracts_v3,
-    _sunday_gap_fade,
-)
+import phoenixguard.decision.book_strategy_full_stack_v3 as full_stack_v3
 from phoenixguard.decision.candlestick_rule_catalog_v3 import (
     evaluate_candlestick_catalog_v3,
+)
+
+_news_pivot = cast(
+    "Callable[[Sequence[Mapping[str, Any]], Mapping[str, Any] | None], dict[str, Any]]",
+    getattr(full_stack_v3, "_news_pivot"),
+)
+_strict_trendline_contracts_v3 = cast(
+    "Callable[[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]], Mapping[str, Any], Mapping[str, Any], str], dict[str, Any]]",
+    getattr(full_stack_v3, "_strict_trendline_contracts_v3"),
+)
+_sunday_gap_fade = cast(
+    "Callable[[Sequence[Mapping[str, Any]], Mapping[str, Any] | None], dict[str, Any]]",
+    getattr(full_stack_v3, "_sunday_gap_fade"),
 )
 
 GEOMETRY = {
@@ -36,8 +50,8 @@ GEOMETRY = {
 }
 
 
-def _base_control(**overrides):
-    control = {
+def _base_control(**overrides: Any) -> dict[str, Any]:
+    control: dict[str, Any] = {
         "schema": "PG_BOOK_STRATEGY_FORECAST_CONTROL_V3",
         "observed_candle_count": 40,
         "major_structure_side": "SELL",
@@ -69,7 +83,7 @@ def _base_control(**overrides):
     return control
 
 
-def _family_note(verdict: dict, strategy_id: str) -> dict:
+def _family_note(verdict: Mapping[str, Any], strategy_id: str) -> dict[str, Any]:
     return next(
         row for row in verdict["family_resolutions"] if row["strategy_id"] == strategy_id
     )
@@ -205,10 +219,6 @@ def test_hlz_sequence_expires_after_entry_window() -> None:
     assert verdict["action"] == "WAIT"
 
 
-def _actionable(select_verdict: dict) -> bool:
-    return select_verdict.get("action") in {"BUY", "SELL"}
-
-
 def test_order_block_rto_resolves_by_name() -> None:
     control = _base_control(
         order_blocks_full_v3={
@@ -299,7 +309,7 @@ def test_amd_distribution_fresh_event_is_actionable() -> None:
     assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
 
 
-def test_thin_profit_room_blocks_actionable_under_strict_gates(monkeypatch) -> None:
+def test_thin_profit_room_blocks_actionable_under_strict_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bsc, "STRATEGIST_STRICT_GATES", True)
     control = _base_control(
         trendline_contracts_full_v3={
@@ -327,7 +337,7 @@ def test_thin_profit_room_blocks_actionable_under_strict_gates(monkeypatch) -> N
     assert any("room remains" in note for note in relaxed["advisories"])
 
 
-def test_price_inside_opposing_zone_blocks_under_strict_gates(monkeypatch) -> None:
+def test_price_inside_opposing_zone_blocks_under_strict_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bsc, "STRATEGIST_STRICT_GATES", True)
     control = _base_control(
         trendline_contracts_full_v3={
@@ -524,10 +534,10 @@ def test_waiting_keeps_watch_side_without_chop_label() -> None:
     assert verdict["action"] == "WAIT"
 
 
-def _support_line_candles(breaker: dict | None = None) -> list[dict]:
+def _support_line_candles(breaker: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Pixel candles defending a horizontal support line at y=110 (y-down)."""
     wick_bottoms = [104.0, 106.0, 110.0, 106.5, 107.0, 110.0, 108.0, 109.0, 110.0, 107.5, 109.5]
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     for index, bottom in enumerate(wick_bottoms):
         rows.append(
             {
@@ -630,8 +640,8 @@ def test_htf_line_break_stays_unconfirmed_without_higher_close() -> None:
     assert contract["break_index"] is None
 
 
-def _railway_rows(with_confirmation: bool) -> list[dict]:
-    rows: list[dict] = []
+def _railway_rows(with_confirmation: bool) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     price = 130.0
     for _ in range(12):
         rows.append({"open": price + 1.5, "high": price + 2.0, "low": price - 2.5, "close": price})
@@ -775,7 +785,7 @@ def test_persistent_newspivot_survives_and_fires_hard_exit() -> None:
     A good-news spike that folds back through it = good news/bad price and a hard
     exit for the continuation side.
     """
-    candles = []
+    candles: list[dict[str, float]] = []
     price = 100.0
     for _ in range(5):
         candles.append({"open": price + 0.4, "high": price + 0.9, "low": price - 0.9, "close": price})
@@ -869,8 +879,8 @@ def test_sunday_gap_fade_resolves_by_name_through_strategist() -> None:
     assert family_note["resolution"] in {"CANDIDATE", "ACTIONABLE"}
 
 
-def _pixel_candles(count: int = 24) -> list[dict]:
-    rows = []
+def _pixel_candles(count: int = 24) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for index in range(count):
         close_y = 100.0 + index * 2.0
         rows.append(

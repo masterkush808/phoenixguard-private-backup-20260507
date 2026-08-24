@@ -1,10 +1,11 @@
 from fastapi.testclient import TestClient
 from phoenixguard.mobile_api.app import create_app
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 app = create_app()
-client = TestClient(app)
+client: Any = TestClient(app)
 
 
 def test_v3_chart_state_and_frame_endpoint() -> None:

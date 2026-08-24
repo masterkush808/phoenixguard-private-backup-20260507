@@ -6,7 +6,7 @@ from phoenixguard.mobile_api.app import create_app
 from phoenixguard.vision.market_registry import persist_market_objects
 
 
-client = TestClient(create_app())
+client: Any = TestClient(create_app())
 
 
 def test_chart_transform_is_exposed(tmp_path: Path):

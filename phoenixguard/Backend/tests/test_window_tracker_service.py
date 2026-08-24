@@ -57,7 +57,7 @@ def shutdown_tracker_services_after_test(
 
 
 def test_market_study_objects_preserve_bounded_relationship_evidence() -> None:
-    objects = PhoenixGuardWindowTrackingAdapter._market_study_objects_v3(  # noqa: SLF001
+    objects = PhoenixGuardWindowTrackingAdapter._market_study_objects_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         [
             {
                 "object_type": "crowded price area",
@@ -100,7 +100,7 @@ def test_market_study_objects_preserve_bounded_relationship_evidence() -> None:
 
 
 def test_market_study_objects_keep_real_tracker_zones_and_normalize_geometry() -> None:
-    objects = PhoenixGuardWindowTrackingAdapter._market_study_objects_v3(  # noqa: SLF001
+    objects = PhoenixGuardWindowTrackingAdapter._market_study_objects_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         [
             {
                 "key": "support_1",
@@ -232,10 +232,14 @@ def _activate_window_false(hwnd: int) -> bool:
     return False
 
 
+def _empty_selector_payload(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    return {}
+
+
 def test_tracker_translates_locked_broker_controls_into_chart_exclusions() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     surface = Image.new("RGB", (1000, 600), color=(18, 24, 34))
-    boxes = adapter.chart_space_broker_exclusion_boxes(  # noqa: SLF001
+    boxes = adapter.chart_space_broker_exclusion_boxes(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         surface,
         [0, 0, 1000, 600],
         session_payload={
@@ -1713,7 +1717,7 @@ def test_background_only_visible_activation_is_disabled(
     backend = WindowsWindowCaptureBackend()
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
 
-    assert backend._activate_window_for_visible_capture(101) is False  # noqa: SLF001
+    assert backend._activate_window_for_visible_capture(101) is False  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 
 def test_background_only_locked_window_restore_is_disabled(
@@ -1727,7 +1731,7 @@ def test_background_only_locked_window_restore_is_disabled(
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
 
-    assert tracker._restore_locked_window_descriptor(101) == {}  # noqa: SLF001
+    assert tracker._restore_locked_window_descriptor(101) == {}  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 
 def test_windows_live_capture_rejects_dashboard_title_even_with_embedded_broker_pixels(
@@ -3702,8 +3706,8 @@ def test_market_selector_lane_tracks_letterboxed_edge_viewport_without_asset_tab
     assert viewport_lane[3] == focused_lane[3] + 60
     assert fingerprint(focused) == fingerprint(edge_viewport)
 
-    focused_market = adapter._detect_market_selector(focused)  # noqa: SLF001
-    viewport_market = adapter._detect_market_selector(edge_viewport)  # noqa: SLF001
+    focused_market = adapter._detect_market_selector(focused)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    viewport_market = adapter._detect_market_selector(edge_viewport)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     assert focused_market["value"] == "GBP/USD OTC"
     assert viewport_market["value"] == "GBP/USD OTC"
     assert viewport_market["selector_layout"] == "edge_letterboxed_tab"
@@ -3809,7 +3813,7 @@ def _compact_live_m5_jpeg_glyph() -> NDArray[np.uint8]:
 def test_compact_live_m5_jpeg_topology_does_not_become_m3() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
 
-    label, confidence = adapter._compact_timeframe_shape_hint(  # noqa: SLF001
+    label, confidence = adapter._compact_timeframe_shape_hint(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         _compact_live_m5_jpeg_glyph()
     )
 
@@ -3829,7 +3833,7 @@ def test_letterboxed_edge_timeframe_anchor_accepts_live_m5_position() -> None:
     pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
     adapter = PhoenixGuardWindowTrackingAdapter()
 
-    timeframe = adapter._detect_timeframe_selector(Image.fromarray(pixels, mode="RGB"))  # noqa: SLF001
+    timeframe = adapter._detect_timeframe_selector(Image.fromarray(pixels, mode="RGB"))  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
     assert timeframe["value"] == "M5"
     assert timeframe["bbox"] == [256, 193, 281, 216]
@@ -3850,13 +3854,13 @@ def test_timeframe_selector_recovers_from_transient_empty_template_cache() -> No
     # empty bank after a transient startup initialization error.
     adapter.__dict__["_timeframe_template_bank"] = {}
 
-    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+    timeframe = adapter._detect_timeframe_selector(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         Image.fromarray(pixels, mode="RGB")
     )
 
     assert timeframe["value"] == "M5"
     assert timeframe["bbox"] == [256, 193, 281, 216]
-    assert all(adapter._timeframe_template_bank.values())  # noqa: SLF001
+    assert all(adapter._timeframe_template_bank.values())  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 
 def test_letterboxed_edge_timeframe_accepts_desaturated_live_capture_chip() -> None:
@@ -3871,7 +3875,7 @@ def test_letterboxed_edge_timeframe_accepts_desaturated_live_capture_chip() -> N
     pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
     adapter = PhoenixGuardWindowTrackingAdapter()
 
-    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+    timeframe = adapter._detect_timeframe_selector(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         Image.fromarray(pixels, mode="RGB")
     )
 
@@ -3895,7 +3899,7 @@ def test_letterboxed_edge_timeframe_keeps_m5_separate_from_dark_blue_toolbar() -
     pixels[201 + glyph_y, 262 + glyph_x] = (248, 250, 255)
     adapter = PhoenixGuardWindowTrackingAdapter()
 
-    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+    timeframe = adapter._detect_timeframe_selector(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         Image.fromarray(pixels, mode="RGB")
     )
 
@@ -3937,7 +3941,7 @@ def test_letterboxed_edge_timeframe_ignores_later_toolbar_notification_badges() 
         )
 
     adapter = PhoenixGuardWindowTrackingAdapter()
-    timeframe = adapter._detect_timeframe_selector(  # noqa: SLF001
+    timeframe = adapter._detect_timeframe_selector(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         Image.fromarray(pixels, mode="RGB")
     )
 
@@ -3951,7 +3955,7 @@ def test_chart_identity_probe_rebuilds_only_poisoned_ocr_template_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
-    healthy_timeframe_bank = adapter._timeframe_template_bank  # noqa: SLF001
+    healthy_timeframe_bank = adapter._timeframe_template_bank  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     poisoned_ocr_bank: dict[str, list[NDArray[np.uint8]]] = {}
     adapter.__dict__["_ocr_char_template_bank"] = poisoned_ocr_bank
     timeframe_calls = 0
@@ -3959,7 +3963,7 @@ def test_chart_identity_probe_rebuilds_only_poisoned_ocr_template_cache(
     def detect_timeframe(_image: Image.Image) -> dict[str, Any]:
         nonlocal timeframe_calls
         timeframe_calls += 1
-        ocr_bank = adapter._ocr_char_template_bank  # noqa: SLF001
+        ocr_bank = adapter._ocr_char_template_bank  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         if not ocr_bank or not all(ocr_bank.values()):
             return {}
         return {
@@ -4002,15 +4006,15 @@ def test_chart_identity_probe_rebuilds_only_poisoned_ocr_template_cache(
     assert timeframe_calls == 2
     assert adapter.__dict__["_timeframe_template_bank"] is healthy_timeframe_bank
     assert adapter.__dict__["_ocr_char_template_bank"] is not poisoned_ocr_bank
-    assert all(adapter._ocr_char_template_bank.values())  # noqa: SLF001
+    assert all(adapter._ocr_char_template_bank.values())  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 
 def test_headerless_identity_probe_preserves_complete_template_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
-    healthy_timeframe_bank = adapter._timeframe_template_bank  # noqa: SLF001
-    healthy_ocr_bank = adapter._ocr_char_template_bank  # noqa: SLF001
+    healthy_timeframe_bank = adapter._timeframe_template_bank  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    healthy_ocr_bank = adapter._ocr_char_template_bank  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     timeframe_calls = 0
 
     def detect_timeframe(_image: Image.Image) -> dict[str, Any]:
@@ -4202,7 +4206,7 @@ def test_live_compact_cad_selector_splits_touching_ca_at_bounded_valley() -> Non
         {"bbox": [94, 0, 103, 11]},
     ]
 
-    split = adapter._split_market_wide_components(mask, components)  # noqa: SLF001
+    split = adapter._split_market_wide_components(mask, components)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
     assert len(split) == 10
     assert split[0]["bbox"] == [0, 0, 8, 11]
@@ -4237,9 +4241,12 @@ def test_market_selector_second_raster_lane_can_only_enrich_same_pair_to_otc(
             {"value": "EUR/NZD OTC", "source": "header_text", "confidence": 0.57},
         )
     )
-    monkeypatch.setattr(adapter, "_detect_market_selector_once", lambda *_args, **_kwargs: next(reads))
+    def queued_market_read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return next(reads)
 
-    recovered = adapter._detect_market_selector(surface)  # noqa: SLF001
+    monkeypatch.setattr(adapter, "_detect_market_selector_once", queued_market_read)
+
+    recovered = adapter._detect_market_selector(surface)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
     assert recovered["value"] == "EUR/NZD OTC"
     assert recovered["specificity_recovery"] == "jpeg_raster_ocr_lane"
@@ -4251,13 +4258,16 @@ def test_market_selector_second_raster_lane_can_only_enrich_same_pair_to_otc(
             {"value": "EUR/USD OTC", "source": "header_text", "confidence": 0.59},
         )
     )
+    def queued_disagreeing_read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return next(disagreeing_reads)
+
     monkeypatch.setattr(
         adapter,
         "_detect_market_selector_once",
-        lambda *_args, **_kwargs: next(disagreeing_reads),
+        queued_disagreeing_read,
     )
 
-    disagreed = adapter._detect_market_selector(surface)  # noqa: SLF001
+    disagreed = adapter._detect_market_selector(surface)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
     assert disagreed["value"] == "EUR/NZD"
     assert "specificity_recovery" not in disagreed
@@ -5092,8 +5102,8 @@ def test_edge_tab_ingest_preserves_authoritative_roi_for_identity_and_study(
         return original_study(image, session_payload=session_payload)
 
     monkeypatch.setattr(adapter, "probe_chart_identity_v3", probe_identity)
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
     monkeypatch.setattr(adapter, "study", record_study)
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path / "edge-full-frame-identity",
@@ -5437,8 +5447,8 @@ def test_same_frame_wgc_identity_attestation_unblocks_cropped_chart_study(
     assert attestation["source_verified"] is True
     assert attestation["broker_click_safe"] is False
 
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
     result = adapter.study(
         surface,
         session_payload={
@@ -5481,8 +5491,8 @@ def test_same_frame_wgc_identity_attestation_accepts_standard_fx_chart(
     assert attestation["market"] == "EUR/USD"
     assert attestation["timeframe"] == "M15"
 
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
     result = adapter.study(
         surface,
         session_payload={
@@ -5505,8 +5515,8 @@ def test_source_agnostic_chart_identity_probe_reads_tradingview_window_title(
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     surface = _synthetic_chart_surface("buy", width=900, height=520)
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
 
     identity = adapter.probe_chart_identity_v3(
         surface,
@@ -5534,23 +5544,29 @@ def test_source_agnostic_chart_identity_probe_fails_closed_on_incomplete_or_conf
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     surface = _synthetic_chart_surface("buy", width=900, height=520)
-    monkeypatch.setattr(
-        adapter,
-        "_detect_market_selector",
-        lambda *_args, **_kwargs: {
+    def visual_eur_usd_market_selector(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
             "value": "EUR/USD",
             "source": "visual_chart_header",
             "confidence": 0.91,
-        },
+        }
+
+    def visual_m5_timeframe_selector(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "value": "M5",
+            "source": "visual_chart_header",
+            "confidence": 0.91,
+        }
+
+    monkeypatch.setattr(
+        adapter,
+        "_detect_market_selector",
+        visual_eur_usd_market_selector,
     )
     monkeypatch.setattr(
         adapter,
         "_detect_timeframe_selector",
-        lambda *_args, **_kwargs: {
-            "value": "M5",
-            "source": "visual_chart_header",
-            "confidence": 0.91,
-        },
+        visual_m5_timeframe_selector,
     )
 
     conflicting = adapter.probe_chart_identity_v3(
@@ -5566,8 +5582,8 @@ def test_source_agnostic_chart_identity_probe_fails_closed_on_incomplete_or_conf
     assert conflicting["detected_market"] == ""
     assert conflicting["detected_timeframe"] == ""
 
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
     incomplete = adapter.probe_chart_identity_v3(
         surface,
         source={"metadata": {"window": {"title": "EUR · M5 · chart"}}},
@@ -5591,8 +5607,8 @@ def test_wgc_non_otc_identity_survives_derived_chart_plane_and_publishes_operato
     adapter = PhoenixGuardWindowTrackingAdapter()
     # The derived candle plane deliberately has no chart header. The exact WGC
     # full-surface probe must therefore supply identity before study begins.
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path / "wgc-universal-identity",
         tracking_adapter=adapter,
@@ -5652,8 +5668,9 @@ def test_wgc_non_otc_identity_survives_derived_chart_plane_and_publishes_operato
         now_epoch=capture_epoch + 0.1,
     )
     assert workspace["overlays"]
+    surface_state = cast(Mapping[str, Any], workspace["surface"])
     assert all(
-        int(row["frame_id"]) == int(workspace["surface"]["frame_id"])
+        int(row["frame_id"]) == int(surface_state["frame_id"])
         for row in cast(Sequence[Mapping[str, Any]], workspace["overlays"])
     )
 
@@ -5670,8 +5687,8 @@ def test_wgc_transport_heartbeat_with_identical_pixels_is_live_unchanged_not_sta
     )
 
     adapter = PhoenixGuardWindowTrackingAdapter()
-    monkeypatch.setattr(adapter, "_detect_market_selector", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(adapter, "_detect_timeframe_selector", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(adapter, "_detect_market_selector", _empty_selector_payload)
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", _empty_selector_payload)
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path / "wgc-live-unchanged",
         tracking_adapter=adapter,
@@ -5750,9 +5767,11 @@ def test_wgc_transport_heartbeat_with_identical_pixels_is_live_unchanged_not_sta
         live_state,
         now_epoch=second_capture_epoch + 0.1,
     )
-    assert workspace["freshness"]["state"] == "UNCHANGED"
-    assert "Chart stream live" in str(workspace["freshness"]["label"])
-    assert workspace["permission"]["allowed"] is False
+    freshness = cast(Mapping[str, Any], workspace["freshness"])
+    assert freshness["state"] == "UNCHANGED"
+    assert "Chart stream live" in str(freshness["label"])
+    permission = cast(Mapping[str, Any], workspace["permission"])
+    assert permission["allowed"] is False
     assert workspace["overlays"]
     overlay_lifecycles = {
         str(row["lifecycle"])
@@ -5832,7 +5851,7 @@ def test_wgc_identity_attestation_rejects_unleased_or_low_confidence_source() ->
         Callable[[Image.Image], str],
         getattr(window_tracker_module, "_surface_signature"),
     )(surface)
-    unleased_source = {
+    unleased_source: dict[str, Any] = {
         "source_id": "windows-region-capture-v3",
         "source_type": "windows_graphics_capture_roi",
         "sequence_id": "wgc-sequence-7",
@@ -5965,7 +5984,7 @@ def test_pending_unsuffixed_market_survives_one_empty_read_then_accepts_otc(
     detector_values: Iterator[dict[str, Any]] = iter(
         (
             {"value": "EUR/NZD", "source": "header_text", "confidence": 0.79},
-            {},
+            cast(dict[str, Any], {}),
             {"value": "EUR/NZD OTC", "source": "header_text", "confidence": 0.79},
         )
     )
@@ -7133,7 +7152,7 @@ def test_window_tracker_support_resistance_zones_fit_touch_candles() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
 
     def derive_zones(candles: Sequence[Mapping[str, Any]], size: tuple[int, int]) -> list[dict[str, Any]]:
-        return adapter.derive_support_resistance_zones(  # noqa: SLF001
+        return adapter.derive_support_resistance_zones(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
             candles,
             size,
             candidate_action="BUY",
@@ -11116,7 +11135,7 @@ def test_tracker_http_surface_updates_reused_session_locked_hwnd(tmp_path: Path)
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
     app = create_app(window_tracker_service=tracker_service)
-    client = TestClient(app)
+    client: Any = TestClient(app)
 
     create_response = client.post(
         "/v1/mobile/window-tracker/sessions",
@@ -11197,7 +11216,7 @@ def test_tracker_http_surface_serves_session_artifacts_and_dashboard(tmp_path: P
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
     app = create_app(window_tracker_service=tracker_service)
-    client = TestClient(app)
+    client: Any = TestClient(app)
 
     create_response = client.post(
         "/v1/mobile/window-tracker/sessions",
@@ -11314,7 +11333,7 @@ def test_tracker_artifact_route_serves_an_archived_exact_frame_after_latest_adva
             assert session_id == "archive-session"
             return session_root
 
-    client = TestClient(create_app(window_tracker_service=ArchivedArtifactTracker()))
+    client: Any = TestClient(create_app(window_tracker_service=ArchivedArtifactTracker()))
 
     for artifact_kind in ("chart", "window"):
         archived = client.get(
@@ -11508,7 +11527,7 @@ def test_tracker_http_surface_has_no_manual_projection_actions(tmp_path: Path) -
         tracking_adapter=PhoenixGuardWindowTrackingAdapter(),
     )
     app = create_app(window_tracker_service=tracker_service)
-    client = TestClient(app)
+    client: Any = TestClient(app)
 
     create_response = client.post(
         "/v1/mobile/window-tracker/sessions",
@@ -11603,7 +11622,7 @@ def test_tracker_http_surface_updates_capture_interval_control(tmp_path: Path) -
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
     app = create_app(window_tracker_service=tracker_service)
-    client = TestClient(app)
+    client: Any = TestClient(app)
 
     create_response = client.post(
         "/v1/mobile/window-tracker/sessions",
@@ -11658,7 +11677,7 @@ def test_tracker_http_rejects_private_projection_controls(tmp_path: Path) -> Non
         capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
-    client = TestClient(create_app(window_tracker_service=tracker_service))
+    client: Any = TestClient(create_app(window_tracker_service=tracker_service))
     session_id = client.post(
         "/v1/mobile/window-tracker/sessions",
         json={"session_id": "private-control-boundary"},
@@ -11738,7 +11757,7 @@ def test_tracker_http_emergency_stop_disables_live_execution(tmp_path: Path) -> 
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
     app = create_app(window_tracker_service=tracker_service)
-    client = TestClient(app)
+    client: Any = TestClient(app)
 
     create_response = client.post(
         "/v1/mobile/window-tracker/sessions",
@@ -12999,7 +13018,7 @@ def test_tracker_http_demo_random_trade_route_accepts_default_body(tmp_path: Pat
         execution_backend=execution_backend,
     )
     app = create_app(window_tracker_service=tracker_service)
-    client = TestClient(app)
+    client: Any = TestClient(app)
     create_response = client.post(
         "/v1/mobile/window-tracker/sessions",
         json={"session_id": "pocket-live", "window_query": "Pocket Option"},
@@ -13537,7 +13556,7 @@ def test_full_resolution_fallback_cannot_resurrect_stale_lane_after_resized_righ
 
     def extract_resolution_dependent_lane(image_arg: Image.Image) -> list[dict[str, Any]]:
         if image_arg.width < image.width:
-            adapter._record_candle_lane_selection_audit(  # noqa: SLF001
+            adapter._record_candle_lane_selection_audit(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
                 {
                     "schema_version": "phoenixguard.candle_lane_selection_audit.v1",
                     "selected_lane": "ambiguous_fail_closed",
@@ -13548,7 +13567,7 @@ def test_full_resolution_fallback_cannot_resurrect_stale_lane_after_resized_righ
                 }
             )
             return []
-        adapter._record_candle_lane_selection_audit(  # noqa: SLF001
+        adapter._record_candle_lane_selection_audit(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
             {
                 "schema_version": "phoenixguard.candle_lane_selection_audit.v1",
                 "selected_lane": "default",
@@ -13640,7 +13659,7 @@ def test_causal_right_lane_wins_over_longer_historical_lane_and_is_cached(
 
     monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
     image = Image.new("RGB", (960, 508), color=(20, 26, 38))
-    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         image,
         cache_key="pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508",
     )
@@ -13654,7 +13673,7 @@ def test_causal_right_lane_wins_over_longer_historical_lane_and_is_cached(
     assert lane_audit["right_candidate_track_count"] == 12
     assert lane_audit["default_endpoint_proven"] is False
     assert lane_audit["current_endpoint_unproven"] is False
-    cached = adapter._live_candle_cache[  # noqa: SLF001
+    cached = adapter._live_candle_cache[  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
     ]
     assert max(float(row["center_x"]) for row in cached["tracks"]) == 610.0
@@ -13691,7 +13710,7 @@ def test_disjoint_right_lane_underflow_fails_closed_instead_of_publishing_histor
         return tracks(40, 27, 8)
 
     monkeypatch.setattr(window_tracker_module, "extract_candle_tracks_adaptive_v3", fake_adaptive_extract)
-    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         Image.new("RGB", (960, 508), color=(20, 26, 38)),
         cache_key="pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508",
     )
@@ -13702,7 +13721,7 @@ def test_disjoint_right_lane_underflow_fails_closed_instead_of_publishing_histor
     assert audit["right_candidate_disjoint"] is True
     assert audit["right_candidate_ambiguous"] is True
     assert audit["selection_reason"] == "disjoint_right_lane_track_underflow_fail_closed"
-    assert adapter._live_candle_cache[  # noqa: SLF001
+    assert adapter._live_candle_cache[  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
     ]["tracks"] == []
 
@@ -13740,7 +13759,7 @@ def test_unproven_current_endpoint_fails_closed_without_a_right_lane(
         "extract_candle_tracks_adaptive_v3",
         fake_adaptive_extract,
     )
-    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+    rows, metadata = adapter._extract_live_candle_tracks_incremental(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         Image.new("RGB", (960, 508), color=(20, 26, 38)),
         cache_key="pocket-live|M5|USD/CAD OTC|selector_v3_current_pair|960x508",
     )
@@ -13793,16 +13812,16 @@ def test_pair_a_to_pair_b_full_refresh_keeps_pair_b_on_causal_right_lane(
     pair_a_key = "pocket-live|M5|CAD/CHF OTC|selector_v2_pair_a|960x508"
     pair_b_key = "pocket-live|M5|GBP/USD OTC|selector_v2_pair_b|960x508"
 
-    pair_a_rows, _ = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+    pair_a_rows, _ = adapter._extract_live_candle_tracks_incremental(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         image,
         cache_key=pair_a_key,
     )
     phase["pair"] = "B"
-    pair_b_rows, first_b_metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+    pair_b_rows, first_b_metadata = adapter._extract_live_candle_tracks_incremental(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         image,
         cache_key=pair_b_key,
     )
-    refreshed_b_rows, refreshed_b_metadata = adapter._extract_live_candle_tracks_incremental(  # noqa: SLF001
+    refreshed_b_rows, refreshed_b_metadata = adapter._extract_live_candle_tracks_incremental(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         image,
         cache_key=pair_b_key,
     )
@@ -13813,7 +13832,7 @@ def test_pair_a_to_pair_b_full_refresh_keeps_pair_b_on_causal_right_lane(
     assert refreshed_b_metadata["full_refresh_reason"] == "insufficient_cached_history"
     assert refreshed_b_metadata["causal_lane_selection"]["selected_lane"] == "causal_right"
     assert max(float(row["center_x"]) for row in refreshed_b_rows) == 610.0
-    assert max(float(row["center_x"]) for row in adapter._live_candle_cache[pair_b_key]["tracks"]) == 610.0  # noqa: SLF001
+    assert max(float(row["center_x"]) for row in adapter._live_candle_cache[pair_b_key]["tracks"]) == 610.0  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 
 def test_compact_live_state_preserves_confirmed_instrument_identity_flags() -> None:
@@ -13829,8 +13848,8 @@ def test_compact_live_state_preserves_confirmed_instrument_identity_flags() -> N
         "timeframe_identity_confirmed": True,
         "market_selector_visual_fingerprint": "selector_v2_gbp_usd",
     }
-    compact_market = window_tracker_module._compact_live_state_market_payload(identity)  # noqa: SLF001
-    compact_signal = window_tracker_module._compact_live_state_latest_signal_payload(  # noqa: SLF001
+    compact_market = window_tracker_module._compact_live_state_market_payload(identity)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    compact_signal = window_tracker_module._compact_live_state_latest_signal_payload(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         {
             "market": "GBP/USD OTC",
             "focus_timeframe": "M5",
@@ -14220,10 +14239,14 @@ def test_live_chart_resolution_path_uses_incremental_candle_extraction(
     incremental_calls: list[tuple[int, int]] = []
 
     monkeypatch.setenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "4096")
+
+    def fixed_selector_fingerprint(_image: Image.Image) -> str:
+        return selector_fingerprint
+
     monkeypatch.setattr(
         window_tracker_module,
         "_market_selector_visual_fingerprint",
-        lambda _image: selector_fingerprint,
+        fixed_selector_fingerprint,
     )
 
     def incremental_extract(
@@ -14250,19 +14273,25 @@ def test_live_chart_resolution_path_uses_incremental_candle_extraction(
         "_extract_live_candle_tracks_incremental",
         incremental_extract,
     )
+    def fail_locked_extract(_image: Image.Image) -> None:
+        pytest.fail(
+            "locked chart-resolution frames must use the incremental path"
+        )
+
+    def fail_chart_bbox_detect(_image: Image.Image) -> None:
+        pytest.fail(
+            "an authoritative Edge chart ROI must not be detected or cropped again"
+        )
+
     monkeypatch.setattr(
         adapter,
         "_extract_candle_tracks",
-        lambda _image: pytest.fail(
-            "locked chart-resolution frames must use the incremental path"
-        ),
+        fail_locked_extract,
     )
     monkeypatch.setattr(
         adapter,
         "_detect_chart_bbox",
-        lambda _image: pytest.fail(
-            "an authoritative Edge chart ROI must not be detected or cropped again"
-        ),
+        fail_chart_bbox_detect,
     )
     result = adapter.study(
         image,
@@ -14340,23 +14369,35 @@ def test_local_locked_focus_still_uses_chart_bbox_detector(
     detector_calls: list[tuple[int, int]] = []
     expected_bbox = [18, 16, 622, 352]
 
+    def local_selector_fingerprint(_image: Image.Image) -> str:
+        return "selector_v3_local_cad_jpy"
+
+    def local_m5_timeframe_selector(_image: Image.Image) -> dict[str, Any]:
+        return {"value": "M5", "confidence": 0.94}
+
+    def local_cad_jpy_market_selector(
+        _image: Image.Image,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "value": "CAD/JPY OTC",
+            "confidence": 0.93,
+        }
+
     monkeypatch.setattr(
         window_tracker_module,
         "_market_selector_visual_fingerprint",
-        lambda _image: "selector_v3_local_cad_jpy",
+        local_selector_fingerprint,
     )
     monkeypatch.setattr(
         adapter,
         "_detect_timeframe_selector",
-        lambda _image: {"value": "M5", "confidence": 0.94},
+        local_m5_timeframe_selector,
     )
     monkeypatch.setattr(
         adapter,
         "_detect_market_selector",
-        lambda _image, **_kwargs: {
-            "value": "CAD/JPY OTC",
-            "confidence": 0.93,
-        },
+        local_cad_jpy_market_selector,
     )
 
     def detect_chart_bbox(chart_surface: Image.Image) -> tuple[list[int], float]:
@@ -14364,10 +14405,14 @@ def test_local_locked_focus_still_uses_chart_bbox_detector(
         return list(expected_bbox), 0.91
 
     monkeypatch.setattr(adapter, "_detect_chart_bbox", detect_chart_bbox)
-    monkeypatch.setattr(
-        adapter,
-        "_extract_live_candle_tracks_incremental",
-        lambda _image, *, cache_key: (
+    def cold_incremental_extract(
+        candle_image: Image.Image,
+        *,
+        cache_key: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        _ = candle_image
+        _ = cache_key
+        return (
             [],
             {
                 "enabled": True,
@@ -14377,7 +14422,12 @@ def test_local_locked_focus_still_uses_chart_bbox_detector(
                 "reuse_count": 0,
                 "causal_lane_selection": {},
             },
-        ),
+        )
+
+    monkeypatch.setattr(
+        adapter,
+        "_extract_live_candle_tracks_incremental",
+        cold_incremental_extract,
     )
 
     result = adapter.study(
@@ -15139,7 +15189,7 @@ def test_session_snapshot_read_does_not_wait_for_session_commit_lock(
         },
     )
 
-    commit_lock = tracker._session_commit_lock_for(session_id)  # noqa: SLF001
+    commit_lock = tracker._session_commit_lock_for(session_id)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     executor = ThreadPoolExecutor(max_workers=1)
     commit_lock.acquire()
     try:
@@ -15161,7 +15211,7 @@ def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
     tracker.session_dir(session_id).mkdir(parents=True, exist_ok=True)
     observed_epoch = 1_800.0
 
-    first = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+    first = tracker._publish_direct_visual_bias_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         session_id,
         {
             "side": "SELL",
@@ -15181,7 +15231,7 @@ def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
         frame_id=40,
         fallback_payload={},
     )
-    second = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+    second = tracker._publish_direct_visual_bias_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         session_id,
         {
             "side": "BUY",
@@ -15203,7 +15253,7 @@ def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
     assert second["side"] == "BUY"
     assert tracker.direct_visual_bias_snapshot_v3(session_id)["frame_id"] == 41
 
-    same_frame_delayed = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+    same_frame_delayed = tracker._publish_direct_visual_bias_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         session_id,
         {
             "side": "SELL",
@@ -15217,7 +15267,7 @@ def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
     assert same_frame_delayed["side"] == "BUY"
     assert same_frame_delayed["frame_id"] == 41
 
-    refreshed = tracker._refresh_direct_visual_bias_from_heartbeat_v3(  # noqa: SLF001
+    refreshed = tracker._refresh_direct_visual_bias_from_heartbeat_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         session_id,
         {
             "source_id": "edge-chart-region-v3",
@@ -15230,7 +15280,7 @@ def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
     assert refreshed["observed_epoch"] == observed_epoch + 30.0
     assert refreshed["unchanged_frame_heartbeat"] is True
 
-    stale = tracker._publish_direct_visual_bias_v3(  # noqa: SLF001
+    stale = tracker._publish_direct_visual_bias_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         session_id,
         {
             "side": "SELL",
@@ -15246,10 +15296,10 @@ def test_direct_visual_bias_sidecar_uses_stable_timeframe_candle_identity(
 
 
 def test_fast_external_frame_visual_bias_reads_current_candle_palette() -> None:
-    sell = ContinuousWindowTrackerService._direct_visual_bias_from_frame_v3(  # noqa: SLF001
+    sell = ContinuousWindowTrackerService._direct_visual_bias_from_frame_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         _synthetic_chart_surface("sell")
     )
-    buy = ContinuousWindowTrackerService._direct_visual_bias_from_frame_v3(  # noqa: SLF001
+    buy = ContinuousWindowTrackerService._direct_visual_bias_from_frame_v3(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         _synthetic_chart_surface("buy")
     )
 

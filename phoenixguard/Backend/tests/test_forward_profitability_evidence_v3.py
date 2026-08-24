@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, cast
+
 from phoenixguard.study.path_clock_liquidity_store_v3 import (
     PathClockLiquiditySideStoreV3,
 )
 
+_profitability_evidence = cast(
+    "Callable[..., dict[str, Any]]",
+    getattr(PathClockLiquiditySideStoreV3, "_profitability_evidence"),
+)
+
 
 def test_forward_profitability_requires_conservative_positive_expectancy() -> None:
-    evidence = PathClockLiquiditySideStoreV3._profitability_evidence(
+    evidence = _profitability_evidence(
         matured_count=500,
         candidate_metrics={"directional_accuracy": 0.70},
         baseline_metrics={"directional_accuracy": 0.55},
@@ -20,7 +28,7 @@ def test_forward_profitability_requires_conservative_positive_expectancy() -> No
 
 
 def test_directional_accuracy_cannot_promote_negative_payout_expectancy() -> None:
-    evidence = PathClockLiquiditySideStoreV3._profitability_evidence(
+    evidence = _profitability_evidence(
         matured_count=1000,
         candidate_metrics={"directional_accuracy": 0.56},
         baseline_metrics={"directional_accuracy": 0.50},
@@ -32,7 +40,7 @@ def test_directional_accuracy_cannot_promote_negative_payout_expectancy() -> Non
 
 
 def test_small_winning_sample_stays_unproven() -> None:
-    evidence = PathClockLiquiditySideStoreV3._profitability_evidence(
+    evidence = _profitability_evidence(
         matured_count=25,
         candidate_metrics={"directional_accuracy": 0.80},
         baseline_metrics={"directional_accuracy": 0.50},

@@ -27,7 +27,7 @@ class _KillOnlyTracker:
 
 def test_local_dashboard_kill_route_fences_the_selected_source() -> None:
     tracker = _KillOnlyTracker()
-    client = TestClient(create_app(window_tracker_service=tracker))
+    client: Any = TestClient(create_app(window_tracker_service=tracker))
 
     response = client.post(
         "/v1/mobile/window-tracker/sessions/chart-study/source-control/kill",
@@ -46,7 +46,7 @@ def test_local_dashboard_kill_route_fences_the_selected_source() -> None:
 
 def test_local_dashboard_kill_route_reports_unknown_session() -> None:
     tracker = _KillOnlyTracker()
-    client = TestClient(create_app(window_tracker_service=tracker))
+    client: Any = TestClient(create_app(window_tracker_service=tracker))
 
     response = client.post(
         "/v1/mobile/window-tracker/sessions/missing-session/source-control/kill",

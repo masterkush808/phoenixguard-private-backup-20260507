@@ -279,7 +279,12 @@ def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
     assert trace["model_health_summary"]["label"] == "2/2 roles ready"
     assert all(row["synthetic"] is True for row in trace["model_warm_state_v3"])
     assert {row["unit_kind"] for row in trace["model_warm_state_v3"]} == {"logical_role"}
-    assert trace["overlay_render_budget"]["CLEAN_LIVE"] == 48
+    # The trace publishes the module's authoritative overlay ceilings; the
+    # unified 1M detection ceiling for every mode is the deliberate live
+    # contract (commit "streaming under 1M caps") and must never regress to a
+    # value that would truncate the candle scene.
+    assert trace["overlay_render_budget"] == OVERLAY_RENDER_BUDGETS
+    assert trace["overlay_render_budget"]["CLEAN_LIVE"] == 1_000_000
 
 
 def test_performance_trace_keeps_awake_label_for_measured_model_rows() -> None:

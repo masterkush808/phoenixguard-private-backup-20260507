@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from statistics import median
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 def _number(value: Any) -> float | None:
@@ -17,11 +17,14 @@ def _points(value: Any) -> list[list[float]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
     rows: list[list[float]] = []
-    for raw in value:
-        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 2:
+    for raw in cast(Sequence[Any], value):
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
             return []
-        x = _number(raw[0])
-        y = _number(raw[1])
+        points_row = cast(Sequence[Any], raw)
+        if len(points_row) < 2:
+            return []
+        x = _number(points_row[0])
+        y = _number(points_row[1])
         if x is None or y is None:
             return []
         rows.append([x, y])
@@ -29,9 +32,12 @@ def _points(value: Any) -> list[list[float]]:
 
 
 def _bounds(value: Any) -> tuple[float, float, float, float] | None:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) < 4:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return None
-    parsed = [_number(item) for item in value[:4]]
+    bounds_value = cast(Sequence[Any], value)
+    if len(bounds_value) < 4:
+        return None
+    parsed = [_number(item) for item in bounds_value[:4]]
     if any(item is None for item in parsed):
         return None
     left, top, right, bottom = (float(item) for item in parsed if item is not None)
@@ -79,9 +85,11 @@ def _candle_is_closed(candle: Mapping[str, Any], index: int, count: int) -> bool
 def _candle_geometry(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     count = len(candles)
-    for index, candle in enumerate(candles):
+    for index, candle_raw in enumerate(candles):
+        candle: Any = candle_raw
         if not isinstance(candle, Mapping):
             continue
+        candle = cast(Mapping[str, Any], candle)
         box = _bounds(candle.get("bbox") or candle.get("bounds") or candle.get("box"))
         wick_top = _first_number(
             candle,

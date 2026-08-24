@@ -5,6 +5,7 @@ import importlib
 import json
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -76,7 +77,11 @@ def test_runtime_config_collapses_to_final_live(monkeypatch: pytest.MonkeyPatch)
     assert runtime.auto_model_council_on_inference is True
 
 
-def test_floating_state_endpoint_uses_clean_contract() -> None:
+def test_floating_state_endpoint_uses_clean_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:
             return {"session_id": session_id, "status": "running", "model_health": {"models_awake": 7, "models_total": 7}}
@@ -96,7 +101,7 @@ def test_floating_state_endpoint_uses_clean_contract() -> None:
                 "execution_lane": {"name": "SNIPER_ZONE_ENTRY", "accepted": False, "reason": "NO_EXECUTION_LANE_ACCEPTED"},
             }
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/floating/state?session_id=pocket-live-8788")
     assert response.status_code == 200
     payload = response.json()
@@ -111,7 +116,13 @@ def test_floating_state_endpoint_uses_clean_contract() -> None:
     assert "inspector" in inspector_response.json()
 
 
-def test_floating_state_carries_drawable_overlay_objects_when_counts_are_positive() -> None:
+def test_floating_state_carries_drawable_overlay_objects_when_counts_are_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Direct disk sidecar reads would shadow the injected tracker with real
+    # runtime state sharing this session id; keep the fixture authoritative.
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+
     overlay_object: dict[str, object] = {
         "overlay_id": "demand-1",
         "object_id": "demand-1",
@@ -165,7 +176,7 @@ def test_floating_state_carries_drawable_overlay_objects_when_counts_are_positiv
         def latest_model_council_study_packet(self, session_id: str) -> dict[str, object]:
             raise KeyError(session_id)
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/floating/state?session_id=pocket-live-8788")
 
     assert response.status_code == 200
@@ -187,7 +198,7 @@ def test_tracker_artifact_endpoint_handles_pruned_file_race(tmp_path: Path) -> N
             assert artifact_kind == "chart"
             return missing_path
 
-    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    client: Any = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
     response = client.get("/v1/mobile/window-tracker/sessions/pocket-live-8788/artifacts/latest-chart")
 
     assert response.status_code == 404
