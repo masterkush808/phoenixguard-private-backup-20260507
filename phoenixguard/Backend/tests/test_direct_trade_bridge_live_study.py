@@ -1011,11 +1011,11 @@ def test_bridge_trigger_state_default_cooldown_is_disabled():
         state.record_trade_execution()
 
 
-def test_bridge_trigger_state_stops_after_eight_executed_trades():
+def test_bridge_trigger_state_stops_after_eight_executed_contracts():
     bridge = _load_bridge_module("phoenixguard_direct_trade_bridge_session_trade_cap")
     state = bridge._BridgeTriggerState(max_trades_per_candle=1)
 
-    for index in range(8):
+    for index in range(4):
         trade = {
             "side": "BUY",
             "signal_id": f"sig-{index}",
@@ -1026,7 +1026,7 @@ def test_bridge_trigger_state_stops_after_eight_executed_trades():
         state.record_trade_execution(trade)
 
     assert state.should_trigger(
-        {"side": "BUY", "signal_id": "sig-8", "published_epoch": 9.0, "candle_key": "c-8"}
+        {"side": "BUY", "signal_id": "sig-4", "published_epoch": 5.0, "candle_key": "c-4"}
     ) == (False, "session_trade_limit_reached")
 
 

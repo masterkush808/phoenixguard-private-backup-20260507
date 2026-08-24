@@ -112,7 +112,7 @@ _state_epoch_watermark = 0.0
 DEFAULT_SIGNAL_SOURCE = "strategist"
 DEFAULT_FLIP_GUARD_SECONDS = 0.0
 DEFAULT_MAX_TRADES_PER_CANDLE = 1
-DEFAULT_MAX_TRADES_PER_SESSION = 8
+DEFAULT_MAX_TRADES_PER_SESSION = 4
 DEFAULT_COOLDOWN_AFTER_TRADES = 0
 DEFAULT_COOLDOWN_SECONDS = 0.0
 DEFAULT_FRONTLINE_FRESHNESS_SECONDS = 180.0
@@ -1928,7 +1928,7 @@ def _trigger_manifest_to_boxes(
         boxes["sell_click"] = boxes["sell_button"]
 
     fixed_amount = _float(manifest.get("fixed_amount"), 1.0)
-    fixed_expiry = int(_float(manifest.get("fixed_expiry_seconds"), 60.0) or 60)
+    fixed_expiry = int(_float(manifest.get("fixed_expiry_seconds"), 9900.0) or 9900)
     timing_policy = _timing_policy_from_manifest(manifest)
     return boxes, chart_anchor, fixed_amount, fixed_expiry, timing_policy
 
@@ -2080,13 +2080,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rearm-seconds", type=float, default=0.0)
     parser.add_argument("--flip-guard-seconds", type=float, default=DEFAULT_FLIP_GUARD_SECONDS)
-    parser.add_argument("--fixed-expiry-seconds", type=int, default=180)
+    parser.add_argument(
+        "--fixed-expiry-seconds",
+        type=int,
+        default=9900,
+        help="Audit metadata for direct clicks: the Pocket Option expiry selected in the broker UI (default 9900 = 2h45m).",
+    )
     parser.add_argument("--max-trades-per-candle", type=int, default=DEFAULT_MAX_TRADES_PER_CANDLE)
     parser.add_argument(
         "--max-trades-per-session",
         type=int,
         default=DEFAULT_MAX_TRADES_PER_SESSION,
-        help="Hard cap on executed trades for this bridge process; 0 disables the cap.",
+        help=(
+            "Hard cap on granted executions for this bridge process; each execution fires 2 contracts "
+            "(default 4 executions = 8 contracts total). 0 disables the cap."
+        ),
     )
     parser.add_argument("--block-opposite-side-same-candle", action="store_true")
     parser.add_argument("--cooldown-after-trades", type=int, default=DEFAULT_COOLDOWN_AFTER_TRADES)
