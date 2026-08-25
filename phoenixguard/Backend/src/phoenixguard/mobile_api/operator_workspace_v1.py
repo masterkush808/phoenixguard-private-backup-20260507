@@ -4053,6 +4053,15 @@ def _forward_timing_forecast_contract_v3(value: object) -> dict[str, object]:
         and broker_expiry is not None
         and broker_expiry > 0.0
     )
+    # A recommendation counts as proven when it is anchored to the studied
+    # model horizon rather than arriving as a bare declared number.
+    recommended_trade_duration_proven = bool(
+        result["recommended_trade_duration_seconds"] is not None
+        and result.get("forecast_horizon_seconds") is not None
+    )
+    result["recommended_trade_duration_proven"] = (
+        recommended_trade_duration_proven
+    )
     result["broker_expiry_seconds"] = (
         int(cast(float, broker_expiry)) if broker_expiry_proven else None
     )
@@ -4070,6 +4079,9 @@ def _forward_timing_forecast_contract_v3(value: object) -> dict[str, object]:
             ).upper()
             if result["recommended_trade_duration_seconds"] is not None
             else "UNAVAILABLE"
+        ),
+        "recommended_trade_duration_proven": (
+            recommended_trade_duration_proven
         ),
         "broker_expiry": (
             _safe_public_text(
@@ -5956,6 +5968,11 @@ def _operator_timing_forecast_v3(
             if recommended_duration is not None and recommended_duration > 0.0
             else None
         ),
+        "recommended_trade_duration_proven": bool(
+            recommended_duration is not None
+            and recommended_duration > 0.0
+            and forecast_horizon_seconds is not None
+        ),
         "broker_expiry_seconds": (
             int(broker_expiry)
             if broker_expiry is not None
@@ -5975,6 +5992,9 @@ def _operator_timing_forecast_v3(
                 "UNAVAILABLE",
                 limit=64,
             ).upper(),
+            "recommended_trade_duration_proven": bool(
+                duration_provenance.get("recommended_trade_duration_proven")
+            ),
             "broker_expiry": _safe_public_text(
                 duration_provenance.get("broker_expiry"),
                 "UNPROVEN",

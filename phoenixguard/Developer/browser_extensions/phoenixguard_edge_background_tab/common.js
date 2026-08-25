@@ -343,7 +343,7 @@ export function boundedHeartbeatIdentityObservation(value = {}, expectedSequence
     cleanText(row.schema_version) !== "PG_EDGE_TAB_IDENTITY_HEARTBEAT_V3" ||
     row.revocation_only !== true ||
     !/^[A-Z]{3}\/[A-Z]{3}(?: OTC)?$/.test(symbol) ||
-    !/^(?:M1|M3|M5|M15|M30|H1|H4|D1)$/.test(timeframe) ||
+    !/^(?:S3|S5|S10|S15|S30|M1|M2|M3|M4|M5|M10|M15|M20|M30|M45|H1|H2|H3|H4|H6|H8|H12|D1|D2|D3|W1|W2|MN1|MN3|MN6)$/.test(timeframe) ||
     !sequenceId ||
     !expectedSequence ||
     sequenceId !== expectedSequence ||

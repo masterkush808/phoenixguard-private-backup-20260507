@@ -219,7 +219,11 @@ def _higher_timeframe_authority(
     ).strip().upper()
     current_seconds = _TIMEFRAME_SECONDS.get(current, 0)
     authority_seconds = _TIMEFRAME_SECONDS.get(authority_timeframe, current_seconds)
-    strict = side in {"BUY", "SELL"} and authority_seconds >= current_seconds
+    # A single-timeframe feed has no higher-timeframe authority.  Falling back
+    # to the current timeframe must stay advisory (CURRENT_TIMEFRAME_AUTHORITY);
+    # letting the chart's own trend self-certify as "HTF" turned every
+    # counter-trend entry into an unwinnable veto.
+    strict = side in {"BUY", "SELL"} and authority_seconds > current_seconds
     return {
         "current_timeframe": current,
         "authority_timeframe": authority_timeframe,
@@ -467,10 +471,7 @@ def evaluate_book_strategy_context_v3(
         )
     traces.extend(cast(list[dict[str, Any]], _rows(full_stack.get("rule_trace"))))
     htf = _higher_timeframe_authority(timeframe, trend_directions, higher_timeframe_context)
-    if htf["strictly_enforced"]:
-        side = str(htf["side"])
-        scores[side] += 2.6
-        traces.append(_trace("HTF_DIRECTIONAL_AUTHORITY", side, 2.6, "Higher-timeframe structure owns terminal direction; the lower timeframe only refines the reaction and entry.", pdf_pages=[105, 105], source_section="HTF analysis and LTF entries"))
+    # HTF is advisory-only for now: it no longer contributes directional score.
 
     full_structure = _mapping(full_stack.get("market_structure"))
     derived_bms = _mapping(full_structure.get("latest_bms"))
@@ -589,12 +590,13 @@ def evaluate_book_strategy_context_v3(
         not htf.get("strictly_enforced")
         or effective_htf_side == bms_side
     )
+    # HTF alignment is reported, never required: sequence readiness is
+    # causal-order-only for now.
     sequence_ready = bool(
         bms.get("confirmed")
         and bms_side in {"BUY", "SELL"}
         and precursor_ordered
         and terminal_index > bms_index
-        and htf_sequence_aligned
     )
     events = [
         {"ordinal": 1, "event": "LIQUIDITY_OR_FAILURE_SWING", "satisfied": precursor_index >= 0, "index": precursor_index, "order_valid": precursor_ordered},
@@ -618,30 +620,24 @@ def evaluate_book_strategy_context_v3(
         or current_zone_reactions
         or int(_number(latest_sweep.get("index"), -1)) == len(rows) - 1
     )
-    aggressive_htf_ok = bool(
-        aggressive_side in {"BUY", "SELL"}
-        and (
-            not htf.get("strictly_enforced")
-            or aggressive_side == effective_htf_side
-        )
-    )
     conservative_side = _side(bms_side, role_flip.get("side")) if sequence_ready else _side(role_flip.get("side"))
     conservative_current = bool(
         sequence_ready and terminal_index == len(rows) - 1
         or role_flip.get("current_retest")
     )
+    # HTF alignment no longer gates entry profiles (advisory-only for now).
     entry_profiles = {
         "aggressive": {
-            "ready": aggressive_current and aggressive_htf_ok,
+            "ready": aggressive_current,
             "side": aggressive_side,
             "current_closed_candle_evidence": aggressive_current,
-            "requires": ["STRICT_THREE_TOUCH_OR_ZONE_OR_SWEEP", "COMPLETED_REJECTION", "HTF_NOT_OPPOSING"],
+            "requires": ["STRICT_THREE_TOUCH_OR_ZONE_OR_SWEEP", "COMPLETED_REJECTION"],
         },
         "conservative": {
-            "ready": conservative_current and htf_sequence_aligned,
+            "ready": conservative_current,
             "side": conservative_side,
             "current_closed_candle_evidence": conservative_current,
-            "requires": ["CAUSAL_EVENT_ORDER", "COMPLETED_RETEST_OR_RTO", "HTF_ALIGNMENT"],
+            "requires": ["CAUSAL_EVENT_ORDER", "COMPLETED_RETEST_OR_RTO"],
         },
     }
     return {
@@ -876,8 +872,15 @@ def _profit_room_assessment(
                 "No measurable opposing structure target; profit room is reported, never guessed."
             ),
         }
-    median_range = _number(geometry.get("median_candle_range_y_px"), 0.0)
-    minimum_room = max(1.5 * median_range, 8.0) if median_range > 0.0 else 12.0
+    # Profit-room floor is a fixed 20 units of movement by default (operator
+    # setting), not a volatility-scaled multiplier that could demand 60+.
+    try:
+        configured_minimum_room = float(
+            os.environ.get("PHOENIXGUARD_MIN_PROFIT_ROOM_PX", "20.0")
+        )
+    except ValueError:
+        configured_minimum_room = 20.0
+    minimum_room = max(8.0, configured_minimum_room)
     sufficient = bool(room >= minimum_room)
     label = str(target.get("source") or "opposing book structure").replace("_", " ").lower()
     if room <= 0.0:
@@ -1417,11 +1420,7 @@ def select_current_book_action_v3(
             "reason": _clip_text(reason),
         })
 
-    if htf.get("strictly_enforced") and htf_effective_side in {"BUY", "SELL"}:
-        _vote(
-            "HIGHER_TIMEFRAME_AUTHORITY", htf_effective_side, 2.6,
-            "Rule of forex: price continues in its direction until an opposing force; the HTF owns that direction.",
-        )
+    # HTF contributes no alignment vote for now (advisory-only).
     if major_side in {"BUY", "SELL"}:
         _vote("MAJOR_STRUCTURE_DIRECTION", major_side, 1.35, "Big-picture structure continues until an opposing force breaks it.")
     if inner_side in {"BUY", "SELL"}:
@@ -1629,8 +1628,7 @@ def select_current_book_action_v3(
         not htf.get("strictly_enforced")
         or effective_htf == selected_side
     )
-    if htf_ok and effective_htf == selected_side:
-        aligned_rule_ids.add("HTF_DIRECTIONAL_AUTHORITY")
+    # HTF adds no confluence credit for now (advisory-only).
     if _side(fibonacci.get("side")) == selected_side and (
         _truthy(fibonacci, "in_ote") or _truthy(fibonacci, "at_or_beyond_50")
     ):
@@ -1694,7 +1692,10 @@ def select_current_book_action_v3(
         advisories.append(profit_room.get("reason") or "thin profit room")
 
     # The strategist is the authority: a named candidate with a valid side is
-    # actionable. Strict gate mode is opt-in only.
+    # actionable.  Higher-timeframe conflict stays advisory — a professional
+    # strategist decides when to trade with the trend and when to fade it;
+    # the higher timeframe informs prioritization and confluence, it never
+    # vetoes an otherwise valid candidate by itself.
     if same_priority_conflict:
         advisories.append("equal-priority directional conflict resolved by priority order")
     ready = bool(
@@ -1703,7 +1704,6 @@ def select_current_book_action_v3(
             not STRATEGIST_STRICT_GATES
             or (
                 confluence_count >= STRATEGIST_MIN_CONFLUENCE_V3
-                and htf_ok
                 and not opposing_conflict
                 and not same_priority_conflict
                 and not suspended
@@ -1722,8 +1722,6 @@ def select_current_book_action_v3(
             if STRATEGIST_MIN_CONFLUENCE_V3 > 1
             else "no independent confluence"
         )
-    if not htf_ok:
-        blocked_reasons.append("higher-timeframe conflict")
     if opposing_conflict:
         blocked_reasons.append("current opposing-force reaction")
     if same_priority_conflict:

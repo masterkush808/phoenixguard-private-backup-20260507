@@ -5200,16 +5200,6 @@ async function requestJson(url) {
         applySessionStreamEvent(event);
         scheduleStreamRefresh(40);
       });
-      ["TRACKING_UPDATE", "MARKET_STUDY_UPDATE"].forEach(function (eventName) {
-        source.addEventListener(eventName, function (event) {
-          if (state.eventSource !== source) {
-            return;
-          }
-          state.streamConnected = true;
-          applySessionStreamEvent(event);
-          scheduleStreamRefresh(40);
-        });
-      });
       source.addEventListener("SESSION_ERROR", function () {
         if (state.eventSource === source) {
           closeSessionStream();
@@ -5393,7 +5383,7 @@ async function requestJson(url) {
         const row = safeObject(overlay);
         const lifecycle = safeText(row.lifecycle, "current").toLowerCase();
         return safeList(families).includes(overlayFamily(row))
-          && !["historical", "archived", "ended", "expired", "stale", "superseded"].includes(lifecycle)
+          && !["historical", "archived", "ended", "expired", "stale", "stale_diagnostic", "superseded"].includes(lifecycle)
           && studyDirection(row) !== "HOLD"
           && (!predicate || predicate(row));
       }).sort(function (left, right) {
@@ -5527,14 +5517,14 @@ async function requestJson(url) {
         ).toUpperCase();
         const operatorOwnedCurrentSignal = Boolean(
           safeText(source.schema_version, "") === "PG_OPERATOR_WORKSPACE_V1"
-          && safeText(candidate.provider_role, "") === "PRIMARY_BOOK_RULE_SIGNAL_PROVIDER"
+          && safeText(candidate.provider_role, "") === "PRIMARY_STRATEGIST_SIGNAL_PROVIDER"
           && safeText(candidate.overlay_contract, "") === "EXACT_CURRENT_CHART_PIXELS_NO_FLOATING_GEOMETRY"
           && candidate.current_scenario_only === true
           && candidate.execution_authority === false
         );
         const streamOwnedCurrentSignal = Boolean(
           safeText(source.schema_version, "") !== "PG_OPERATOR_WORKSPACE_V1"
-          && safeText(candidate.provider_role, "") === "PRIMARY_BOOK_RULE_SIGNAL_PROVIDER"
+          && safeText(candidate.provider_role, "") === "PRIMARY_STRATEGIST_SIGNAL_PROVIDER"
           && safeText(candidate.overlay_contract, "") === "EXACT_CURRENT_CHART_PIXELS_NO_FLOATING_GEOMETRY"
           && candidate.current_scenario_only === true
           && candidate.execution_authority === false
@@ -7941,7 +7931,7 @@ const operatorState = safeObject(payload);
       if (geometryRole === "SOURCE_ORIGIN") {
         return "history";
       }
-      if (["historical", "archived", "ended", "expired", "superseded", "stale"].includes(lifecycle)) {
+      if (["historical", "archived", "ended", "expired", "superseded", "stale", "stale_diagnostic"].includes(lifecycle)) {
         return "history";
       }
       return "current";
@@ -9497,7 +9487,7 @@ const operatorState = safeObject(payload);
       const group = overlayGroup(overlay);
       const family = overlayFamily(overlay);
       const lifecycle = safeText(overlay.lifecycle, "current").toLowerCase();
-      if (["historical", "archived", "ended", "expired", "superseded", "stale"].includes(lifecycle)) {
+      if (["historical", "archived", "ended", "expired", "superseded", "stale", "stale_diagnostic"].includes(lifecycle)) {
         return "This is an earlier chart event kept for context. It cannot describe the current move or open an entry.";
       }
       if (family === "order_positioning") {

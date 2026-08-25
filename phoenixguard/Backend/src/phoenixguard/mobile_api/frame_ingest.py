@@ -1542,7 +1542,16 @@ def _readiness_payload() -> dict[str, object]:
         "max_source_age_sec": _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC", 180, 5),
         "require_capture_epoch": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH", True),
         "require_frame_id": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID", True),
-        "signature_required": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", False),
+        # Advertise the EFFECTIVE policy: tokens carrying a signing secret are
+        # required to sign even when the global env flag is off, so clients do
+        # not trust an optional-signing advertisement and then hit 401s.
+        "signature_required": (
+            _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", False)
+            or _env_bool(
+                "PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE_WHEN_SECRET_SET",
+                True,
+            )
+        ),
         "signature_nonce_ttl_sec": _env_int(
             "PHOENIXGUARD_FRAME_INGEST_SIGNATURE_NONCE_TTL_SEC",
             DEFAULT_SIGNATURE_NONCE_TTL_SEC,

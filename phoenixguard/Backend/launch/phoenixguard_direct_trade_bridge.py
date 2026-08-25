@@ -362,20 +362,6 @@ def _float(value: object, default: float = 0.0) -> float:
     return default
 
 
-def _int(value: object, default: int = 0) -> int:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return default
-    return default
-
 
 def _upper(value: object) -> str:
     return _text(value).upper()
@@ -1571,24 +1557,18 @@ def _frontline_gate_context(
     observed_epoch = _float(verdict.get("observed_epoch"), 0.0)
     signal_epoch = _float(signal.get("observed_epoch"), _float(signal.get("published_epoch"), 0.0))
     verdict_age = max(0.0, now_epoch - _float(verdict.get("published_epoch"), now_epoch))
-    candle_match = False
-    verdict_candle_seq = verdict.get("candle_sequence")
-    signal_candle_seq = signal.get("candle_sequence")
-    if verdict_candle_seq is not None and signal_candle_seq is not None:
-        candle_match = _int(verdict_candle_seq, -1) == _int(signal_candle_seq, -2)
-    if candle_match:
-        verdict_candle_key = _text(verdict.get("candle_key"))
-        signal_candle_key = _text(signal.get("candle_key"))
-        if verdict_candle_key and signal_candle_key:
-            candle_match = verdict_candle_key == signal_candle_key
-
+    # Frontline verdicts inherit the fast-lane visual-bias identity
+    # ("direct:..." keys and an epoch-bucket sequence) while the strategist
+    # signal carries the closed-candle lineage ordinal.  The two spaces never
+    # intersect, so cross-comparing them here was permanently false; freshness
+    # is decided by the observed/published epoch window below.
     age_window_ok = verdict_age <= max(0.0, float(freshness_seconds))
     epoch_close = (
         observed_epoch <= 0.0
         or signal_epoch <= 0.0
         or abs(observed_epoch - signal_epoch) <= max(30.0, float(freshness_seconds))
     )
-    fresh = candle_match or (age_window_ok and epoch_close)
+    fresh = age_window_ok and epoch_close
     if not fresh:
         if required:
             raise TradeRejected(
@@ -1631,7 +1611,7 @@ def _frontline_gate_context(
         ),
         "model": _text(verdict.get("model")),
         "state": state,
-        "candle_match": candle_match,
+        "candle_match": bool(age_window_ok and epoch_close),
         "age_seconds": round(verdict_age, 2),
     }
 

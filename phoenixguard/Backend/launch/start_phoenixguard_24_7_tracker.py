@@ -932,6 +932,13 @@ def _ensure_session(
         "yes",
         "on",
     }
+    # Explicit operator kill switch: PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=0
+    # forces shadow mode even when live execution is otherwise enabled.
+    allow_live_broker_clicks = str(
+        os.getenv("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS", "1") or "1"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if live_execution_enabled and not allow_live_broker_clicks:
+        live_execution_enabled = False
     execution_mode = "live" if live_execution_enabled else "shadow"
     controls = build_locked_tracker_controls(
         capture_interval_sec=capture_interval_sec,

@@ -87,7 +87,7 @@ if ($token.Length -lt 32) {
 }
 
 $env:PHOENIXGUARD_FRAME_INGEST_TOKEN = $token
-$env:PHOENIXGUARD_FRAME_INGEST_LOCAL_MANAGED = '1'
+$env:PHOENIXGUARD_FRAME_INGEST_TOKEN_LOCAL_MANAGED = '1'
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path $runtimeDir 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path $runtimeDir 'logs_live'

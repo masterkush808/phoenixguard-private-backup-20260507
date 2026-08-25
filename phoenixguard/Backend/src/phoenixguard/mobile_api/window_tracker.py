@@ -2851,6 +2851,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "timeframe_identity_confirmed",
         "timing_signal",
         "two_candle_study",
+        "valid_until_epoch",
     }
 )
 
@@ -41095,13 +41096,18 @@ class ContinuousWindowTrackerService:
                 mark_stage("prestudy_external_broker_identity")
         study: TrackingStudy | None = None
         error_message = ""
+        # A discarded study costs far more than a slow one: the cycle burns its
+        # full latency and publishes nothing, so the completed-study age grows
+        # by minutes while captures continue.  Default to the full clamp so
+        # loaded-machine studies complete instead of being retried into
+        # multi-minute droughts.  Operators can still lower it via env.
         live_study_budget_sec = min(
             120.0,
             max(
                 10.0,
                 _env_float(
                     "PHOENIXGUARD_LIVE_TRACKER_STUDY_BUDGET_SEC",
-                    45.0,
+                    120.0,
                     10.0,
                 ),
             ),

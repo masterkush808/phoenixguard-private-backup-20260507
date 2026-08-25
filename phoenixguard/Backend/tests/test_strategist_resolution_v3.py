@@ -106,7 +106,7 @@ def test_break_retest_resolves_by_name_with_confluence_reason() -> None:
     assert verdict["resolution"] == "ACTIONABLE"
     assert verdict["confluence_count"] >= 2
     assert "MAJOR_STRUCTURE_DIRECTION" in verdict["rule_ids"]
-    assert "HTF_DIRECTIONAL_AUTHORITY" in verdict["rule_ids"]
+    assert "HTF_DIRECTIONAL_AUTHORITY" not in verdict["rule_ids"]
     assert "confluence" in verdict["scenario"].lower()
     assert _family_note(verdict, "STRICT_WICK_TRENDLINE")["resolution"] == "ACTIONABLE"
 
@@ -414,7 +414,9 @@ def test_equal_priority_directional_conflict_gates_action() -> None:
     )
 
 
-def test_htf_conflict_gates_action() -> None:
+def test_htf_conflict_stays_advisory() -> None:
+    """A strict higher-timeframe conflict informs the strategist; it never
+    vetoes an otherwise valid candidate on its own."""
     control = _base_control(
         support_resistance_full_v3={"current_reactions": [{"current_action_side": "SELL"}]},
         higher_timeframe_authority_v3={
@@ -426,18 +428,18 @@ def test_htf_conflict_gates_action() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_STRATEGIC_CONFLICT_V3
-    assert verdict["action"] == "WAIT"
-    assert any(
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
+    assert "higher-timeframe conflict noted" in verdict["advisories"]
+    assert not any(
         "higher-timeframe conflict" in reason for reason in verdict["blocked_reasons"]
     )
 
 
-def test_ltf_reversal_evidence_never_grants_counter_htf_authority() -> None:
-    """HLZ p.105: HTF owns direction; p.152: reversals need HTF liquidity first.
-
-    Full LTF reversal evidence (SMS + BMS against HTF) must stay gated.
-    """
+def test_counter_htf_reversal_publishes_with_advisory() -> None:
+    """HLZ p.105 HTF context and p.152 reversal liquidity are weighed, not
+    obeyed: full LTF reversal evidence (SMS + BMS against a conflicting HTF)
+    publishes as a counter-trend entry with the conflict surfaced."""
     control = _base_control(
         support_resistance_full_v3={"current_reactions": [{"current_action_side": "SELL"}]},
         higher_timeframe_authority_v3={
@@ -463,11 +465,9 @@ def test_ltf_reversal_evidence_never_grants_counter_htf_authority() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_STRATEGIC_CONFLICT_V3
-    assert verdict["action"] == "WAIT"
-    assert any(
-        "higher-timeframe conflict" in reason for reason in verdict["blocked_reasons"]
-    )
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
+    assert "higher-timeframe conflict noted" in verdict["advisories"]
     family_note = _family_note(verdict, "BMS_SMS_STRUCTURE")
     assert family_note["side"] == "SELL"
 
@@ -486,10 +486,8 @@ def test_legacy_reversal_confirmed_key_is_ignored() -> None:
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
     assert verdict["playbook"] == "SUPPORT_RESISTANCE_REJECTION"
-    assert verdict["action"] == "WAIT"
-    assert any(
-        "higher-timeframe conflict" in reason for reason in verdict["blocked_reasons"]
-    )
+    assert verdict["action"] == "SELL"
+    assert "higher-timeframe conflict noted" in verdict["advisories"]
 
 
 def test_news_suspension_gates_action() -> None:
@@ -709,7 +707,7 @@ def test_directional_alignment_ledger_merges_every_book_side() -> None:
     assert alignment["leader"] == "SELL"
     assert alignment["BUY"] == 0.0
     families = {row["family"] for row in alignment["contributions"]}
-    assert {"HIGHER_TIMEFRAME_AUTHORITY", "STRICT_WICK_TRENDLINE", "TURTLE_SOUP", "FIBONACCI_OTE"} <= families
+    assert {"STRICT_WICK_TRENDLINE", "TURTLE_SOUP", "FIBONACCI_OTE"} <= families
     assert any("opposing force" in row["reason"] for row in alignment["contributions"])
 
     empty = select_current_book_action_v3(_base_control(

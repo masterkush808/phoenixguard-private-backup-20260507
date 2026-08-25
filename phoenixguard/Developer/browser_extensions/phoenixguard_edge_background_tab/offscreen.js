@@ -768,7 +768,7 @@ function bracketedIdentityObservation(session, before, after) {
   const stableKeys = ["symbol", "timeframe", "market_bbox_css", "timeframe_bbox_css", "viewport_css"];
   if (stableKeys.some((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]))) return null;
   if (!/^[A-Z]{3}\/[A-Z]{3}(?: OTC)?$/.test(String(before.symbol || ""))) return null;
-  if (!/^(?:S\d+|M\d+|H\d+|D1|W1)$/.test(String(before.timeframe || ""))) return null;
+  if (!/^(?:S\d+|M\d+|H\d+|D[123]|W[12]|MN[136])$/.test(String(before.timeframe || ""))) return null;
   if (!Array.isArray(before.market_bbox_css) || before.market_bbox_css.length !== 4) return null;
   if (!Array.isArray(before.timeframe_bbox_css) || before.timeframe_bbox_css.length !== 4) return null;
   return {

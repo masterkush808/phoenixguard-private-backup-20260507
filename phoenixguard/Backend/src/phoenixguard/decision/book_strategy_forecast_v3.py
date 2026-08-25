@@ -619,8 +619,7 @@ def build_book_strategy_forecast_control_v3(
     )
     higher_timeframe = _mapping(context_suite.get("higher_timeframe"))
     effective_htf_side = _side(higher_timeframe.get("effective_side"))
-    if higher_timeframe.get("strictly_enforced") and effective_htf_side in scores:
-        major_side = effective_htf_side
+    # HTF is advisory-only for now: it never overrides visible structure.
     for direction in scores:
         scores[direction] += _number(
             _mapping(context_suite.get("score_adjustments")).get(direction),
@@ -813,10 +812,7 @@ def build_book_strategy_forecast_control_v3(
         playbook = "UNRESOLVED"
 
     temporal = _mapping(context_suite.get("temporal"))
-    htf_entry_aligned = bool(
-        not higher_timeframe.get("strictly_enforced")
-        or immediate_side == effective_htf_side
-    )
+    # HTF alignment is advisory for now: entry actionability is causal-only.
     aggressive_ready = bool(
         line_context["current_touch"]
         or hlz_sequence.get("stop_hunt")
@@ -829,7 +825,6 @@ def build_book_strategy_forecast_control_v3(
     )
     entry_actionable = bool(
         confidence >= 0.55
-        and htf_entry_aligned
         and not temporal.get("entry_suspended_until_news_pivot")
         and (
             conservative_ready
@@ -856,9 +851,7 @@ def build_book_strategy_forecast_control_v3(
     phase_multipliers = [round(value * path_amplitude, 6) for value in phase_multipliers]
     cumulative = sum(phase_multipliers)
     terminal_side = (
-        effective_htf_side
-        if higher_timeframe.get("strictly_enforced") and effective_htf_side in scores
-        else "BUY"
+        "BUY"
         if cumulative > 0.0
         else "SELL"
         if cumulative < 0.0
@@ -893,12 +886,12 @@ def build_book_strategy_forecast_control_v3(
         "entry_profile": entry_profile,
         "entry_profiles": {
             "aggressive": {
-                "ready": aggressive_ready and htf_entry_aligned and not temporal.get("entry_suspended_until_news_pivot"),
-                "requires": ["MATURE_STRUCTURE_TOUCH_OR_SWEEP", "VISIBLE_REJECTION", "HTF_NOT_OPPOSING"],
+                "ready": aggressive_ready and not temporal.get("entry_suspended_until_news_pivot"),
+                "requires": ["MATURE_STRUCTURE_TOUCH_OR_SWEEP", "VISIBLE_REJECTION"],
             },
             "conservative": {
-                "ready": conservative_ready and htf_entry_aligned and not temporal.get("entry_suspended_until_news_pivot"),
-                "requires": ["COMPLETED_CONFIRMATION_CLOSE", "BMS_RETRACEMENT_OR_RETEST", "HTF_ALIGNMENT"],
+                "ready": conservative_ready and not temporal.get("entry_suspended_until_news_pivot"),
+                "requires": ["COMPLETED_CONFIRMATION_CLOSE", "BMS_RETRACEMENT_OR_RETEST"],
             },
         },
         "invalidation": invalidation,
