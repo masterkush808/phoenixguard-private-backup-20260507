@@ -102,7 +102,9 @@ DEFAULT_POINTER_MOVE_DURATION_SECONDS = 0.35
 # correct for hours, so an unchanged observation timestamp is not a stale
 # stream.  Operators can opt into a positive age cap for polling diagnostics.
 DEFAULT_MAX_SIGNAL_AGE_SECONDS = 0.0
-DEFAULT_MAX_STATE_AGE_SECONDS = 180.0
+# Staleness contract: observation state is only stale after 5 minutes
+# without an update from the live stack.
+DEFAULT_MAX_STATE_AGE_SECONDS = 300.0
 _max_state_age_seconds = DEFAULT_MAX_STATE_AGE_SECONDS
 _state_epoch_watermark = 0.0
 # The strategist (published PG_BOOK_RULE_ACTION_SIGNAL_V3 verdict) is the sole
