@@ -11043,6 +11043,19 @@ def build_operator_workspace_v1(
             ),
             "stream": stream,
             "capture_source": capture_transport,
+            # Overlay trend readings for the dashboard direction strip.
+            # Binary BUY/SELL from slope sign; HOLD only before the first
+            # accepted frame ever lands.
+            "global_direction": _safe_public_text(
+                _mapping(source.get("tracking_summary")).get("global_direction"),
+                "",
+                limit=8,
+            ).upper(),
+            "local_direction": _safe_public_text(
+                _mapping(source.get("tracking_summary")).get("local_direction"),
+                "",
+                limit=8,
+            ).upper(),
         },
         "freshness": freshness,
         "current_move": current_move,
