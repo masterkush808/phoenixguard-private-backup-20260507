@@ -150,7 +150,7 @@ dashboard without any floating editor window.
 Preferred developer stack restart (PowerShell terminal 1):
 
 ```powershell
-.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
+.\.venv-live\Scripts\python.exe .\Backend\tools\phoenixguard_kill_switch.py
 ```
 
 This Python wrapper asks the API to stop the tracker if it is reachable, kills detected PhoenixGuard
@@ -171,7 +171,7 @@ duplicate-process cleanup, so relaunch the bridge command only after the replace
 To inspect what the kill switch would stop without touching the running stack:
 
 ```powershell
-.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py --dry-run
+.\.venv-live\Scripts\python.exe .\Backend\tools\phoenixguard_kill_switch.py --dry-run
 ```
 
 Manual fallback:
@@ -334,7 +334,7 @@ state, and launch the production stack.
 
 ```powershell
 Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
-.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
+.\.venv-live\Scripts\python.exe .\Backend\tools\phoenixguard_kill_switch.py
 ```
 
 Use `--kill-only` when you only want the stop step, `--skip-clean` when you want to preserve current
