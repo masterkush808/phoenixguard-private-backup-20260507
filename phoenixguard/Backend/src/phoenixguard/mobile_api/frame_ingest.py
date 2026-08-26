@@ -159,6 +159,7 @@ class FrameAnalysisMailbox:
     active_job: FrameAnalysisJob | None = None
     pending_job: FrameAnalysisJob | None = None
     worker: threading.Thread | None = None
+    worker_started: bool = False
     epoch: int = 0
     replaced_frame_count: int = 0
     retired: bool = False
@@ -956,6 +957,7 @@ def _analysis_mailbox_worker(mailbox: FrameAnalysisMailbox) -> None:
                 active = mailbox.active_job
                 mailbox.active_job = None
                 mailbox.worker = None
+                mailbox.worker_started = False
                 if active is not None:
                     active.image.close()
                 return
@@ -963,6 +965,7 @@ def _analysis_mailbox_worker(mailbox: FrameAnalysisMailbox) -> None:
         if job is None:
             with _ANALYSIS_MAILBOX_LOCK:
                 mailbox.worker = None
+                mailbox.worker_started = False
             return
         outcome = FrameAnalysisOutcome(state="discarded")
         transient_retry_count = 0
@@ -1017,6 +1020,22 @@ def _analysis_mailbox_worker(mailbox: FrameAnalysisMailbox) -> None:
                     )
                 if not retry_is_current:
                     break
+        except Exception as exc:
+            # An unexpected exception must never escape before the cleanup
+            # block below: a raised error here used to kill the worker thread
+            # with active_job still set, permanently wedging the single-slot
+            # analysis mailbox (capture freeze until restart).
+            outcome = FrameAnalysisOutcome(
+                state="failed",
+                reason_code="FRAME_ANALYSIS_WORKER_ERROR",
+                error_type=type(exc).__name__,
+            )
+            _audit_async_analysis_event(
+                "frame_analysis_failed",
+                job,
+                error_type=type(exc).__name__,
+                reason_code="FRAME_ANALYSIS_WORKER_ERROR",
+            )
         finally:
             job.image.close()
         with _ANALYSIS_MAILBOX_LOCK:
@@ -1048,11 +1067,13 @@ def _analysis_mailbox_worker(mailbox: FrameAnalysisMailbox) -> None:
                 pending = mailbox.pending_job
                 mailbox.pending_job = None
                 mailbox.worker = None
+                mailbox.worker_started = False
                 if pending is not None:
                     pending.image.close()
                 return
             if mailbox.pending_job is None:
                 mailbox.worker = None
+                mailbox.worker_started = False
                 return
             mailbox.active_job = mailbox.pending_job
             mailbox.pending_job = None
@@ -1120,6 +1141,22 @@ def _enqueue_analysis_job(
         mailbox.identity_key = job.identity_key
         mailbox.last_touched_monotonic = time.monotonic()
         mailbox.retry_after_ms = min(300_000, max(0, int(retry_after_ms or 0)))
+        if (
+            mailbox.active_job is not None
+            and (
+                mailbox.worker is None
+                or (mailbox.worker_started and not mailbox.worker.is_alive())
+            )
+        ):
+            # Self-heal: the previous worker died without cleanup, so free the
+            # wedged active slot instead of queueing behind it forever.
+            stale_job = mailbox.active_job
+            mailbox.active_job = None
+            mailbox.epoch += 1
+            try:
+                stale_job.image.close()
+            except Exception:
+                pass
         job.mailbox_epoch = mailbox.epoch
         if mailbox.active_job is None:
             mailbox.active_job = job
@@ -1130,6 +1167,7 @@ def _enqueue_analysis_job(
                 daemon=True,
             )
             mailbox.worker = worker_to_start
+            mailbox.worker_started = False
             disposition = "active"
         else:
             if mailbox.pending_job is not None:
@@ -1153,6 +1191,7 @@ def _enqueue_analysis_job(
                     mailbox.active_job = None
                 if mailbox.worker is worker_to_start:
                     mailbox.worker = None
+                    mailbox.worker_started = False
                 orphaned_pending = mailbox.pending_job
                 mailbox.pending_job = None
                 mailbox.epoch += 1
@@ -1180,6 +1219,9 @@ def _enqueue_analysis_job(
                     reason_code="WORKER_START_FAILED",
                 )
             raise
+        with _ANALYSIS_MAILBOX_LOCK:
+            if mailbox.worker is worker_to_start:
+                mailbox.worker_started = True
     return public, disposition, last_result
 
 
@@ -1188,6 +1230,20 @@ def _signature_required(context: FeedAuthContext) -> bool:
         return True
     if context.signing_secret:
         return _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE_WHEN_SECRET_SET", True)
+    return False
+
+
+def _any_configured_signing_secret() -> bool:
+    """True when ANY configured credential carries an HMAC signing secret."""
+    if str(os.getenv("PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET", "") or "").strip():
+        return True
+    try:
+        rules = _load_token_registry()
+    except HTTPException:
+        return False
+    for rule in rules:
+        if _rule_signing_secret(rule):
+            return True
     return False
 
 
@@ -1542,14 +1598,18 @@ def _readiness_payload() -> dict[str, object]:
         "max_source_age_sec": _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC", 180, 5),
         "require_capture_epoch": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH", True),
         "require_frame_id": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID", True),
-        # Advertise the EFFECTIVE policy: tokens carrying a signing secret are
-        # required to sign even when the global env flag is off, so clients do
-        # not trust an optional-signing advertisement and then hit 401s.
+        # Advertise the EFFECTIVE policy for the credentials actually
+        # configured: secret-carrying tokens must sign (when-secret-set
+        # defaults on), while plain-token installs keep streaming unsigned.
+        # A blanket True here made secret-less clients refuse to stream.
         "signature_required": (
             _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", False)
-            or _env_bool(
-                "PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE_WHEN_SECRET_SET",
-                True,
+            or (
+                _env_bool(
+                    "PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE_WHEN_SECRET_SET",
+                    True,
+                )
+                and _any_configured_signing_secret()
             )
         ),
         "signature_nonce_ttl_sec": _env_int(

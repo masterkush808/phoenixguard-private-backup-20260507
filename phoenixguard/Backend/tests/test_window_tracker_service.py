@@ -13959,6 +13959,79 @@ def test_live_incremental_extraction_reuses_static_history_but_refreshes_latest_
     assert float(second_rows[-1]["center_y"]) == 70.0
 
 
+def test_live_incremental_extraction_dense_chart_reuses_history_on_near_identical_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dense charts (3px candle spacing) must not force a full re-extraction
+    every frame when the history pixels prove the geometry unchanged.
+
+    Reproduces the production stall: an 18px seam held fewer candles than the
+    match requirement and a flat 3px x-tolerance equalled one full candle of
+    ambiguity, so every frame fell back to 'edge_overlap_unverified' (~34s
+    full pass per cycle on a 177-track chart).
+    """
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    cache_key = "pocket-live|M5|EUR/JPY OTC|selector_v3_dense|960x508"
+    absolute_x_values = [120 + index * 3 for index in range(160)]
+    generation = {"value": 0}
+
+    def fake_extract(image_arg: Image.Image) -> list[dict[str, Any]]:
+        width = int(image_arg.width)
+        is_edge_crop = width < 960
+        # Simulate a detection-grid shift on edge crops so strict seam
+        # matching finds zero overlaps (the production failure mode).
+        shift = 4.0 if is_edge_crop else 0.0
+        x_offset = 960 - width
+        rows: list[dict[str, Any]] = []
+        for index, absolute_x in enumerate(absolute_x_values):
+            if absolute_x < x_offset + 6:
+                continue
+            local_x = float(absolute_x - x_offset) + shift
+            center_y = 70.0 if index == len(absolute_x_values) - 1 and generation["value"] else 110.0
+            rows.append(
+                {
+                    "track_id": index,
+                    "bbox": [int(local_x) - 2, int(center_y - 10), int(local_x) + 2, int(center_y + 10)],
+                    "center_x": local_x,
+                    "center_x_px": local_x,
+                    "center_y": center_y,
+                    "center_y_px": center_y,
+                    "direction": "BUY",
+                    "color": "green",
+                    "price_proxy": 1.0 - center_y / 508.0,
+                }
+            )
+        return rows
+
+    monkeypatch.setattr(adapter, "_extract_candle_tracks", fake_extract)
+    first_image = Image.new("RGB", (960, 508), color=(20, 26, 38))
+    incremental_extract = cast(
+        Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]],
+        getattr(adapter, "_extract_live_candle_tracks_incremental"),
+    )
+    first_rows, first_meta = incremental_extract(
+        first_image,
+        cache_key=cache_key,
+    )
+    assert len(first_rows) == 160
+    assert first_meta["history_reused"] is False
+
+    # Next frame: pixel-near-identical history region (sub-threshold noise),
+    # which the probe gate accepts and the seam check must not veto.
+    second_image = first_image.copy()
+    ImageDraw.Draw(second_image).rectangle((40, 200, 90, 260), fill=(22, 28, 40))
+    second_rows, second_meta = incremental_extract(
+        second_image,
+        cache_key=cache_key,
+    )
+
+    assert second_meta["enabled"] is True
+    assert second_meta["history_reused"] is True
+    assert second_meta["edge_overlap_bypass"] == "near_identical_history"
+    assert second_meta["full_refresh_reason"] == ""
+    assert len(second_rows) >= len(first_rows) - 2
+
+
 def test_live_incremental_extraction_full_refreshes_when_history_geometry_moves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

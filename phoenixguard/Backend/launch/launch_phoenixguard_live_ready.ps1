@@ -496,6 +496,8 @@ Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_TRACKER_ARTIFACT_R
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC' -Value '1800'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB' -Value '64'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_LIVE_TRACKER_STUDY_BUDGET_SEC' -Value '120'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_ALLOW_ZONE_INTERIOR_ENTRY' -Value '1'
+Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_EXECUTION_TIMING_VETO' -Value '0'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_MARKET_REGISTRY_MAX_BYTES' -Value '8388608'
 Set-PhoenixGuardDefaultProcessEnvironment -Name 'PHOENIXGUARD_MARKET_REGISTRY_RETAIN_LINES' -Value '2000'
 $env:PHOENIXGUARD_OVERLAY_PERSIST_DEBUG = '0'

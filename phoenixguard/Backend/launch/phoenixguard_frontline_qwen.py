@@ -86,6 +86,9 @@ DEFAULT_MODEL_FALLBACKS: list[str] = [
     if _text.strip()
 ]
 DEFAULT_MIN_INTERVAL_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_MIN_INTERVAL_SEC") or "2700.0")
+# After a failed review (DNS/HTTP blip, provider error), retry this soon
+# instead of waiting the full success cadence.
+DEFAULT_ERROR_RETRY_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_ERROR_RETRY_SEC") or "90.0")
 DEFAULT_VERDICT_FRESHNESS_SECONDS = float(os.getenv("PHOENIXGUARD_FRONTLINE_FRESHNESS_SEC") or "180.0")
 DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_CONTEXT_CHARS") or "30000")
 DEFAULT_MAX_LIST_ITEMS = int(os.getenv("PHOENIXGUARD_FRONTLINE_MAX_LIST_ITEMS") or "1000000")
@@ -829,6 +832,7 @@ def _run_loop(
                 last_processed_epoch = observed_epoch
                 last_call_epoch = time.time()
                 verdict: dict[str, object]
+                call_succeeded: bool
                 try:
                     verdict = _run_verdict_once(
                         base_url=base_url,
@@ -841,7 +845,9 @@ def _run_loop(
                         max_list_items=max_list_items,
                         mock=mock,
                     )
+                    call_succeeded = str(verdict.get("state") or "") != "error"
                 except Exception as exc:
+                    call_succeeded = False
                     verdict = {
                         "state": "error",
                         "model": model,
@@ -854,6 +860,13 @@ def _run_loop(
                         "observed_epoch": observed_epoch,
                         "candle_sequence": candle_sequence,
                     }
+                if not call_succeeded:
+                    # A transient DNS/HTTP blip must not silence the analyst
+                    # for a full review interval: re-arm after a short retry
+                    # delay instead of the success cadence.
+                    last_call_epoch = time.time() - max(
+                        0.0, min_interval_seconds - DEFAULT_ERROR_RETRY_SECONDS
+                    )
                 published = _publish_verdict(session_id=session_id, verdict=verdict)
                 log_entry = {
                     "published": bool(published),

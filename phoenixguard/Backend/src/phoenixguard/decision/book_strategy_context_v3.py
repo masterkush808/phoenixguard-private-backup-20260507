@@ -882,6 +882,27 @@ def _profit_room_assessment(
         configured_minimum_room = 20.0
     minimum_room = max(8.0, configured_minimum_room)
     sufficient = bool(room >= minimum_room)
+    # Operator opt-in: when price already sits inside the opposing target,
+    # the book default is to refuse (move spent).  With
+    # PHOENIXGUARD_ALLOW_ZONE_INTERIOR_ENTRY the interior condition is
+    # demoted to an advisory so the candidate can publish; thin positive
+    # room still respects the minimum-room floor below.
+    allow_zone_interior_entry = os.environ.get(
+        "PHOENIXGUARD_ALLOW_ZONE_INTERIOR_ENTRY", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if room <= 0.0 and allow_zone_interior_entry:
+        label_interior = str(target.get("source") or "opposing book structure").replace("_", " ").lower()
+        return {
+            "measured": True,
+            "sufficient": None,
+            "room_px": round(room, 6),
+            "minimum_room_px": round(minimum_room, 6),
+            "target_source": str(target.get("source") or ""),
+            "reason": (
+                f"Price trades inside the {label_interior} target; interior-entry "
+                "override active, room gate waived by operator."
+            ),
+        }
     label = str(target.get("source") or "opposing book structure").replace("_", " ").lower()
     if room <= 0.0:
         reason = (
@@ -1690,6 +1711,11 @@ def select_current_book_action_v3(
         advisories.append("high-impact news context unresolved")
     if profit_room.get("sufficient") is False:
         advisories.append(profit_room.get("reason") or "thin profit room")
+    if (
+        profit_room.get("sufficient") is None
+        and "interior-entry" in str(profit_room.get("reason") or "")
+    ):
+        advisories.append(str(profit_room.get("reason")))
 
     # The strategist is the authority: a named candidate with a valid side is
     # actionable.  Higher-timeframe conflict stays advisory — a professional
@@ -1705,7 +1731,6 @@ def select_current_book_action_v3(
             or (
                 confluence_count >= STRATEGIST_MIN_CONFLUENCE_V3
                 and not opposing_conflict
-                and not same_priority_conflict
                 and not suspended
                 and profit_room.get("sufficient") is not False
             )
@@ -1724,8 +1749,6 @@ def select_current_book_action_v3(
         )
     if opposing_conflict:
         blocked_reasons.append("current opposing-force reaction")
-    if same_priority_conflict:
-        blocked_reasons.append("equal-priority directional conflict")
     if suspended:
         blocked_reasons.append("unresolved high-impact news context")
     if profit_room.get("sufficient") is False:

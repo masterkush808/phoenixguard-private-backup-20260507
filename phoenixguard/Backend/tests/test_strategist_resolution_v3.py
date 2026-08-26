@@ -339,6 +339,7 @@ def test_thin_profit_room_blocks_actionable_under_strict_gates(monkeypatch: pyte
 
 def test_price_inside_opposing_zone_blocks_under_strict_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bsc, "STRATEGIST_STRICT_GATES", True)
+    monkeypatch.delenv("PHOENIXGUARD_ALLOW_ZONE_INTERIOR_ENTRY", raising=False)
     control = _base_control(
         trendline_contracts_full_v3={
             "current_role_flip_retests": [
@@ -359,6 +360,15 @@ def test_price_inside_opposing_zone_blocks_under_strict_gates(monkeypatch: pytes
     assert verdict["profit_room"]["room_px"] == 0.0
     assert verdict["status"] == STATUS_STRATEGIC_CONFLICT_V3
     assert any("inside" in reason for reason in verdict["blocked_reasons"])
+
+    # Operator override: interior entry demotes the veto to an advisory.
+    monkeypatch.setenv("PHOENIXGUARD_ALLOW_ZONE_INTERIOR_ENTRY", "1")
+    overridden = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
+
+    assert overridden["profit_room"]["sufficient"] is None
+    assert overridden["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert overridden["action"] == "SELL"
+    assert any("interior-entry" in note for note in overridden["advisories"])
 
 
 def test_profit_room_passes_when_sufficient() -> None:
@@ -395,7 +405,9 @@ def test_unmeasured_target_does_not_starve_resolution() -> None:
     assert verdict["profit_room"]["measured"] is False
 
 
-def test_equal_priority_directional_conflict_gates_action() -> None:
+def test_equal_priority_directional_conflict_stays_advisory() -> None:
+    """The priority order already resolves same-priority conflicts; the
+    resolution surfaces as an advisory, never as a veto."""
     control = _base_control(
         support_resistance_full_v3={
             "current_reactions": [
@@ -407,9 +419,12 @@ def test_equal_priority_directional_conflict_gates_action() -> None:
 
     verdict = select_current_book_action_v3(control, market_geometry=dict(GEOMETRY))
 
-    assert verdict["status"] == STATUS_STRATEGIC_CONFLICT_V3
-    assert verdict["action"] == "WAIT"
+    assert verdict["status"] == STATUS_STRATEGIST_ACTION_CONFIRMED_V3
+    assert verdict["action"] == "SELL"
     assert any(
+        "equal-priority" in advisory for advisory in verdict["advisories"]
+    )
+    assert not any(
         "equal-priority" in reason for reason in verdict["blocked_reasons"]
     )
 

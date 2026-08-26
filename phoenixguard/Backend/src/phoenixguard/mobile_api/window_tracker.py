@@ -6099,6 +6099,13 @@ def _build_execution_timing_profile(
             candidate = min(target_cap, max(tactical_sec, int(2 * timeframe_sec)))
         return int(max(min_sec, min(max_sec, candidate)))
 
+    # Operator opt-out: PHOENIXGUARD_EXECUTION_TIMING_VETO=0 publishes the
+    # entry-timing contract as allowed while retaining the diagnostic labels,
+    # so the bridge is never vetoed by the history-area/force-extreme layer.
+    if not _env_bool("PHOENIXGUARD_EXECUTION_TIMING_VETO", True):
+        entry_allowed = True
+        block_reason = ""
+
     if not entry_allowed:
         recommended = max(tactical_sec, min(standard_sec, eta_target_seconds))
         if "studied history area" in block_reason or "significant" in block_reason or (
@@ -20529,7 +20536,24 @@ class PhoenixGuardWindowTrackingAdapter:
         if history_mae > 1.25 or history_changed_fraction > 0.025:
             return full_refresh("historical_geometry_changed")
 
-        crop_start = max(0, int(round(probe_end - max(18.0, median_spacing * 3.0))))
+        # Dense charts (median spacing ~3px at analysis resolution) made the
+        # old 18px seam hold fewer candles than the match requirement and a
+        # flat 3px x-tolerance equal to one full candle of ambiguity, so the
+        # verification failed every frame ("edge_overlap_unverified") and each
+        # cycle paid the full 177-track extraction (~34s).  Widen the seam
+        # with spacing and drop the ambiguity floor.
+        crop_start = max(
+            0,
+            int(
+                round(
+                    probe_end
+                    - max(
+                        18.0,
+                        min(median_spacing * 12.0, float(image_width) * 0.25),
+                    )
+                )
+            ),
+        )
         edge_image = image.crop((crop_start, 0, int(image.width), int(image.height)))
         edge_tracks = self._rebase_candle_tracks_x(
             self._extract_candle_tracks(edge_image),
@@ -20542,7 +20566,7 @@ class PhoenixGuardWindowTrackingAdapter:
         if len(edge_tracks) < 6:
             return full_refresh("edge_track_underflow")
 
-        x_tolerance = max(3.0, median_spacing * 0.42)
+        x_tolerance = max(min(3.0, median_spacing * 0.49), median_spacing * 0.42)
         y_tolerance = max(14.0, float(image.height) * 0.055)
         overlap_matches = 0
         for edge_row in edge_tracks:
@@ -20557,7 +20581,18 @@ class PhoenixGuardWindowTrackingAdapter:
                 and abs(float(nearest.get("center_y", 0.0) or 0.0) - edge_y) <= y_tolerance
             ):
                 overlap_matches += 1
-        required_overlap = min(4, max(2, len(edge_tracks) // 4))
+        # Near-identical history pixels are stronger evidence than seam track
+        # matching: when the probe proves the historical region essentially
+        # did not change, a fragile sub-candle seam match must not force a
+        # full re-extraction.
+        near_identical_history = bool(
+            history_mae <= 0.30 and history_changed_fraction <= 0.004
+        )
+        if near_identical_history:
+            required_overlap = 0
+            metadata["edge_overlap_bypass"] = "near_identical_history"
+        else:
+            required_overlap = min(4, max(2, len(edge_tracks) // 4))
         metadata["edge_overlap_matches"] = int(overlap_matches)
         metadata["edge_overlap_required"] = int(required_overlap)
         if overlap_matches < required_overlap:

@@ -558,8 +558,14 @@ def _attach_live_sidecars(payload: Mapping[str, object], session_id: str) -> dic
 def _payload_live_epoch(payload: Mapping[str, object]) -> float:
     latest_signal = _mapping_or_empty(payload.get("latest_signal"))
     visual_observation = _mapping_or_empty(payload.get("visual_observation_v3"))
+    # The direct visual bias sidecar is stamped on every capture attempt,
+    # including frames the study pipeline deliberately skips ("picture
+    # unchanged"), so it is the honest stream-liveness signal.  A cached
+    # strategist verdict on an unchanged chart must not read as stale.
+    direct_bias = _mapping_or_empty(payload.get("direct_visual_bias_v3"))
     return _freshest_epoch(
         payload.get("last_capture_epoch"),
+        direct_bias.get("observed_epoch"),
         payload.get("display_published_epoch"),
         payload.get("display_capture_epoch"),
         latest_signal.get("published_epoch"),
