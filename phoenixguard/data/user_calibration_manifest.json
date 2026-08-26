@@ -1,0 +1,61 @@
+{
+  "actions": {
+    "buy": {
+      "click": {
+        "x": 1852,
+        "y": 203
+      }
+    },
+    "chart_focus": {
+      "click": {
+        "x": 1431,
+        "y": 403
+      }
+    },
+    "sell": {
+      "click": {
+        "x": 1855,
+        "y": 218
+      }
+    }
+  },
+  "boxes": {
+    "buy_click": {
+      "x": 1852,
+      "y": 203
+    },
+    "chart_anchor": {
+      "x": 1431,
+      "y": 403
+    },
+    "sell_click": {
+      "x": 1855,
+      "y": 218
+    }
+  },
+  "broker": "Pocket Option",
+  "fixed_amount": 1.0,
+  "fixed_expiry_seconds": 9900,
+  "mode": "fixed_amount_fixed_expiry",
+  "notes": "Durable operator calibration. The bridge will focus the chart, wait five seconds, press the BUY or SELL target, wait five seconds, then confirm the second press - human-paced so the sequence is never mistaken for a bot. Time and amount remain fixed to the values below.",
+  "score_threshold": 0.62,
+  "timing_policy": {
+    "chart_focus_settle_seconds": 5.0,
+    "inter_click_delay_seconds": 5.0,
+    "pointer_move_duration_seconds": 0.35,
+    "pre_click_delay_seconds": 5.0
+  },
+  "trigger_order": [
+    "chart_anchor",
+    "buy_click",
+    "sell_click"
+  ],
+  "trigger_policy": {
+    "allow_buy_sell_auto_switch": true,
+    "amount_fixed": true,
+    "chart_focus_before_trade": true,
+    "time_fixed": true,
+    "weighted_score_required": true
+  },
+  "version": "phoenixguard_trigger_calibration_v2"
+}
