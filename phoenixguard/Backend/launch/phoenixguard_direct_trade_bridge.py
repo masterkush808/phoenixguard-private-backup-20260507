@@ -1352,7 +1352,69 @@ def _live_signal_from_state(payload: Mapping[str, object], *, signal_source: str
     normalized_source = _text(signal_source).lower() or DEFAULT_SIGNAL_SOURCE
     if normalized_source in {"strategist", "book", "book_rule", "book_rules"}:
         return _book_rule_signal_from_state(payload)
+    if normalized_source == "local":
+        return _local_overlay_signal_from_state(payload)
     return {}
+
+
+def _local_overlay_signal_from_state(payload: Mapping[str, object]) -> dict[str, object]:
+    """Trade the LOCAL overlay direction directly.
+
+    ``tracking_summary.local_direction`` is the regression slope over the
+    most recent candles (the local overlay), independent of the global
+    overlay and of the strategist playbook gates.  BUY when local slopes up,
+    SELL when it slopes down; HOLD publishes nothing.
+    """
+    tracking = _mapping_or_empty(payload.get("tracking_summary"))
+    latest_signal = _mapping_or_empty(payload.get("latest_signal"))
+    side = _upper(tracking.get("local_direction") or latest_signal.get("local_direction"))
+    if side not in {"BUY", "SELL"}:
+        return {}
+    direct_bias = _mapping_or_empty(payload.get("direct_visual_bias_v3"))
+    epoch = _freshest_epoch(
+        payload.get("last_capture_epoch"),
+        direct_bias.get("observed_epoch"),
+        latest_signal.get("published_epoch"),
+    )
+    candle_sequence_raw = direct_bias.get("candle_sequence")
+    candle_sequence: int | None = None
+    if isinstance(candle_sequence_raw, bool):
+        candle_sequence = None
+    elif isinstance(candle_sequence_raw, (int, float)):
+        candle_sequence = int(candle_sequence_raw)
+    elif isinstance(candle_sequence_raw, str):
+        try:
+            candle_sequence = int(candle_sequence_raw.strip())
+        except ValueError:
+            candle_sequence = None
+    candle_key = _text(direct_bias.get("candle_key"))
+    return {
+        "schema_version": "PG_LOCAL_OVERLAY_SIGNAL_V3",
+        "provider_role": "LOCAL_OVERLAY_SIGNAL_PROVIDER",
+        "status": "LOCAL_OVERLAY_ACTION_CONFIRMED",
+        "action": side,
+        "actionable": True,
+        "side": side,
+        "watch_side": side,
+        "playbook": "LOCAL_OVERLAY_TREND",
+        "confidence": _clip01_confidence(latest_signal.get("local_trend_confidence")),
+        "published_epoch": epoch,
+        "observed_epoch": epoch,
+        "candle_key": candle_key,
+        "candle_sequence": candle_sequence,
+        "scenario": f"Local overlay slopes {side}; trading the local trend directly.",
+        "trigger": "Local overlay direction flip or stream end.",
+        "invalidation": "Local overlay slope flips to the opposite side.",
+        "execution_authority": False,
+    }
+
+
+def _clip01_confidence(value: object) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.6
+    return max(0.0, min(1.0, number))
 
 
 def _calibration_manifest_paths(project_root: Path) -> list[Path]:
@@ -2062,9 +2124,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-signal-age-seconds", type=float, default=DEFAULT_MAX_SIGNAL_AGE_SECONDS)
     parser.add_argument(
         "--signal-source",
-        choices=("strategist", "book", "book_rule", "book_rules"),
+        choices=("strategist", "book", "book_rule", "book_rules", "local"),
         default=DEFAULT_SIGNAL_SOURCE,
-        help="Trigger authority. Only the strategist verdict (PG_BOOK_RULE_ACTION_SIGNAL_V3) can start a trade.",
+        help=(
+            "Trigger authority. 'strategist' (default) executes PG_BOOK_RULE_ACTION_SIGNAL_V3 "
+            "verdicts; 'local' executes the local overlay direction directly (BUY on local "
+            "uptrend, SELL on local downtrend, no playbook gates)."
+        ),
     )
     parser.add_argument("--rearm-seconds", type=float, default=0.0)
     parser.add_argument("--flip-guard-seconds", type=float, default=DEFAULT_FLIP_GUARD_SECONDS)
