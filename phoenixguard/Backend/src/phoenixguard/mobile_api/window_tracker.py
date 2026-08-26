@@ -24313,8 +24313,12 @@ class PhoenixGuardWindowTrackingAdapter:
         local_slope = _regression_slope(local_values)
         impulse_delta = float(proxies[-1] - proxies[-2])
         current_slope = _regression_slope(current_values)
-        global_direction = _trend_direction(global_slope, epsilon=0.018)
-        local_direction = _trend_direction(local_slope, epsilon=0.018)
+        # The global and local overlays are always directional: the SIGN of
+        # the regression slope is the reading.  A near-flat slope still has a
+        # sign, and publishing HOLD here starved consumers that must act on
+        # every frame.
+        global_direction = "BUY" if global_slope >= 0.0 else "SELL"
+        local_direction = "BUY" if local_slope >= 0.0 else "SELL"
         impulse_direction = _trend_direction(impulse_delta, epsilon=0.022)
         latest_direction = str(candles[-1].get("direction", "HOLD") or "HOLD")
         latest_color = str(candles[-1].get("color", "unknown") or "unknown")

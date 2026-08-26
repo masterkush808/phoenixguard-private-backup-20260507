@@ -1323,6 +1323,41 @@
       background: linear-gradient(90deg, rgba(242, 200, 102, 0.055), rgba(255, 255, 255, 0.012));
     }
 
+    .overlay-direction-readings {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .direction-chip {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 3px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 10px;
+    }
+
+    .direction-chip label {
+      color: var(--muted);
+      letter-spacing: 0.08em;
+    }
+
+    .direction-chip strong[data-side="BUY"] { color: #2fd07a; }
+    .direction-chip strong[data-side="SELL"] { color: #ff5d5d; }
+    .direction-chip strong[data-side="PENDING"] { color: var(--muted); }
+
+    .direction-divergence {
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(242, 200, 102, 0.55);
+      color: rgba(242, 200, 102, 0.95);
+      font-size: 9px;
+      letter-spacing: 0.1em;
+    }
+
     .visual-evidence-status {
       display: flex;
       min-width: 0;
@@ -3184,6 +3219,17 @@
               <strong id="visual-evidence-label">Broker view connecting</strong>
             </div>
             <span class="surface-meta" id="surface-meta">Waiting for a current observation</span>
+            <div class="overlay-direction-readings" id="overlay-direction-readings" aria-live="polite">
+              <span class="direction-chip" id="global-direction-chip">
+                <label>GLOBAL</label>
+                <strong id="global-direction-value">—</strong>
+              </span>
+              <span class="direction-chip" id="local-direction-chip">
+                <label>LOCAL</label>
+                <strong id="local-direction-value">—</strong>
+              </span>
+              <span class="direction-divergence" id="direction-divergence-badge" hidden>DIVERGENT</span>
+            </div>
           </div>
 
           <div class="surface-stage" id="surface-stage">
@@ -7352,6 +7398,35 @@ function renderLatentStateControl(payload) {
         "Waiting for a current observation"
       );
       renderStreamObservation(payload);
+      renderOverlayDirectionReadings(payload);
+    }
+
+    function renderOverlayDirectionReadings(payload) {
+      const tracking = safeObject(
+        safeObject(payload.tracking_summary)
+          || safeObject(safeObject(state.liveSession).tracking_summary)
+      );
+      const globalValue = safeText(tracking.global_direction, "").toUpperCase();
+      const localValue = safeText(tracking.local_direction, "").toUpperCase();
+      const normalize = (value) => (value === "BUY" || value === "SELL" ? value : "PENDING");
+      const globalSide = normalize(globalValue);
+      const localSide = normalize(localValue);
+      const globalNode = document.getElementById("global-direction-value");
+      const localNode = document.getElementById("local-direction-value");
+      if (globalNode) {
+        globalNode.textContent = globalSide;
+        globalNode.dataset.side = globalSide;
+      }
+      if (localNode) {
+        localNode.textContent = localSide;
+        localNode.dataset.side = localSide;
+      }
+      const badge = document.getElementById("direction-divergence-badge");
+      if (badge) {
+        badge.hidden = !(globalSide === "BUY" || globalSide === "SELL")
+          || !(localSide === "BUY" || localSide === "SELL")
+          || globalSide === localSide;
+      }
     }
 
     function parseSurfaceViewport(value) {
